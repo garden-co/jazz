@@ -62,7 +62,7 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   "groove.durable-index.v2",
-  "groove.large-value.v1",
+  "groove.large-value.v2",
   "groove.ordered-chunk-storage.v1",
   "groove.ordered-kv.v1",
   "jazz.node-storage.v1",

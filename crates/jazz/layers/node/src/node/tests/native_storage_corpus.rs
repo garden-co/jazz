@@ -43,25 +43,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "129d8ea6884ed2bdc5d0835d1b082ccfab98e64e420b6817e821d4563d7a1ab2";
+    "9e318d467be2bdb834215730e40b11ffc6c4a3515294d0c440c942c3286219b2";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "4f6e65456038b83216ccced3e1215c54bafa38620d7bc6c42e1cd0b50d3b7c7e";
+    "4cb0c86d9189a610567301d946cd87eafc1834e05a736b066b37472cfcf87c94";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "129d8ea6884ed2bdc5d0835d1b082ccfab98e64e420b6817e821d4563d7a1ab2";
+    "9e318d467be2bdb834215730e40b11ffc6c4a3515294d0c440c942c3286219b2";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "0460e0a111e0d0b95c2612bac281389d46acc932cc1c00708db8a078f9bcda0a";
+    "f505d96eb4f23a09c5948fe71e7f805f1e0af6168ee312498fc814e12161c8f0";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "c71b140641f02646ec55da6cd48d22feceb5adc82d72c22a4590a07d7e406ab1";
+    "211129d1e987363badf88876dce748811b84db240ffd58db37199ac55b053298";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "be61745423ce7e702ef1edc723e6eb2eb45be6f7ddf8a2f1a9568e1f679adbb0";
+    "99315a30cc39b0141501b0493bd8a8cfe80d0e13cf47beb7eb94c3ec145f3622";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -1948,7 +1948,7 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     .err()
     .expect("retired SQLite profile must reject");
     assert!(
-        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref unknown, .. } if unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
+        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message == "codec profile omits mandatory Groove epoch-one codec"),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
@@ -2444,6 +2444,10 @@ fn rocksdb_family_entries(
 /// Jazz markers.
 fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
     match result {
+        Err(groove::storage::Error::InvalidStorageLayout(message)) => {
+            // Historical roots predate the mandatory v2 scalar codec.
+            assert_eq!(message, "codec profile omits mandatory Groove epoch-one codec", "{store}");
+        }
         Err(groove::storage::Error::UnsupportedStorageCodecs {
             epoch,
             missing,
@@ -2454,11 +2458,12 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 missing,
                 vec![
                     "groove.durable-index.v2".to_owned(),
+                    "groove.large-value.v2".to_owned(),
                     "jazz.node-storage.v1".to_owned(),
                 ],
                 "{store}"
             );
-            assert_eq!(unknown, ["jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
+            assert_eq!(unknown, ["groove.large-value.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
         }
         Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
         Ok(()) => panic!("{store}: a pre-linear root must not open"),

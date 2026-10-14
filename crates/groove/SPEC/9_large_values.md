@@ -67,10 +67,8 @@ LargeValueRef {
 }
 ```
 
-The enum case tags are stable: `Primitive = 2`, `Chunked = 3`. Tags 0 and 1
-are permanently reserved so persisted values from the superseded private
-`[tag] + payload` codec fail closed instead of colliding with a canonical
-length-prefixed record. Its payloads use only Groove's canonical primitive,
+The `groove.large-value.v2` scalar enum has exactly two cases:
+`Primitive = 0`, `Chunked = 1`. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 Every engine-owned record field has a permanent, one-based numeric record-slot
@@ -98,7 +96,7 @@ Borrowed inline access validates the enum framing and logical kind directly;
 this preserves decode/recreate acceptance without constructing owned values.
 Owned primitive decoding copies that same raw payload after logical validation;
 it does not construct field maps or re-encode a record. Primitive encoding may
-pass the raw payload directly to the ordinary variant-record encoder for tag 2.
+pass the raw payload directly to the ordinary variant-record encoder for tag 0.
 These are specialized implementations of the same enum/record layout, not a
 separate scalar format; byte fixtures compare them with the generic codecs.
 Every independently addressed immutable tree node carries and authenticates its
@@ -214,7 +212,7 @@ MUST reject a node whose embedded format differs. A decoder MUST NOT try the
 current codec after an unknown, malformed, or mismatched format fails.
 
 V1 is the only supported case in the format dispatch table. Its stored-scalar
-arm remains the schema-known `Primitive = 2 | Chunked = 3` enum: schema lowers
+arm remains the schema-known `Primitive = 0 | Chunked = 1` enum: schema lowers
 the bytes/string/JSON kind, so neither arm adds a client-controlled kind tag.
 V1's permanent numeric identities are:
 
@@ -257,15 +255,15 @@ insert:"e", utf16:* = 0 }`, the descriptor fixture is:
 00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065
 ```
 
-The same value wrapped in the bytes schema's ordinary `Chunked = 3` scalar arm
-is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
+The same value wrapped in the bytes schema's ordinary `Chunked = 1` scalar arm
+is exactly the preceding bytes with its leading `00` enum tag replaced by `01`.
 
 `INV-LARGE-11`: descriptor-led format dispatch and canonical v1 fixture
 validation MUST fail closed before a malformed physical representation can
 change lifecycle state or disclose an authenticated child capability.
 
 V1 dispatch is joint: the outer descriptor's `format_version` is selected
-before its root record, every nested edit record, or the `Chunked = 3`
+before its root record, every nested edit record, or the `Chunked = 1`
 stored-scalar payload is interpreted. The schema-known scalar kind still
 supplies bytes/string/JSON context; it is not a version selector and never
 supplies a client-controlled kind tag. A future version therefore needs one

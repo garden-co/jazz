@@ -1386,7 +1386,7 @@ mod version_record_wire_row {
             let encoded = encode(&original).unwrap();
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
-                "ec3b67be19dc025171263e46873fb5d8d3179b360d1527bebd135ee9b8803340"
+                "a06b6a20e4d67052bd5e8a5ceadc8ef77e1de7ca745f8a38777792efb58efeb2"
             );
             assert_eq!(&encoded[..5], b"JVRR\x02");
             assert_eq!(decode(&encoded).unwrap(), original);
@@ -6172,7 +6172,7 @@ mod tests {
         }
         assert_eq!(
             receipt.finalize().to_hex().as_str(),
-            "475d72b7c78a532386605e6391d57c02f6a69eae69993c97cb2e4414bd9d52b4"
+            "115d7dd21a7920aff3799d618abdfdedf47dd42e20401bcb744e689314bf907b"
         );
         assert_eq!(
             policy_binding_directory_claims_from_value(encoded).unwrap(),
@@ -6521,7 +6521,7 @@ mod tests {
             BranchColumnValue::encode_typed(&Value::String("hi".to_owned()), &ValueType::String)
                 .unwrap();
         assert_eq!(integer.0, [1, 2, 4, 3, 2, 1]);
-        assert_eq!(string.0, [1, 6, 2, b'h', b'i']);
+        assert_eq!(string.0, [1, 6, 0, b'h', b'i']);
 
         let stable_enum = ValueType::EnumTag(
             groove::records::ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap(),
@@ -6544,7 +6544,7 @@ mod tests {
             1, 0, 0, 0, b'a', // first name
             6, 0, 0, 0, 1, 2, 4, 3, 2, 1, // first value
             1, 0, 0, 0, b'z', // second name
-            5, 0, 0, 0, 1, 6, 2, b'h', b'i', // second value
+            5, 0, 0, 0, 1, 6, 0, b'h', b'i', // second value
         ];
         assert_eq!(key.canonical_bytes(), expected);
         assert_eq!(BranchKey::from_canonical_bytes(&expected).unwrap(), key);

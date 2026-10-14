@@ -51,9 +51,9 @@ mod tests {
     #[test]
     fn root_profiles_have_pinned_manifest_bytes() {
         for (profile, expected) in [
-            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x05\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x14jazz.node-storage.v1\x00".as_slice()),
-            (catalogue_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x19jazz.catalogue-storage.v1\x00".as_slice()),
-            (account_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x17jazz.account-storage.v1\x00".as_slice()),
+            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x05\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x14jazz.node-storage.v1\x00".as_slice()),
+            (catalogue_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x19jazz.catalogue-storage.v1\x00".as_slice()),
+            (account_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x17jazz.account-storage.v1\x00".as_slice()),
         ] {
             assert_eq!(manifest(&profile).encode().unwrap(), expected);
             assert_eq!(StorageEpochManifest::decode(expected).unwrap().encode().unwrap(), expected);

@@ -119,6 +119,13 @@ fn open_sqlite(path: &std::path::Path) -> Result<(), StorageError> {
 
 fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], store: &str) {
     match result {
+        Err(StorageError::InvalidStorageLayout(message)) => {
+            // Historical roots predate the mandatory v2 scalar codec.
+            assert_eq!(
+                message, "codec profile omits mandatory Groove epoch-one codec",
+                "{store}"
+            );
+        }
         Err(StorageError::UnsupportedStorageCodecs {
             epoch,
             missing,
@@ -129,12 +136,14 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
                 missing,
                 vec![
                     DURABLE_INDEX_V2.to_owned(),
+                    "groove.large-value.v2".to_owned(),
                     "jazz.node-storage.v1".to_owned(),
                 ],
                 "{store}"
             );
             let mut expected_unknown = expected_unknown.to_vec();
             expected_unknown.extend([
+                "groove.large-value.v1",
                 "jazz.branch-key.v1",
                 "jazz.catalogue.activation.v1",
                 "jazz.catalogue.bootstrap-ready.v1",

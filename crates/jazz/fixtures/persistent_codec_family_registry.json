@@ -49,7 +49,7 @@
       ]
     },
     {
-      "id": "groove.large-value.v1",
+      "id": "groove.large-value.v2",
       "boundary": "durable-storage",
       "profile": "groove-root",
       "spec": {

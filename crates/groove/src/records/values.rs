@@ -2157,8 +2157,8 @@ pub(super) fn visit_encoded_indirect_values(
         | ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => {
             let (tag, _) = super::split_variant_record(bytes)?;
             match tag {
-                2 => Ok(false),
-                3 => visitor(bytes, value_type),
+                0 => Ok(false),
+                1 => visitor(bytes, value_type),
                 _ => Err(Error::LargeValue(
                     crate::large_values::Error::MalformedScalar,
                 )),
