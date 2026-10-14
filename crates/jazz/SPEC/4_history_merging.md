@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
-- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read by the lower candidates' row ids: the local delta's over origin under an index, the head's over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
+- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's whole presence over origin under an index, the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
 - `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
@@ -535,8 +535,8 @@ Storage is delta-encoded and does not name refs. Origin is
 the sparse delta `jazz_physical_{id}_ahead_current`, which holds the newest
 pending image of each row, already folded over origin's image. Nothing else
 is stored per ref: no copy of the origin images the delta overrides (the
-`ahead_shadow` table that held them is retired; the read masks origin by a
-keyed lookup instead). The tier of a read picks its refs
+`ahead_shadow` table that held them is retired; the read masks origin by the
+delta's presence instead). The tier of a read picks its refs
 (`INV-REF-2`): `Global` reads `[origin]`, and `Local` and `None` read
 `[local delta, origin]`.
 
@@ -559,15 +559,23 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
   when one row-closed path (a row-id prefix) bounds every layer of the stack.
 - _Presence._ The layer's row ids, read without the index, so an edit that
   left the predicate still hides the row below. Only the layer's rows that
-  share a lower candidate's id can hide one, so the presence is read by those
-  ids: a keyed lookup of the layer's refs by the lower candidates' row ids
-  ([#4005](https://github.com/garden-co/jazz/issues/4005)). It costs the
-  lower candidates, not the layer. Under an index the local delta masks
-  origin this way (a pending edit that moved a row out of the prefix still
-  hides its origin image), and a branch view masks its base by the head's
-  presence. Inside a recursive step the presence is the masking layer's
-  rows read whole (see below): still exact, and it costs that layer (the
-  local delta, or the head), never the layers below.
+  share a lower candidate's id can hide one, and ids no candidate holds hide
+  nothing, so the presence may be read whole or just for those ids, and it
+  is read whichever way is bounded by the smaller side:
+  - Under an index the local delta masks origin by its whole presence (a
+    pending edit that moved a row out of the prefix still hides its origin
+    image). The delta is sparse, only this node's pending rows, while
+    origin's candidates under a prefix can be most of the table: the read
+    costs the pending rows, not one probe per origin candidate.
+  - A branch view masks its base by the head's presence read by the base
+    candidates' row ids: a keyed lookup of the head's refs
+    ([#4005](https://github.com/garden-co/jazz/issues/4005)). A head can be
+    as large as its base, so this costs the base candidates, not the head.
+
+  Both are exact whatever the layers' sizes later become, so a live read
+  stays correct as the delta grows and shrinks; the choice only moves cost.
+  Inside a recursive step every presence is the masking layer's rows read
+  whole (see below).
 
 Under an index prefix each content layer of a branch view therefore reads
 only that prefix, and the base's content costs its index matches. The

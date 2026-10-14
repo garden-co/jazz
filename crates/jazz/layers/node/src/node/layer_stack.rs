@@ -34,12 +34,12 @@ pub(in crate::node) enum Mask {
     /// The layer's `row_uuid`s, read without the access path that bounds its
     /// rows, so a layer edit that left the predicate still hides the row
     /// below (SPEC 11 "Masking precedes predicates"). Only ids the layers
-    /// below hold can hide anything, so the presence is read just for those
-    /// ids: a keyed lookup of the layer's stored rows by the lower
-    /// candidates' row ids. The local delta masks origin this way under an
-    /// index (a pending edit that moved a row out of the prefix still hides
-    /// its origin image), and a branch view masks its base by the head's
-    /// presence.
+    /// below hold can hide anything, so the presence may be read whole or
+    /// just for those ids, whichever is bounded: the local delta masks
+    /// origin under an index by its whole presence (only pending rows; a
+    /// pending edit that moved a row out of the prefix still hides its
+    /// origin image), and a branch view masks its base by the head's
+    /// presence looked up by the base candidates' row ids.
     Presence(GraphBuilder),
 }
 

@@ -109,9 +109,9 @@ fn indexed_branch_todos_schema() -> JazzSchema {
 /// a whole branch key, and main's settled rows outside the prefix are never
 /// read as content. Main is still masked exactly: by the draft's presence (a
 /// draft edit that left the prefix hides its main row) and, within main, by
-/// main's pending edits looked up by its origin candidates' row ids (a
-/// pending edit that left the prefix hides its settled image; one that
-/// entered it is found by the local index). An unindexed read of the same
+/// main's whole presence in its local delta (a pending edit that left the
+/// prefix hides its settled image; one that entered it is found by the
+/// local index). An unindexed read of the same
 /// view is the control: it scans both branch keys.
 ///
 /// The deletion registers and the draft's presence are not index-bounded
@@ -222,7 +222,7 @@ fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
         "no content layer of the indexed branch view may scan a whole branch key"
     );
     // Draft and main each read local and origin under the prefix; each
-    // local delta masks its origin by a keyed lookup, not an index probe.
+    // local delta masks its origin by its whole presence, not an index probe.
     assert_eq!(metrics.source_index_probes, 4, "{metrics:?}");
     // Both deletion registers and the draft's presence are looked up by
     // the candidates' row ids: none reads a branch key whole.
@@ -399,7 +399,7 @@ fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
     // specialized from the outer `todos` source and shares its deduplicated
     // physical branch layers, so they are counted once, for the outer read:
     // draft and main each read local and origin under the prefix (each local
-    // delta masks its origin by a keyed lookup); both deletion registers and
+    // delta masks its origin by its whole presence); both deletion registers and
     // the draft's presence are looked up by the candidates' row ids.
     // The specialized proof is compiled for this read, and its `labels`
     // source, correlated only through the outer row, reads whole. The
@@ -714,24 +714,28 @@ fn update_pending(db: &Db, row_id: RowUuid, title: &str) -> TxId {
 
 /// Alice reads `title = needle` at `Local` while she holds pending edits,
 /// some of them on rows outside the prefix. Origin is read under the index
-/// prefix, and the local delta masks origin's candidates by its presence
-/// looked up by those candidates' row ids: neither origin's other rows nor
-/// the delta's unrelated rows are read, so the read's storage work is the
-/// same with 20 settled rows and 2 unrelated pending edits as with 60 and
-/// 20. A pending edit that moved a candidate out of the prefix still hides
-/// it; one that moved a row in is found by the delta's own index.
+/// prefix, and the local delta masks origin's candidates by its whole
+/// presence: the delta holds only pending rows, so the read never visits
+/// origin's rows outside the prefix and never probes the delta once per
+/// origin candidate. Its storage work is the same with 20 settled rows as
+/// with 60, the same with 40 more origin candidates under the prefix (the
+/// #4022 regression: a keyed lookup paid one delta probe per candidate),
+/// and grows only by the extra pending rows themselves. A pending edit that
+/// moved a candidate out of the prefix still hides it; one that moved a row
+/// in is found by the delta's own index.
 ///
 /// White-box because storage-read attribution and the read path's source
 /// counters are not public.
 ///
 /// ```text
-/// origin:  a=needle  b=needle  out=needle  in=hay  hay x n
+/// origin:  a=needle  b=needle  out=needle  in=hay  needle x m  hay x n
 /// local:   out -> hay   in -> needle   k hay rows -> straw
-/// alice ──title = needle, Local──► {a, b, in}   (reads independent of n, k)
+/// alice ──title = needle, Local──► {a, b, in, needle x m}
+///          origin reads independent of n; delta reads independent of n, m
 /// ```
 #[test]
-fn indexed_local_read_masks_origin_by_pending_rows_looked_up_by_candidate_ids() {
-    let read = |hay: u8, pending_hay: u8| {
+fn indexed_local_read_masks_origin_by_the_whole_pending_delta() {
+    let read = |hay: u8, needles: u8, pending_hay: u8| {
         let schema = indexed_todos_schema();
         let db = open_settling_authority(0xda, &schema);
         let (a, b, moved_out, moved_in) = (row(1), row(2), row(3), row(4));
@@ -745,6 +749,10 @@ fn indexed_local_read_masks_origin_by_pending_rows_looked_up_by_candidate_ids() 
         }
         for n in 0..hay {
             insert_settled(&db, row(0x10 + n), "hay");
+        }
+        let extra_needles = (0..needles).map(|n| row(0x80 + n)).collect::<Vec<_>>();
+        for &row_id in &extra_needles {
+            insert_settled(&db, row_id, "needle");
         }
         update_pending(&db, moved_out, "hay");
         update_pending(&db, moved_in, "needle");
@@ -762,12 +770,13 @@ fn indexed_local_read_masks_origin_by_pending_rows_looked_up_by_candidate_ids() 
             rows.sort();
             rows
         };
+        let expected = sorted([a, b, moved_in].into_iter().chain(extra_needles).collect());
         // Warm the plan so the measured read is the row read alone.
         assert_eq!(
             sorted(row_ids(
                 &block_on(db.all(&needle, local.clone())).expect("warm read")
             )),
-            vec![a, b, moved_in]
+            expected
         );
         db.reset_storage_read_metrics_for_test();
         db.node.node.borrow_mut().reset_query_engine_read_metrics();
@@ -775,7 +784,7 @@ fn indexed_local_read_masks_origin_by_pending_rows_looked_up_by_candidate_ids() 
             sorted(row_ids(
                 &block_on(db.all(&needle, local)).expect("indexed read")
             )),
-            vec![a, b, moved_in]
+            expected
         );
         let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
         assert_eq!(metrics.source_full_scans, 0, "{metrics:?}");
@@ -785,28 +794,39 @@ fn indexed_local_read_masks_origin_by_pending_rows_looked_up_by_candidate_ids() 
         );
         db.take_storage_read_metrics_for_test()
     };
-    let small = read(20, 2);
-    let large = read(60, 20);
+    let base = read(20, 0, 2);
+    let more_hay = read(60, 0, 2);
+    assert_eq!(
+        (base.global_current_rows, base.ahead_current_rows),
+        (more_hay.global_current_rows, more_hay.ahead_current_rows),
+        "origin's rows outside the prefix may not be read: {base:?} vs {more_hay:?}"
+    );
+    let more_candidates = read(20, 40, 2);
+    assert_eq!(
+        base.ahead_current_rows, more_candidates.ahead_current_rows,
+        "origin's candidates may not cost reads of the delta: {base:?} vs {more_candidates:?}"
+    );
+    let more_pending = read(20, 0, 20);
+    assert_eq!(
+        base.global_current_rows, more_pending.global_current_rows,
+        "unrelated pending rows may not cost origin reads: {base:?} vs {more_pending:?}"
+    );
     assert_eq!(
         (
-            small.global_current_rows.reads,
-            small.ahead_current_rows.reads
+            more_pending.ahead_current_rows.reads - base.ahead_current_rows.reads,
+            more_pending.ahead_current_rows.ranges - base.ahead_current_rows.ranges,
         ),
-        (
-            large.global_current_rows.reads,
-            large.ahead_current_rows.reads
-        ),
-        "neither origin's rows outside the prefix nor unrelated pending rows may be read: \
-         {small:?} vs {large:?}"
+        (18, 0),
+        "the mask reads each pending row once: {base:?} vs {more_pending:?}"
     );
 }
 
 /// Alice keeps a `title = needle` subscription open at `Local` while her
 /// pending edits appear over rows origin already holds under the index
-/// prefix and then settle. The local delta's mask over origin is a
-/// maintained keyed lookup, so every step is one exact delta: a pending
-/// edit leaving the prefix removes the origin candidate, one entering adds
-/// the row, and settling an edit changes nothing the subscriber sees. White-
+/// prefix and then settle. The local delta masks origin by its maintained
+/// presence, so every step is one exact delta: a pending edit leaving the
+/// prefix removes the origin candidate, one entering adds the row, and
+/// settling an edit changes nothing the subscriber sees. White-
 /// box only for settling (`finalize_local_mergeable_commit_for_test`); the
 /// assertions are on the public subscription stream.
 ///

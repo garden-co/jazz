@@ -655,7 +655,7 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
         // A Local read also probes the local delta; its mask over origin is
-        // a keyed lookup by origin's candidates, not an index probe.
+        // the delta's whole presence (its pending rows), not an index probe.
         let probes = if tier == DurabilityTier::Local { 2 } else { 1 };
         assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
@@ -746,8 +746,8 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
     // Origin and local-delta index probes; a newer pending winner that
-    // changed owner masks its origin image through a keyed lookup by the
-    // origin candidates' row ids, without scanning the delta.
+    // changed owner masks its origin image through the delta's whole
+    // presence, which costs the pending rows, not origin's candidates.
     assert_eq!(local_metrics.source_index_probes, 2);
     assert_eq!(local_metrics.source_full_scans, 0);
 }

@@ -3011,12 +3011,11 @@ where
     /// (`INV-BVIEW-9`).
     ///
     /// Under an index access path every content layer reads only its index
-    /// prefix, and everything else is read by the content candidates' row
-    /// ids (a keyed lookup, #4005), so it costs the candidates rather than
-    /// the branches:
+    /// prefix. Within each branch the local delta masks origin by its whole
+    /// presence, which costs the pending rows only (see [`Self::presence`]).
+    /// Everything else is read by the content candidates' row ids (a keyed
+    /// lookup, #4005), so it costs the candidates rather than the branches:
     ///
-    /// - within each branch, the local delta masks origin by its presence
-    ///   looked up by origin's candidates' row ids;
     /// - the head's presence is looked up by the base candidates' row ids:
     ///   anti-joining the base candidates only needs the head rows that
     ///   share one of their ids;
@@ -3115,7 +3114,7 @@ where
                 request,
                 Ref::stack(tier),
                 &head_keys,
-                base_content.clone().project(["row_uuid"]),
+                PresenceRead::Lookup(base_content.clone().project(["row_uuid"])),
             )?;
             layer_stack::Layer::masked_by(head_content, layer_stack::Mask::Presence(presence))
         } else {
@@ -3130,27 +3129,43 @@ where
         ))
     }
 
-    /// The `row_uuid`s a branch key holds in `refs` among `row_ids`,
-    /// whatever their values: the union of those refs' rows, each looked up
-    /// by those ids and read through the system-field winner projection.
-    /// This is a [`layer_stack::Mask::Presence`]: the head's presence over a
-    /// base (`refs` = the head's ref stack), or the local delta's over origin
-    /// (`refs` = `[Local]`).
+    /// The `row_uuid`s a branch key holds in `refs`, whatever their values,
+    /// read through the system-field winner projection: a
+    /// [`layer_stack::Mask::Presence`]. It masks the layers below by row id
+    /// alone, so a masking row whose indexed value left the prefix still
+    /// hides the row below.
+    ///
+    /// `among` picks how the presence is read:
+    ///
+    /// - [`PresenceRead::Lookup`] reads it only for the given row ids, by a
+    ///   keyed lookup of the refs' rows. It costs one probe per distinct id,
+    ///   whatever the masking layer holds. A branch view's head masks its
+    ///   base this way (`refs` = the head's ref stack, ids = the base
+    ///   candidates): the head can be as large as the base.
+    /// - [`PresenceRead::Whole`] reads the refs' rows whole. It costs the
+    ///   masking layer's rows, never the layers below. The local delta masks
+    ///   origin this way (`refs` = `[Local]`): the delta holds only this
+    ///   node's pending rows, while origin's candidates under a prefix can
+    ///   number in the hundreds of thousands, so probing the delta once per
+    ///   candidate would cost the candidates even when nothing is pending.
+    ///
+    /// Either is exact: ids outside the candidates match nothing, so they hide
+    /// nothing. And either stays exact under maintenance, whatever the sizes
+    /// later become; the choice only moves cost.
     ///
     /// A source inside a recursive step cannot look rows up
-    /// ([`source_in_recursive_step`]). There the presence is the refs' rows
-    /// read whole. That is exact (the extra ids match no candidate, so they hide
-    /// nothing) and costs the masking layer's rows, never the layers below:
-    /// the local delta (this node's pending rows, which an unindexed `Local`
-    /// read reads whole anyway) or a branch view's head.
+    /// ([`source_in_recursive_step`]), so there every presence is read whole.
     fn presence(
         &self,
         request: &SourceRequest,
         refs: &[Ref],
         stored_keys: &BTreeSet<BranchKey>,
-        row_ids: GraphBuilder,
+        among: PresenceRead,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let in_recursive_step = source_in_recursive_step(request);
+        let row_ids = match among {
+            PresenceRead::Lookup(row_ids) if !source_in_recursive_step(request) => Some(row_ids),
+            PresenceRead::Lookup(_) | PresenceRead::Whole => None,
+        };
         let mut rows = Vec::new();
         for r in refs {
             for branch_key in stored_keys {
@@ -3164,12 +3179,11 @@ where
                         None,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-                let present = if in_recursive_step {
-                    marker
-                } else {
-                    lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
+                let present = match &row_ids {
+                    None => marker,
+                    Some(row_ids) => lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
                         source_resolution_error(request, SourceGap::SchemaProjection)
-                    })?
+                    })?,
                 };
                 rows.push(present.project(["row_uuid"]));
             }
@@ -3288,15 +3302,16 @@ where
             let rows = class_rows(self, r.physical_class())?.project(physical_fields.clone());
             Ok(match access {
                 // Under an index prefix the local delta masks origin by its
-                // presence among origin's candidates: a pending edit that
-                // moved a row out of the prefix still hides its origin image.
+                // whole presence: a pending edit that moved a row out of the
+                // prefix still hides its origin image. The delta holds only
+                // pending rows, so this costs them, not origin's candidates.
                 BranchLayerAccess::Index { .. } => layer_stack::Layer::masked_by(
                     rows,
                     layer_stack::Mask::Presence(self.presence(
                         request,
                         &[r],
                         stored_keys,
-                        origin.clone().project(["row_uuid"]),
+                        PresenceRead::Whole,
                     )?),
                 ),
                 BranchLayerAccess::Full | BranchLayerAccess::PrimaryKey(_) => {
@@ -3589,12 +3604,12 @@ where
             } else {
                 let global = global.project(physical_fields.clone());
                 // An unlimited index read stays index-bounded on the local
-                // delta too: delta rows under the prefix join the result, and
-                // the delta's presence among the settled candidates' row ids
-                // (a keyed lookup) names the candidates they replace. A
-                // pending edit that moved a row out of the prefix still hides
-                // its settled image: the lookup reads the delta by row id,
-                // whatever its indexed value.
+                // delta's rows: delta rows under the prefix join the result,
+                // and the delta's whole presence names the settled candidates
+                // they replace. A pending edit that moved a row out of the
+                // prefix still hides its settled image: the presence is the
+                // delta's row ids, whatever their indexed values. It costs the
+                // pending rows, never the settled candidates.
                 if let Some(CurrentAccessPath::Index {
                     column,
                     order_column,
@@ -3636,7 +3651,7 @@ where
                         request,
                         &[Ref::Local],
                         &BTreeSet::from([BranchKey::default()]),
-                        global.clone().project(["row_uuid"]),
+                        PresenceRead::Whole,
                     )?;
                     let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                     let ahead = ahead.project(physical_fields.clone());
@@ -3910,6 +3925,15 @@ pub(super) enum BranchLayerAccess {
 /// The rows of a physical current table source, keyed `(branch_key,
 /// row_uuid, ..)`, whose `row_uuid` is one of `row_ids`' (a keyed lookup:
 /// one storage probe per distinct id, maintained as the ids change).
+/// How [`JazzSourceGraphPreparer::presence`] reads a masking layer's row ids.
+enum PresenceRead {
+    /// Only these row ids (a relation with a `row_uuid` field), by a keyed
+    /// lookup: one probe per distinct id.
+    Lookup(GraphBuilder),
+    /// Every row id the layer holds.
+    Whole,
+}
+
 fn lookup_by_row_id(rows: GraphBuilder, row_ids: GraphBuilder) -> Result<GraphBuilder, Error> {
     GraphBuilder::lookup(rows, row_ids, ["row_uuid"]).ok_or(Error::InvalidStoredValue(
         "a keyed lookup needs a physical current table source",

@@ -18,9 +18,10 @@
 //! | `Local`         | `Ahead` (`..._ahead_current`) over `Global` |
 //!
 //! A read bounded by an index masks the origin layer by the local delta's
-//! presence among origin's candidates: a keyed lookup of the delta by those
-//! candidates' row ids, so it never visits the whole delta and needs no
-//! stored copy of the overridden origin images.
+//! whole presence (its row ids, whatever their indexed values). The delta
+//! holds only this node's pending rows, so this costs them rather than
+//! origin's candidates, and needs no stored copy of the overridden origin
+//! images.
 
 use super::*;
 
