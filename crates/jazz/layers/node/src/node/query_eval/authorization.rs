@@ -354,19 +354,11 @@ where
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
-                .schema
-        }
-        .clone();
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+            .clone();
         // Access-path pushdown is an optimization, not part of the decision
         // boundary. Keep the target coordinate in the policy AST as well so
         // inline transaction overlays cannot authorize one row from another
@@ -874,18 +866,10 @@ where
                 }
             }
         }
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?;
         let policy_shape = policy
             .clone()
             .validate_with_schema_version(policy_schema, policy_schema_version)?;
@@ -1190,20 +1174,12 @@ where
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "policy schema version is unknown",
+            ))?;
         let table = policy_schema
             .tables
             .iter()
@@ -1339,20 +1315,12 @@ where
         {
             return Ok(request.clone());
         }
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "policy schema version is unknown",
+            ))?;
         let table = policy_schema
             .tables
             .iter()

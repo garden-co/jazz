@@ -2979,18 +2979,10 @@ where
         shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if shape.schema_version() == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-                .schema
-        };
+        let schema = self
+            .catalogue
+            .schema_for_version(shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let query = shape.query();
         if let Some(relation) = &query.relation
             && crate::query::relation_union_parts(&relation.rel).is_some()

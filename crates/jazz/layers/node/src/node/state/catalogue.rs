@@ -1397,3 +1397,17 @@ self.database.finish_persistence(persisted)?;
     }
 
 }
+
+impl SchemaCatalogue {
+    /// The compiled schema for `version`: the active schema (carrying its
+    /// permissions), the node's local API schema, or a catalogue entry.
+    fn schema_for_version(&self, version: SchemaVersionId) -> Option<&JazzSchema> {
+        if version == self.active_schema.schema {
+            Some(&self.active_schema.compiled)
+        } else if version == self.local_schema_version_id {
+            Some(&self.schema)
+        } else {
+            self.catalogue_schemas.get(&version).map(|entry| &entry.schema)
+        }
+    }
+}

@@ -639,7 +639,8 @@ where
                 // An inherited clause evaluates another table's policy; accept
                 // it as monotone only when every policy of the schema is.
                 known = self
-                    .policy_schema_for_monotonicity(policy_schema)
+                    .catalogue
+                    .schema_for_version(policy_schema)
                     .is_some_and(|schema| {
                         schema.tables.iter().all(|table| {
                             table
@@ -654,19 +655,6 @@ where
             monotone.push(known);
         }
         Ok(monotone)
-    }
-
-    fn policy_schema_for_monotonicity(&self, schema: SchemaVersionId) -> Option<&JazzSchema> {
-        if schema == self.catalogue.active_schema.schema {
-            Some(&self.catalogue.active_schema.compiled)
-        } else if schema == self.catalogue.local_schema_version_id {
-            Some(&self.catalogue.schema)
-        } else {
-            self.catalogue
-                .catalogue_schemas
-                .get(&schema)
-                .map(|entry| &entry.schema)
-        }
     }
 
     /// Check one write of a unit against a round's shared overlay, leaving
@@ -1201,20 +1189,12 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
     ) -> Result<bool, Error> {
-        let schema = if schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema_version)
+        let schema =
+            self.catalogue
+                .schema_for_version(schema_version)
                 .ok_or(Error::InvalidStoredValue(
                     "repair request schema is missing from catalogue",
-                ))?
-                .schema
-        };
+                ))?;
         // `id` resolves to a declared user column when a table has one, so an
         // internal physical-row probe must use the dedicated access-path API.
         let shape = crate::query::Query::from(table_name)
