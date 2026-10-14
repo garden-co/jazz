@@ -1,5 +1,6 @@
 import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
+import { toError } from "../runtime/util.js";
 
 /** A stable provider session identifier, never a JWT. Pending means initial hydration. */
 export interface AuthProviderState {
@@ -26,7 +27,6 @@ export interface AuthProviderConnection {
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
 const releases = new WeakMap<object, Promise<void>>();
-const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
 
 /** Reconcile a provider with an externally owned Jazz session.
  * Signup, login and restoration atomically login-or-register. For linking an
@@ -144,7 +144,7 @@ export function connectAuthProvider<Client>(
     });
     const task = operation
       .catch((cause) => {
-        if (!disposed && token === generation) failure = asError(cause);
+        if (!disposed && token === generation) failure = toError(cause);
       })
       .finally(() => {
         if (running !== task) return;
@@ -219,7 +219,7 @@ export function connectAuthProvider<Client>(
       });
       running = operation
         .catch((cause) => {
-          failure = asError(cause);
+          failure = toError(cause);
         })
         .finally(() => {
           running = undefined;

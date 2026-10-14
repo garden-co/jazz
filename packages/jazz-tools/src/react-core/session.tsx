@@ -12,6 +12,7 @@ import {
 import type { JazzSession, JazzSessionActions, JazzSessionSnapshot } from "../session/state.js";
 import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
   JazzSessionActions;
@@ -175,7 +176,7 @@ export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
             else await created.close();
           },
           (reason: unknown) => {
-            const failure = reason instanceof Error ? reason : new Error(String(reason));
+            const failure = toError(reason);
             owner.promise = undefined;
             if (owner.active) setError(failure);
             throw failure;

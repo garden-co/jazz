@@ -9,6 +9,7 @@ import type {
 } from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 /**
  * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
@@ -30,10 +31,6 @@ export interface UseAllResult<T extends { id: string }> {
 export interface UseAllSuspenseResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
-}
-
-function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
 }
 
 function applyEntryState<T extends { id: string }>(

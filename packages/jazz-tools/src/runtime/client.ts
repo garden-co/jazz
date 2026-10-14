@@ -24,6 +24,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
+import { toError } from "./util.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -1979,7 +1980,7 @@ export class JazzClient {
         } catch (error) {
           // User callback failures must not escape through the native tick or
           // leave a live source publishing behind the terminal notification.
-          terminate(error instanceof Error ? error : new Error(String(error)), true);
+          terminate(toError(error), true);
         }
       });
     } catch (error) {
@@ -2061,10 +2062,7 @@ export class JazzClient {
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
-    return (
-      rejectionFromRuntimeWaitError(error) ??
-      (error instanceof Error ? error : new Error(String(error)))
-    );
+    return rejectionFromRuntimeWaitError(error) ?? toError(error);
   }
 
   /**

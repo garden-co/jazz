@@ -2,6 +2,7 @@ import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
 import { limitQueryToOne } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
 import { getJazzContext } from "./context.svelte.js";
+import { toError } from "../runtime/util.js";
 
 type MaybeGetter<T> = T | (() => T);
 
@@ -100,7 +101,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
             }
           },
           onError: (error: unknown) => {
-            this.error = error instanceof Error ? error : new Error(String(error));
+            this.error = toError(error);
             this.current = undefined;
             this.isLoading = false;
           },
@@ -111,7 +112,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
           },
         });
       } catch (e) {
-        this.error = e instanceof Error ? e : new Error(String(e));
+        this.error = toError(e);
         this.isLoading = false;
       }
 

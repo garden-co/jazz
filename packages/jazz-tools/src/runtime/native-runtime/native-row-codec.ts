@@ -2,9 +2,9 @@ import { Utf8Decoder } from "../utf8.js";
 import { bytesToHex, formatUuidAt } from "../hex.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { concatBytes, isValidUtf8 } from "../util.js";
 
 const textDecoder = new Utf8Decoder({ fatal: true });
-const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -232,15 +232,6 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     cursor += length;
   }
   return cursor === bytes.length;
-}
-
-function isValidUtf8(bytes: Uint8Array): boolean {
-  try {
-    fatalUtf8Decoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function readNativeRelationSubscriptionSnapshot(
@@ -1129,17 +1120,6 @@ function expectSignedI32(value: Value): number {
 function expectSignedI64(value: Value): bigint {
   if (value.type !== "BigInt") throw new Error("expected BigInt value");
   return exactSignedI64(value.value, "BigInt value");
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
 }
 
 class OffsetWriter {

@@ -14,6 +14,7 @@ import type {
   PolicyValue,
   TablePolicies,
 } from "./schema.js";
+import { isRecord } from "./runtime/util.js";
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
@@ -26,10 +27,6 @@ export interface MissingExplicitPolicyDiagnostic {
 }
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isWasmValueLike(value: unknown): value is WasmValue {
   if (!isRecord(value) || typeof value.type !== "string") {

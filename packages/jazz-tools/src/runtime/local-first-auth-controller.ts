@@ -1,4 +1,5 @@
 import type { AuthSecretStore } from "./auth-secret-store.js";
+import { toError } from "./util.js";
 
 export interface LocalFirstAuthState {
   secret: string | null;
@@ -61,7 +62,7 @@ function createLocalFirstAuthController(store: AuthSecretStore): LocalFirstAuthC
       setState({
         secret: null,
         isLoading: false,
-        error: error instanceof Error ? error : new Error(String(error)),
+        error: toError(error),
       });
     };
 

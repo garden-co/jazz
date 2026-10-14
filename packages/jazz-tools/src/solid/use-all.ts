@@ -5,6 +5,7 @@ import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 export type UseAllResult<T extends { id: string }> = {
   data: T[] | undefined;
@@ -46,7 +47,7 @@ export function useAll<T extends { id: string }>(
       setState({
         data: entry.state.data && [...entry.state.data],
         isLoading: entry.state.status === "pending",
-        error: entry.state.error ? normalizeError(entry.state.error) : null,
+        error: entry.state.error ? toError(entry.state.error) : null,
       });
 
       const unsubscribe = entry.subscribe({
@@ -54,7 +55,7 @@ export function useAll<T extends { id: string }>(
           setState({
             data: undefined,
             isLoading: false,
-            error: normalizeError(error),
+            error: toError(error),
           }),
         onReset: () =>
           batch(() => {
@@ -91,14 +92,10 @@ export function useAll<T extends { id: string }>(
       setState({
         data: undefined,
         isLoading: false,
-        error: normalizeError(error),
+        error: toError(error),
       });
     }
   });
 
   return state;
-}
-
-function normalizeError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

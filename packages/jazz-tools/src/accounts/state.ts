@@ -1,4 +1,5 @@
 import type { BackendAuth } from "./enrollment.js";
+import { toError } from "../runtime/util.js";
 /** Framework-independent account selection. Credentials live in handles, never snapshots. */
 export interface AccountIdentity {
   readonly issuer: string;
@@ -88,7 +89,7 @@ export class AccountManager<Auth> {
 
   /** @internal Surface host storage failure without changing the selected account. */
   reportPersistenceError(cause: unknown): void {
-    const error = cause instanceof Error ? cause : new Error(String(cause));
+    const error = toError(cause);
     this.publish({ ...this.snapshot, error });
   }
 
@@ -203,7 +204,7 @@ export class AccountManager<Auth> {
       this.publish({ account, pending: undefined, error: undefined });
       return outcome === account ? account : undefined;
     } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const error = toError(cause);
       if (generation === this.generation) {
         this.publish({ ...this.snapshot, pending: undefined, error });
       }
@@ -231,7 +232,7 @@ export class AccountManager<Auth> {
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       return account;
     } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const error = toError(cause);
       if (generation === this.generation) {
         this.publish({ ...this.snapshot, pending: undefined, error });
       }

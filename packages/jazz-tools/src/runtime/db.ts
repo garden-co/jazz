@@ -95,6 +95,7 @@ import {
   type ConnectionManager,
   type DbForConnection,
 } from "./connection-manager/index.js";
+import { toError } from "./util.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2694,7 +2695,7 @@ export class Db {
       ) {
         return;
       }
-      subscription.terminalError ??= error instanceof Error ? error : new Error(String(error));
+      subscription.terminalError ??= toError(error);
       completeTerminalization(subscription);
     };
     const createSubscriptionGeneration = (
