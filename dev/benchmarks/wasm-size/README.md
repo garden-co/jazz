@@ -8,7 +8,7 @@ python3 dev/benchmarks/wasm-size/attribute.py target/wasm-size/out/jazz_wasm_bg.
 ```
 
 `build.sh` reproduces the release build (`dev/artifacts/build.mjs`): fat LTO,
-one codegen unit, then `wasm-opt -O -g`, then drops the mangling hashes from
+one codegen unit, then `wasm-opt -O -g --low-memory-unused`, then drops the mangling hashes from
 function names as release builds do. It needs `wasm-bindgen` and
 `wasm-opt` on `PATH`; `npm i binaryen` provides a `wasm-opt` that works
 offline. A build takes about 20 minutes on four cores.
