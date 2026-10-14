@@ -77,6 +77,6 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
 | logical pack        | `129d8ea6884ed2bdc5d0835d1b082ccfab98e64e420b6817e821d4563d7a1ab2` |
-| SQLite payload      | `631ce8b1e77855bc7a27e30248a355a0ccd1a3b57a3a218d545d5cf3d972a8ef` |
-| gzip SQLite archive | `938c6733dd3972e5204d7464233e338b5e3aed0435935099e8824ec4f66d936a` |
-| RocksDB archive     | `d57fdb68dd4c504066d2c04a3c56f167f2768589235c1cfed4629d5699dfe8d9` |
+| SQLite payload      | `c71b140641f02646ec55da6cd48d22feceb5adc82d72c22a4590a07d7e406ab1` |
+| gzip SQLite archive | `0460e0a111e0d0b95c2612bac281389d46acc932cc1c00708db8a078f9bcda0a` |
+| RocksDB archive     | `be61745423ce7e702ef1edc723e6eb2eb45be6f7ddf8a2f1a9568e1f679adbb0` |

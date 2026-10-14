@@ -430,7 +430,8 @@ cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
 selected fragments, so `n_total_writes` is not an authoritative total. A
 complete payload clears the flag; later fragments do not downgrade it.
 False does not guarantee that every row remains cached after eviction.
-Roots with the former nullable string field lack this codec and are refused
+This encoding receipt is covered by the `jazz.node-storage.v1` root profile.
+Roots with the former nullable string field lack that profile marker and are refused
 at manifest admission, without migration or a physical epoch/wire bump.
 Fate/global time and durability remain separate lattice observations:
 accepted/global uses an authority `GlobalTime`, rejection has no global winner,

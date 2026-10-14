@@ -6,7 +6,7 @@
 // producer here makes the semantic shape, backend profile, and reopen contract
 // executable beside the NodeState paths that actually write it.
 
-use crate::storage_codec_profile::{epoch_1_storage_codec_profile, node_storage_codec_profile};
+use crate::storage_codec_profile::node_storage_codec_profile;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
 use jazz_storage_sqlite::{
@@ -55,13 +55,13 @@ const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "938c6733dd3972e5204d7464233e338b5e3aed0435935099e8824ec4f66d936a";
+    "0460e0a111e0d0b95c2612bac281389d46acc932cc1c00708db8a078f9bcda0a";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "631ce8b1e77855bc7a27e30248a355a0ccd1a3b57a3a218d545d5cf3d972a8ef";
+    "c71b140641f02646ec55da6cd48d22feceb5adc82d72c22a4590a07d7e406ab1";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "d57fdb68dd4c504066d2c04a3c56f167f2768589235c1cfed4629d5699dfe8d9";
+    "be61745423ce7e702ef1edc723e6eb2eb45be6f7ddf8a2f1a9568e1f679adbb0";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -1400,7 +1400,7 @@ where
         }) => {
             assert!(missing.is_empty(), "{missing:?}");
             assert!(
-                unknown.iter().any(|codec| codec == "jazz.history-version-current.v4")
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v1")
                     && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
                 "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
             );
@@ -1932,7 +1932,7 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     let historical = epoch_1_native_corpus_pack();
     assert!(historical.contains("store\tjazz_settled_result_members\n"));
     let schema = native_corpus_schema();
-    let profile = epoch_1_storage_codec_profile().unwrap();
+    let profile = node_storage_codec_profile().unwrap();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let sqlite_dir = tempfile::tempdir().unwrap();
@@ -2377,15 +2377,13 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// Before linear history this receipt reopened and extended the alpha.54 root.
 /// The history codec is now `jazz.history-version-current.v4` and old roots
 /// are refused rather than migrated, so the receipt pins the refusal instead:
-/// the root lacks exactly the durable-index and row-history families and
-/// declares nothing this build does not read.
+/// the root lacks the durable-index and node-storage markers and
+/// declares retired per-family Jazz markers.
 ///
 /// ```text
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                       missing [groove.durable-index.v2,
-///                                                jazz.history-version-current.v4,
-///                                                jazz.transaction-durability.v2,
-///                                                        jazz.transaction-record.v1]
+///                                                        jazz.node-storage.v1]
 /// ```
 #[test]
 fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
@@ -2441,9 +2439,9 @@ fn rocksdb_family_entries(
 }
 
 /// A pre-linear (DAG layout, alpha.54 to alpha.59) node root is refused at
-/// manifest admission with the typed error naming exactly the four families
-/// it lacks (durable index, linear row history and the compact durability
-/// encoding), and its retired subscription-cache family.
+/// manifest admission with the typed error naming the current root profile markers
+/// it lacks (durable index and node storage), and its retired per-family
+/// Jazz markers.
 fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
     match result {
         Err(groove::storage::Error::UnsupportedStorageCodecs {
@@ -2456,13 +2454,11 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 missing,
                 vec![
                     "groove.durable-index.v2".to_owned(),
-                    "jazz.history-version-current.v4".to_owned(),
-                    "jazz.transaction-durability.v2".to_owned(),
-                    "jazz.transaction-record.v1".to_owned(),
+                    "jazz.node-storage.v1".to_owned(),
                 ],
                 "{store}"
             );
-            assert_eq!(unknown, ["jazz.subscription-program-fact-key.v1"], "{store}");
+            assert_eq!(unknown, ["jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
         }
         Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
         Ok(()) => panic!("{store}: a pre-linear root must not open"),

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Epoch-one authoritative codec-family inventory. A family is not frozen merely by appearing in source: it must name its normative boundary, exact semantic-to-byte receipt, malformed/canonical rejection receipt, and reopen or backend evidence.",
+  "purpose": "Authoritative encoding receipt inventory. Root profiles select complete storage layouts; individual byte families retain semantic, rejection, and reopen evidence without separate manifest markers.",
   "families": [
     {
       "id": "groove.ordered-kv.v1",
@@ -144,7 +144,6 @@
     {
       "id": "jazz.branch-key.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/11_branch_views_time_travel.md",
         "anchor": "#### Canonical branch-coordinate codec"
@@ -167,7 +166,6 @@
     {
       "id": "jazz.catalogue.activation.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -190,7 +188,6 @@
     {
       "id": "jazz.catalogue.bootstrap-ready.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -213,7 +210,6 @@
     {
       "id": "jazz.catalogue.lens.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -236,7 +232,6 @@
     {
       "id": "jazz.catalogue.lineage.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -259,7 +254,6 @@
     {
       "id": "jazz.catalogue.physical-mapping.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
         "anchor": "### 2.7 Reference implementation: identity encoding & storage lowering"
@@ -282,7 +276,6 @@
     {
       "id": "jazz.catalogue.schema.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -305,7 +298,6 @@
     {
       "id": "jazz.catalogue.write-pointer.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/10_lenses_migrations.md",
         "anchor": "#### Epoch-pinned catalogue kernel"
@@ -328,7 +320,6 @@
     {
       "id": "jazz.server-catalogue-entry.v1",
       "boundary": "durable-storage",
-      "profile": "server-catalogue-root",
       "spec": {
         "path": "crates/jazz/SPEC/4_history_merging.md",
         "anchor": "### Durable codec profile"
@@ -355,7 +346,6 @@
     {
       "id": "jazz.history-version-current.v4",
       "boundary": "durable-storage",
-      "profile": "jazz-node-root",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
         "anchor": "**Linear-history storage boundary (2026-09-29).**"
@@ -371,11 +361,11 @@
       "evidence": [
         {
           "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
-          "anchor": "fn node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots"
+          "anchor": "fn root_profiles_reject_other_roots_and_changed_inventories"
         },
         {
           "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
-          "anchor": "fn node_profile_refuses_history_v2_and_v3_roots"
+          "anchor": "fn root_profiles_reject_other_roots_and_changed_inventories"
         },
         {
           "path": "crates/jazz/layers/node/src/node/codec.rs",
@@ -671,7 +661,6 @@
     {
       "id": "jazz.transaction-durability.v2",
       "boundary": "durable-storage",
-      "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/9_topology.md",
         "anchor": "### 9.2 Durability encoding v2 compatibility"
@@ -694,7 +683,6 @@
     {
       "id": "jazz.transaction-record.v1",
       "boundary": "durable-storage",
-      "profile": "jazz-node-root",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
         "anchor": "**Transaction audit record.**"
@@ -715,6 +703,75 @@
         {
           "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
           "anchor": "fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        }
+      ]
+    },
+    {
+      "id": "jazz.node-storage.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/jazz/fixtures/storage_epoch_1_jazz_codec_profile.md",
+        "anchor": "## Independent root profiles"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_have_pinned_manifest_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_reject_other_roots_and_changed_inventories"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
+          "anchor": "fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        }
+      ]
+    },
+    {
+      "id": "jazz.catalogue-storage.v1",
+      "boundary": "durable-storage",
+      "profile": "server-catalogue-root",
+      "spec": {
+        "path": "crates/jazz/fixtures/storage_epoch_1_jazz_codec_profile.md",
+        "anchor": "## Independent root profiles"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_have_pinned_manifest_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_reject_other_roots_and_changed_inventories"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_storage.rs",
+          "anchor": "fn adapter_catalogue_reopens_only_the_v1_default_cf_layout"
+        }
+      ]
+    },
+    {
+      "id": "jazz.account-storage.v1",
+      "boundary": "durable-storage",
+      "profile": "account-root",
+      "spec": {
+        "path": "crates/jazz/fixtures/storage_epoch_1_jazz_codec_profile.md",
+        "anchor": "## Independent root profiles"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_have_pinned_manifest_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+        "anchor": "fn root_profiles_reject_other_roots_and_changed_inventories"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-server/src/server/accounts.rs",
+          "anchor": "fn disk_recovery_preserves_pending_links_and_permanent_revoked_assignments"
         }
       ]
     }
