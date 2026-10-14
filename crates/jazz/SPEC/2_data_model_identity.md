@@ -296,7 +296,7 @@ patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
 `base_pending` (SPEC 4 §4.6). Beside them: a
 global-current record per row with `global_time` (the row's seq) and index
 `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
-`(branch_key, row_uuid)` with its `ahead_shadow` copy; and `_deletion` as an
+`(branch_key, row_uuid)`; and `_deletion` as an
 ordinary nullable cell. No row state carries a timestamp used for merging.
 The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
