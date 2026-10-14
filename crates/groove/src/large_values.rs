@@ -2598,14 +2598,8 @@ pub(crate) fn node_ref_from_value(value: &Value) -> Result<NodeRef, Error> {
 fn node_ref_from_values(values: &[Value]) -> Result<NodeRef, Error> {
     let mut fields = node_ref_record_schema().decode_values(values)?;
     Ok(NodeRef {
-        object_hash: ContentHash(raw_bytes(&take_durable_large_value_field(
-            &mut fields,
-            NODE_REF_OBJECT_HASH_FIELD,
-        )?)?),
-        locator: Locator(raw_bytes(&take_durable_large_value_field(
-            &mut fields,
-            NODE_REF_LOCATOR_FIELD,
-        )?)?),
+        object_hash: ContentHash(take_raw32(&mut fields, NODE_REF_OBJECT_HASH_FIELD)?),
+        locator: Locator(take_raw32(&mut fields, NODE_REF_LOCATOR_FIELD)?),
     })
 }
 
@@ -2852,6 +2846,58 @@ fn take_durable_large_value_field(
     fields.remove(&id).ok_or(Error::MalformedScalar)
 }
 
+/// Take field `id` as the variant `extract` accepts; an absent or mistyped
+/// field is malformed.
+fn take_field<T>(
+    fields: &mut BTreeMap<u16, Value>,
+    id: u16,
+    extract: impl FnOnce(Value) -> Option<T>,
+) -> Result<T, Error> {
+    extract(take_durable_large_value_field(fields, id)?).ok_or(Error::MalformedScalar)
+}
+
+fn take_u8(fields: &mut BTreeMap<u16, Value>, id: u16) -> Result<u8, Error> {
+    take_field(fields, id, |value| match value {
+        Value::U8(value) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_u64(fields: &mut BTreeMap<u16, Value>, id: u16) -> Result<u64, Error> {
+    take_field(fields, id, |value| match value {
+        Value::U64(value) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_raw32(fields: &mut BTreeMap<u16, Value>, id: u16) -> Result<[u8; 32], Error> {
+    take_field(fields, id, |value| raw_bytes(&value).ok())
+}
+
+fn take_bytes(fields: &mut BTreeMap<u16, Value>, id: u16) -> Result<Vec<u8>, Error> {
+    take_field(fields, id, |value| match value {
+        Value::Bytes(value) => Some(value),
+        _ => None,
+    })
+}
+
+/// The `Nullable(U64)` encoding of an optional metric.
+fn opt_u64_value(value: Option<u64>) -> Value {
+    Value::Nullable(value.map(|value| Box::new(Value::U64(value))))
+}
+
+/// Inverse of [`opt_u64_value`]; `None` when `value` has another shape.
+fn opt_u64(value: &Value) -> Option<Option<u64>> {
+    match value {
+        Value::Nullable(None) => Some(None),
+        Value::Nullable(Some(value)) => match value.as_ref() {
+            Value::U64(value) => Some(Some(*value)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Construct a fixed engine-owned record layout from permanent, one-based
 /// positional field IDs. Source declaration order is normalized, but numeric
 /// IDs are actual record ordinals: skipped IDs become canonical empty nullable
@@ -3046,7 +3092,7 @@ fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
             ),
             (
                 LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
-                Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
+                opt_u64_value(value.utf16_length),
             ),
             (
                 LARGE_VALUE_REF_EDIT_TAIL_FIELD,
@@ -3093,38 +3139,25 @@ fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
 
 fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<LargeValueRef, Error> {
     let mut fields = large_value_ref_payload_schema().decode_values(values)?;
-    let Value::U8(format_version) =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_FORMAT_VERSION_FIELD)?
-    else {
-        return Err(Error::MalformedScalar);
-    };
+    let format_version = take_u8(&mut fields, LARGE_VALUE_REF_FORMAT_VERSION_FIELD)?;
     // Select the joint descriptor/edit/scalar contract before decoding the
     // nested root or tail. Do not let a future version accidentally inherit
     // V1 field interpretation merely because the outer record decoded.
     let format = LargeValueFormat::from_version(format_version)?;
-    let logical_hash =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_LOGICAL_HASH_FIELD)?;
+    let logical_hash = ContentHash(take_raw32(&mut fields, LARGE_VALUE_REF_LOGICAL_HASH_FIELD)?);
     let root = take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_ROOT_FIELD)?;
-    let Value::U64(byte_length) =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_BYTE_LENGTH_FIELD)?
-    else {
-        return Err(Error::MalformedScalar);
-    };
-    let Value::Nullable(utf16_length) =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_UTF16_LENGTH_FIELD)?
-    else {
-        return Err(Error::MalformedScalar);
-    };
-    let Value::Array(edits) =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_EDIT_TAIL_FIELD)?
-    else {
-        return Err(Error::MalformedScalar);
-    };
-    let utf16_length = match utf16_length.as_deref() {
-        None => None,
-        Some(Value::U64(value)) => Some(*value),
-        _ => return Err(Error::MalformedScalar),
-    };
+    let byte_length = take_u64(&mut fields, LARGE_VALUE_REF_BYTE_LENGTH_FIELD)?;
+    let utf16_length = take_field(&mut fields, LARGE_VALUE_REF_UTF16_LENGTH_FIELD, |value| {
+        opt_u64(&value)
+    })?;
+    let edits = take_field(
+        &mut fields,
+        LARGE_VALUE_REF_EDIT_TAIL_FIELD,
+        |value| match value {
+            Value::Array(edits) => Some(edits),
+            _ => None,
+        },
+    )?;
     let mut edit_tail = Vec::with_capacity(edits.len());
     for value in edits {
         let Value::Record(edit) = value else {
@@ -3132,48 +3165,19 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
         };
         let values = edit.to_values().map_err(|_| Error::MalformedScalar)?;
         let mut fields = large_value_edit_schema().decode_values(&values)?;
-        let Value::U64(offset) = take_durable_large_value_field(&mut fields, EDIT_OFFSET_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
-        let Value::U64(delete_length) =
-            take_durable_large_value_field(&mut fields, EDIT_DELETE_LENGTH_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
-        let Value::Bytes(insert_bytes) =
-            take_durable_large_value_field(&mut fields, EDIT_INSERT_BYTES_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
-        let Value::U64(utf16_offset) =
-            take_durable_large_value_field(&mut fields, EDIT_UTF16_OFFSET_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
-        let Value::U64(delete_utf16_length) =
-            take_durable_large_value_field(&mut fields, EDIT_DELETE_UTF16_LENGTH_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
-        let Value::U64(insert_utf16_length) =
-            take_durable_large_value_field(&mut fields, EDIT_INSERT_UTF16_LENGTH_FIELD)?
-        else {
-            return Err(Error::MalformedScalar);
-        };
         edit_tail.push(ReplaceEdit {
-            offset,
-            delete_length,
-            insert_bytes,
-            utf16_offset,
-            delete_utf16_length,
-            insert_utf16_length,
+            offset: take_u64(&mut fields, EDIT_OFFSET_FIELD)?,
+            delete_length: take_u64(&mut fields, EDIT_DELETE_LENGTH_FIELD)?,
+            insert_bytes: take_bytes(&mut fields, EDIT_INSERT_BYTES_FIELD)?,
+            utf16_offset: take_u64(&mut fields, EDIT_UTF16_OFFSET_FIELD)?,
+            delete_utf16_length: take_u64(&mut fields, EDIT_DELETE_UTF16_LENGTH_FIELD)?,
+            insert_utf16_length: take_u64(&mut fields, EDIT_INSERT_UTF16_LENGTH_FIELD)?,
         });
     }
     let value = LargeValueRef {
         kind,
         format_version,
-        logical_hash: ContentHash(raw_bytes(&logical_hash)?),
+        logical_hash,
         root: node_ref_from_value(&root)?,
         byte_length,
         utf16_length,
@@ -3746,12 +3750,7 @@ fn encode_node_v1(node: &ChunkNode) -> Result<Vec<u8>, Error> {
                             Value::Bytes(child.node_ref.object_hash.0.to_vec()),
                             Value::Bytes(child.node_ref.locator.0.to_vec()),
                             Value::U64(child.metrics.byte_length),
-                            Value::Nullable(
-                                child
-                                    .metrics
-                                    .utf16_length
-                                    .map(|value| Box::new(Value::U64(value))),
-                            ),
+                            opt_u64_value(child.metrics.utf16_length),
                             Value::Bytes(child.logical_hash.0.to_vec()),
                         ])
                         .map(|bytes| {
@@ -3886,17 +3885,13 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
                         object_hash,
                         locator,
                         Value::U64(byte_length),
-                        Value::Nullable(utf16_length),
+                        utf16_length,
                         logical_hash,
                     ] = fields.as_slice()
                     else {
                         return Err(Error::MalformedNode);
                     };
-                    let utf16_length = match utf16_length.as_deref() {
-                        None => None,
-                        Some(Value::U64(value)) => Some(*value),
-                        _ => return Err(Error::MalformedNode),
-                    };
+                    let utf16_length = opt_u64(utf16_length).ok_or(Error::MalformedNode)?;
                     Ok(BranchChild {
                         node_ref: NodeRef {
                             object_hash: ContentHash(
