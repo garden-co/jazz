@@ -45,11 +45,6 @@ pub(super) enum PhysicalCurrentClass {
     /// of each row this node holds a pending write for, already folded over
     /// origin's image.
     Ahead,
-    /// Origin's shadow of the local delta: origin's image of each row the
-    /// delta overrides, indexed like origin, so an index read of the local
-    /// stack can mask origin under the same prefix without scanning the
-    /// whole delta.
-    AheadShadow,
 }
 
 #[derive(Clone, Copy)]
