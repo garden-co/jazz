@@ -8,13 +8,16 @@
 //! encoding live above in [`crate::db`] and [`crate::records`].
 
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::ivm::DurableStorage;
 use crate::records::RecordDescriptor;
 use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore};
 
-use super::{IvmRuntimeError, RecordDeltas, encode_key_part, index_record_descriptor};
+use super::{
+    IvmRuntimeError, RecordDeltas, composite_keys, encode_key_part, index_record_descriptor,
+    named_field_value,
+};
 
 #[derive(Default)]
 struct PendingPersistKey {
@@ -295,56 +298,13 @@ fn persist_record_keys(
     key_fields: &[usize],
     durable_storage: &DurableStorage,
 ) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
-    let mut keys = vec![durable_storage.key_prefix.clone()];
-    let mut seen = HashSet::new();
-
-    for field_idx in key_fields {
-        let field = descriptor
-            .fields()
-            .get(*field_idx)
-            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
-        let field_name = field
-            .name
-            .as_deref()
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-        let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
-        let value = descriptor.bind(record).get_idx(field_idx)?;
-        let parts = arrangement_key_parts(value);
-
-        if parts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
-        for key in &keys {
-            for value in &parts {
-                let mut next = key.clone();
-                encode_key_part(&mut next, value)?;
-                if seen.insert(next.clone()) {
-                    next_keys.push(next);
-                }
-            }
-        }
-        keys = next_keys;
-        seen.clear();
-    }
-
-    Ok(keys)
-}
-
-fn arrangement_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
-    match value {
-        crate::records::Value::Array(values) => values,
-        crate::records::Value::Nullable(Some(value)) => match *value {
-            crate::records::Value::Array(values) => values
-                .into_iter()
-                .map(|value| crate::records::Value::Nullable(Some(Box::new(value))))
-                .collect(),
-            value => vec![crate::records::Value::Nullable(Some(Box::new(value)))],
-        },
-        value => vec![value],
-    }
+    composite_keys(
+        durable_storage.key_prefix.clone(),
+        key_fields
+            .iter()
+            .map(|field_idx| named_field_value(descriptor, record, *field_idx)),
+        encode_key_part,
+    )
 }
 
 #[cfg(test)]

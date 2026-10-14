@@ -258,67 +258,100 @@ pub(super) fn record_field_key_parts(
         .fields()
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-    match &field.value_type {
-        ValueType::Array(_) => {
-            let field_name = field
-                .name
-                .as_deref()
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
-            let Value::Array(values) = descriptor.bind(record).get_idx(field_idx)? else {
-                return Err(IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()));
-            };
-            values
+    if !expands_to_key_parts(&field.value_type) {
+        let mut key = Vec::new();
+        encode_record_field_key_part(&mut key, descriptor, record, field_idx)?;
+        return Ok(vec![key]);
+    }
+    key_parts(named_field_value(descriptor, record, field_idx)?)
+        .iter()
+        .map(|part| {
+            let mut key = Vec::new();
+            encode_key_part(&mut key, part)?;
+            Ok(key)
+        })
+        .collect()
+}
+
+/// Whether a field of this type is indexed once per array element.
+pub(super) fn expands_to_key_parts(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Array(_) => true,
+        ValueType::Nullable(inner) => matches!(inner.as_ref(), ValueType::Array(_)),
+        _ => false,
+    }
+}
+
+/// The values a record is keyed under for one field: each element of an
+/// array (nullable arrays keep their elements nullable), else the value.
+pub(super) fn key_parts(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(values) => values,
+        Value::Nullable(Some(value)) => match *value {
+            Value::Array(values) => values
                 .into_iter()
-                .map(|value| {
-                    let mut key = Vec::new();
-                    encode_key_part(&mut key, &value)?;
-                    Ok(key)
-                })
-                .collect()
+                .map(|value| Value::Nullable(Some(Box::new(value))))
+                .collect(),
+            value => vec![Value::Nullable(Some(Box::new(value)))],
+        },
+        value => vec![value],
+    }
+}
+
+/// Read field `field_idx` through its name, so a renamed or aliased field
+/// resolves exactly as predicates resolve it.
+pub(super) fn named_field_value(
+    descriptor: &RecordDescriptor,
+    record: &[u8],
+    field_idx: usize,
+) -> Result<Value, IvmRuntimeError> {
+    let field = descriptor
+        .fields()
+        .get(field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    let field_name = field
+        .name
+        .as_deref()
+        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+    let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
+        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
+    Ok(descriptor.bind(record).get_idx(field_idx)?)
+}
+
+/// Every composite key of a record: `prefix` followed by one key part of
+/// each field, in field order, without duplicates. A field with no parts (an
+/// empty array) yields no keys at all.
+pub(super) fn composite_keys(
+    prefix: Vec<u8>,
+    field_values: impl IntoIterator<Item = Result<Value, IvmRuntimeError>>,
+    mut encode: impl FnMut(&mut Vec<u8>, &Value) -> Result<(), IvmRuntimeError>,
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    let mut keys = vec![prefix];
+    let mut seen = rustc_hash::FxHashSet::default();
+    for value in field_values {
+        let parts = key_parts(value?);
+        if let ([key], [part]) = (keys.as_mut_slice(), parts.as_slice()) {
+            // One key and one part cannot produce a duplicate.
+            encode(key, part)?;
+            continue;
         }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)) => {
-            let field_name = field
-                .name
-                .as_deref()
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
-            match descriptor.bind(record).get_idx(field_idx)? {
-                Value::Nullable(None) => {
-                    let mut key = Vec::new();
-                    encode_key_part(&mut key, &Value::Nullable(None))?;
-                    Ok(vec![key])
-                }
-                Value::Nullable(Some(value)) => match *value {
-                    Value::Array(values) => values
-                        .into_iter()
-                        .map(|value| {
-                            let mut key = Vec::new();
-                            encode_key_part(&mut key, &Value::Nullable(Some(Box::new(value))))?;
-                            Ok(key)
-                        })
-                        .collect(),
-                    value => {
-                        let mut key = Vec::new();
-                        encode_key_part(&mut key, &Value::Nullable(Some(Box::new(value))))?;
-                        Ok(vec![key])
-                    }
-                },
-                value => {
-                    let mut key = Vec::new();
-                    encode_key_part(&mut key, &value)?;
-                    Ok(vec![key])
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
+        for key in &keys {
+            for part in &parts {
+                let mut next = key.clone();
+                encode(&mut next, part)?;
+                if seen.insert(next.clone()) {
+                    next_keys.push(next);
                 }
             }
         }
-        _ => {
-            let mut key = Vec::new();
-            encode_record_field_key_part(&mut key, descriptor, record, field_idx)?;
-            Ok(vec![key])
-        }
+        keys = next_keys;
+        seen.clear();
     }
+    Ok(keys)
 }
 
 pub(super) fn compare_record_field(

@@ -16,12 +16,12 @@ use std::sync::{Arc, Weak};
 
 use crate::{
     ivm::{FieldRef, ValueComparison},
-    records::{RecordDescriptor, ValueType},
+    records::RecordDescriptor,
 };
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, RecordDeltas, SubTick,
-    consolidate_deltas, encode_key_part,
+    composite_keys, consolidate_deltas, encode_key_part, expands_to_key_parts,
     record_projection::{resolve_field_name, resolve_field_ref},
 };
 
@@ -1022,7 +1022,7 @@ fn keyed_join_deltas<'a>(
 
     let mut keyed = Vec::new();
     for delta in deltas {
-        for key in join_keys_with_comparison(descriptor, delta.raw(), fields, comparison)? {
+        for key in join_keys(descriptor, delta.raw(), fields, comparison)? {
             keyed.push(KeyedRecordDelta { delta, key });
         }
     }
@@ -1041,13 +1041,10 @@ fn scalar_join_field_indices(
             .fields()
             .get(field_idx)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-        match &descriptor_field.value_type {
-            ValueType::Array(_) => return Ok(None),
-            ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)) => {
-                return Ok(None);
-            }
-            _ => indices.push(field_idx),
+        if expands_to_key_parts(&descriptor_field.value_type) {
+            return Ok(None);
         }
+        indices.push(field_idx);
     }
     Ok(Some(indices))
 }
@@ -1081,69 +1078,14 @@ pub(super) fn join_keys(
     fields: &[String],
     comparison: ValueComparison,
 ) -> Result<Vec<JoinKey>, IvmRuntimeError> {
-    join_keys_with_comparison(descriptor, record, fields, comparison)
-}
-
-fn join_keys_with_comparison(
-    descriptor: &RecordDescriptor,
-    record: &[u8],
-    fields: &[String],
-    comparison: ValueComparison,
-) -> Result<Vec<JoinKey>, IvmRuntimeError> {
-    if fields.len() == 1 {
-        let field_idx = resolve_field_name(descriptor, &fields[0])
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(fields[0].clone()))?;
-        let values = descriptor.bind(record).get_idx(field_idx)?;
-        let parts = join_key_parts(values);
-        if parts.is_empty() {
-            return Ok(Vec::new());
-        }
-        if parts.len() == 1 {
-            let mut key = Vec::new();
-            encode_join_key_part(&mut key, &parts[0], comparison)?;
-            return Ok(vec![JoinKey::from_vec(key)]);
-        }
-        let mut keys = Vec::with_capacity(parts.len());
-        let mut seen = HashSet::default();
-        for value in &parts {
-            let mut key = Vec::new();
-            encode_join_key_part(&mut key, value, comparison)?;
-            if !seen.contains(&key) {
-                seen.insert(key.clone());
-                keys.push(JoinKey::from_vec(key));
-            }
-        }
-        return Ok(keys);
-    }
-
-    let mut keys = vec![Vec::new()];
-    let mut seen = HashSet::default();
-
-    for field in fields {
+    let values = fields.iter().map(|field| {
         let field_idx = resolve_field_name(descriptor, field)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-        let values = descriptor.bind(record).get_idx(field_idx)?;
-        let parts = join_key_parts(values);
-
-        if parts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut next_keys = Vec::with_capacity(keys.len() * parts.len());
-        for key in &keys {
-            for value in &parts {
-                let mut next = key.clone();
-                encode_join_key_part(&mut next, value, comparison)?;
-                if !seen.contains(&next) {
-                    seen.insert(next.clone());
-                    next_keys.push(next);
-                }
-            }
-        }
-        keys = next_keys;
-        seen.clear();
-    }
-
+        Ok(descriptor.bind(record).get_idx(field_idx)?)
+    });
+    let keys = composite_keys(Vec::new(), values, |key, value| {
+        encode_join_key_part(key, value, comparison)
+    })?;
     Ok(keys.into_iter().map(JoinKey::from_vec).collect())
 }
 
@@ -1186,20 +1128,6 @@ fn encode_join_integer_key(key: &mut Vec<u8>, value: i128) -> Result<(), IvmRunt
     key.push(0xfe);
     key.extend(value.to_be_bytes());
     Ok(())
-}
-
-fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
-    match value {
-        crate::records::Value::Array(values) => values,
-        crate::records::Value::Nullable(Some(value)) => match *value {
-            crate::records::Value::Array(values) => values
-                .into_iter()
-                .map(|value| crate::records::Value::Nullable(Some(Box::new(value))))
-                .collect(),
-            value => vec![crate::records::Value::Nullable(Some(Box::new(value)))],
-        },
-        value => vec![value],
-    }
 }
 
 pub(super) fn create_join_record(
@@ -1300,21 +1228,18 @@ mod tests {
         let float_record = f64.create(&[Value::F64(7.0)]).unwrap();
 
         assert_eq!(
-            join_keys_with_comparison(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
-            join_keys_with_comparison(&i64, &i64_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys(&i64, &i64_record, &fields, ValueComparison::Policy).unwrap(),
             "lowered join correlations match equal integer values across widths"
         );
         assert_ne!(
-            join_keys_with_comparison(&u64, &large_u64_record, &fields, ValueComparison::Policy)
-                .unwrap(),
-            join_keys_with_comparison(&i64, &max_i64_record, &fields, ValueComparison::Policy)
-                .unwrap(),
+            join_keys(&u64, &large_u64_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys(&i64, &max_i64_record, &fields, ValueComparison::Policy).unwrap(),
             "U64 above i64::MAX remains exact"
         );
         assert_ne!(
-            join_keys_with_comparison(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
-            join_keys_with_comparison(&f64, &float_record, &fields, ValueComparison::Policy)
-                .unwrap(),
+            join_keys(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys(&f64, &float_record, &fields, ValueComparison::Policy).unwrap(),
             "integer and float join keys remain type-exact"
         );
         assert_ne!(
