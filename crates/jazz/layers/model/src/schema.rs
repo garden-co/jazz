@@ -1320,17 +1320,7 @@ fn deletion_column() -> GrooveColumnType {
 }
 
 fn rejection_reason_column() -> GrooveColumnType {
-    storage_enum(
-        "jazz_rejection_reason",
-        &[
-            "client_clock_too_far_ahead",
-            "authorization_denied",
-            "exclusive_conflict",
-            "causality_violation",
-            "cascade",
-            "malformed_commit",
-        ],
-    )
+    crate::tx::RejectionReason::storage_value_type()
 }
 
 fn durability_column() -> GrooveColumnType {
@@ -1437,10 +1427,6 @@ fn transactions_table() -> GrooveTableSchema {
             column("global_time", GrooveColumnType::U64.nullable()),
             // upstream-decided: written only by rejection/state application.
             column("rejection_reason", rejection_reason_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("cascade_root", tx_id_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("reason_detail", GrooveColumnType::String.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
         ],
@@ -1840,8 +1826,6 @@ fn rejected_transactions_table() -> GrooveTableSchema {
             column("kind", tx_kind_column()),
             column("made_by", crate::ids::RowAuthor::value_type()),
             column("rejection_reason", rejection_reason_column()),
-            column("cascade_root", tx_id_column().nullable()),
-            column("reason_detail", GrooveColumnType::String.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
         ],
     )

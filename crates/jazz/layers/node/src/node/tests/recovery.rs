@@ -2245,16 +2245,29 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         assert!(core.transaction_record(tx_id).is_none());
 
         // Valid record framing does not make an incomplete rejected fate valid.
-        for reason in [None, Some("cascade")] {
+        for reason in [
+            None,
+            Some(Value::Enum(groove::records::EnumValue::create(
+                4,
+                groove::records::RecordDescriptor::default(),
+                &[],
+            ).unwrap())),
+        ] {
             let mut invalid_state = values.clone();
             invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
                 Value::String("rejected".to_owned());
             invalid_state[TransactionRowRecord::FIELD_REJECTION_REASON_IDX] =
-                Value::Nullable(reason.map(|reason| Box::new(Value::String(reason.to_owned()))));
+                Value::Nullable(reason.clone().map(Box::new));
             let mut batch = core.database.open_batch();
             batch.update("jazz_transactions", invalid_state);
-            let applied =
-                crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+            let applied = crate::local_executor::block_on(core.database.apply_batch(batch));
+            if reason.is_some() {
+                // A cascade without its root is now rejected by the payload
+                // schema before it can become a stored transaction.
+                assert!(applied.is_err());
+                continue;
+            }
+            let applied = applied.unwrap();
             let persisted = crate::local_executor::block_on(applied.persist());
             core.database.finish_persistence(persisted).unwrap();
             for pending in [false, true] {

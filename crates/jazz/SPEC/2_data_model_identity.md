@@ -416,16 +416,23 @@ by Groove's storage epoch; this section freezes logical record and transport
 bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
 **Transaction audit record.** `jazz_transactions` has permanent logical field
-positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+positions `0..=16`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
 made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
-is_partial: bool, fate, global_time, rejection_reason,
-cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+is_partial: bool, fate, global_time, rejection_reason, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
 `None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
-`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
-`is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
+`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
+
+Rejection reasons use a Groove payload enum. Cases 0–3 have empty payloads;
+`Cascade` has one required `root: Tuple<U64, Uuid>`, and `MalformedCommit`
+has one required `message: String` (an empty message is allowed).
+The audit row's reason is nullable and must be present when fate is rejected.
+The retry store `jazz_rejected_transactions` uses the same enum, required,
+with fields `(time, node_id, kind, made_by, rejection_reason, user_metadata)`.
+
+The `is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
 `jazz.transaction-record.v1`. True means the transaction was learned from
 selected fragments, so `n_total_writes` is not an authoritative total. A
 complete payload clears the flag; later fragments do not downgrade it.

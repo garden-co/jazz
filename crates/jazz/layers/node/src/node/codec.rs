@@ -61,25 +61,6 @@ groove::impl_record_field_enum!(FateTag {
     FateTag::Rejected = 2,
 });
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RejectionReasonTag {
-    ClientClockTooFarAhead,
-    AuthorizationDenied,
-    ExclusiveConflict,
-    CausalityViolation,
-    Cascade,
-    MalformedCommit,
-}
-
-groove::impl_record_field_enum!(RejectionReasonTag {
-    RejectionReasonTag::ClientClockTooFarAhead = 0,
-    RejectionReasonTag::AuthorizationDenied = 1,
-    RejectionReasonTag::ExclusiveConflict = 2,
-    RejectionReasonTag::CausalityViolation = 3,
-    RejectionReasonTag::Cascade = 4,
-    RejectionReasonTag::MalformedCommit = 5,
-});
-
 groove::define_record! {
     pub(super) struct CurrentRowRecord {
         0 => row_uuid: RowUuid,
@@ -116,10 +97,8 @@ groove::define_record! {
         12 => is_partial: bool,
         13 => fate: FateTag,
         14 => global_time: Option<GlobalTime>,
-        15 => rejection_reason: Option<RejectionReasonTag>,
-        16 => cascade_root: Option<Value>,
-        17 => reason_detail: Option<String>,
-        18 => durability: DurabilityTier,
+        15 => rejection_reason: Option<groove::records::EnumValue>,
+        16 => durability: DurabilityTier,
     }
 }
 
@@ -1958,10 +1937,8 @@ groove::define_record! {
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: RejectionReasonTag,
-        5 => cascade_root: Option<Value>,
-        6 => reason_detail: Option<String>,
-        7 => user_metadata: Option<String>,
+        4 => rejection_reason: groove::records::EnumValue,
+        5 => user_metadata: Option<String>,
     }
 }
 
@@ -3641,13 +3618,10 @@ pub(super) fn transaction_values_with_partial_flag(
         Value::Bool(is_partial),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0)))),
-        Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
-        Value::Nullable(
-            rejection_reason_cascade_root(&fate).map(|root| Box::new(tx_id_value(root))),
-        ),
-        Value::Nullable(
-            rejection_reason_detail(&fate).map(|detail| Box::new(Value::String(detail))),
-        ),
+        Value::Nullable(match &fate {
+            Fate::Rejected(reason) => Some(Box::new(reason.to_storage_value()?)),
+            Fate::Pending | Fate::Accepted => None,
+        }),
         Value::String(durability_string(durability).to_owned()),
     ])
 }
@@ -3667,15 +3641,7 @@ pub(super) fn rejected_transaction_values(
         RowAuthor::from_persisted_subject(tx.made_by)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .to_value(),
-        Value::String(rejection_reason_tag_for_reason(&reason)),
-        Value::Nullable(
-            rejection_reason_cascade_root_for_reason(&reason)
-                .map(|root| Box::new(tx_id_value(root))),
-        ),
-        Value::Nullable(
-            rejection_reason_detail_for_reason(&reason)
-                .map(|detail| Box::new(Value::String(detail))),
-        ),
+        reason.to_storage_value()?,
         Value::Nullable(
             tx.user_metadata_json
                 .clone()
@@ -3785,52 +3751,6 @@ pub(super) fn known_transaction_payload_matches_redacted_cardinality(
     let mut incoming = incoming.clone();
     incoming.n_total_writes = 0;
     known_transaction_payload_matches(&existing, &incoming)
-}
-
-pub(super) fn rejection_reason_tag(fate: &Fate) -> Option<String> {
-    match fate {
-        Fate::Rejected(reason) => Some(rejection_reason_tag_for_reason(reason)),
-        Fate::Pending | Fate::Accepted => None,
-    }
-}
-
-pub(super) fn rejection_reason_tag_for_reason(reason: &RejectionReason) -> String {
-    match reason {
-        RejectionReason::ClientClockTooFarAhead => "client_clock_too_far_ahead".to_owned(),
-        RejectionReason::AuthorizationDenied => "authorization_denied".to_owned(),
-        RejectionReason::ExclusiveConflict => "exclusive_conflict".to_owned(),
-        RejectionReason::CausalityViolation => "causality_violation".to_owned(),
-        RejectionReason::Cascade { .. } => "cascade".to_owned(),
-        RejectionReason::MalformedCommit(_) => "malformed_commit".to_owned(),
-    }
-}
-
-pub(super) fn rejection_reason_cascade_root(fate: &Fate) -> Option<TxId> {
-    match fate {
-        Fate::Rejected(reason) => rejection_reason_cascade_root_for_reason(reason),
-        Fate::Pending | Fate::Accepted => None,
-    }
-}
-
-pub(super) fn rejection_reason_cascade_root_for_reason(reason: &RejectionReason) -> Option<TxId> {
-    match reason {
-        RejectionReason::Cascade { root } => Some(*root),
-        _ => None,
-    }
-}
-
-pub(super) fn rejection_reason_detail(fate: &Fate) -> Option<String> {
-    match fate {
-        Fate::Rejected(reason) => rejection_reason_detail_for_reason(reason),
-        Fate::Pending | Fate::Accepted => None,
-    }
-}
-
-pub(super) fn rejection_reason_detail_for_reason(reason: &RejectionReason) -> Option<String> {
-    match reason {
-        RejectionReason::MalformedCommit(reason) => Some(reason.clone()),
-        _ => None,
-    }
 }
 
 pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<VersionRecord> {
@@ -4623,38 +4543,15 @@ pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fat
 pub(super) fn rejection_reason_from_encoded_fields(
     record: BorrowedRecord<'_>,
 ) -> Result<RejectionReason, Error> {
-    let tag = record
-        .get_nullable_enum(TransactionRowRecord::FIELD_REJECTION_REASON_IDX)?
-        .ok_or(Error::InvalidStoredValue(
+    let Value::Nullable(Some(reason)) =
+        record.get_idx(TransactionRowRecord::FIELD_REJECTION_REASON_IDX)?
+    else {
+        return Err(Error::InvalidStoredValue(
             "rejected transaction missing reason",
-        ))?;
-    match tag {
-        0 => Ok(RejectionReason::ClientClockTooFarAhead),
-        1 => Ok(RejectionReason::AuthorizationDenied),
-        2 => Ok(RejectionReason::ExclusiveConflict),
-        3 => Ok(RejectionReason::CausalityViolation),
-        4 => Ok(RejectionReason::Cascade {
-            root: nullable_tx_id_value(
-                record.get_idx(TransactionRowRecord::FIELD_CASCADE_ROOT_IDX)?,
-            )?
-            .ok_or(Error::InvalidStoredValue("cascade rejection missing root"))?,
-        }),
-        5 => Ok(RejectionReason::MalformedCommit(
-            record
-                .get_nullable_string(TransactionRowRecord::FIELD_REASON_DETAIL_IDX)?
-                .unwrap_or_default()
-                .to_owned(),
-        )),
-        _ => Err(Error::InvalidStoredValue("unknown rejection reason")),
-    }
-}
-
-pub(super) fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, Error> {
-    match value {
-        Value::Nullable(None) => Ok(None),
-        Value::Nullable(Some(value)) => tx_id_from_value(*value).map(Some),
-        _ => Err(Error::InvalidStoredValue("tx id must be nullable tuple")),
-    }
+        ));
+    };
+    RejectionReason::from_storage_value(*reason)
+        .map_err(|_| Error::InvalidStoredValue("invalid rejection reason"))
 }
 
 pub(super) fn durability_from_discriminant(value: u8) -> Result<DurabilityTier, Error> {

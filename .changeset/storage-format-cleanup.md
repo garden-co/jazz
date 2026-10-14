@@ -25,4 +25,6 @@
 
 - Store record-descriptor nodes with fields specific to each kind, removing irrelevant metadata and fixed child counts. Field names, enum identities, type validation, and row value encodings are preserved; descriptor bytes and identities derived from them change.
 
+- Store transaction rejections as a payload enum shared by audit and retry records: cascade rejections require their root transaction ID, malformed commits require their message, and other reasons carry no payload. Remove the separate optional root/detail fields.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.
