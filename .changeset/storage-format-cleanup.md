@@ -5,6 +5,7 @@
 **Breaking:** Simplified Jazz's persisted storage format:
 
 - Removed the retired subscription-cache stores and their recovery cleanup.
+- Removed legacy empty-schema sentinel handling from the server catalogue. Empty schemas now undergo the same metadata validation and indexing as every other schema, even without active selections or migration references.
 - Removed the retired scope-relay repair ledger registration and its key/value descriptors, which were retained only to open older stores after the repair lane was removed.
 - Replaced the nullable string marker for partial transactions with an `is_partial` boolean, preserving transaction validation, forwarding, and partial-to-complete application behavior.
 - Consolidated Jazz compatibility markers into one format per node store, server catalogue, and account registry. Independent stores no longer inherit unrelated Jazz formats.
@@ -23,6 +24,8 @@
 - Specialize chunk-tree branch children by value kind: omit UTF-16 length for bytes and require it for string/JSON, saving nine bytes per binary child and one per text child. Branch content hashes change with their encoding.
 
 - Use one storage encoding for every catalogue schema and one counted v2 lineage-publication encoding for every predecessor set. Remove the retired v1 decoders; schema IDs stay unchanged, while affected publication IDs change with their canonical bytes.
+
+- Unify server catalogue schema and lens payloads on version 2, always encoding composite-index lists (including empty lists) and rejecting version 1. Schema identities remain unchanged.
 
 - Store record-descriptor nodes with fields specific to each kind, removing irrelevant metadata and fixed child counts. Field names, enum identities, type validation, and row value encodings are preserved; descriptor bytes and identities derived from them change.
 
