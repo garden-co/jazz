@@ -188,6 +188,59 @@ fn owned_utf16_range(text: &str, range: std::ops::Range<u64>) -> Result<String, 
     Ok(text[start..end].to_owned())
 }
 
+/// One in-place edit of a bytes or UTF-8 string cell.
+enum CellEdit {
+    Append(Vec<u8>),
+    Splice {
+        offset: u64,
+        delete_length: u64,
+        insert: Vec<u8>,
+    },
+}
+
+impl CellEdit {
+    fn apply_inline(self, bytes: &mut Vec<u8>) -> Result<(), Error> {
+        match self {
+            Self::Append(suffix) => {
+                bytes.extend(suffix);
+                Ok(())
+            }
+            Self::Splice {
+                offset,
+                delete_length,
+                insert,
+            } => splice_owned_bytes(bytes, offset, delete_length, insert),
+        }
+    }
+}
+
+impl LargeValueUpdate {
+    fn column(&self) -> &str {
+        match self {
+            Self::Splice { column, .. } | Self::JsonSet { column, .. } => column,
+        }
+    }
+}
+
+/// A descriptor's next cell value, the staged root it produced (if any), and
+/// the intermediate staged roots it superseded.
+type LargeValueEdit = (
+    Value,
+    Option<groove::large_values::StagedLargeValue>,
+    Vec<groove::large_values::StagedLargeValueId>,
+);
+
+/// Map a UTF-16 coordinate lowering failure to the splice error callers see.
+fn utf16_splice_byte(result: Result<u64, crate::node::Error>) -> Result<u64, Error> {
+    result.map_err(|error| {
+        if is_utf16_coordinate_lowering_error(&error) {
+            Error::new(ErrorCode::Query, "UTF-16 splice splits a surrogate pair")
+        } else {
+            error.into()
+        }
+    })
+}
+
 fn splice_owned_bytes(
     bytes: &mut Vec<u8>,
     offset: u64,
@@ -760,51 +813,8 @@ where
         column: &str,
         bytes: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_mutation_operation_admitted()?;
-        let (value, nullable) =
-            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
-        match value {
-            Value::Bytes(mut current) => {
-                current.extend(bytes);
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::Bytes(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
-            }
-            Value::String(mut current) => {
-                let suffix = String::from_utf8(bytes).map_err(|_| {
-                    Error::new(ErrorCode::Schema, "string append is not valid UTF-8")
-                })?;
-                current.push_str(&suffix);
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::String(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
-            }
-            Value::Large(value_ref) => {
-                let staged = self
-                    .node
-                    .lock_for_large_value_staging()
-                    .await?
-                    .append_and_stage_large_value(*value_ref, bytes)
-                    .await?;
-                self.write_staged_large_value_update(table, row, column, staged, nullable)
-                    .await
-            }
-            _ => Err(large_value_cell_type_error(table, column)),
-        }
+        self.edit_value_cell(table, row, column, CellEdit::Append(bytes))
+            .await
     }
 
     /// Apply a byte-coordinate splice to an ordinary bytes or UTF-8 string
@@ -818,52 +828,66 @@ where
         delete_length: u64,
         insert: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        let edit = CellEdit::Splice {
+            offset,
+            delete_length,
+            insert,
+        };
+        self.edit_value_cell(table, row, column, edit).await
+    }
+
+    /// Apply `edit` to an inline bytes/string cell (as an ordinary update) or
+    /// to an indirect large value (by staging only the touched chunks).
+    async fn edit_value_cell(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        edit: CellEdit,
+    ) -> Result<WriteHandle<S>, Error> {
         self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
-        match value {
+        let next = match value {
             Value::Bytes(mut current) => {
-                splice_owned_bytes(&mut current, offset, delete_length, insert)?;
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::Bytes(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
+                edit.apply_inline(&mut current)?;
+                Value::Bytes(current)
             }
             Value::String(current) => {
+                let invalid = match edit {
+                    CellEdit::Append(_) => "string append is not valid UTF-8",
+                    CellEdit::Splice { .. } => "string splice is not valid UTF-8",
+                };
                 let mut bytes = current.into_bytes();
-                splice_owned_bytes(&mut bytes, offset, delete_length, insert)?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    Error::new(ErrorCode::Schema, "string splice is not valid UTF-8")
-                })?;
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::String(text), nullable),
-                    )]),
-                    Default::default(),
+                edit.apply_inline(&mut bytes)?;
+                Value::String(
+                    String::from_utf8(bytes).map_err(|_| Error::new(ErrorCode::Schema, invalid))?,
                 )
-                .await
             }
             Value::Large(value_ref) => {
-                let staged = self
-                    .node
-                    .lock_for_large_value_staging()
-                    .await?
-                    .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
-                    .await?;
-                self.write_staged_large_value_update(table, row, column, staged, nullable)
-                    .await
+                let node = self.node.lock_for_large_value_staging().await?;
+                let staged = match edit {
+                    CellEdit::Append(bytes) => {
+                        node.append_and_stage_large_value(*value_ref, bytes).await?
+                    }
+                    CellEdit::Splice {
+                        offset,
+                        delete_length,
+                        insert,
+                    } => {
+                        node.edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
+                            .await?
+                    }
+                };
+                drop(node);
+                return self
+                    .write_staged_large_value_update(table, row, column, staged, nullable)
+                    .await;
             }
-            _ => Err(large_value_cell_type_error(table, column)),
-        }
+            _ => return Err(large_value_cell_type_error(table, column)),
+        };
+        let patch = BTreeMap::from([(column.to_owned(), preserve_nullable(next, nullable))]);
+        self.update(table, row, patch, Default::default()).await
     }
 
     /// Apply typed partial large-value descriptors together with an ordinary
@@ -931,41 +955,11 @@ where
         let result = async {
             let mut touched = BTreeSet::new();
             for mutation in mutations {
-                let column = match &mutation {
-                    LargeValueUpdate::Splice { column, .. }
-                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
-                };
-                if !touched.insert(column.clone()) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field may have one descriptor per update",
-                    ));
-                }
-                if authored_columns.contains(&column) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field cannot be both patched and partially updated",
-                    ));
-                }
-                let current = cells.get(&column).cloned().ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Schema,
-                        format!("unknown column {table}.{column}"),
-                    )
-                })?;
-                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
-                let (next, column_staged, obsolete) = match mutation {
-                    LargeValueUpdate::Splice {
-                        within, splices, ..
-                    } => {
-                        self.apply_large_value_splices(current, column_kind, &within, &splices)
-                            .await?
-                    }
-                    LargeValueUpdate::JsonSet { edits, .. } => {
-                        self.apply_large_value_json_set(current, column_kind, &edits)
-                            .await?
-                    }
-                };
+                let (column, (next, column_staged, obsolete)) = self
+                    .apply_large_value_update(table, mutation, &cells, &mut touched, |column| {
+                        authored_columns.contains(column)
+                    })
+                    .await?;
                 cleanup.extend(obsolete);
                 if let Some(staged_value) = column_staged {
                     cleanup.push(staged_value.id);
@@ -1050,41 +1044,11 @@ where
         let result = async {
             let mut touched = BTreeSet::new();
             for mutation in mutations {
-                let column = match &mutation {
-                    LargeValueUpdate::Splice { column, .. }
-                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
-                };
-                if !touched.insert(column.clone()) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field may have one descriptor per update",
-                    ));
-                }
-                if authored.contains_key(&column) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field cannot be both patched and partially updated",
-                    ));
-                }
-                let current = target.get(&column).cloned().ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Schema,
-                        format!("unknown column {table}.{column}"),
-                    )
-                })?;
-                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
-                let (mut next, column_staged, obsolete) = match mutation {
-                    LargeValueUpdate::Splice {
-                        within, splices, ..
-                    } => {
-                        self.apply_large_value_splices(current, column_kind, &within, &splices)
-                            .await?
-                    }
-                    LargeValueUpdate::JsonSet { edits, .. } => {
-                        self.apply_large_value_json_set(current, column_kind, &edits)
-                            .await?
-                    }
-                };
+                let (column, (mut next, column_staged, obsolete)) = self
+                    .apply_large_value_update(table, mutation, &target, &mut touched, |column| {
+                        authored.contains_key(column)
+                    })
+                    .await?;
                 self.evict_staged_large_values(obsolete).await;
                 // An inline result that outgrew the inline limit is lowered
                 // now rather than at commit, so a later splice in this
@@ -1175,20 +1139,59 @@ where
         }
     }
 
+    /// Validate one descriptor against the row's `current` cells (at most one
+    /// descriptor per column, never a column the plain patch also authors)
+    /// and apply it, returning its column and edit.
+    async fn apply_large_value_update(
+        &self,
+        table: &str,
+        mutation: LargeValueUpdate,
+        current: &RowCells,
+        touched: &mut BTreeSet<String>,
+        is_patched: impl FnOnce(&str) -> bool,
+    ) -> Result<(String, LargeValueEdit), Error> {
+        let column = mutation.column().to_owned();
+        if !touched.insert(column.clone()) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "a large-value field may have one descriptor per update",
+            ));
+        }
+        if is_patched(&column) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "a large-value field cannot be both patched and partially updated",
+            ));
+        }
+        let value = current.get(&column).cloned().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("unknown column {table}.{column}"),
+            )
+        })?;
+        let (column_kind, _) = self.large_value_column_kind(table, &column)?;
+        let edit = match mutation {
+            LargeValueUpdate::Splice {
+                within, splices, ..
+            } => {
+                self.apply_large_value_splices(value, column_kind, &within, &splices)
+                    .await?
+            }
+            LargeValueUpdate::JsonSet { edits, .. } => {
+                self.apply_large_value_json_set(value, column_kind, &edits)
+                    .await?
+            }
+        };
+        Ok((column, edit))
+    }
+
     async fn apply_large_value_splices(
         &self,
         value: Value,
         expected_kind: groove::large_values::LargeValueKind,
         page: &LargeValueUpdatePage,
         splices: &[LargeValueUpdateSplice],
-    ) -> Result<
-        (
-            Value,
-            Option<groove::large_values::StagedLargeValue>,
-            Vec<groove::large_values::StagedLargeValueId>,
-        ),
-        Error,
-    > {
+    ) -> Result<LargeValueEdit, Error> {
         let (value, nullable) = unwrap_present_nullable(value);
         if !matches!(
             expected_kind,
@@ -1300,32 +1303,14 @@ where
                         Error::new(ErrorCode::Query, "UTF-16 splice range overflows")
                     })?;
                     let node = self.node.node.lock().await;
-                    let offset = match node
-                        .large_text_utf16_offset_to_byte(&current, offset_utf16)
-                        .await
-                    {
-                        Ok(offset) => offset,
-                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
-                            return Err(Error::new(
-                                ErrorCode::Query,
-                                "UTF-16 splice splits a surrogate pair",
-                            ));
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
-                    let end = match node
-                        .large_text_utf16_offset_to_byte(&current, end_utf16)
-                        .await
-                    {
-                        Ok(end) => end,
-                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
-                            return Err(Error::new(
-                                ErrorCode::Query,
-                                "UTF-16 splice splits a surrogate pair",
-                            ));
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
+                    let offset = utf16_splice_byte(
+                        node.large_text_utf16_offset_to_byte(&current, offset_utf16)
+                            .await,
+                    )?;
+                    let end = utf16_splice_byte(
+                        node.large_text_utf16_offset_to_byte(&current, end_utf16)
+                            .await,
+                    )?;
                     let inserted = std::str::from_utf8(&splice.insert).map_err(|_| {
                         Error::new(ErrorCode::Query, "text splice insert is not valid UTF-8")
                     })?;
@@ -1363,14 +1348,7 @@ where
         value: Value,
         expected_kind: groove::large_values::LargeValueKind,
         edits: &[JsonSetEdit],
-    ) -> Result<
-        (
-            Value,
-            Option<groove::large_values::StagedLargeValue>,
-            Vec<groove::large_values::StagedLargeValueId>,
-        ),
-        Error,
-    > {
+    ) -> Result<LargeValueEdit, Error> {
         if expected_kind != groove::large_values::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
