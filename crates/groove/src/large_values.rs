@@ -2877,14 +2877,8 @@ const LARGE_VALUE_REF_EDIT_TAIL_FIELD: u16 = 6;
 
 #[derive(Clone)]
 struct DurableLargeValueRecordSchema {
-    slots: Vec<DurableLargeValueRecordSlot>,
+    field_ids: Vec<u16>,
     descriptor: RecordDescriptor,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DurableLargeValueRecordSlot {
-    Known(u16),
-    Reserved(u16),
 }
 
 impl DurableLargeValueRecordSchema {
@@ -2898,16 +2892,9 @@ impl DurableLargeValueRecordSchema {
                 return Err(Error::MalformedScalar);
             }
         }
-        let mut ordered = Vec::with_capacity(self.slots.len());
-        for slot in &self.slots {
-            match slot {
-                DurableLargeValueRecordSlot::Known(id) => {
-                    ordered.push(values.remove(id).ok_or(Error::MalformedScalar)?)
-                }
-                DurableLargeValueRecordSlot::Reserved(_) => {
-                    ordered.push(Value::Nullable(None));
-                }
-            }
+        let mut ordered = Vec::with_capacity(self.field_ids.len());
+        for id in &self.field_ids {
+            ordered.push(values.remove(id).ok_or(Error::MalformedScalar)?);
         }
         if values.is_empty() {
             Ok(ordered)
@@ -2917,20 +2904,15 @@ impl DurableLargeValueRecordSchema {
     }
 
     fn decode_values(&self, values: &[Value]) -> Result<BTreeMap<u16, Value>, Error> {
-        if values.len() != self.slots.len() {
+        if values.len() != self.field_ids.len() {
             return Err(Error::MalformedScalar);
         }
-        let mut fields = BTreeMap::new();
-        for (slot, value) in self.slots.iter().zip(values) {
-            match slot {
-                DurableLargeValueRecordSlot::Known(id) => {
-                    fields.insert(*id, value.clone());
-                }
-                DurableLargeValueRecordSlot::Reserved(_)
-                    if matches!(value, Value::Nullable(None)) => {}
-                DurableLargeValueRecordSlot::Reserved(_) => return Err(Error::MalformedScalar),
-            }
-        }
+        let fields = self
+            .field_ids
+            .iter()
+            .copied()
+            .zip(values.iter().cloned())
+            .collect();
         Ok(fields)
     }
 }
@@ -2944,48 +2926,32 @@ fn take_durable_large_value_field(
 
 /// Construct a fixed engine-owned record layout from permanent, one-based
 /// positional field IDs. Source declaration order is normalized, but numeric
-/// IDs are actual record ordinals: skipped IDs become canonical empty nullable
-/// slots and are never compacted away.
+/// IDs are actual record ordinals. Gaps and duplicate IDs are rejected.
 fn durable_large_value_record_descriptor(
     fields: impl IntoIterator<Item = (u16, &'static str, ValueType)>,
 ) -> DurableLargeValueRecordSchema {
     let mut fields = fields.into_iter().collect::<Vec<_>>();
     fields.sort_by_key(|(id, _, _)| *id);
     assert!(
-        fields.iter().all(|(id, _, _)| *id != 0),
-        "large-value durable field IDs start at one"
+        !fields.is_empty(),
+        "large-value record must have at least one field"
     );
     assert!(
-        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
-        "large-value record has duplicate durable field IDs"
+        fields
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _, _))| usize::from(*id) == index + 1),
+        "large-value record field IDs must be contiguous starting at one"
     );
-    let max_field_id = fields
-        .last()
-        .expect("large-value record must have at least one field")
-        .0;
-    let mut fields = fields.into_iter().peekable();
-    let mut slots = Vec::with_capacity(usize::from(max_field_id));
-    let mut descriptor_fields = Vec::with_capacity(usize::from(max_field_id));
-    for slot_id in 1..=max_field_id {
-        match fields.peek() {
-            Some((id, _, _)) if *id == slot_id => {
-                let (_, name, value_type) = fields.next().expect("peeked field must exist");
-                slots.push(DurableLargeValueRecordSlot::Known(slot_id));
-                descriptor_fields.push((format!("f{slot_id:04}_{name}"), value_type));
-            }
-            _ => {
-                slots.push(DurableLargeValueRecordSlot::Reserved(slot_id));
-                descriptor_fields.push((
-                    format!("f{slot_id:04}_reserved"),
-                    ValueType::Nullable(Box::new(ValueType::raw_bytes())),
-                ));
-            }
-        }
-    }
-    debug_assert!(fields.next().is_none());
+    let field_ids = fields.iter().map(|(id, _, _)| *id).collect();
+    let descriptor = RecordDescriptor::new(
+        fields
+            .into_iter()
+            .map(|(id, name, value_type)| (format!("f{id:04}_{name}"), value_type)),
+    );
     DurableLargeValueRecordSchema {
-        slots,
-        descriptor: RecordDescriptor::new(descriptor_fields),
+        field_ids,
+        descriptor,
     }
 }
 
@@ -6339,156 +6305,39 @@ mod tests {
         );
     }
 
-    // This is an intentionally internal physical-codec receipt. Application
-    // rows cannot construct these engine-owned descriptors; the test freezes
-    // the slot contract that makes future storage-format changes explicit.
+    /// Alice's engine-owned record layout uses contiguous numeric IDs.
+    /// This internal byte receipt pins ordering that public row queries cannot expose.
     #[test]
     fn durable_large_value_field_ids_are_physical_slots() {
-        fn encode(
-            schema: &DurableLargeValueRecordSchema,
-            fields: impl IntoIterator<Item = (u16, Value)>,
-        ) -> Vec<u8> {
-            let values = schema.ordered_values(fields).unwrap();
-            schema.descriptor.create(&values).unwrap()
-        }
-        fn to_hex(bytes: &[u8]) -> String {
-            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-        }
-        fn assert_renumber_is_physical(
-            before_schema: &DurableLargeValueRecordSchema,
-            after_schema: &DurableLargeValueRecordSchema,
-            before_fields: Vec<(u16, Value)>,
-            after_fields: Vec<(u16, Value)>,
-        ) -> (Vec<u8>, Vec<u8>) {
-            let before = encode(before_schema, before_fields);
-            let after = encode(after_schema, after_fields);
-            assert_ne!(before, after, "renumbering changes canonical bytes");
+        let schema = durable_large_value_record_descriptor([
+            (1, "object_hash", ValueType::U64),
+            (2, "locator", ValueType::U64),
+        ]);
+        let reordered = durable_large_value_record_descriptor([
+            (2, "locator", ValueType::U64),
+            (1, "object_hash", ValueType::U64),
+        ]);
+        let values = schema
+            .ordered_values([(2, Value::U64(11)), (1, Value::U64(7))])
+            .unwrap();
+        let bytes = schema.descriptor.create(&values).unwrap();
+        assert_eq!(bytes, [7, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes, reordered.descriptor.create(&values).unwrap());
+        assert_eq!(
+            schema.decode_values(&values).unwrap(),
+            BTreeMap::from([(1, Value::U64(7)), (2, Value::U64(11))])
+        );
+        for ids in [vec![], vec![0], vec![2], vec![1, 1], vec![1, 3]] {
             assert!(
-                after_schema
-                    .descriptor
-                    .bind(&before)
-                    .to_values()
-                    .map_err(|_| ())
-                    .and_then(|old_values| after_schema.decode_values(&old_values).map_err(|_| ()))
-                    .is_err(),
-                "a renumbered schema must reject the old record slots"
+                std::panic::catch_unwind(|| {
+                    durable_large_value_record_descriptor(
+                        ids.iter().map(|id| (*id, "field", ValueType::U64)),
+                    );
+                })
+                .is_err(),
+                "invalid field IDs must be rejected: {ids:?}"
             );
-            (before, after)
         }
-
-        let locator_at_two = durable_large_value_record_descriptor([
-            (1, "object_hash", ValueType::U64),
-            (2, "locator", ValueType::U64),
-        ]);
-        let locator_at_two_reordered = durable_large_value_record_descriptor([
-            (2, "locator", ValueType::U64),
-            (1, "object_hash", ValueType::U64),
-        ]);
-        let locator_at_three = durable_large_value_record_descriptor([
-            (1, "object_hash", ValueType::U64),
-            (3, "locator", ValueType::U64),
-        ]);
-        let locator_two = encode(&locator_at_two, [(1, Value::U64(7)), (2, Value::U64(11))]);
-        assert_eq!(
-            locator_two,
-            encode(
-                &locator_at_two_reordered,
-                [(2, Value::U64(11)), (1, Value::U64(7))],
-            ),
-            "source declaration order is not physical"
-        );
-        let (locator_two, locator_three) = assert_renumber_is_physical(
-            &locator_at_two,
-            &locator_at_three,
-            vec![(1, Value::U64(7)), (2, Value::U64(11))],
-            vec![(1, Value::U64(7)), (3, Value::U64(11))],
-        );
-        assert_eq!(to_hex(&locator_two), "07000000000000000b00000000000000");
-        assert_eq!(to_hex(&locator_three), "07000000000000000b0000000000000000");
-
-        let edit_at_three = durable_large_value_record_descriptor([
-            (1, "offset", ValueType::U64),
-            (2, "delete_length", ValueType::U64),
-            (3, "insert_bytes", ValueType::U64),
-        ]);
-        let edit_at_four = durable_large_value_record_descriptor([
-            (1, "offset", ValueType::U64),
-            (2, "delete_length", ValueType::U64),
-            (4, "insert_bytes", ValueType::U64),
-        ]);
-        let (edit_three, edit_four) = assert_renumber_is_physical(
-            &edit_at_three,
-            &edit_at_four,
-            vec![
-                (1, Value::U64(17)),
-                (2, Value::U64(19)),
-                (3, Value::U64(23)),
-            ],
-            vec![
-                (1, Value::U64(17)),
-                (2, Value::U64(19)),
-                (4, Value::U64(23)),
-            ],
-        );
-        assert_eq!(
-            to_hex(&edit_three),
-            "110000000000000013000000000000001700000000000000"
-        );
-        assert_eq!(
-            to_hex(&edit_four),
-            "11000000000000001300000000000000170000000000000000"
-        );
-
-        let reference_at_three = durable_large_value_record_descriptor([
-            (1, "format_version", ValueType::U64),
-            (2, "logical_hash", ValueType::U64),
-            (3, "root", ValueType::U64),
-        ]);
-        let reference_at_four = durable_large_value_record_descriptor([
-            (1, "format_version", ValueType::U64),
-            (2, "logical_hash", ValueType::U64),
-            (4, "root", ValueType::U64),
-        ]);
-        let (reference_three, reference_four) = assert_renumber_is_physical(
-            &reference_at_three,
-            &reference_at_four,
-            vec![
-                (1, Value::U64(29)),
-                (2, Value::U64(31)),
-                (3, Value::U64(37)),
-            ],
-            vec![
-                (1, Value::U64(29)),
-                (2, Value::U64(31)),
-                (4, Value::U64(37)),
-            ],
-        );
-        assert_eq!(
-            to_hex(&reference_three),
-            "1d000000000000001f000000000000002500000000000000"
-        );
-        assert_eq!(
-            to_hex(&reference_four),
-            "1d000000000000001f00000000000000250000000000000000"
-        );
-
-        let nonempty_reserved = locator_at_three
-            .descriptor
-            .create(&[
-                Value::U64(7),
-                Value::Nullable(Some(Box::new(Value::Bytes(vec![1])))),
-                Value::U64(11),
-            ])
-            .unwrap();
-        let values = locator_at_three
-            .descriptor
-            .bind(&nonempty_reserved)
-            .to_values()
-            .unwrap();
-        assert!(
-            locator_at_three.decode_values(&values).is_err(),
-            "reserved slots must remain canonical empty nulls"
-        );
     }
 
     struct PreparedProvider {
@@ -8591,7 +8440,7 @@ mod tests {
             LargeValueKind::Json,
         ] {
             let schema = primitive_payload_schema(kind);
-            assert_eq!(schema.slots, [DurableLargeValueRecordSlot::Known(1)]);
+            assert_eq!(schema.field_ids, [1]);
             assert_eq!(schema.descriptor.fields().len(), 1);
             assert_eq!(
                 schema.descriptor.fields()[0].value_type,

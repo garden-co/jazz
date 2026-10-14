@@ -230,8 +230,7 @@ fn canonical_large_value_children(
 // `staged/`, and `upload/` cannot be confused. Values therefore use a plain
 // canonical Groove record, rather than a second private magic/version/tag
 // envelope. These identifiers are durable *one-based record slots*, not
-// declaration order. A retired slot stays in the physical layout as an empty
-// nullable placeholder; it is never compacted away.
+// declaration order. Field IDs must be contiguous, starting at one.
 const ROOT_REF_DURABLE_FIELD: u16 = 1;
 const ROOT_REF_STAGED_FIELD: u16 = 2;
 const ROOT_REF_NODE_ACTIVE_FIELD: u16 = 3;
@@ -256,60 +255,39 @@ const PENDING_UPLOAD_CHUNKS_FIELD: u16 = 7;
 
 #[derive(Clone)]
 struct DurableMetadataRecordSchema {
-    slots: Vec<DurableMetadataRecordSlot>,
+    field_ids: Vec<u16>,
     descriptor: records::RecordDescriptor,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DurableMetadataRecordSlot {
-    Known(u16),
-    Reserved(u16),
 }
 
 /// Construct a fixed engine-owned record layout from permanent, one-based
 /// positional field IDs. Sorting source declarations is a no-op, but an ID is
-/// also its actual ordinal: gaps become reserved nullable slots so renumbering
-/// a field changes the physical record schema rather than being normalized by
-/// a name sort.
+/// also its actual ordinal. Gaps and duplicate IDs are rejected.
 fn durable_metadata_record_schema(
     fields: impl IntoIterator<Item = (u16, &'static str, records::ValueType)>,
 ) -> DurableMetadataRecordSchema {
     let mut fields = fields.into_iter().collect::<Vec<_>>();
     fields.sort_by_key(|(id, _, _)| *id);
     assert!(
-        fields.iter().all(|(id, _, _)| *id != 0),
-        "durable metadata record field IDs start at one"
+        !fields.is_empty(),
+        "durable metadata record must have at least one field"
     );
     assert!(
-        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
-        "durable metadata record has duplicate field IDs"
+        fields
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _, _))| usize::from(*id) == index + 1),
+        "durable metadata record field IDs must be contiguous starting at one"
     );
-    let max_field_id = fields
-        .last()
-        .expect("durable metadata record must have at least one field")
-        .0;
-    let mut fields = fields.into_iter().peekable();
-    let mut slots = Vec::with_capacity(usize::from(max_field_id));
-    let mut descriptor_fields = Vec::with_capacity(usize::from(max_field_id));
-    for slot_id in 1..=max_field_id {
-        match fields.peek() {
-            Some((id, _, _)) if *id == slot_id => {
-                let (_, name, value_type) = fields.next().expect("peeked field must exist");
-                slots.push(DurableMetadataRecordSlot::Known(slot_id));
-                descriptor_fields.push((format!("f{slot_id:04}_{name}"), value_type));
-            }
-            _ => {
-                slots.push(DurableMetadataRecordSlot::Reserved(slot_id));
-                descriptor_fields.push((
-                    format!("f{slot_id:04}_reserved"),
-                    records::ValueType::Nullable(Box::new(records::ValueType::raw_bytes())),
-                ));
-            }
-        }
+    let field_ids = fields.iter().map(|(id, _, _)| *id).collect();
+    let descriptor = records::RecordDescriptor::new(
+        fields
+            .into_iter()
+            .map(|(id, name, value_type)| (format!("f{id:04}_{name}"), value_type)),
+    );
+    DurableMetadataRecordSchema {
+        field_ids,
+        descriptor,
     }
-    debug_assert!(fields.next().is_none());
-    let descriptor = records::RecordDescriptor::new(descriptor_fields);
-    DurableMetadataRecordSchema { slots, descriptor }
 }
 
 fn large_value_root_references_schema() -> &'static DurableMetadataRecordSchema {
@@ -442,18 +420,11 @@ fn encode_large_value_metadata_record(
             )));
         }
     }
-    let mut ordered = Vec::with_capacity(schema.slots.len());
-    for slot in &schema.slots {
-        match slot {
-            DurableMetadataRecordSlot::Known(id) => {
-                ordered.push(values.remove(id).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode {name}: missing field id {id}"
-                    ))
-                })?)
-            }
-            DurableMetadataRecordSlot::Reserved(_) => ordered.push(records::Value::Nullable(None)),
-        }
+    let mut ordered = Vec::with_capacity(schema.field_ids.len());
+    for id in &schema.field_ids {
+        ordered.push(values.remove(id).ok_or_else(|| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode {name}: missing field id {id}"))
+        })?);
     }
     if let Some((id, _)) = values.into_iter().next() {
         return Err(Error::InvalidLargeValueMetadata(format!(
@@ -486,21 +457,7 @@ fn decode_large_value_metadata_record(
             "cannot decode {name}: non-canonical record"
         )));
     }
-    let mut decoded = BTreeMap::new();
-    for (slot, value) in schema.slots.iter().zip(values) {
-        match slot {
-            DurableMetadataRecordSlot::Known(id) => {
-                decoded.insert(*id, value);
-            }
-            DurableMetadataRecordSlot::Reserved(id) => {
-                if !matches!(value, records::Value::Nullable(None)) {
-                    return Err(Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode {name}: reserved field id {id} is nonempty"
-                    )));
-                }
-            }
-        }
-    }
+    let decoded = schema.field_ids.iter().copied().zip(values).collect();
     Ok(decoded)
 }
 

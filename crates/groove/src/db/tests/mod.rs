@@ -394,14 +394,7 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         assert_eq!(schema.descriptor.create(&values).unwrap(), *encoded);
     }
     assert_eq!(
-        large_value_root_references_schema()
-            .slots
-            .iter()
-            .filter_map(|slot| match slot {
-                DurableMetadataRecordSlot::Known(id) => Some(*id),
-                DurableMetadataRecordSlot::Reserved(_) => None,
-            })
-            .collect::<Vec<_>>(),
+        large_value_root_references_schema().field_ids,
         [
             ROOT_REF_DURABLE_FIELD,
             ROOT_REF_STAGED_FIELD,
@@ -409,14 +402,7 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         ]
     );
     assert_eq!(
-        large_value_node_references_schema()
-            .slots
-            .iter()
-            .filter_map(|slot| match slot {
-                DurableMetadataRecordSlot::Known(id) => Some(*id),
-                DurableMetadataRecordSlot::Reserved(_) => None,
-            })
-            .collect::<Vec<_>>(),
+        large_value_node_references_schema().field_ids,
         [
             NODE_REF_REFERENCES_FIELD,
             NODE_REF_UPLOAD_REFERENCES_FIELD,
@@ -515,11 +501,6 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         (1, "references", records::ValueType::U64),
         (2, "upload_references", records::ValueType::U64),
     ]);
-    let children_at_four = durable_metadata_record_schema([
-        (1, "references", records::ValueType::U64),
-        (2, "upload_references", records::ValueType::U64),
-        (4, "children", records::ValueType::U64),
-    ]);
     let at_three = encode_large_value_metadata_record(
         &children_at_three,
         [
@@ -540,16 +521,6 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         "children-at-three",
     )
     .unwrap();
-    let at_four = encode_large_value_metadata_record(
-        &children_at_four,
-        [
-            (1, records::Value::U64(7)),
-            (2, records::Value::U64(11)),
-            (4, records::Value::U64(13)),
-        ],
-        "children-at-four",
-    )
-    .unwrap();
     assert_eq!(
         at_three, reordered,
         "source declaration order is not physical"
@@ -558,33 +529,17 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         to_hex(&at_three),
         "07000000000000000b000000000000000d00000000000000"
     );
-    assert_eq!(
-        to_hex(&at_four),
-        "07000000000000000b000000000000000d0000000000000000"
-    );
-    assert!(
-        decode_large_value_metadata_record(&at_three, &children_at_four, "children-at-four")
+    for ids in [vec![], vec![0], vec![2], vec![1, 1], vec![1, 3]] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                durable_metadata_record_schema(
+                    ids.iter().map(|id| (*id, "field", records::ValueType::U64)),
+                );
+            })
             .is_err(),
-        "renumbering CHILDREN from slot 3 to 4 must reject old physical bytes"
-    );
-    let nonempty_reserved = children_at_four
-        .descriptor
-        .create(&[
-            records::Value::U64(7),
-            records::Value::U64(11),
-            records::Value::Nullable(Some(Box::new(records::Value::Bytes(vec![1])))),
-            records::Value::U64(13),
-        ])
-        .unwrap();
-    assert!(
-        decode_large_value_metadata_record(
-            &nonempty_reserved,
-            &children_at_four,
-            "children-at-four"
-        )
-        .is_err(),
-        "reserved slots remain permanently empty"
-    );
+            "invalid field IDs must be rejected: {ids:?}"
+        );
+    }
 
     assert_eq!(
         [

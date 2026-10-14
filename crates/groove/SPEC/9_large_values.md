@@ -78,11 +78,12 @@ identity independent of source declaration order: `NodeRef = { 1: object_hash, 2
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
 5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
 refactor. Implementations normalize source declarations by ID, then materialize
-each ID as its actual record ordinal. A skipped or retired ID remains a
-reserved `Nullable<bytes>` slot encoded exactly as `null`; readers reject a
-nonempty reserved slot and writers never compact it away. Thus source reorder
-is harmless, while renumbering `locator:2` to `locator:3`, an edit field, or a
-reference field changes canonical physical bytes and rejects the old layout.
+each ID as its actual record ordinal. IDs MUST be contiguous starting at one;
+empty layouts, zero IDs, duplicates and gaps are rejected when the schema is
+constructed. Source reorder is harmless. Changing a field's ordinal or
+removing a field requires an explicitly versioned format change; no nullable
+placeholders are synthesized. All current layouts are contiguous, so removing
+the unused reserved-slot machinery changes no persisted bytes or versions.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
 its primitive backing is string as well. The ordinary enum schema is
@@ -720,11 +721,10 @@ contains `{ 1: id:bytes16, 2: value_ref:LargeValueRef,
 3: receipt_id:bytes16?, 4: encoded_bytes:u64, 5: node_count:u64,
 6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent,
 one-based physical record slots and source declaration order is not semantic.
-If a future layout retires or skips an ID, it MUST retain every gap as a
-reserved `Nullable<bytes>` record slot encoded exactly as `null`; readers MUST
-reject a nonempty reserved slot and writers MUST NOT compact it away. Thus
-renumbering a field (for example `children:3` to `children:4`) changes the
-record layout and cannot be silently normalized by declaration-name sorting.
+IDs MUST be contiguous starting at one; schema construction rejects empty
+layouts, zero IDs, duplicates and gaps. Removing or renumbering a field requires
+an explicitly versioned format change, rather than retaining an implicit
+nullable placeholder. Current metadata encodings are unchanged.
 Each value is exactly its normal
 Groove record encoding: there is no metadata magic prefix, private type tag,
 or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
