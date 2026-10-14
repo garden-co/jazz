@@ -50,8 +50,10 @@ merge.
   v6 carries both unchanged and refuses v5 and v4 peers the same way it
   refuses v3 ones. This branch used v5 for linear history before #3659 took
   that number; it was renumbered to v6 when main was merged, and its
-  `SyncMessage` tags (34 `ViewUpdatePart`, 35 `RetryLater`) did not collide
-  with #3659, which added no `SyncMessage` variant.
+  `SyncMessage` tags (then 34 `ViewUpdatePart` and 35 `RetryLater`) did not
+  collide with #3659, which added no `SyncMessage` variant. `RetryLater` has
+  since been retired (#4072) without ever shipping in a release: Core no
+  longer answers "retry later" and no peer sends or decodes it.
 - **Storage:** every root that stores rows opens with
   `node_storage_codec_profile()`
   (`crates/jazz/layers/protocol/src/storage_codec_profile.rs`), which is the

@@ -294,3 +294,82 @@ fn queued_edit_and_later_streamed_value_keep_their_order() {
         Some(Value::String("status".to_owned()))
     );
 }
+
+/// A stand-in unit: the upload order never looks inside one.
+fn replay_unit(tx_id: TxId) -> SyncMessage {
+    SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Pending,
+        global_time: None,
+        durability: None,
+    }
+}
+
+/// Recovery queues a writer's pending units in transaction order whether
+/// their causal closure is complete or not: a blocked `p` goes up before the
+/// complete `w` written after it, not after every complete unit.
+#[test]
+fn recovery_uploads_a_blocked_unit_before_a_later_complete_one() {
+    let node = NodeUuid::from_bytes([0xe7; 16]);
+    let p = TxId::new(TxTime(100), node);
+    let w = TxId::new(TxTime(101), node);
+    let settled = TxId::new(TxTime(99), node);
+    let pending = BTreeSet::from([p, w]);
+    let roots = BTreeSet::from([p, w]);
+    let statuses = BTreeMap::from([
+        (p, LocalReplayStatus::Blocked),
+        (w, LocalReplayStatus::Complete),
+        (settled, LocalReplayStatus::Complete),
+    ]);
+    let complete = vec![(settled, replay_unit(settled)), (w, replay_unit(w))];
+    let blocked = BTreeMap::from([(p, replay_unit(p))]);
+    let uploads = local_replay_upload_order(
+        &pending,
+        &complete,
+        &roots,
+        &statuses,
+        &blocked,
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        uploads.keys().copied().collect::<Vec<_>>(),
+        vec![p, w],
+        "settled ancestors are not uploaded; p goes before w"
+    );
+
+    // A blocked root the plan kept no unit for uploads the route's retained
+    // unit, in the same order.
+    let uploads = local_replay_upload_order(
+        &pending,
+        &complete,
+        &roots,
+        &statuses,
+        &BTreeMap::new(),
+        &BTreeMap::from([(p, replay_unit(p))]),
+    );
+    assert_eq!(uploads.keys().copied().collect::<Vec<_>>(), vec![p, w]);
+}
+
+/// A transaction the plan completed keeps its complete unit even if a
+/// blocked or retained unit is also known for it.
+#[test]
+fn recovery_keeps_the_complete_unit_of_a_completed_transaction() {
+    let node = NodeUuid::from_bytes([0xe8; 16]);
+    let w = TxId::new(TxTime(101), node);
+    let complete_unit = replay_unit(w);
+    let retained_unit = SyncMessage::FateUpdate {
+        tx_id: w,
+        fate: Fate::Accepted,
+        global_time: None,
+        durability: None,
+    };
+    let uploads = local_replay_upload_order(
+        &BTreeSet::from([w]),
+        &[(w, complete_unit.clone())],
+        &BTreeSet::from([w]),
+        &BTreeMap::from([(w, LocalReplayStatus::Complete)]),
+        &BTreeMap::from([(w, retained_unit.clone())]),
+        &BTreeMap::from([(w, retained_unit)]),
+    );
+    assert_eq!(uploads.get(&w), Some(&complete_unit));
+}

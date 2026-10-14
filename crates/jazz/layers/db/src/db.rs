@@ -2423,6 +2423,44 @@ where
     Ok((statuses, units, complete_units))
 }
 
+/// The pending units recovery uploads, keyed by transaction so the caller
+/// queues them in one transaction-ordered pass: complete units (`complete`,
+/// whose causal closure is present) and blocked ones (the unit the replay
+/// plan kept for a root that is not complete, or the route's retained unit)
+/// alike. A blocked unit is therefore never queued behind a later complete
+/// unit of its writer (SPEC 14, `INV-HIST-23`).
+///
+/// A transaction is in `complete` exactly when the plan marked it
+/// `Complete`, and only roots not marked so take a blocked or retained unit,
+/// so no transaction gets both. Were it to, its complete unit is kept, as
+/// when complete units were queued first.
+fn local_replay_upload_order(
+    pending: &BTreeSet<TxId>,
+    complete: &[(TxId, SyncMessage)],
+    roots: &BTreeSet<TxId>,
+    statuses: &BTreeMap<TxId, LocalReplayStatus>,
+    blocked: &BTreeMap<TxId, SyncMessage>,
+    retained: &BTreeMap<TxId, SyncMessage>,
+) -> BTreeMap<TxId, SyncMessage> {
+    let mut uploads = BTreeMap::new();
+    for (tx_id, unit) in complete {
+        if pending.contains(tx_id) {
+            uploads.entry(*tx_id).or_insert_with(|| unit.clone());
+        }
+    }
+    for tx_id in roots {
+        if !pending.contains(tx_id)
+            || matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete))
+        {
+            continue;
+        }
+        if let Some(unit) = blocked.get(tx_id).or_else(|| retained.get(tx_id)) {
+            uploads.entry(*tx_id).or_insert_with(|| unit.clone());
+        }
+    }
+    uploads
+}
+
 pub(super) async fn restore_local_subscriber_replay<S>(
     node: &SharedNodeState<S>,
     outbox: &Outbox,
@@ -2474,31 +2512,19 @@ where
         .iter()
         .filter_map(|pending| pending.unit.as_ref().map(|_| pending.tx_id))
         .collect::<BTreeSet<_>>();
-    // Pending units to upload, complete or blocked, keyed so they are queued
-    // in one transaction-ordered pass: a blocked unit is never queued behind
-    // a later complete unit of its writer (SPEC 14, per-writer order).
-    let mut uploads = BTreeMap::new();
-    for (tx_id, unit) in replay_units {
+    let uploads = local_replay_upload_order(
+        &pending_set,
+        &replay_units,
+        &roots,
+        &statuses,
+        &blocked_units,
+        &retained_replay_units,
+    );
+    for (_, unit) in replay_units {
         // A reopened main-thread runtime has no transaction history. Send
         // accepted causal ancestors before each pending unit so the latter
         // can be ingested before its Local ack or later authority fate.
-        downstream_fates.borrow_mut().push(unit.clone());
-        if pending_set.contains(&tx_id) {
-            uploads.insert(tx_id, unit);
-        }
-    }
-    for tx_id in &roots {
-        if !pending_set.contains(tx_id)
-            || matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete))
-        {
-            continue;
-        }
-        if let Some(unit) = blocked_units
-            .get(tx_id)
-            .or_else(|| retained_replay_units.get(tx_id))
-        {
-            uploads.insert(*tx_id, unit.clone());
-        }
+        downstream_fates.borrow_mut().push(unit);
     }
     for (tx_id, unit) in uploads {
         if outbox_units.insert(tx_id) {
