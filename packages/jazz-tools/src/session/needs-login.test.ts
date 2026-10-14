@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
+import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { notifyLocalWrite } from "../runtime/local-write-observer.js";
 import { createJazzAppOwner, jwtAuth } from "./app.js";
@@ -174,6 +175,49 @@ describe("needsLogin", () => {
     const session = await retainedSession();
     await session.logout();
     expect(session.getSnapshot()).toMatchObject({ status: "signed-out", needsLogin: false });
+    await session.close();
+  });
+
+  for (const ending of ["logout", "close"] as const) {
+    it(`is false, and never flips back, when ${ending} interrupts a login in flight`, async () => {
+      const gate = deferred<void>();
+      const inner = registryFetch();
+      const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+        await gate.promise;
+        return inner(input, init);
+      });
+      const session = await retainedSession(fetch as unknown as typeof globalThis.fetch);
+      const retained = session.getSnapshot().account!;
+      const seen: (boolean | undefined)[] = [];
+      session.subscribe(() => seen.push(session.getSnapshot().needsLogin));
+      const login = session.loginJWT(jwt(alice));
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      const ended = session[ending]();
+      gate.resolve();
+      await expect(login).rejects.toThrow();
+      await ended;
+      expect(session.getSnapshot()).toMatchObject({
+        status: ending === "logout" ? "signed-out" : "closed",
+        needsLogin: false,
+      });
+      expect(session.getSnapshot().account).toBeUndefined();
+      // The interrupted login never bound a credential to the reopened account.
+      expect(isProvisionalAccount(retained)).toBe(ending === "close");
+      await tick();
+      expect(seen.at(-1)).toBe(false);
+      if (ending === "logout") await session.close();
+    });
+  }
+
+  it("does not republish when logging in again changes nothing", async () => {
+    const session = await retainedSession();
+    await session.loginJWT(jwt(alice));
+    const settled = session.getSnapshot();
+    const notified = vi.fn();
+    session.subscribe(notified);
+    await session.loginOrRegisterJWT(jwt(alice));
+    expect(session.getSnapshot()).toBe(settled);
+    expect(notified).not.toHaveBeenCalled();
     await session.close();
   });
 
@@ -383,6 +427,28 @@ describe("needsLogin development warning", () => {
     await vi.advanceTimersByTimeAsync(NEEDS_LOGIN_WARNING_DELAY_MS);
     expect(warn).toHaveBeenCalledOnce();
     await app.dispose();
+  });
+
+  it("close() clears a pending warning timer", async () => {
+    const { session, warn } = await warnedSession();
+    write(session);
+    expect(vi.getTimerCount()).toBe(1);
+    await session.close();
+    expect(session.getSnapshot()).toMatchObject({ status: "closed", needsLogin: false });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(NEEDS_LOGIN_WARNING_DELAY_MS * 4);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("logout clears a pending warning timer", async () => {
+    const { session, warn } = await warnedSession();
+    write(session);
+    expect(vi.getTimerCount()).toBe(1);
+    await session.logout();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(NEEDS_LOGIN_WARNING_DELAY_MS * 4);
+    expect(warn).not.toHaveBeenCalled();
+    await session.close();
   });
 
   it("stays silent once the account no longer needs a login", async () => {
