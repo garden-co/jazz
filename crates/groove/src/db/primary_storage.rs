@@ -444,23 +444,6 @@ impl Database {
             .await
     }
 
-    /// [`Self::primary_key_scan_range_raw`] that also observes writes already
-    /// staged in `batch`.
-    pub async fn primary_key_scan_range_raw_in_batch(
-        &self,
-        batch: &DatabaseBatch,
-        table: &str,
-        start: &[Value],
-        end: &[Value],
-    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_storage_txn(batch)?;
-        let resident = self.resident_storage();
-        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
-            .await
-    }
-
     async fn primary_key_scan_range_raw_with_storage<'a, T>(
         &'a self,
         storage: &T,
@@ -498,22 +481,6 @@ impl Database {
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
         let resident = self.resident_storage();
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        self.primary_key_last_raw_with_storage(&storage, table, prefix)
-            .await
-    }
-
-    /// Return the last encoded primary-key record while also observing writes
-    /// already staged in `batch`.
-    pub async fn primary_key_last_raw_in_batch(
-        &self,
-        batch: &DatabaseBatch,
-        table: &str,
-        prefix: &[Value],
-    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_storage_txn(batch)?;
-        let resident = self.resident_storage();
-        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
             .await
     }
@@ -581,23 +548,6 @@ impl Database {
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
         let resident = self.resident_storage();
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
-            .await
-    }
-
-    /// Return encoded index-probe records while also observing writes already
-    /// staged in `batch`.
-    pub async fn index_scan_raw_in_batch(
-        &self,
-        batch: &DatabaseBatch,
-        table: &str,
-        index_name: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_storage_txn(batch)?;
-        let resident = self.resident_storage();
-        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
             .await
     }

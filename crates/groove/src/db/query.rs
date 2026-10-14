@@ -968,23 +968,6 @@ impl Database {
         Ok(subscription)
     }
 
-    /// Internal owner-loop binding entrypoint; see [`Self::subscribe_with_waker`].
-    #[doc(hidden)]
-    pub async fn bind_shape_with_waker(
-        &mut self,
-        shape: PreparedShapeId,
-        binding_values: &[Value],
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<MultisinkSubscription, Error> {
-        self.bind_shape_with_lifetime(
-            shape,
-            binding_values,
-            SubscriptionLifetime::Retained,
-            progress_waker,
-        )
-        .await
-    }
-
     /// Bind a prepared graph for one initial result or continued maintenance.
     /// Lifetime is per consumer, not part of the reusable graph's identity.
     pub async fn bind_shape_with_lifetime(
