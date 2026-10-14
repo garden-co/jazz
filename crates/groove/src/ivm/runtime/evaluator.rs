@@ -1934,7 +1934,12 @@ impl TickEvaluator<'_> {
                 scope: self.context.scope,
                 input: node,
             };
-            !self.arrangement_states.contains_key(&key)
+            // A stored arrangement holds no buckets between evaluations, so a
+            // rebuild that reads all of them must rebuild it too.
+            self.arrangement_states.get(&key).is_none_or(|state| {
+                self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
+                    && state.value().probe_plan().is_some()
+            })
         } else if matches!(
             self.graph.node(node).map(|node| &node.descriptor.operator),
             Some(OpType::Lookup(_))
@@ -2083,7 +2088,7 @@ impl TickEvaluator<'_> {
         result
     }
 
-    fn compute_filter(
+    pub(super) fn compute_filter(
         &mut self,
         node: NodeId,
         filter: &FilterOp,
@@ -2143,7 +2148,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn compute_projection(
+    pub(super) fn compute_projection(
         &mut self,
         node: NodeId,
         project: &MapProjectOp,
@@ -2253,6 +2258,12 @@ impl TickEvaluator<'_> {
                     let mut inputs = smallvec::SmallVec::<[Arc<RecordDeltas>; 2]>::new();
                     for input in &graph_node.descriptor.inputs {
                         inputs.push(self.update_node(*input).await?);
+                    }
+                    // Without a session, a kernel cannot load stored buckets.
+                    // Boxed: this driver recurses, and an inline storage scan
+                    // would grow every frame of it.
+                    if self.evaluation_inputs.is_none() {
+                        Box::pin(self.prefetch_stored_inputs(node)).await?;
                     }
                     self.compute_batch(node, &inputs)
                 }
@@ -3316,7 +3327,7 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn arrangement_key(
+    pub(super) fn arrangement_key(
         &mut self,
         input: NodeId,
         descriptor: RecordDescriptor,
@@ -3342,7 +3353,11 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn join_field_names(&mut self, node: NodeId, join: &JoinOp) -> (Arc<[String]>, Arc<[String]>) {
+    pub(super) fn join_field_names(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+    ) -> (Arc<[String]>, Arc<[String]>) {
         let meta = self.node_meta.entry(node).or_default();
         let left = meta
             .join_left_fields
@@ -3420,7 +3435,7 @@ impl TickEvaluator<'_> {
         );
     }
 
-    fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
+    pub(super) fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
         SubTick {
             tick: self.current_tick,
             // Root-scope arrangements represent table time, not recursive
@@ -3857,7 +3872,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn materialize_indirect_fields(
+    pub(super) fn materialize_indirect_fields(
         &mut self,
         input: &Arc<RecordDeltas>,
         fields: &BTreeSet<String>,

@@ -57,6 +57,7 @@ pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
 mod state;
+mod stored_arrangement;
 mod terminal;
 mod typed_template;
 
@@ -253,6 +254,9 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether new arrangements over stored tables, keyed on their primary
+    /// key, are read from storage instead of held (`stored_arrangement`).
+    stored_arrangements_enabled: bool,
     /// Whether plain ordered outputs receive generic root positions (insert
     /// indices and moves). A consumer that never reads them turns this off,
     /// so an unbounded TopBy keeps its delta-only path.
@@ -377,6 +381,7 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            stored_arrangements_enabled: false,
             plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
@@ -464,6 +469,13 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Read arrangements compiled from now on from storage when they arrange
+    /// a stored table by its primary key. Existing arrangements keep their
+    /// representation.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.stored_arrangements_enabled = enabled;
     }
 
     /// Enable or disable generic root positions for plain ordered outputs.
@@ -647,6 +659,8 @@ pub enum IvmRuntimeError {
     StorageUnavailable,
     #[error("evaluation blocked on a non-resident storage input")]
     EvaluationBlocked,
+    #[error("a stored arrangement was read for a key nobody probed")]
+    StoredArrangementUnprobed,
     #[error("streaming checksum window and work budgets must be non-zero")]
     InvalidStreamingChecksumBudget,
     #[error("streaming checksum requires a String or Bytes field")]

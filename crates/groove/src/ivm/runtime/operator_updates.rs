@@ -19,6 +19,8 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output: Option<Arc<crate::records::PreparedRecordCopy>>,
+    /// Set on an `Arrange` node whose arrangement is read from storage.
+    pub(super) stored_arrangement: Option<Arc<stored_arrangement::StoredArrangementPlan>>,
     pub(super) aggregate_group_fields: Option<Arc<[String]>>,
 }
 

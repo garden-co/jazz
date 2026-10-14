@@ -9,6 +9,18 @@ impl TickEvaluator<'_> {
         node: NodeId,
         inputs: &[Arc<RecordDeltas>],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        // Consumers of stored arrangements read only buckets loaded for them.
+        let stored = self.prefetch_stored_inputs_now(node)?;
+        let output = self.compute_operator_batch(node, inputs)?;
+        self.check_stored_reads(&stored)?;
+        Ok(output)
+    }
+
+    fn compute_operator_batch(
+        &mut self,
+        node: NodeId,
+        inputs: &[Arc<RecordDeltas>],
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         let graph_node = self
             .graph
             .node(node)
@@ -88,7 +100,10 @@ impl TickEvaluator<'_> {
                     let stamp = self.arrangement_sub_tick(&key);
                     #[cfg(feature = "cold-settle-attribution")]
                     self.trace_arrangement_snapshot(&key, &input.deltas);
-                    let mut state = self.arrangement_states.remove(&key).unwrap_or_default();
+                    let mut state = match self.arrangement_states.remove(&key) {
+                        Some(state) => state,
+                        None => self.new_arrangement_state(&key),
+                    };
                     super::join::prepare_arrangement(
                         &mut state,
                         &output_desc,
