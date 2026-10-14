@@ -613,10 +613,21 @@ fn program_binding_suffix(program: &QueryProgram) -> String {
     format!(":program:{:016x}", hasher.finish())
 }
 
-/// Renames every binding source `graph` reads by appending `suffix`.
-/// The name of the binding source `program`'s graphs read, if any.
-fn program_binding_source_name(program: &QueryProgram) -> Option<String> {
-    let mut name = None;
+#[cfg(test)]
+thread_local! {
+    static SCOPED_BINDING_SOURCES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The binding source names programs were scoped to since the last call.
+#[cfg(test)]
+pub(crate) fn take_scoped_binding_sources_for_test() -> Vec<String> {
+    SCOPED_BINDING_SOURCES.with(|names| std::mem::take(&mut *names.borrow_mut()))
+}
+
+/// The names of the binding sources `program`'s graphs read.
+fn program_binding_source_names(program: &QueryProgram) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     let graphs = program
         .lowered
         .terminals
@@ -626,18 +637,15 @@ fn program_binding_source_name(program: &QueryProgram) -> Option<String> {
     for graph in graphs {
         rewrite_graph(graph, &mut |node| {
             if let GraphBuilder::BindingSource { shape, .. } = &node {
-                debug_assert!(
-                    name.as_ref().is_none_or(|name| name == shape),
-                    "a program reads one binding source",
-                );
-                name.get_or_insert_with(|| shape.clone());
+                names.insert(shape.clone());
             }
             node
         });
     }
-    name
+    names
 }
 
+/// Renames every binding source `graph` reads by appending `suffix`.
 pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> GraphBuilder {
     rewrite_graph(graph, &mut |mut node| {
         if let GraphBuilder::BindingSource { shape, .. } = &mut node {
@@ -777,13 +785,14 @@ where
         // (recursive and frontier policies seed from claim slots), and its
         // subscription then binds under the signature's fallback name, so it
         // is checked and scoped like any other.
+        let read_sources = program_binding_source_names(program);
         let Some(source_shape) = program
             .request
             .input
             .binding
             .source_shape
             .clone()
-            .or_else(|| program_binding_source_name(program))
+            .or_else(|| read_sources.first().cloned())
         else {
             return;
         };
@@ -794,7 +803,17 @@ where
             // A subplan is embedded in, and checked with, its outer program.
             return;
         }
-        let suffix = match self.check_program_route_discipline(program) {
+        // The route check proves delivery for bindings of one source. A
+        // program reading several has no single binding to check against,
+        // so it stays with its session.
+        let discipline = if read_sources.len() > 1 {
+            Err(RouteViolation(format!(
+                "program reads several binding sources {read_sources:?}"
+            )))
+        } else {
+            self.check_program_route_discipline(program)
+        };
+        let suffix = match discipline {
             // A client-local source already belongs to one session, and
             // its bindings attach to it by the name computed before any
             // program compiles.
@@ -817,7 +836,10 @@ where
         if let Some(graph) = program.lowered.internal_app_rows_graph.as_mut() {
             *graph = isolate_binding_sources(graph, &suffix);
         }
-        program.request.input.binding.source_shape = Some(format!("{source_shape}{suffix}"));
+        let scoped = format!("{source_shape}{suffix}");
+        #[cfg(test)]
+        SCOPED_BINDING_SOURCES.with(|names| names.borrow_mut().push(scoped.clone()));
+        program.request.input.binding.source_shape = Some(scoped);
     }
 
     pub(super) fn check_program_route_discipline(

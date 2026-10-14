@@ -278,6 +278,7 @@ fn shared_ctx_recursive_policy_without_source_name_is_checked() {
         .unwrap();
     core.drive_query_runtime().unwrap();
     let base = shared_program_shapes(&core);
+    crate::node::query_eval::take_scoped_binding_sources_for_test();
     let mut failures = Vec::new();
     let mut runs = Vec::new();
     for (who, opts) in [
@@ -288,6 +289,15 @@ fn shared_ctx_recursive_policy_without_source_name_is_checked() {
         let (st, m) = shared_ctx_sub(&mut core, &mut peer, &shape, opts);
         runs.push((peer, st, m));
     }
+    let isolated = crate::node::query_eval::take_scoped_binding_sources_for_test()
+        .into_iter()
+        .filter(|name| name.contains(":isolated:"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        isolated.len(),
+        2,
+        "each reader's recursive policy program reads its own isolated binding source: {isolated:?}"
+    );
     assert_eq!(
         shared_program_shapes(&core) - base,
         2,

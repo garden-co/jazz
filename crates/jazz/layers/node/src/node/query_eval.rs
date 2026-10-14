@@ -228,6 +228,8 @@ pub fn take_required_sink_deltas(
 
 mod lowering;
 mod route_discipline;
+#[cfg(test)]
+pub(crate) use route_discipline::take_scoped_binding_sources_for_test;
 
 use lowering::*;
 pub use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
