@@ -740,8 +740,15 @@ ID is duplicated in the canonical value and MUST match byte-for-byte before
 scan/recovery, acceptance, finalization, resume, or eviction. A valid value
 copied under a different or malformed key is corruption, not an alias or replay.
 The promotion journals bind both directions without duplicating the upload
-record. `completed-upload/<upload-id>` contains the full canonical upload
-record and MUST contain that exact embedded upload ID.
+record. `completed-upload/<upload-id>` contains a dedicated canonical record:
+`{ 1: id:bytes16, 2: receipt_id:bytes16, 3: descriptor:LargeValueRef,
+4: encoded_bytes:u64, 5: node_count:u64 }`. It MUST contain that exact embedded
+upload ID. Receipt ID and descriptor are required; completion retains neither
+the pending chunk list nor its creation timestamp. Retry also checks the
+descriptor and accounting against the staged receipt.
+This layout belongs to the unreleased `groove.large-value.v2` contract;
+the preceding pending-record completion layout is unsupported, without a
+fallback reader or another storage/wire version bump.
 `completed-receipt/<receipt-id>` contains exactly the 16 raw upload-ID bytes:
 no record envelope, length prefix, descriptor, accounting, or chunk list.
 For example, upload ID `a6` repeated 16 times produces exactly sixteen `a6`

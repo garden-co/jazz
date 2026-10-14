@@ -380,11 +380,41 @@ fn large_value_metadata_records_are_canonical_groove_records() {
     let encoded_node = encode_large_value_node_references(&node).unwrap();
     let encoded_staged = encode_staged_large_value(&staged).unwrap();
     let encoded_pending = encode_pending_large_value_upload(&pending).unwrap();
+    let completed = CompletedLargeValueUpload {
+        id: pending.id,
+        receipt_id: pending.receipt_id.unwrap(),
+        descriptor: value_ref.clone(),
+        accounting: pending.accounting,
+    };
+    let encoded_completed = encode_completed_large_value_upload(&completed).unwrap();
+    // Internal byte receipt: Alice's completion keeps only required evidence.
+    // Fixed accounting, two offsets, two 16-byte IDs, then the independently
+    // pinned canonical descriptor; no timestamp, chunk list or nullable flags.
+    let mut expected_completed = vec![
+        19, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 56, 0, 0, 0,
+    ];
+    expected_completed.extend_from_slice(&[0x55; 16]);
+    expected_completed.extend_from_slice(&[0x66; 16]);
+    expected_completed.extend_from_slice(&encoded_value_ref);
+    assert_eq!(encoded_completed, expected_completed);
+    assert_eq!(
+        decode_completed_large_value_upload(&expected_completed).unwrap(),
+        completed
+    );
+    assert!(decode_completed_large_value_upload(&encoded_pending).is_err());
+    for end in 0..encoded_completed.len() {
+        assert!(decode_completed_large_value_upload(&encoded_completed[..end]).is_err());
+    }
+    let mut trailing_completed = encoded_completed.clone();
+    trailing_completed.push(0);
+    assert!(decode_completed_large_value_upload(&trailing_completed).is_err());
+
     for (schema, encoded) in [
         (large_value_root_references_schema(), &encoded_root),
         (large_value_node_references_schema(), &encoded_node),
         (staged_large_value_schema(), &encoded_staged),
         (pending_large_value_upload_schema(), &encoded_pending),
+        (completed_large_value_upload_schema(), &encoded_completed),
     ] {
         assert!(
             !encoded.starts_with(b"GLVM"),
@@ -930,16 +960,13 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
     let copied_upload_key_id = crate::large_values::StagedLargeValueId([0x86; 16]);
     let source_receipt = crate::large_values::StagedLargeValueId([0x87; 16]);
     let copied_receipt_key_id = crate::large_values::StagedLargeValueId([0x88; 16]);
-    let completed =
-        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
-            id: source_upload,
-            descriptor: Some(descriptor),
-            receipt_id: Some(source_receipt),
-            accounting: crate::large_values::StagedLargeValueAccounting::default(),
-            created_at_ms: 0,
-            chunks: Vec::new(),
-        })
-        .unwrap();
+    let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+        id: source_upload,
+        descriptor,
+        receipt_id: source_receipt,
+        accounting: crate::large_values::StagedLargeValueAccounting::default(),
+    })
+    .unwrap();
     let copied_upload_key = completed_large_value_upload_key(copied_upload_key_id);
     let copied_receipt_key = completed_large_value_receipt_key(copied_receipt_key_id);
     database
@@ -1045,16 +1072,13 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
         .value_ref;
     let upload_id = crate::large_values::StagedLargeValueId([0x89; 16]);
     let receipt_id = crate::large_values::StagedLargeValueId([0x8a; 16]);
-    let completed =
-        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
-            id: upload_id,
-            descriptor: Some(descriptor),
-            receipt_id: Some(receipt_id),
-            accounting: crate::large_values::StagedLargeValueAccounting::default(),
-            created_at_ms: 0,
-            chunks: Vec::new(),
-        })
-        .unwrap();
+    let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+        id: upload_id,
+        descriptor,
+        receipt_id,
+        accounting: crate::large_values::StagedLargeValueAccounting::default(),
+    })
+    .unwrap();
     let upload_key = completed_large_value_upload_key(upload_id);
     let receipt_key = completed_large_value_receipt_key(receipt_id);
     database

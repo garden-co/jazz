@@ -407,6 +407,149 @@ fn pending_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
     })
 }
 
+/// Durable completion evidence retained until its staged receipt is closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletedLargeValueUpload {
+    id: crate::large_values::StagedLargeValueId,
+    receipt_id: crate::large_values::StagedLargeValueId,
+    descriptor: crate::large_values::LargeValueRef,
+    accounting: crate::large_values::StagedLargeValueAccounting,
+}
+
+const COMPLETED_UPLOAD_ID_FIELD: u16 = 1;
+const COMPLETED_UPLOAD_RECEIPT_ID_FIELD: u16 = 2;
+const COMPLETED_UPLOAD_DESCRIPTOR_FIELD: u16 = 3;
+const COMPLETED_UPLOAD_ENCODED_BYTES_FIELD: u16 = 4;
+const COMPLETED_UPLOAD_NODE_COUNT_FIELD: u16 = 5;
+
+fn completed_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
+            (
+                COMPLETED_UPLOAD_ID_FIELD,
+                "id",
+                records::ValueType::raw_bytes(),
+            ),
+            (
+                COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+                "receipt_id",
+                records::ValueType::raw_bytes(),
+            ),
+            // Preserve descriptor-led format dispatch at the metadata boundary.
+            (
+                COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+                "descriptor",
+                records::ValueType::raw_bytes(),
+            ),
+            (
+                COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+                "encoded_bytes",
+                records::ValueType::U64,
+            ),
+            (
+                COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+                "node_count",
+                records::ValueType::U64,
+            ),
+        ])
+    })
+}
+
+fn encode_completed_large_value_upload(
+    upload: &CompletedLargeValueUpload,
+) -> Result<Vec<u8>, Error> {
+    let descriptor =
+        crate::large_values::encode_large_value_ref(&upload.descriptor).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot encode completed upload descriptor: {error}"
+            ))
+        })?;
+    encode_large_value_metadata_record(
+        completed_large_value_upload_schema(),
+        [
+            (
+                COMPLETED_UPLOAD_ID_FIELD,
+                staged_large_value_id_value(upload.id),
+            ),
+            (
+                COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+                staged_large_value_id_value(upload.receipt_id),
+            ),
+            (
+                COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+                records::Value::Bytes(descriptor),
+            ),
+            (
+                COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+                records::Value::U64(upload.accounting.encoded_bytes),
+            ),
+            (
+                COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+                records::Value::U64(upload.accounting.node_count),
+            ),
+        ],
+        "completed upload",
+    )
+}
+
+fn decode_completed_large_value_upload(encoded: &[u8]) -> Result<CompletedLargeValueUpload, Error> {
+    let mut fields = decode_large_value_metadata_record(
+        encoded,
+        completed_large_value_upload_schema(),
+        "completed upload",
+    )?;
+    let id = take_metadata_field(&mut fields, COMPLETED_UPLOAD_ID_FIELD, "completed upload")?;
+    let receipt_id = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+        "completed upload",
+    )?;
+    let records::Value::Bytes(descriptor) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload descriptor".to_owned(),
+        ));
+    };
+    let records::Value::U64(encoded_bytes) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload accounting".to_owned(),
+        ));
+    };
+    let records::Value::U64(node_count) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload accounting".to_owned(),
+        ));
+    };
+    Ok(CompletedLargeValueUpload {
+        id: staged_large_value_id_from_value(&id)?,
+        receipt_id: staged_large_value_id_from_value(&receipt_id)?,
+        descriptor: crate::large_values::decode_large_value_ref(&descriptor).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode completed upload descriptor: {error}"
+            ))
+        })?,
+        accounting: crate::large_values::StagedLargeValueAccounting {
+            encoded_bytes,
+            node_count,
+        },
+    })
+}
+
 fn encode_large_value_metadata_record(
     schema: &DurableMetadataRecordSchema,
     input_values: impl IntoIterator<Item = (u16, records::Value)>,
@@ -931,10 +1074,10 @@ fn decode_pending_large_value_upload_at_key(
 fn decode_completed_large_value_upload_at_key(
     key: &[u8],
     encoded: &[u8],
-) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+) -> Result<CompletedLargeValueUpload, Error> {
     let key_id =
         staged_large_value_id_from_metadata_key(key, b"completed-upload/", "completed upload")?;
-    let completed = decode_pending_large_value_upload(encoded)?;
+    let completed = decode_completed_large_value_upload(encoded)?;
     if completed.id != key_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload key and journal id differ".to_owned(),

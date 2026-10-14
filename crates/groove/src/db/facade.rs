@@ -194,7 +194,7 @@ where
 async fn completed_large_value_upload_journal<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
-) -> Result<Option<crate::large_values::PendingLargeValueUpload>, Error>
+) -> Result<Option<CompletedLargeValueUpload>, Error>
 where
     S: OrderedKvStorage + ?Sized,
 {
@@ -206,9 +206,7 @@ where
         return Ok(None);
     };
     let completed = decode_completed_large_value_upload_at_key(&upload_key, &encoded)?;
-    let receipt_id = completed.receipt_id.ok_or_else(|| {
-        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
-    })?;
+    let receipt_id = completed.receipt_id;
     let receipt_key = completed_large_value_receipt_key(receipt_id);
     let reverse = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
@@ -242,9 +240,7 @@ where
     let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
         return Ok(None);
     };
-    let receipt_id = completed
-        .receipt_id
-        .expect("completed journal requires a receipt id");
+    let receipt_id = completed.receipt_id;
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -259,7 +255,7 @@ where
     let staged_key = staged_large_value_key(receipt_id);
     let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
-        || completed.descriptor.as_ref() != Some(&staged.value_ref)
+        || completed.descriptor != staged.value_ref
         || staged.accounting != completed.accounting
     {
         return Err(Error::InvalidLargeValueMetadata(
@@ -311,7 +307,7 @@ where
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
     let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
-    if forward_completed.receipt_id != Some(receipt_id) {
+    if forward_completed.receipt_id != receipt_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -1462,7 +1458,12 @@ impl Database {
         )
         .await?;
         promotion_state.borrow_mut().extend(registration_operations);
-        let completed = encode_pending_large_value_upload(&bound_upload)?;
+        let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+            id: upload_id,
+            receipt_id,
+            descriptor: staged.value_ref.clone(),
+            accounting: staged.accounting,
+        })?;
         promotion_state.borrow_mut().extend([
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
