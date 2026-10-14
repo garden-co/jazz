@@ -1064,7 +1064,6 @@ where
             .values()
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
-        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;

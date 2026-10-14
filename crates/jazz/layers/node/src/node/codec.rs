@@ -4442,16 +4442,17 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     // The global-current table carries every user cell, so current rows
     // resolve directly from it in O(current rows). Deletion is a cell of the
     // winning image: select the winner first, then drop deleted images.
+    let layers = layer_stack::ref_layers(settled, |r| {
+        let table_name = match r {
+            Ref::Local => ahead_current_table_name(&table.name),
+            Ref::Remote(Remote::Origin) => global_current_table_name(&table.name),
+        };
+        layer_stack::Layer::new(GraphBuilder::table(table_name).project(content_fields.clone()))
+    });
     let current = if settled == DurabilityTier::Global {
-        GraphBuilder::table(global_current_table_name(&table.name)).project(content_fields.clone())
+        layer_stack::compose(layers)
     } else {
-        pending_overlay_over(
-            GraphBuilder::table(global_current_table_name(&table.name))
-                .project(content_fields.clone()),
-            GraphBuilder::table(ahead_current_table_name(&table.name))
-                .project(content_fields.clone()),
-        )
-        .project(content_fields)
+        layer_stack::compose(layers).project(content_fields)
     };
     current.filter(not_deleted_predicate()).project_fields(
         std::iter::once(ProjectField::named("row_uuid"))
@@ -4949,20 +4950,6 @@ pub(super) fn tx_id_value(tx_id: TxId) -> Value {
 
 pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
-}
-
-/// A row's pending overlay, when present, is what the client sees: it is
-/// already the synced image with every pending patch folded on top, so it
-/// wins regardless of how its stamp compares with the synced row.
-pub(in crate::node) fn pending_overlay_over(
-    global: GraphBuilder,
-    ahead: GraphBuilder,
-) -> GraphBuilder {
-    let overlaid = ahead.clone().project(["row_uuid"]);
-    GraphBuilder::union([
-        ahead,
-        GraphBuilder::anti_join(global, overlaid, ["row_uuid"], ["row_uuid"]),
-    ])
 }
 
 pub(super) fn ahead_current_table_name(table: &str) -> String {

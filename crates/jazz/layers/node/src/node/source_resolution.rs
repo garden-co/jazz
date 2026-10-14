@@ -320,19 +320,7 @@ where
             .schema
             .clone();
         let table_schema = self.table_in_schema(table, schema_version)?;
-        let (head, _) = schema
-            .project_branch_view_selector(&table_schema, head)
-            .map_err(Error::InvalidBranchKey)?;
-        let base = base
-            .map(|base| match base {
-                BranchViewBase::Current(selector) => schema
-                    .project_branch_view_selector(&table_schema, selector)
-                    .map(|(key, _)| BranchViewSourceBase::Current(key)),
-                BranchViewBase::Snapshot { branch, snapshot } => schema
-                    .project_branch_view_selector(&table_schema, branch)
-                    .map(|(key, _)| BranchViewSourceBase::Snapshot(key, snapshot.clone())),
-            })
-            .transpose()
+        let (head, base) = layer_stack::branch_view_stack(&schema, &table_schema, head, base)
             .map_err(Error::InvalidBranchKey)?;
         Ok(self
             .branch_view_rows_for_schema(
@@ -527,15 +515,13 @@ where
             .collect::<BTreeSet<_>>();
         let mut rows = Vec::new();
         for row_uuid in row_ids {
-            let Some(version) = head_content
-                .get(&row_uuid)
-                .or_else(|| base_content.get(&row_uuid))
+            // Content and deletion registers stack separately, head over
+            // base (`INV-BVIEW-9`).
+            let Some(version) = layer_stack::top_wins([&head_content, &base_content], &row_uuid)
             else {
                 continue;
             };
-            let deletion = head_deletions
-                .get(&row_uuid)
-                .or_else(|| base_deletions.get(&row_uuid));
+            let deletion = layer_stack::top_wins([&head_deletions, &base_deletions], &row_uuid);
             if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
                 continue;
             }
