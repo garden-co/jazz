@@ -354,6 +354,13 @@ where
         snapshot: Option<&SnapshotRef>,
     ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
         let mut content = BTreeMap::new();
+        let mut tx_ids = BTreeMap::new();
+        let snapshot = snapshot.map(|snapshot| Snapshot {
+            owner: snapshot.owner,
+            global_base: snapshot.global_base,
+            local_base: snapshot.local_base,
+            dots: snapshot.dots.clone(),
+        });
         let stored_keys = self.equivalent_stored_branch_keys(table, read_schema_version, key)?;
         for stored_key in stored_keys {
             for version in self
@@ -364,41 +371,12 @@ where
                 let Some(tx) = self.query_transaction(tx_id).await? else {
                     continue;
                 };
-                let visible = if let Some(snapshot) = snapshot {
-                    let snapshot = Snapshot {
-                        owner: snapshot.owner,
-                        global_base: snapshot.global_base,
-                        local_base: snapshot.local_base,
-                        dots: snapshot.dots.clone(),
-                    };
-                    self.snapshot_covers(tx_id, &snapshot).await
-                } else {
-                    match tier {
-                        DurabilityTier::Global => {
-                            matches!(tx.fate, Fate::Accepted)
-                                && tx.durability >= DurabilityTier::Global
-                        }
-
-                        DurabilityTier::None | DurabilityTier::Local => {
-                            !matches!(tx.fate, Fate::Rejected(_))
-                        }
-                    }
+                let visible = match &snapshot {
+                    Some(snapshot) => self.snapshot_covers(tx_id, snapshot).await,
+                    None => visible_at_tier(&tx, tier),
                 };
-                if !visible {
-                    continue;
-                }
-                let target = &mut content;
-                let replace =
-                    target
-                        .get(&version.row_uuid())
-                        .is_none_or(|existing: &VersionRow| {
-                            version.tx_time().sort_key(tx_id.node)
-                                > existing.tx_time().sort_key(
-                                    self.version_tx_id(existing).expect("valid version tx").node,
-                                )
-                        });
-                if replace {
-                    target.insert(version.row_uuid(), version);
+                if visible {
+                    keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
                 }
             }
         }
@@ -525,25 +503,11 @@ where
             if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
                 continue;
             }
-            let source_schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "history schema version alias must exist",
-                ))?;
-            let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(source_table, version)?;
-            let Some(projected_table) = self.translate_cells(
-                source_schema,
-                read_schema_version,
-                version.table(),
-                &mut cells,
-            )?
+            let Some(mut cells) =
+                self.project_version_cells(table, read_schema_version, version)?
             else {
                 continue;
             };
-            if projected_table != table {
-                continue;
-            }
             for column_name in &read_table.branch_by {
                 let (_, encoded) = output_branch
                     .values
@@ -559,21 +523,7 @@ where
                     })?,
                 );
             }
-            let updated = match deletion {
-                Some(deletion)
-                    if self
-                        .version_tx_id(deletion)?
-                        .time
-                        .sort_key(self.version_tx_id(deletion)?.node)
-                        > self
-                            .version_tx_id(version)?
-                            .time
-                            .sort_key(self.version_tx_id(version)?.node) =>
-                {
-                    deletion
-                }
-                _ => version,
-            };
+            let updated = self.newer_of_deletion(version, deletion)?;
             rows.push(current_row_from_materialized_cells_with_layer_provenance(
                 &read_table,
                 version,
@@ -586,7 +536,7 @@ where
         Ok(rows)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) async fn current_rows_for_schema(
         &mut self,
         table: &str,
@@ -597,27 +547,9 @@ where
             return self.current_rows(table, tier).await;
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
-        let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
-        for version in self.query_table_versions(table).await? {
-            let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            let visible_at_tier = match tier {
-                DurabilityTier::Global => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
-                }
-
-                DurabilityTier::None | DurabilityTier::Local => {
-                    !matches!(tx.fate, Fate::Rejected(_))
-                }
-            };
-            if !visible_at_tier {
-                continue;
-            }
-            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
-        }
+        let content = self
+            .winning_versions(table, VersionVisibility::Tier(tier))
+            .await?;
         self.project_version_winners(table, read_schema_version, &read_table, content)
     }
 
@@ -630,23 +562,9 @@ where
         let read_table = self
             .table_in_schema_ref(table, read_schema_version)?
             .clone();
-        let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
-        for version in self.query_table_versions(table).await? {
-            let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            if !matches!(tx.fate, Fate::Accepted)
-                || tx.durability < DurabilityTier::Global
-                || tx
-                    .global_time
-                    .is_none_or(|global_time| global_time > position)
-            {
-                continue;
-            }
-            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
-        }
+        let content = self
+            .winning_versions(table, VersionVisibility::GlobalAt(position))
+            .await?;
         self.project_version_winners(table, read_schema_version, &read_table, content)
     }
 
@@ -659,16 +577,87 @@ where
         let read_table = self
             .table_in_schema_ref(table, read_schema_version)?
             .clone();
-        let mut content = BTreeMap::<RowUuid, VersionRow>::new();
-        let mut tx_ids = BTreeMap::<RowUuid, TxId>::new();
+        let content = self
+            .winning_versions(table, VersionVisibility::Snapshot(snapshot))
+            .await?;
+        self.project_version_winners(table, read_schema_version, &read_table, content)
+    }
+
+    /// Each row's latest version in `table` among those `visibility` admits.
+    async fn winning_versions(
+        &mut self,
+        table: &str,
+        visibility: VersionVisibility<'_>,
+    ) -> Result<BTreeMap<RowUuid, VersionRow>, Error> {
+        let mut content = BTreeMap::new();
+        let mut tx_ids = BTreeMap::new();
         for version in self.query_table_versions(table).await? {
             let tx_id = self.version_tx_id(&version)?;
-            if !self.snapshot_covers(tx_id, snapshot).await {
-                continue;
+            let visible = match visibility {
+                VersionVisibility::Snapshot(snapshot) => {
+                    self.snapshot_covers(tx_id, snapshot).await
+                }
+                #[cfg(test)]
+                VersionVisibility::Tier(tier) => self
+                    .query_transaction(tx_id)
+                    .await?
+                    .is_some_and(|tx| visible_at_tier(&tx, tier)),
+                VersionVisibility::GlobalAt(position) => {
+                    self.query_transaction(tx_id).await?.is_some_and(|tx| {
+                        matches!(tx.fate, Fate::Accepted)
+                            && tx.durability >= DurabilityTier::Global
+                            && tx
+                                .global_time
+                                .is_some_and(|global_time| global_time <= position)
+                    })
+                }
+            };
+            if visible {
+                keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
             }
-            keep_latest_version(&mut content, &mut tx_ids, tx_id, version);
         }
-        self.project_version_winners(table, read_schema_version, &read_table, content)
+        Ok(content)
+    }
+
+    /// Materialize `version` in its own schema and translate its cells into
+    /// `read_schema_version`; `None` when the row now belongs to another table.
+    fn project_version_cells(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        version: &VersionRow,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let source_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "history schema version alias must exist",
+            ))?;
+        let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
+        let mut cells = self.materialized_cells_for_version(source_table, version)?;
+        let projected_table = self.translate_cells(
+            source_schema,
+            read_schema_version,
+            version.table(),
+            &mut cells,
+        )?;
+        Ok((projected_table.as_deref() == Some(table)).then_some(cells))
+    }
+
+    /// The row's last-updated version: its deletion marker when that sorts
+    /// after the content version, else the content version itself.
+    fn newer_of_deletion<'a>(
+        &self,
+        content: &'a VersionRow,
+        deletion: Option<&'a VersionRow>,
+    ) -> Result<&'a VersionRow, Error> {
+        let sort_key = |version: &VersionRow| -> Result<_, Error> {
+            let tx_id = self.version_tx_id(version)?;
+            Ok(tx_id.time.sort_key(tx_id.node))
+        };
+        Ok(match deletion {
+            Some(deletion) if sort_key(deletion)? > sort_key(content)? => deletion,
+            _ => content,
+        })
     }
 
     /// Project each row's winning version into `read_schema_version`,
@@ -689,45 +678,17 @@ where
             {
                 continue;
             }
-            let source_schema = self
-                .schema_version_for_alias(content.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "history schema version alias must exist",
-                ))?;
-            let source_table = self.table_in_schema_ref(content.table(), source_schema)?;
-            let mut cells = self.materialized_cells_for_version(source_table, &content)?;
-            let Some(projected_table) = self.translate_cells(
-                source_schema,
-                read_schema_version,
-                content.table(),
-                &mut cells,
-            )?
+            let Some(cells) = self.project_version_cells(table, read_schema_version, &content)?
             else {
                 continue;
             };
-            if projected_table == table {
-                let updated = match deletions.get(&row_uuid) {
-                    Some(deletion)
-                        if self
-                            .version_tx_id(deletion)?
-                            .time
-                            .sort_key(self.version_tx_id(deletion)?.node)
-                            > self
-                                .version_tx_id(&content)?
-                                .time
-                                .sort_key(self.version_tx_id(&content)?.node) =>
-                    {
-                        deletion
-                    }
-                    _ => &content,
-                };
-                match current_row_from_materialized_cells_with_layer_provenance(
-                    read_table, &content, &content, updated, &cells,
-                ) {
-                    Ok(row) => rows.push(row),
-                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
-                    Err(error) => return Err(error),
-                }
+            let updated = self.newer_of_deletion(&content, deletions.get(&row_uuid))?;
+            match current_row_from_materialized_cells_with_layer_provenance(
+                read_table, &content, &content, updated, &cells,
+            ) {
+                Ok(row) => rows.push(row),
+                Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                Err(error) => return Err(error),
             }
         }
         sort_current_rows(&mut rows);
@@ -763,6 +724,29 @@ fn deletion_marker_winners(
         .filter(|(_, version)| version.deletion().is_some())
         .map(|(row_uuid, version)| (*row_uuid, version.clone()))
         .collect()
+}
+
+/// Which transactions a version scan admits.
+#[derive(Clone, Copy)]
+enum VersionVisibility<'a> {
+    /// Visible at a durability tier (see [`visible_at_tier`]).
+    #[cfg(test)]
+    Tier(DurabilityTier),
+    /// Globally accepted at or before a global position.
+    GlobalAt(GlobalTime),
+    /// Covered by a frozen snapshot.
+    Snapshot(&'a Snapshot),
+}
+
+/// Global reads see only globally durable accepted transactions; local reads
+/// see everything not rejected.
+fn visible_at_tier(tx: &StoredTransaction, tier: DurabilityTier) -> bool {
+    match tier {
+        DurabilityTier::Global => {
+            matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
+        }
+        DurabilityTier::None | DurabilityTier::Local => !matches!(tx.fate, Fate::Rejected(_)),
+    }
 }
 
 /// Keep `version` as its row's winner if its transaction sorts after the
