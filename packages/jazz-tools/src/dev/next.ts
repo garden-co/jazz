@@ -248,12 +248,8 @@ export function withJazz(
       ...inspectorConfig,
       env: {
         ...merged.env,
-        [PUBLIC_APP_ID_ENV]: managed.appId,
-        [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
+        ...runtime.clientEnv(managed),
         ...(options.inspector !== false ? { NEXT_PUBLIC_JAZZ_INSPECTOR: "1" } : {}),
-        ...(managed.telemetryCollectorUrl
-          ? { [PUBLIC_TELEMETRY_COLLECTOR_URL_ENV]: managed.telemetryCollectorUrl }
-          : {}),
       },
       turbopack: {
         ...previousTurbopack,

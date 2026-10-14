@@ -192,12 +192,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       // runtime's own write below.
       owners.attachServer(holder, viteServer);
 
-      viteServer.config.env ??= {};
-      viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
-      viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
-      if (managed.telemetryCollectorUrl) {
-        viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
-      }
+      Object.assign((viteServer.config.env ??= {}), runtime.clientEnv(managed));
       console.log(
         `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
       );

@@ -392,7 +392,20 @@ export class ManagedDevRuntime {
   private previousBackendSecret: string | undefined;
   private hadPreviousBackendSecret = false;
   private injectedBackendSecret: string | undefined;
-  constructor(private envKeys: ManagedRuntimeEnvKeys) {}
+  constructor(readonly envKeys: ManagedRuntimeEnvKeys) {}
+
+  /** The public client env for `runtime` under this runtime's keys; telemetry only when set. */
+  clientEnv(
+    runtime: Pick<ManagedRuntime, "appId" | "serverUrl" | "telemetryCollectorUrl">,
+  ): Record<string, string> {
+    return {
+      [this.envKeys.appId]: runtime.appId,
+      [this.envKeys.serverUrl]: runtime.serverUrl,
+      ...(runtime.telemetryCollectorUrl
+        ? { [this.envKeys.telemetryCollectorUrl]: runtime.telemetryCollectorUrl }
+        : {}),
+    };
+  }
 
   prepareEnv(options: InitializeOptions): string | null {
     const serverOpt = options.server ?? true;
@@ -678,11 +691,7 @@ export class ManagedDevRuntime {
           this.injectedBackendSecret = backendSecret;
         }
 
-        process.env[this.envKeys.appId] = appId;
-        process.env[this.envKeys.serverUrl] = serverUrl;
-        if (telemetryCollectorUrl) {
-          process.env[this.envKeys.telemetryCollectorUrl] = telemetryCollectorUrl;
-        }
+        Object.assign(process.env, this.clientEnv({ appId, serverUrl, telemetryCollectorUrl }));
 
         this.runtime = { appId, serverUrl, adminSecret, backendSecret, telemetryCollectorUrl };
         this.runtimeConfigSignature = this.serializeConfig(this.getManagedRuntimeConfig(options));
