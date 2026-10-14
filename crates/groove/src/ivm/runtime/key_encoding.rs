@@ -128,7 +128,12 @@ pub(super) fn record_field_key_parts(
         encode_record_field_key_part(&mut key, descriptor, record, field_idx)?;
         return Ok(vec![key]);
     }
-    key_parts(named_field_value(descriptor, record, field_idx)?)
+    let value = named_field_value(descriptor, record, field_idx)?;
+    if matches!(field.value_type, ValueType::Array(_)) && !matches!(value, Value::Array(_)) {
+        let name = field.name.as_deref().unwrap_or("<unnamed>");
+        return Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()));
+    }
+    key_parts(value)
         .iter()
         .map(|part| {
             let mut key = Vec::new();
