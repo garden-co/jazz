@@ -3922,9 +3922,6 @@ pub(super) enum BranchLayerAccess {
     },
 }
 
-/// The rows of a physical current table source, keyed `(branch_key,
-/// row_uuid, ..)`, whose `row_uuid` is one of `row_ids`' (a keyed lookup:
-/// one storage probe per distinct id, maintained as the ids change).
 /// How [`JazzSourceGraphPreparer::presence`] reads a masking layer's row ids.
 enum PresenceRead {
     /// Only these row ids (a relation with a `row_uuid` field), by a keyed
@@ -3934,6 +3931,9 @@ enum PresenceRead {
     Whole,
 }
 
+/// The rows of a physical current table source, keyed `(branch_key,
+/// row_uuid, ..)`, whose `row_uuid` is one of `row_ids`' (a keyed lookup:
+/// one storage probe per distinct id, maintained as the ids change).
 fn lookup_by_row_id(rows: GraphBuilder, row_ids: GraphBuilder) -> Result<GraphBuilder, Error> {
     GraphBuilder::lookup(rows, row_ids, ["row_uuid"]).ok_or(Error::InvalidStoredValue(
         "a keyed lookup needs a physical current table source",

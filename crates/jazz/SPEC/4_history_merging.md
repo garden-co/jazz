@@ -566,7 +566,11 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
     pending edit that moved a row out of the prefix still hides its origin
     image). The delta is sparse, only this node's pending rows, while
     origin's candidates under a prefix can be most of the table: the read
-    costs the pending rows, not one probe per origin candidate.
+    costs the pending rows, not one probe per origin candidate. The one
+    case that reads more than before: a draft branch that exists only on
+    this node has an empty origin, so its delta is the whole branch, and an
+    indexed read of it reads every row of the branch for the mask. That is
+    bounded by what an unindexed read of the branch costs.
   - A branch view masks its base by the head's presence read by the base
     candidates' row ids: a keyed lookup of the head's refs
     ([#4005](https://github.com/garden-co/jazz/issues/4005)). A head can be
