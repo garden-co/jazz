@@ -25,6 +25,7 @@ import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import { toError } from "./util.js";
+import { parseUuidBytes } from "./hex.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -85,14 +86,9 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       return envelope(5, payload); // Groove I64
     }
     case "Uuid": {
-      const hex = value.value.replaceAll("-", "");
-      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
-      return envelope(
-        7, // Groove UUID
-        Uint8Array.from({ length: 16 }, (_, index) =>
-          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
-        ),
-      );
+      const bytes = parseUuidBytes(value.value);
+      if (!bytes) throw new Error(`invalid branch UUID ${value.value}`);
+      return envelope(7, bytes); // Groove UUID
     }
     case "Text": {
       const text = new TextEncoder().encode(value.value);
