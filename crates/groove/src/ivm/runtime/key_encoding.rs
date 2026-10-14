@@ -631,7 +631,40 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
     // Type tags make composite keys unambiguous. Payload bytes are chosen to
     // preserve natural ordering in RocksDB's lexicographic iterator order.
     match value {
-        Value::U8(value) => {
+        Value::F64(value) if value.is_nan() => {
+            return Err(IvmRuntimeError::RecordEncoding(
+                records::Error::InvalidF64NaN,
+            ));
+        }
+        Value::Tuple(values) => {
+            key.push(11);
+            for value in values {
+                encode_key_part(key, value)?;
+            }
+        }
+        Value::Nullable(None) => {
+            key.push(8);
+        }
+        Value::Nullable(Some(value)) => {
+            key.push(9);
+            encode_key_part(key, value)?;
+        }
+        value => encode_scalar_key_part(key, value)?,
+    }
+    Ok(())
+}
+
+/// Type-tagged, order-preserving bytes of one scalar key value. The arrangement
+/// codec ([`encode_key_part`]) and the runtime window-group codec share these
+/// tags and differ only in how they encode composite values; any non-scalar
+/// value reaching here is not a supported key.
+#[inline]
+pub(super) fn encode_scalar_key_part(
+    key: &mut Vec<u8>,
+    value: &Value,
+) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::U8(value) | Value::EnumTag(value) => {
             key.push(0);
             key.push(*value);
         }
@@ -660,11 +693,6 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.extend(order_preserving_i64_bits(*value).to_be_bytes());
         }
         Value::F64(value) => {
-            if value.is_nan() {
-                return Err(IvmRuntimeError::RecordEncoding(
-                    records::Error::InvalidF64NaN,
-                ));
-            }
             key.push(4);
             key.extend(order_preserving_f64_bits(*value).to_be_bytes());
         }
@@ -684,26 +712,12 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(10);
             key.extend_from_slice(value.as_bytes());
         }
-        Value::Tuple(values) => {
-            key.push(11);
-            for value in values {
-                encode_key_part(key, value)?;
-            }
-        }
-        Value::EnumTag(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::Nullable(None) => {
-            key.push(8);
-        }
-        Value::Nullable(Some(value)) => {
-            key.push(9);
-            encode_key_part(key, value)?;
-        }
-        Value::Array(_) | Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
-            return Err(IvmRuntimeError::UnsupportedJoinKey);
-        }
+        Value::Tuple(_)
+        | Value::Nullable(_)
+        | Value::Array(_)
+        | Value::Record(_)
+        | Value::Enum(_)
+        | Value::Large(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
     }
     Ok(())
 }
