@@ -538,6 +538,23 @@ where
         status
     }
 
+    /// Queue a write whose transaction identity `tx_id` was reserved just
+    /// now. The future reports its own outcome; the queue only runs it in its
+    /// place, so it takes no status, error event or completion.
+    pub(super) fn enqueue_reserved_write(&self, tx_id: TxId, future: QueuedMutationFuture) {
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                transaction: Some((tx_id, TxKind::Mergeable)),
+                open_tx_id: None,
+                future,
+                status: None,
+                completion: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
     pub(super) fn enqueue_transaction_operation(
         &self,
         open_tx_id: OpenTransactionId,

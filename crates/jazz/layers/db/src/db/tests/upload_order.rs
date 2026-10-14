@@ -13,7 +13,11 @@ use crate::model::test_support::AllowAll;
 fn music_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("tracks").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("tracks")
+                    .column("title", PublicColumnType::Text)
+                    .column("notes", PublicColumnType::Text),
+            )
             .allow_all(),
     )
 }
@@ -208,5 +212,85 @@ fn predecessor_reaching_core_after_its_chained_write_is_refused() {
     assert_eq!(
         rows[0].cell(&music_schema().tables[0], "title"),
         Some(Value::String("e2".to_owned()))
+    );
+}
+
+/// A queued edit and a streamed value to the same row keep the order they
+/// were made in. `enqueue_update` reserves its transaction when it is queued;
+/// the streamed upload is finished after it, while the edit still waits in
+/// the owner queue. The streamed write must not take an earlier place in the
+/// writer's order than the edit made before it: Core decides one writer's
+/// writes in transaction order, so the edit would otherwise reach Core as
+/// older than a write it had already accepted, and be refused.
+///
+/// ```text
+/// alice ══ enqueue_update(title=status)   reserved t1, queued
+/// alice ══ finish streaming notes          t2
+/// core     both accepted; title=status, notes=streamed
+/// ```
+#[test]
+fn queued_edit_and_later_streamed_value_keep_their_order() {
+    let mut fixture = Fixture::new(0xe5);
+    let queued = fixture
+        .writer
+        .enqueue_update(
+            "tracks".to_owned(),
+            fixture.target,
+            title("status"),
+            Default::default(),
+        )
+        .unwrap();
+    let edit = queued.mergeable_tx_id();
+    let cells = BTreeMap::new();
+    let mut upload = fixture
+        .writer
+        .begin_streaming_value_upload("tracks", &cells, "notes")
+        .unwrap();
+    crate::local_executor::block_on(
+        fixture
+            .writer
+            .push_streaming_value_upload(&mut upload, b"streamed"),
+    )
+    .unwrap();
+    let streamed = crate::local_executor::block_on(fixture.writer.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Update,
+        "tracks",
+        fixture.target,
+        cells,
+        "notes",
+        crate::db::WriteIdentity::Database,
+        None,
+        None,
+        None,
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    assert!(
+        edit < streamed,
+        "the edit was made first, so it is first in its writer's order"
+    );
+    let settled = |fixture: &Fixture| {
+        [edit, streamed]
+            .iter()
+            .all(|tx_id| fixture.is_global(*tx_id) || fixture.is_rejected(*tx_id))
+    };
+    fixture.pump_until(64, settled);
+    for tx_id in [edit, streamed] {
+        let state = fixture.writer.write_state(tx_id).unwrap();
+        assert!(
+            fixture.is_global(tx_id),
+            "{tx_id:?} must be accepted: {:?}",
+            state.fate
+        );
+    }
+    let edit_seq = fixture.core_state(edit).and_then(|(_, seq, _)| seq);
+    let streamed_seq = fixture.core_state(streamed).and_then(|(_, seq, _)| seq);
+    assert!(edit_seq < streamed_seq, "{edit_seq:?} {streamed_seq:?}");
+    let rows = fixture.core.read(&Query::from("tracks")).unwrap();
+    let table = &music_schema().tables[0];
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String("status".to_owned()))
     );
 }

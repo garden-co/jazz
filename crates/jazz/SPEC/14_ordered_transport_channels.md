@@ -71,6 +71,14 @@ and has no "come back later" answer. An uploader that holds one of a writer's
 units back (a large value still uploading or rate-limited) holds back that
 writer's later units on the link too.
 
+"The order they were written" is the writer's `TxId` order. A writer mints a
+write's `TxId` when the write takes its place in its owner's mutation queue,
+which publishes one write at a time in that order; a write that does not start
+in the queue (a finished streamed upload) reserves its `TxId` and joins the
+queue when its row write is made, instead of minting at commit. So `TxId`
+order, local commit order, outbox order and recovery's `TxId`-sorted replay
+after a restart are one order.
+
 FateUpdate uses the Writes channel with a bilateral canonical barrier. A local-first
 query can deliver another author's Pending transaction carrier. After accepting
 that view for delivery, the sender registers a fate observer for its recipient;
