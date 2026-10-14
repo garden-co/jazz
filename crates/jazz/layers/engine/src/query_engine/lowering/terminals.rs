@@ -23,19 +23,14 @@ pub(super) fn shared_witness_sinks(terminals: &[LoweredTerminal]) -> BTreeMap<St
         else {
             continue;
         };
-        let (version_role, version_tag, replacement_tag) = match replacement_role {
-            ProgramFactTerminal::ReplacementWitnessContent => (
-                ProgramFactTerminal::VersionWitnessContent,
-                "version_content",
-                "replacement_content",
-            ),
-            ProgramFactTerminal::ReplacementWitnessDeletion => (
-                ProgramFactTerminal::VersionWitnessDeletion,
-                "version_deletion",
-                "replacement_deletion",
-            ),
+        let layer = match replacement_role {
+            ProgramFactTerminal::ReplacementWitnessContent => WitnessLayer::Content,
+            ProgramFactTerminal::ReplacementWitnessDeletion => WitnessLayer::Deletion,
             _ => continue,
         };
+        let version_role = WitnessFlavour::Version.terminal(layer);
+        let version_tag = WitnessFlavour::Version.tag(layer);
+        let replacement_tag = WitnessFlavour::Replacement.tag(layer);
         for version in terminals {
             if shared.values().any(|sink| sink == &version.sink) {
                 continue;
@@ -973,7 +968,7 @@ pub(super) fn lowered_terminals(
                     });
                 }
             }
-        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
+        } else if let Some(flavour) = WitnessFlavour::of(fact) {
             for (source_id, resolved_source) in resolved_sources {
                 let Some(covered_source) = covered_source_members.get(source_id) else {
                     // Coverage is emitted independently below.  An exact
@@ -989,121 +984,19 @@ pub(super) fn lowered_terminals(
                     &root_route_fields,
                     &root_source_route_fields,
                 );
-                let content_output = fact_output_with_terminal(
+                push_witness_terminals(
+                    &mut terminals,
+                    flavour,
                     fact,
-                    ProgramFactTerminal::VersionWitnessContent,
                     plan,
                     source_id,
                     resolved_source,
+                    covered_source.clone(),
+                    &source_route_fields,
                     resolved_sources,
                     request,
-                    source_route_fields.clone(),
+                    parameter_domain,
                 )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph_from_visible_graph(
-                        resolved_source,
-                        covered_source.clone(),
-                        "version_content",
-                        &source_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(content_output),
-                });
-                // A content retraction alone means the authority no longer
-                // selects that source; it might be policy revocation, and
-                // must never be mistaken for a tombstone. When this source
-                // has an explicit deletion-register witness, ship that exact
-                // deletion layer independently. The receiver validates and
-                // ingests its tx/branch/schema carrier while retaining no
-                // deletion tuple in its maintained input relation.
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::VersionWitnessDeletion,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    source_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "version_deletion",
-                        request,
-                        parameter_domain,
-                        &source_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
-                });
-            }
-        } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
-            for (source_id, resolved_source) in resolved_sources {
-                let Some(covered_source) = covered_source_members.get(source_id) else {
-                    continue;
-                };
-                let source_route_fields = terminal_route_fields_for_source(
-                    source_id,
-                    resolved_source,
-                    plan.root_source(),
-                    &root_route_fields,
-                    &root_source_route_fields,
-                );
-                let content_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::ReplacementWitnessContent,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    source_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph_from_visible_graph(
-                        resolved_source,
-                        covered_source.clone(),
-                        "replacement_content",
-                        &source_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(content_output),
-                });
-                // A content retraction alone means the authority no longer
-                // selects that source; it might be policy revocation, and
-                // must never be mistaken for a tombstone. When this source
-                // has an explicit deletion-register witness, ship that exact
-                // deletion layer independently. The receiver validates and
-                // ingests its tx/branch/schema carrier while retaining no
-                // deletion tuple in its maintained input relation.
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::ReplacementWitnessDeletion,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    source_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "replacement_deletion",
-                        request,
-                        parameter_domain,
-                        &source_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
-                });
             }
         } else if matches!(fact, ProgramFactKey::ProgramSourceCoverage(_)) {
             // Closure coverage is control-plane evidence, not a projection of
@@ -2238,120 +2131,147 @@ fn lowered_aggregate_terminals(
                     output: OutputTerminalSchema::Fact(output),
                 });
             }
-        } else if matches!(fact, ProgramFactKey::VersionWitnesses) {
+        } else if let Some(flavour) = WitnessFlavour::of(fact) {
             // Aggregate result membership is derived output, not an input
             // snapshot a receiver may replay.  Ship the exact versioned
-            // contributors for every compiled source so a covered receiver
-            // can rebuild the same aggregate graph locally.
+            // contributors (and replacement evidence, in the same source-fact
+            // family as ordinary maintained queries) for every compiled source
+            // so a covered receiver can rebuild the same aggregate graph
+            // locally. A receiver only admits the source closure, never the
+            // aggregate result.
             for (source_id, contributor_graph) in &aggregate_contributors {
                 let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
                     single_gap_report(UnsupportedReason::Runtime(
                         "aggregate contributor has no resolved descriptor".to_owned(),
                     ))
                 })?;
-                let content_output = fact_output_with_terminal(
+                push_witness_terminals(
+                    &mut terminals,
+                    flavour,
                     fact,
-                    ProgramFactTerminal::VersionWitnessContent,
                     plan,
                     source_id,
                     resolved_source,
+                    contributor_graph.clone(),
+                    &root_route_fields,
                     resolved_sources,
                     request,
-                    root_route_fields.clone(),
+                    parameter_domain,
                 )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph_from_visible_graph(
-                        resolved_source,
-                        contributor_graph.clone(),
-                        "version_content",
-                        &root_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(content_output),
-                });
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::VersionWitnessDeletion,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    root_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "version_deletion",
-                        request,
-                        parameter_domain,
-                        &root_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
-                });
-            }
-        } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
-            // Keep aggregate contributor replacement evidence in the same
-            // source-fact family as ordinary maintained queries.  A receiver
-            // only admits the source closure, never the aggregate result.
-            for (source_id, contributor_graph) in &aggregate_contributors {
-                let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(
-                        "aggregate contributor has no resolved descriptor".to_owned(),
-                    ))
-                })?;
-                let content_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::ReplacementWitnessContent,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    root_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, source_id),
-                    graph: content_version_witness_graph_from_visible_graph(
-                        resolved_source,
-                        contributor_graph.clone(),
-                        "replacement_content",
-                        &root_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(content_output),
-                });
-                if resolved_source.deletion_register.is_none() {
-                    continue;
-                }
-                let deletion_output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::ReplacementWitnessDeletion,
-                    plan,
-                    source_id,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    root_route_fields.clone(),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_deletion_fact_sink_name(fact, source_id),
-                    graph: deletion_witness_graph_for_current_register(
-                        resolved_source,
-                        "replacement_deletion",
-                        request,
-                        parameter_domain,
-                        &root_route_fields,
-                    )?,
-                    output: OutputTerminalSchema::Fact(deletion_output),
-                });
             }
         }
     }
     Ok(terminals)
+}
+
+/// Version and replacement witnesses lower identically; they differ only in
+/// terminal roles, sink names and the `event_kind` tag of each layer.
+#[derive(Clone, Copy)]
+enum WitnessFlavour {
+    Version,
+    Replacement,
+}
+
+#[derive(Clone, Copy)]
+enum WitnessLayer {
+    Content,
+    Deletion,
+}
+
+impl WitnessFlavour {
+    fn of(key: &ProgramFactKey) -> Option<Self> {
+        match key {
+            ProgramFactKey::VersionWitnesses => Some(Self::Version),
+            ProgramFactKey::ReplacementWitnesses => Some(Self::Replacement),
+            _ => None,
+        }
+    }
+
+    fn terminal(self, layer: WitnessLayer) -> ProgramFactTerminal {
+        match (self, layer) {
+            (Self::Version, WitnessLayer::Content) => ProgramFactTerminal::VersionWitnessContent,
+            (Self::Version, WitnessLayer::Deletion) => ProgramFactTerminal::VersionWitnessDeletion,
+            (Self::Replacement, WitnessLayer::Content) => {
+                ProgramFactTerminal::ReplacementWitnessContent
+            }
+            (Self::Replacement, WitnessLayer::Deletion) => {
+                ProgramFactTerminal::ReplacementWitnessDeletion
+            }
+        }
+    }
+
+    /// The `event_kind` literal; `maintained.{tag}` is also the sink prefix.
+    fn tag(self, layer: WitnessLayer) -> &'static str {
+        match (self, layer) {
+            (Self::Version, WitnessLayer::Content) => "version_content",
+            (Self::Version, WitnessLayer::Deletion) => "version_deletion",
+            (Self::Replacement, WitnessLayer::Content) => "replacement_content",
+            (Self::Replacement, WitnessLayer::Deletion) => "replacement_deletion",
+        }
+    }
+}
+
+/// Emit one source's content witness terminal and, when the source has a
+/// deletion register, its deletion witness terminal (in that order).
+fn push_witness_terminals(
+    terminals: &mut Vec<LoweredTerminal>,
+    flavour: WitnessFlavour,
+    fact: &ProgramFactKey,
+    plan: &AnalyzedQueryPlan,
+    source_id: &SourceId,
+    resolved_source: &ResolvedSource,
+    visible_graph: GraphBuilder,
+    route_fields: &BTreeSet<String>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &LoweringContext<'_>,
+    parameter_domain: &ParameterDomain,
+) -> CapabilityResult<()> {
+    let output = |layer| {
+        fact_output_with_terminal(
+            fact,
+            flavour.terminal(layer),
+            plan,
+            source_id,
+            resolved_source,
+            resolved_sources,
+            request,
+            route_fields.clone(),
+        )
+        .map(OutputTerminalSchema::Fact)
+    };
+    let content_output = output(WitnessLayer::Content)?;
+    terminals.push(LoweredTerminal {
+        sink: scoped_fact_sink_name(fact, source_id),
+        graph: content_version_witness_graph_from_visible_graph(
+            resolved_source,
+            visible_graph,
+            flavour.tag(WitnessLayer::Content),
+            route_fields,
+        )?,
+        output: content_output,
+    });
+    // A content retraction alone means the authority no longer selects that
+    // source; it might be policy revocation, and must never be mistaken for a
+    // tombstone. When this source has an explicit deletion-register witness,
+    // ship that exact deletion layer independently. The receiver validates
+    // and ingests its tx/branch/schema carrier while retaining no deletion
+    // tuple in its maintained input relation.
+    if resolved_source.deletion_register.is_none() {
+        return Ok(());
+    }
+    let deletion_output = output(WitnessLayer::Deletion)?;
+    terminals.push(LoweredTerminal {
+        sink: scoped_deletion_fact_sink_name(fact, source_id),
+        graph: deletion_witness_graph_for_current_register(
+            resolved_source,
+            flavour.tag(WitnessLayer::Deletion),
+            request,
+            parameter_domain,
+            route_fields,
+        )?,
+        output: deletion_output,
+    });
+    Ok(())
 }
 
 /// Lower the authority-visible relation immediately before the root aggregate.
@@ -2624,25 +2544,20 @@ fn fact_output_with_terminal(
                 routing_param_fields,
             })
         }
-        ProgramFactKey::VersionWitnesses => {
+        ProgramFactKey::VersionWitnesses | ProgramFactKey::ReplacementWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
             let witness = version_witness_schema(source_id, source, &version);
-            ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
+            let schemas = VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
                 deletion: Some(witness),
                 routing_param_fields,
-            })
-        }
-        ProgramFactKey::ReplacementWitnesses => {
-            let version = version_witness_fields(&source.row_shape)?;
-            let witness = version_witness_schema(source_id, source, &version);
-            ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
-                role_field: "event_kind".to_owned(),
-                content: Some(witness.clone()),
-                deletion: Some(witness),
-                routing_param_fields,
-            })
+            };
+            if matches!(key, ProgramFactKey::VersionWitnesses) {
+                ProgramFactSchema::VersionWitnesses(schemas)
+            } else {
+                ProgramFactSchema::ReplacementWitnesses(schemas)
+            }
         }
         ProgramFactKey::RelationEdges => {
             ProgramFactSchema::RelationEdges(relation_edge_schema(plan, source, resolved_sources)?)
@@ -2847,13 +2762,12 @@ fn scoped_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
 }
 
 fn scoped_deletion_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
-    let base = match key {
-        ProgramFactKey::VersionWitnesses => "maintained.version_deletion",
-        ProgramFactKey::ReplacementWitnesses => "maintained.replacement_deletion",
-        _ => return scoped_fact_sink_name(key, source),
+    let Some(flavour) = WitnessFlavour::of(key) else {
+        return scoped_fact_sink_name(key, source);
     };
     format!(
-        "{base}.{}.{}",
+        "maintained.{}.{}.{}",
+        flavour.tag(WitnessLayer::Deletion),
         source.table,
         source_path_sink_fragment(source)
     )
