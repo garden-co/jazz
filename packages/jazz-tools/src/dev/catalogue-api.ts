@@ -7,7 +7,7 @@ import type {
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
-import { appScopedUrl } from "../runtime/url.js";
+import { appScopedUrl, fetchAdminJson } from "../runtime/url.js";
 
 export interface FetchStoredWasmSchemaOptions {
   appId: string;
@@ -27,26 +27,11 @@ export async function fetchStoredWasmSchema(
   serverUrl: string,
   options: FetchStoredWasmSchemaOptions,
 ): Promise<{ schema: WasmSchema; publishedAt: number | null }> {
-  const schemaUrl = appScopedUrl(
-    serverUrl,
-    options.appId,
-    `schema/${encodeURIComponent(options.schemaHash)}`,
-  );
-
-  const response = await fetch(schemaUrl, {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(`Schema fetch failed: ${response.status} ${response.statusText}${detail}`);
-  }
-
-  const body = (await response.json()) as {
+  const body = (await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, `schema/${encodeURIComponent(options.schemaHash)}`),
+    options.adminSecret,
+    "Schema",
+  )) as {
     schema: { tables: WasmSchema };
     publishedAt?: number | null;
   };
@@ -111,28 +96,17 @@ export async function fetchSchemaHashes(
   serverUrl: string,
   options: FetchStoredSchemasOptions,
 ): Promise<{ hashes: string[]; schemas: StoredSchemaHash[] }> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "schemas"), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
+  const rawSchemaHashesResponse = await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, "schemas"),
+    options.adminSecret,
+    "Schema hashes",
     // A 404 also deliberately hides invalid/mismatched app IDs. It is not a
     // transient-readiness signal, so leave the retry decision with the caller.
-    const guidance =
-      response.status === 404
+    (status) =>
+      status === 404
         ? " Check the server URL and app ID. If this Cloud app was just created, wait for its regional status to become healthy and synced, then retry deployment. A 404 alone does not confirm startup is still in progress."
-        : "";
-    throw new Error(
-      `Schema hashes fetch failed: ${response.status} ${response.statusText}${detail}${guidance}`,
-    );
-  }
-
-  const rawSchemaHashesResponse = (await response.json()) as unknown;
+        : "",
+  );
   const schemaHashesResponse = isSchemaHashesResponseBody(rawSchemaHashesResponse)
     ? rawSchemaHashesResponse
     : {};
@@ -169,20 +143,11 @@ export async function fetchStoredPermissions(
   serverUrl: string,
   options: FetchStoredPermissionsOptions,
 ): Promise<StoredPermissionsResponse> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/permissions"), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(`Permissions fetch failed: ${response.status} ${response.statusText}${detail}`);
-  }
-
-  const body = (await response.json()) as {
+  const body = (await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, "admin/permissions"),
+    options.adminSecret,
+    "Permissions",
+  )) as {
     head?: StoredPermissionsHead | null;
     permissions?: Record<string, TablePolicies> | null;
   };
