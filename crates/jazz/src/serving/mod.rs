@@ -19,12 +19,12 @@ use std::time::SystemTime;
 
 use crate::db::{
     CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
-    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, TickScheduler, Transport,
+    PeerConnection, ResumeCursor, SeededRowIdSource, TickScheduler, Transport,
     WireTransportAdapter,
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
-use crate::ids::{AuthorSubject, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, SchemaVersionId};
 use crate::protocol::{CatalogueAck, MigrationLens, SchemaVersion, SyncMessage};
 use crate::schema::JazzSchema;
 use crate::storage_codec_profile::node_storage_codec_profile;
@@ -150,15 +150,6 @@ impl InMemoryServerShellConfig {
         self
     }
 
-    /// Configure incoming upload rate limits and staged-tree expiry.
-    pub fn with_large_value_staging_policy(
-        mut self,
-        policy: crate::node::LargeValueStagingPolicy,
-    ) -> Self {
-        self.large_value_staging_policy = policy;
-        self
-    }
-
     /// Configure this shell's server role.
     pub fn with_role(mut self, role: NodeRole) -> Self {
         self.role = role;
@@ -224,19 +215,11 @@ pub struct InMemoryServerShell {
     resume_cursors: BTreeMap<u64, (AuthorSubject, ResumeCursor)>,
     next_resume_token: u64,
     next_session_generation: u64,
-    runtime_schema_state: RuntimeSchemaState,
     metrics: InMemoryServerShellMetrics,
-    drain_state: DrainState,
     /// Canonical frames queued for any downstream session since startup.
     /// Shared by every session transport so a host turn can tell whether
     /// its tick produced output for a session other than the one it serves.
     session_frames_queued: Rc<Cell<u64>>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct RuntimeSchemaState {
-    current_write_revision: u64,
-    last_published_schema: Option<SchemaVersionId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -382,7 +365,6 @@ impl fmt::Debug for InMemoryServerShell {
         f.debug_struct("InMemoryServerShell")
             .field("sessions", &self.sessions)
             .field("metrics", &self.metrics)
-            .field("drain_state", &self.drain_state)
             .finish_non_exhaustive()
     }
 }
@@ -412,7 +394,6 @@ impl InMemoryServerShell {
         let large_value_staging_policy = config.large_value_staging_policy;
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
-        let bootstrap_schema = config.schema.clone();
         let storage_factory = config.storage_factory.clone();
         let db = match &storage_config {
             StorageConfig::InMemory => {
@@ -473,7 +454,7 @@ impl InMemoryServerShell {
         }
         db.set_large_value_staging_policy(large_value_staging_policy);
 
-        let mut shell = Self {
+        let shell = Self {
             db,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
@@ -482,13 +463,11 @@ impl InMemoryServerShell {
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             next_session_generation: 1,
-            runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
-            drain_state: DrainState::Running,
             session_frames_queued: Rc::new(Cell::new(0)),
         };
         if bootstrap_runtime_schema {
-            shell.bootstrap_runtime_schema(bootstrap_schema)?;
+            shell.db.current_write_schema()?;
         }
         Ok(shell)
     }
@@ -525,28 +504,6 @@ impl InMemoryServerShell {
         self.db.set_catalogue_activation_failpoint(failpoint);
     }
 
-    /// Return the shell's ABI runtime handle for diagnostics in unit tests.
-    #[cfg(test)]
-    pub fn runtime_handle(&self) -> usize {
-        0
-    }
-
-    /// Return the shell's ABI database handle for diagnostics in unit tests.
-    #[cfg(test)]
-    pub fn db_handle(&self) -> usize {
-        0
-    }
-
-    /// Return the most recent schema version published through this shell's runtime admin lane.
-    pub fn last_published_runtime_schema(&self) -> Option<SchemaVersionId> {
-        self.runtime_schema_state.last_published_schema
-    }
-
-    /// Return the current write-schema pointer revision last applied through this shell.
-    pub fn runtime_write_schema_revision(&self) -> u64 {
-        self.runtime_schema_state.current_write_revision
-    }
-
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn runtime_catalogue_contains(
         &self,
@@ -561,13 +518,6 @@ impl InMemoryServerShell {
 
     pub(crate) fn runtime_catalogue_contains_schema(&self, schema: SchemaVersionId) -> bool {
         self.db.catalogue_schema(schema).is_some()
-    }
-
-    fn bootstrap_runtime_schema(&mut self, _schema: JazzSchema) -> ShellResult<()> {
-        let current = self.db.current_write_schema()?;
-        self.runtime_schema_state.current_write_revision = current.revision;
-        self.runtime_schema_state.last_published_schema = Some(current.schema);
-        Ok(())
     }
 
     /// Atomically admit a non-genesis schema with its lineage-defining lens.
@@ -644,8 +594,6 @@ impl InMemoryServerShell {
             return Err(ShellError::MissingEvent("active schema structural lineage"));
         }
         crate::local_executor::block_on(self.db.activate_schema(revision, schema, permissions))?;
-        self.runtime_schema_state.current_write_revision = revision;
-        self.runtime_schema_state.last_published_schema = Some(schema_id);
         Ok(schema_id)
     }
 
@@ -704,12 +652,6 @@ impl InMemoryServerShell {
         session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> ShellResult<ServerSession> {
-        if self.is_draining() {
-            self.metrics.rejected_sessions += 1;
-            return Err(ShellError::SessionRejected {
-                drain_state: self.drain_state,
-            });
-        }
         let generation = self
             .allocate_session_generation()
             .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
@@ -853,12 +795,6 @@ impl InMemoryServerShell {
         &mut self,
         resume: ServerSessionResume,
     ) -> ShellResult<ServerSession> {
-        if self.is_draining() {
-            self.metrics.rejected_sessions += 1;
-            return Err(ShellError::SessionRejected {
-                drain_state: self.drain_state,
-            });
-        }
         let Some(&(identity, _)) = self.resume_cursors.get(&resume.resume_token) else {
             return Err(ShellError::InvalidResumeToken(resume.resume_token));
         };
@@ -907,40 +843,6 @@ impl InMemoryServerShell {
         self.db.detach_connection(&state.connection);
         self.note_session_closed();
         Ok(())
-    }
-
-    /// Start graceful drain and stop accepting new sessions.
-    pub fn begin_drain(&mut self) {
-        self.drain_state = if self.metrics.active_sessions == 0 {
-            DrainState::Drained
-        } else {
-            DrainState::Draining
-        };
-    }
-
-    /// Return the current shutdown/drain state.
-    pub fn drain_state(&self) -> DrainState {
-        self.drain_state
-    }
-
-    /// Return a live health snapshot for the in-memory shell.
-    pub fn health_snapshot(&self) -> HealthSnapshot {
-        let (status, message) = match self.drain_state {
-            DrainState::Running => (HealthStatus::Ready, "ready"),
-            DrainState::ShutdownRequested | DrainState::Draining => {
-                (HealthStatus::Draining, "draining")
-            }
-            DrainState::Drained => (HealthStatus::Draining, "drained"),
-            DrainState::Stopped => (HealthStatus::Unhealthy, "stopped"),
-        };
-        HealthSnapshot {
-            status,
-            role: NodeRole::Core,
-            profile: DeploymentProfile::Local,
-            drain_state: self.drain_state,
-            message: message.to_owned(),
-            observed_at: SystemTime::now(),
-        }
     }
 
     fn subscription_full_diff_fallbacks(&self) -> u64 {
@@ -1165,29 +1067,6 @@ impl InMemoryServerShell {
         })
     }
 
-    /// Seed a row through the server database for bootstrap/import flows.
-    ///
-    /// This bypasses pending client write semantics and immediately records a
-    /// finalized mergeable commit in history-complete server state.
-    pub fn seed_row_with_id(
-        &mut self,
-        table: impl Into<String>,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> ShellResult<()> {
-        self.db.seed_settled_mergeable_for_bootstrap(
-            &table.into(),
-            row_id,
-            AuthorSubject::SYSTEM,
-            cells,
-        )?;
-        Ok(())
-    }
-
-    fn is_draining(&self) -> bool {
-        !matches!(self.drain_state, DrainState::Running)
-    }
-
     fn allocate_session_generation(
         &mut self,
     ) -> std::result::Result<u64, SessionGenerationAllocationError> {
@@ -1227,9 +1106,6 @@ impl InMemoryServerShell {
 
     fn note_session_closed(&mut self) {
         self.metrics.active_sessions = self.metrics.active_sessions.saturating_sub(1);
-        if self.is_draining() && self.metrics.active_sessions == 0 {
-            self.drain_state = DrainState::Drained;
-        }
     }
 
     fn validate_session(&self, session: ServerSession) -> ShellResult<()> {
@@ -1291,8 +1167,6 @@ pub enum ShellError {
     Storage(String),
     /// A direct transport operation failed.
     Transport(String),
-    /// A postcard payload could not be encoded or decoded.
-    Codec(String),
     /// An expected direct database response was not produced.
     MissingEvent(&'static str),
     /// A server session handle is no longer live in this process.
@@ -1305,11 +1179,6 @@ pub enum ShellError {
         expected: AuthorSubject,
         /// Identity supplied by the caller.
         actual: AuthorSubject,
-    },
-    /// A new session was rejected because the shell is draining.
-    SessionRejected {
-        /// Drain state that caused the rejection.
-        drain_state: DrainState,
     },
     /// The requested storage backend is not implemented by this shell.
     UnsupportedStorage {
@@ -1324,7 +1193,6 @@ impl fmt::Display for ShellError {
             Self::Db(error) => write!(f, "database error: {error}"),
             Self::Storage(error) => write!(f, "storage error: {error}"),
             Self::Transport(error) => write!(f, "transport error: {error}"),
-            Self::Codec(error) => write!(f, "codec error: {error}"),
             Self::MissingEvent(event) => write!(f, "missing database response: {event}"),
             Self::InvalidSession => write!(f, "invalid or closed server session"),
             Self::InvalidResumeToken(token) => {
@@ -1334,9 +1202,6 @@ impl fmt::Display for ShellError {
                 f,
                 "subscriber resume token belongs to {expected:?}, not {actual:?}"
             ),
-            Self::SessionRejected { drain_state } => {
-                write!(f, "session rejected while shell is {drain_state:?}")
-            }
             Self::UnsupportedStorage { storage } => {
                 write!(f, "unsupported server shell storage: {storage:?}")
             }
@@ -1355,12 +1220,6 @@ impl From<DbError> for ShellError {
 impl From<TransportError> for ShellError {
     fn from(error: TransportError) -> Self {
         Self::Transport(format!("{error:?}"))
-    }
-}
-
-impl From<postcard::Error> for ShellError {
-    fn from(error: postcard::Error) -> Self {
-        Self::Codec(error.to_string())
     }
 }
 
