@@ -3731,7 +3731,8 @@ pub(super) enum TransactionRecordWrite {
 /// Stage one transaction's `jazz.tx-record.v2` records: its
 /// `jazz_transactions` record, its `jazz_pending_transactions` record while it
 /// is unsettled and has one, and on insert its `jazz_tx_provenance` record.
-/// The batch that settles a transaction deletes its pending record.
+/// The batch that settles an exclusive transaction deletes its pending
+/// record.
 pub(super) fn stage_transaction_record(
     batch: &mut DatabaseBatch,
     write: TransactionRecordWrite,
@@ -3770,7 +3771,9 @@ pub(super) fn stage_transaction_record(
     }
     match pending_transaction_values(node_alias, tx, status)? {
         Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
-        None if updating => {
+        // Only exclusive transactions keep read evidence, so a mergeable
+        // one never has a pending record to delete.
+        None if updating && tx.kind == TxKind::Exclusive => {
             batch.delete(PENDING_TRANSACTIONS_TABLE, key());
         }
         None => {}

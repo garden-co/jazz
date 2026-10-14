@@ -7,6 +7,8 @@ use crate::node::aggregate_read_result::decode_aggregate_read_result;
 use crate::tx::{AggregateReadResult, Transaction};
 
 struct Peers {
+    /// Kept alive for the nodes' lifetime: destructure with `_dirs`, not
+    /// `..`, or the stores are deleted while still open.
     _dirs: [tempfile::TempDir; 3],
     alice: NodeState,
     bob: NodeState,
@@ -118,6 +120,7 @@ fn exclusive_count_accepts_a_rewrite_that_keeps_the_count() {
         mut alice,
         mut bob,
         mut authority,
+        _dirs,
         ..
     } = peers(&[(1, "a", 1), (2, "a", 2), (3, "b", 10)]);
     let (shape, binding) = count_in("a");
@@ -160,6 +163,7 @@ fn exclusive_count_conflicts_when_another_writer_adds_a_counted_row() {
         mut alice,
         mut bob,
         mut authority,
+        _dirs,
         ..
     } = peers(&[(1, "a", 1), (2, "a", 2), (3, "b", 10)]);
     let (shape, binding) = count_in("a");
@@ -207,6 +211,7 @@ fn exclusive_grouped_sum_min_max_conflict_only_when_a_value_changes() {
         mut alice,
         mut bob,
         mut authority,
+        _dirs,
         ..
     } = peers(&[(1, "a", 1), (2, "a", 2), (3, "a", 3), (4, "b", 10)]);
     let (shape, binding) = shape_of(
@@ -255,7 +260,9 @@ fn exclusive_count_commit_payload_is_independent_of_the_counted_rows() {
         let seed = (1..=rows)
             .map(|idx| (idx, "a", idx as i64))
             .collect::<Vec<_>>();
-        let Peers { mut alice, .. } = peers(&seed);
+        let Peers {
+            mut alice, _dirs, ..
+        } = peers(&seed);
         let (shape, binding) = count_in("a");
         let unit = alice_reads_then_inserts(&mut alice, &shape, &binding, 1_000, 5_000);
         let tx = commit_unit_tx(&unit);
@@ -295,6 +302,7 @@ fn exclusive_aggregate_read_without_a_well_formed_result_is_malformed() {
         let Peers {
             alice: mut mallory,
             mut authority,
+            _dirs,
             ..
         } = peers(&[(1, "a", 1), (2, "a", 2)]);
         let (shape, binding) = count_in("a");
@@ -327,7 +335,9 @@ fn exclusive_aggregate_read_without_a_well_formed_result_is_malformed() {
 /// the same aggregate read before the write is accepted.
 #[test]
 fn exclusive_aggregate_read_after_a_write_is_unsupported() {
-    let Peers { mut alice, .. } = peers(&[(1, "a", 1)]);
+    let Peers {
+        mut alice, _dirs, ..
+    } = peers(&[(1, "a", 1)]);
     let (shape, binding) = count_in("a");
     let tx = OpenTransactionId::new();
     alice.open_exclusive(tx).unwrap();
