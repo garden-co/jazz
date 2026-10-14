@@ -565,6 +565,18 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
+        // Attach a query's coverage, released through `release_coverage` when
+        // the returned guard drops.
+        let attach_coverage =
+            async |query: &PreparedQuery, tier: DurabilityTier, tx: Option<OpenTransactionId>| {
+                let attachment = self
+                    .attach_query_with_coverage_async(query, opts.clone(), tier, tx, author)
+                    .await?;
+                Ok::<_, Error>(SerializedReadCoverage {
+                    attachment: Some(attachment),
+                    release: Some(release_coverage),
+                })
+            };
         // Read the maintained result itself, not just its coverage signal.
         // Dropping the subscription and re-evaluating below would retire its
         // exact request-scoped inputs before the one-shot consumes them.
@@ -587,19 +599,7 @@ where
             && !opts.include_deleted;
         if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
-                Some(SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &prepared,
-                            opts.clone(),
-                            coverage_tier,
-                            None,
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                })
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
             } else {
                 None
             };
@@ -613,19 +613,7 @@ where
             // open, as an attached remote read does. Attaching after the
             // stream opened leaves its deletion reconciliation unchanged.
             let strict_coverage = if strict_client_one_shot {
-                Some(SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &prepared,
-                            opts.clone(),
-                            coverage_tier,
-                            None,
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                })
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
             } else {
                 None
             };
@@ -725,19 +713,7 @@ where
         let mut coverage = None;
         let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
-            let hydration = SerializedReadCoverage {
-                attachment: Some(
-                    self.attach_query_with_coverage_async(
-                        &prepared,
-                        opts.clone(),
-                        DurabilityTier::Global,
-                        open_tx,
-                        author,
-                    )
-                    .await?,
-                ),
-                release: Some(release_coverage),
-            };
+            let hydration = attach_coverage(&prepared, DurabilityTier::Global, open_tx).await?;
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
             match self.race_remote_answer(epoch, None, covered).await {
                 Some(result) => {
@@ -750,19 +726,7 @@ where
             }
         }
         if coverage.is_none() && require_coverage {
-            let attachment = self
-                .attach_query_with_coverage_async(
-                    &prepared,
-                    opts.clone(),
-                    coverage_tier,
-                    open_tx,
-                    author,
-                )
-                .await?;
-            let required = SerializedReadCoverage {
-                attachment: Some(attachment),
-                release: Some(release_coverage),
-            };
+            let required = attach_coverage(&prepared, coverage_tier, open_tx).await?;
             self.wait_for_serialized_read_coverage(&required, coverage_expired)
                 .await?;
             coverage = Some(required);
@@ -777,19 +741,8 @@ where
                     break;
                 };
                 let source_query = self.prepare_query_async(&query).await?;
-                let hydration = SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &source_query,
-                            opts.clone(),
-                            DurabilityTier::Global,
-                            Some(open_tx),
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                };
+                let hydration =
+                    attach_coverage(&source_query, DurabilityTier::Global, Some(open_tx)).await?;
                 let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
                 match self.race_remote_answer(epoch, None, covered).await {
                     Some(result) => {
