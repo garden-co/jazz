@@ -512,8 +512,6 @@ pub struct ResultTransitions {
     /// peer `ViewUpdate`, whose contract is the covered input closure only.
     pub terminal_operations: Vec<TerminalOperation>,
     #[doc(hidden)]
-    pub allow_storage_witness_fallback: bool,
-    #[doc(hidden)]
     pub observed_result_delta_batches: usize,
     /// A deletion-register witness changed while its anti-joined result
     /// terminal may be silent. When the public result terminals are silent,

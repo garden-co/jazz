@@ -74,7 +74,6 @@ pub struct ReconciledMaintainedSubscriptionClone {
     pub canonical_update: Option<SyncMessage>,
     source_removes: Vec<ResultMemberEntry>,
     source_had_program_fact_transitions: bool,
-    allow_storage_witness_fallback: bool,
 }
 
 /// What a usage-site reset knows about its downstream receiver before the
@@ -86,13 +85,11 @@ struct ClonedResetBasis {
     removed_members_are_ordinary: bool,
     source_had_program_fact_transitions: bool,
     flat_row_removes: Option<Vec<ResultMemberEntry>>,
-    allow_storage_witness_fallback: bool,
 }
 
 struct MaintainedCanonicalUpdate {
     changed: bool,
     update: SyncMessage,
-    allow_storage_witness_fallback: bool,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1045,7 +1042,6 @@ impl PeerState {
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 }),
-                allow_storage_witness_fallback: false,
             }));
         };
         if self
@@ -1117,7 +1113,6 @@ impl PeerState {
             update.map(|update| MaintainedCanonicalUpdate {
                 changed: true,
                 update,
-                allow_storage_witness_fallback: false,
             })
         })
     }
@@ -1201,7 +1196,6 @@ impl PeerState {
             result_payload_removes: _,
             program_fact_adds,
             program_fact_removes,
-            allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
             terminal_operations: _,
@@ -1261,7 +1255,6 @@ impl PeerState {
                     update.map(|update| MaintainedCanonicalUpdate {
                         changed: true,
                         update,
-                        allow_storage_witness_fallback: false,
                     })
                 });
         }
@@ -1336,7 +1329,6 @@ impl PeerState {
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     supporting_rows,
                 }),
-                allow_storage_witness_fallback: false,
             }));
         }
         let (tier, read_view) = self
@@ -1387,7 +1379,7 @@ impl PeerState {
                         identity: policy_identity,
                         tier,
                         maintained_facts: maintained,
-                        allow_storage_witness_fallback,
+                        allow_storage_witness_fallback: false,
                     },
                 )
                 .await
@@ -1406,7 +1398,7 @@ impl PeerState {
             let drain_reads = drain_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             eprintln!(
-                "JAZZ_REHYDRATE_TRACE stage=update table={} subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
+                "JAZZ_REHYDRATE_TRACE stage=update table={} subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback=false drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
                 shape.query().table,
                 drain_elapsed.as_millis(),
                 bundle_elapsed.as_millis(),
@@ -1415,7 +1407,6 @@ impl PeerState {
                 fact_add_count,
                 fact_remove_count,
                 bundle_count,
-                allow_storage_witness_fallback,
                 drain_reads.total.reads,
                 drain_reads.total.ranges,
                 bundle_reads.total.reads,
@@ -1451,7 +1442,6 @@ impl PeerState {
         Ok(Some(MaintainedCanonicalUpdate {
             changed: true,
             update,
-            allow_storage_witness_fallback,
         }))
     }
 
@@ -1546,7 +1536,6 @@ impl PeerState {
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let (mut program_fact_adds, mut program_fact_removes) = (Vec::new(), Vec::new());
         let mut supporting_changed = deletion_changes;
-        let allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
         let mut initial_deletion_witness = false;
@@ -1700,7 +1689,6 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             terminal_operations: Vec::new(),
-            allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
             supporting_changed,
@@ -2562,7 +2550,6 @@ impl PeerState {
             result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
-            allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_result_delta_batches: _,
             requires_authoritative_membership_reconcile: _,
             terminal_operations: _,
@@ -2576,7 +2563,6 @@ impl PeerState {
             target_subscription,
             &source_removes,
             source_had_program_fact_transitions,
-            source_allow_storage_witness_fallback,
         );
         if supporting_changed
             || !source_adds.is_empty()
@@ -2656,7 +2642,6 @@ impl PeerState {
             canonical_update: (!canonical_update_is_empty).then_some(canonical.update),
             source_removes,
             source_had_program_fact_transitions,
-            allow_storage_witness_fallback: canonical.allow_storage_witness_fallback,
         }))
     }
 
@@ -2685,14 +2670,12 @@ impl PeerState {
             canonical_update: _,
             source_removes,
             source_had_program_fact_transitions,
-            allow_storage_witness_fallback,
         } = reconciled;
         let basis = self.cloned_reset_basis(
             maintained_subscription,
             target_subscription,
             &source_removes,
             source_had_program_fact_transitions,
-            allow_storage_witness_fallback,
         );
         self.cloned_subscription_reset(
             node,
@@ -2712,7 +2695,6 @@ impl PeerState {
         target_subscription: SubscriptionKey,
         source_removes: &[ResultMemberEntry],
         source_had_program_fact_transitions: bool,
-        allow_storage_witness_fallback: bool,
     ) -> ClonedResetBasis {
         let known_state = self
             .downstream_known_states
@@ -2743,7 +2725,6 @@ impl PeerState {
             removed_members_are_ordinary,
             source_had_program_fact_transitions,
             flat_row_removes,
-            allow_storage_witness_fallback,
         }
     }
 
@@ -2767,7 +2748,6 @@ impl PeerState {
             removed_members_are_ordinary,
             source_had_program_fact_transitions,
             flat_row_removes,
-            allow_storage_witness_fallback,
         } = basis;
         let client_link = self.role != PeerRole::Relay;
         let canonical_state = self
@@ -2912,7 +2892,7 @@ impl PeerState {
                         identity: policy_identity,
                         tier,
                         maintained_facts: maintained,
-                        allow_storage_witness_fallback,
+                        allow_storage_witness_fallback: false,
                     },
                 )
                 .await
