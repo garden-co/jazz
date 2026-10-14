@@ -25,16 +25,21 @@ use jazz::tools::schema_lens::{LensOp, LensTransform};
 
 /// Describes a struct once, as its fields' codecs in wire order, and derives
 /// both its writer and its reader (a [`Wire`] impl) from that description.
+/// An optional `(param: Type)` works as for [`wire_enum!`].
 macro_rules! wire_struct {
-    ($name:ident: $ty:ident { $($field:ident: $codec:expr),+ $(,)? }) => {
-        struct $name;
+    ($name:ident $(($param:ident: $param_ty:ty))?: $ty:ident {
+        $($field:ident: $codec:expr),+ $(,)?
+    }) => {
+        struct $name$(($param_ty))?;
 
         impl Wire<$ty> for $name {
             fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
+                $(let $param: $param_ty = self.0;)?
                 $(Wire::put(&$codec, buf, &value.$field);)+
             }
 
             fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
+                $(let $param: $param_ty = self.0;)?
                 Ok($ty { $($field: Wire::get(&$codec, data, offset)?),+ })
             }
         }
@@ -170,7 +175,6 @@ impl std::error::Error for CatalogueEncodingError {}
 /// Tables are sorted by name for deterministic encoding. Column order within a
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
-    let mut buf = Vec::new();
     let version = if schema
         .values()
         .any(|table| !table.composite_indexes.is_empty())
@@ -179,17 +183,26 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     } else {
         SCHEMA_VERSION
     };
-    buf.push(version);
+    let table = schema_table(version);
+    let mut buf = vec![version];
 
     // Sort tables by name for deterministic ordering
     let mut tables: Vec<_> = schema.iter().collect();
     tables.sort_by_key(|(name, _)| name.as_str());
 
     write_seq(&mut buf, &tables, |buf, (name, table_schema)| {
-        encode_table_entry(buf, name, table_schema, version)
+        write_string(buf, name.as_str());
+        table.put(buf, table_schema);
     });
 
     buf
+}
+
+fn schema_table(schema_version: u8) -> TableWire {
+    TableWire {
+        indexed: true,
+        composite: schema_version >= SCHEMA_COMPOSITE_VERSION,
+    }
 }
 
 /// Read a top-level payload's leading format-version byte. `accepted` lists
@@ -219,42 +232,53 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     Ok(schema)
 }
 
-fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema, version: u8) {
-    write_string(buf, name.as_str());
-    encode_row_descriptor(buf, &schema.columns);
-    encode_indexed_columns(buf, schema.indexed_columns.as_deref());
-    encode_branch_bindings(buf, &schema.branch_by);
-    if version >= SCHEMA_COMPOSITE_VERSION {
-        encode_composite_indexes(buf, &schema.composite_indexes);
-    }
+/// A table's schema as catalogue payloads store it. Schema payloads also carry
+/// the indexed-column set, and version-2 payloads append composite indexes,
+/// validated against the columns decoded before them.
+struct TableWire {
+    indexed: bool,
+    composite: bool,
 }
 
-fn decode_table_entry(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
-    let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
-    let indexed_columns = decode_indexed_columns(data, offset)?;
-    let branch_by = decode_branch_bindings(data, offset)?;
-    let composite_indexes = if schema_version >= SCHEMA_COMPOSITE_VERSION {
-        decode_composite_indexes(data, offset, &descriptor)?
-    } else {
-        Vec::new()
-    };
+impl Wire<TableSchema> for TableWire {
+    fn put(&self, buf: &mut Vec<u8>, table: &TableSchema) {
+        RowWire.put(buf, &table.columns);
+        if self.indexed {
+            encode_indexed_columns(buf, table.indexed_columns.as_deref());
+        }
+        BRANCH_BINDINGS.put(buf, &table.branch_by);
+        if self.composite {
+            encode_composite_indexes(buf, &table.composite_indexes);
+        }
+    }
 
-    Ok((
-        TableName::new(name),
-        TableSchema {
-            columns: descriptor,
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<TableSchema, CatalogueEncodingError> {
+        let columns = RowWire.get(data, offset)?;
+        let indexed_columns = if self.indexed {
+            decode_indexed_columns(data, offset)?
+        } else {
+            None
+        };
+        let branch_by = BRANCH_BINDINGS.get(data, offset)?;
+        let composite_indexes = if self.composite {
+            decode_composite_indexes(data, offset, &columns)?
+        } else {
+            Vec::new()
+        };
+        Ok(TableSchema {
+            columns,
             indexed_columns,
             composite_indexes,
             policies: TablePolicies::default(),
             branch_by,
-        },
-    ))
+        })
+    }
 }
+
+const BRANCH_BINDINGS: Unique<Seq<Str>> = Unique(
+    Seq("branch_bindings", Str("branch_column")),
+    "branch binding",
+);
 
 fn encode_composite_indexes(buf: &mut Vec<u8>, indexes: &[Vec<ColumnName>]) {
     let mut sorted = indexes
@@ -318,26 +342,6 @@ fn decode_composite_indexes(
     Ok(groups)
 }
 
-fn encode_branch_bindings(buf: &mut Vec<u8>, bindings: &[ColumnName]) {
-    write_seq(buf, bindings, |buf, binding| {
-        write_string(buf, binding.as_str())
-    });
-}
-
-fn decode_branch_bindings(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Vec<ColumnName>, CatalogueEncodingError> {
-    let bindings = read_seq(data, offset, "branch_bindings", |data, offset| {
-        Ok(ColumnName::new(read_string(data, offset, "branch_column")?))
-    })?;
-    ensure_unique_names(
-        bindings.iter().map(|binding| binding.as_str()),
-        "branch binding",
-    )?;
-    Ok(bindings)
-}
-
 fn encode_indexed_columns(buf: &mut Vec<u8>, indexed_columns: Option<&[ColumnName]>) {
     match indexed_columns {
         None => write_u32(buf, u32::MAX),
@@ -378,72 +382,38 @@ fn decode_indexed_columns(
 }
 
 fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    let table = schema_table(data[0]);
     let mut offset = 1;
-    let schema_version = data[0];
     let table_count = read_count(data, &mut offset, "schema_tables")?;
 
     let mut schema = Schema::new();
     for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry(data, &mut offset, schema_version)?;
-        schema.insert(name, table_schema);
+        let name = Str("table_name").get(data, &mut offset)?;
+        schema.insert(name, table.get(data, &mut offset)?);
     }
 
     ensure_consumed(data, offset)?;
     Ok(schema)
 }
 
-fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
-    write_seq(buf, &desc.columns, encode_column_descriptor);
+wire_struct! {
+    RowWire: RowDescriptor { columns: COLUMNS }
 }
 
-fn decode_row_descriptor(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<RowDescriptor, CatalogueEncodingError> {
-    let columns = read_seq(data, offset, "row_descriptor_columns", |data, offset| {
-        decode_column_descriptor(data, offset, schema_version)
-    })?;
-    ensure_unique_names(
-        columns.iter().map(|column| column.name.as_str()),
-        "row descriptor column",
-    )?;
+const COLUMNS: Unique<Seq<ColumnWire>> = Unique(
+    Seq("row_descriptor_columns", ColumnWire),
+    "row descriptor column",
+);
 
-    Ok(RowDescriptor::new(columns))
-}
-
-fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
-    write_string(buf, col.name.as_str());
-    encode_column_type(buf, &col.column_type);
-    buf.push(if col.nullable { 1 } else { 0 });
-    write_opt(buf, col.references.as_ref(), |buf, table| {
-        write_string(buf, table.as_str())
-    });
-    Opt(ValueWire).put(buf, &col.default);
-    Opt(MergeStrategyWire).put(buf, &col.merge_strategy);
-}
-
-fn decode_column_descriptor(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<ColumnDescriptor, CatalogueEncodingError> {
-    let name = read_string(data, offset, "column_name")?;
-    let column_type = decode_column_type(data, offset, schema_version)?;
-    let nullable = read_u8(data, offset)? != 0;
-    let references = read_opt(data, offset, |data, offset| {
-        Ok(TableName::new(read_string(data, offset, "column_ref")?))
-    })?;
-    let default = Opt(ValueWire).get(data, offset)?;
-    let merge_strategy = Opt(MergeStrategyWire).get(data, offset)?;
-    Ok(ColumnDescriptor {
-        name: ColumnName::new(name),
-        column_type,
-        nullable,
-        references,
-        default,
-        merge_strategy,
-    })
+wire_struct! {
+    ColumnWire: ColumnDescriptor {
+        name: Str("column_name"),
+        column_type: ColumnTypeWire,
+        nullable: Bool,
+        references: Opt(Str("column_ref")),
+        default: Opt(ValueWire),
+        merge_strategy: Opt(MergeStrategyWire),
+    }
 }
 
 wire_enum! {
@@ -453,160 +423,62 @@ wire_enum! {
     }
 }
 
-/// Column type tags.
-const TYPE_INTEGER: u8 = 1;
-const TYPE_BIGINT: u8 = 2;
-const TYPE_BOOLEAN: u8 = 3;
-const TYPE_TEXT: u8 = 4;
-const TYPE_TIMESTAMP: u8 = 5;
-const TYPE_UUID: u8 = 6;
-const TYPE_ARRAY: u8 = 7;
-const TYPE_ROW: u8 = 8;
-const TYPE_ENUM: u8 = 9;
-const TYPE_DOUBLE: u8 = 10;
-const TYPE_BYTEA: u8 = 11;
-const TYPE_JSON: u8 = 12;
-const TYPE_TRANSACTION_ID: u8 = 13;
-const TYPE_ENUM_PAYLOAD: u8 = 14;
-const TYPE_SCALAR_ENUM: u8 = 15;
-const TYPE_CATALOGUE_ENUM_PAYLOAD: u8 = 16;
-
-fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
-    match col_type {
-        ColumnType::Integer => buf.push(TYPE_INTEGER),
-        ColumnType::BigInt => buf.push(TYPE_BIGINT),
-        ColumnType::Double => buf.push(TYPE_DOUBLE),
-        ColumnType::Boolean => buf.push(TYPE_BOOLEAN),
-        ColumnType::Text => buf.push(TYPE_TEXT),
-        ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
-        ColumnType::Uuid => buf.push(TYPE_UUID),
-        ColumnType::TransactionId => buf.push(TYPE_TRANSACTION_ID),
-        ColumnType::Bytea => buf.push(TYPE_BYTEA),
-        ColumnType::Json { schema } => {
-            buf.push(TYPE_JSON);
-            write_opt(buf, schema.as_ref(), encode_canonical_json_value);
-        }
-        ColumnType::Enum { variants } => {
-            buf.push(TYPE_ENUM);
-            encode_string_list(buf, variants);
-        }
-        ColumnType::ScalarEnum { name, variants } => {
-            buf.push(TYPE_SCALAR_ENUM);
-            write_string(buf, name);
-            encode_string_list(buf, variants);
-        }
-        ColumnType::EnumPayload { cases } => {
-            buf.push(TYPE_ENUM_PAYLOAD);
-            encode_enum_cases(buf, cases);
-        }
-        ColumnType::CatalogueEnumPayload { name, cases } => {
-            buf.push(TYPE_CATALOGUE_ENUM_PAYLOAD);
-            write_string(buf, name);
-            encode_enum_cases(buf, cases);
-        }
-        ColumnType::Array { element: elem } => {
-            buf.push(TYPE_ARRAY);
-            encode_column_type(buf, elem);
-        }
-        ColumnType::Row { columns: desc } => {
-            buf.push(TYPE_ROW);
-            encode_row_descriptor(buf, desc);
-        }
+wire_enum! {
+    ColumnTypeWire: ColumnType, "column_type" {
+        1 => Integer,
+        2 => BigInt,
+        3 => Boolean,
+        4 => Text,
+        5 => Timestamp,
+        6 => Uuid,
+        7 => Array { element: Boxed(ColumnTypeWire) },
+        8 => Row { columns: Boxed(RowWire) },
+        9 => Enum {
+            variants: Unique(Seq("enum_variants", Str("enum_variant")), "enum variant"),
+        },
+        10 => Double,
+        11 => Bytea,
+        12 => Json { schema: Flag("json_schema_presence", JsonWire) },
+        13 => TransactionId,
+        14 => EnumPayload {
+            cases: Unique(Seq("enum_payload_cases", CaseWire("enum_case")), "enum payload case"),
+        },
+        15 => ScalarEnum {
+            name: Str("scalar_enum_name"),
+            variants: Unique(
+                Seq("scalar_enum_variants", Str("scalar_enum_variant")),
+                "scalar enum variant",
+            ),
+        },
+        16 => CatalogueEnumPayload {
+            name: Str("catalogue_enum_payload_name"),
+            cases: Unique(
+                Seq("catalogue_enum_payload_cases", CaseWire("catalogue_enum_payload_case")),
+                "catalogue enum payload case",
+            ),
+        },
     }
 }
 
-fn encode_enum_cases(buf: &mut Vec<u8>, cases: &[EnumCaseDescriptor]) {
-    write_seq(buf, cases, |buf, case| {
-        write_string(buf, &case.name);
-        write_seq(buf, &case.fields, encode_column_descriptor);
-    });
-}
+/// One payload-enum case: its name (the string names it in decode errors),
+/// then its fields.
+struct CaseWire(&'static str);
 
-fn decode_column_type(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<ColumnType, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        TYPE_INTEGER => Ok(ColumnType::Integer),
-        TYPE_BIGINT => Ok(ColumnType::BigInt),
-        TYPE_DOUBLE => Ok(ColumnType::Double),
-        TYPE_BOOLEAN => Ok(ColumnType::Boolean),
-        TYPE_TEXT => Ok(ColumnType::Text),
-        TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
-        TYPE_UUID => Ok(ColumnType::Uuid),
-        TYPE_TRANSACTION_ID => Ok(ColumnType::TransactionId),
-        TYPE_BYTEA => Ok(ColumnType::Bytea),
-        TYPE_JSON => {
-            let schema = if read_flag(data, offset, "json_schema_presence")? {
-                Some(decode_canonical_json_value(data, offset)?)
-            } else {
-                None
-            };
-            Ok(ColumnType::Json { schema })
-        }
-        TYPE_ENUM => {
-            let variants = read_seq(data, offset, "enum_variants", |data, offset| {
-                read_string(data, offset, "enum_variant")
-            })?;
-            ensure_unique_names(variants.iter().map(String::as_str), "enum variant")?;
-            Ok(ColumnType::Enum { variants })
-        }
-        TYPE_SCALAR_ENUM => {
-            let name = read_string(data, offset, "scalar_enum_name")?;
-            let variants = read_seq(data, offset, "scalar_enum_variants", |data, offset| {
-                read_string(data, offset, "scalar_enum_variant")
-            })?;
-            ensure_unique_names(variants.iter().map(String::as_str), "scalar enum variant")?;
-            Ok(ColumnType::ScalarEnum { name, variants })
-        }
-        TYPE_ENUM_PAYLOAD => {
-            let cases = read_seq(data, offset, "enum_payload_cases", |data, offset| {
-                let name = read_string(data, offset, "enum_case")?;
-                let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
-                Ok(EnumCaseDescriptor { name, fields })
-            })?;
-            ensure_unique_names(
-                cases.iter().map(|case| case.name.as_str()),
-                "enum payload case",
-            )?;
-            Ok(ColumnType::EnumPayload { cases })
-        }
-        TYPE_CATALOGUE_ENUM_PAYLOAD => {
-            let name = read_string(data, offset, "catalogue_enum_payload_name")?;
-            let cases = read_seq(
-                data,
-                offset,
-                "catalogue_enum_payload_cases",
-                |data, offset| {
-                    let name = read_string(data, offset, "catalogue_enum_payload_case")?;
-                    let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
-                    Ok(EnumCaseDescriptor { name, fields })
-                },
-            )?;
-            ensure_unique_names(
-                cases.iter().map(|case| case.name.as_str()),
-                "catalogue enum payload case",
-            )?;
-            Ok(ColumnType::CatalogueEnumPayload { name, cases })
-        }
-        TYPE_ARRAY => {
-            let elem = decode_column_type(data, offset, schema_version)?;
-            Ok(ColumnType::Array {
-                element: Box::new(elem),
-            })
-        }
-        TYPE_ROW => {
-            let desc = decode_row_descriptor(data, offset, schema_version)?;
-            Ok(ColumnType::Row {
-                columns: Box::new(desc),
-            })
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "column_type",
-        }),
+impl Wire<EnumCaseDescriptor> for CaseWire {
+    fn put(&self, buf: &mut Vec<u8>, case: &EnumCaseDescriptor) {
+        write_string(buf, &case.name);
+        COLUMNS.put(buf, &case.fields);
+    }
+
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<EnumCaseDescriptor, CatalogueEncodingError> {
+        Ok(EnumCaseDescriptor {
+            name: read_string(data, offset, self.0)?,
+            fields: COLUMNS.get(data, offset)?,
+        })
     }
 }
 
@@ -621,7 +493,6 @@ fn decode_column_type(
 /// [version: u8][op_count: u32][ops...][draft_count: u32][draft_indices...]
 /// ```
 pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
-    let mut buf = Vec::new();
     let version = if transform.ops.iter().any(|op| {
         matches!(op,
             LensOp::AddTable { schema, .. } | LensOp::RemoveTable { schema, .. }
@@ -632,204 +503,59 @@ pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
     } else {
         LENS_VERSION
     };
-    buf.push(version);
-
-    write_seq(&mut buf, &transform.ops, |buf, op| {
-        encode_lens_op(buf, op, version)
-    });
-    write_seq(&mut buf, &transform.draft_ops, |buf, &idx| {
-        write_u32(buf, idx as u32)
-    });
-
+    let mut buf = vec![version];
+    LensWire(version).put(&mut buf, transform);
     buf
 }
 
 /// Decode a LensTransform from binary format.
 pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
     let version = read_format_version(data, &[LENS_VERSION, LENS_COMPOSITE_VERSION])?;
-    let transform = decode_current_lens_transform(data, version)?;
+    let mut offset = 1;
+    let transform = LensWire(version).get(data, &mut offset)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(data, &encode_lens_transform(&transform), "lens")?;
     Ok(transform)
 }
 
-/// LensOp type tags.
-const OP_ADD_COLUMN: u8 = 1;
-const OP_REMOVE_COLUMN: u8 = 2;
-const OP_RENAME_COLUMN: u8 = 3;
-const OP_ADD_TABLE: u8 = 4;
-const OP_REMOVE_TABLE: u8 = 5;
-const OP_RENAME_TABLE: u8 = 6;
-
-fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp, version: u8) {
-    match op {
-        LensOp::RenameTable { old_name, new_name } => {
-            buf.push(OP_RENAME_TABLE);
-            write_string(buf, old_name);
-            write_string(buf, new_name);
-        }
-        LensOp::AddColumn {
-            table,
-            column,
-            column_type,
-            default,
-        } => {
-            buf.push(OP_ADD_COLUMN);
-            write_string(buf, table);
-            write_string(buf, column);
-            encode_column_type(buf, column_type);
-            ValueWire.put(buf, default);
-        }
-        LensOp::RemoveColumn {
-            table,
-            column,
-            column_type,
-            default,
-        } => {
-            buf.push(OP_REMOVE_COLUMN);
-            write_string(buf, table);
-            write_string(buf, column);
-            encode_column_type(buf, column_type);
-            ValueWire.put(buf, default);
-        }
-        LensOp::RenameColumn {
-            table,
-            old_name,
-            new_name,
-        } => {
-            buf.push(OP_RENAME_COLUMN);
-            write_string(buf, table);
-            write_string(buf, old_name);
-            write_string(buf, new_name);
-        }
-        LensOp::AddTable { table, schema } => {
-            buf.push(OP_ADD_TABLE);
-            write_string(buf, table);
-            encode_table_schema(buf, schema, version);
-        }
-        LensOp::RemoveTable { table, schema } => {
-            buf.push(OP_REMOVE_TABLE);
-            write_string(buf, table);
-            encode_table_schema(buf, schema, version);
-        }
+wire_struct! {
+    LensWire(version: u8): LensTransform {
+        ops: Seq("lens_ops", LensOpWire(version)),
+        draft_ops: Seq("lens_draft_ops", U32),
     }
 }
 
-fn decode_lens_op(
-    data: &[u8],
-    offset: &mut usize,
-    lens_version: u8,
-) -> Result<LensOp, CatalogueEncodingError> {
-    let schema_version = schema_version_for_lens_payload(lens_version);
-    let tag = read_u8(data, offset)?;
-    match tag {
-        OP_RENAME_TABLE => {
-            let old_name = read_string(data, offset, "old_name")?;
-            let new_name = read_string(data, offset, "new_name")?;
-            Ok(LensOp::RenameTable { old_name, new_name })
-        }
-        OP_ADD_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset, schema_version)?;
-            let default = ValueWire.get(data, offset)?;
-            Ok(LensOp::AddColumn {
-                table,
-                column,
-                column_type,
-                default,
-            })
-        }
-        OP_REMOVE_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset, schema_version)?;
-            let default = ValueWire.get(data, offset)?;
-            Ok(LensOp::RemoveColumn {
-                table,
-                column,
-                column_type,
-                default,
-            })
-        }
-        OP_RENAME_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let old_name = read_string(data, offset, "old_name")?;
-            let new_name = read_string(data, offset, "new_name")?;
-            Ok(LensOp::RenameColumn {
-                table,
-                old_name,
-                new_name,
-            })
-        }
-        OP_ADD_TABLE => {
-            let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset, lens_version)?;
-            Ok(LensOp::AddTable { table, schema })
-        }
-        OP_REMOVE_TABLE => {
-            let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset, lens_version)?;
-            Ok(LensOp::RemoveTable { table, schema })
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "lens_op",
-        }),
+wire_enum! {
+    LensOpWire(version: u8): LensOp, "lens_op" {
+        1 => AddColumn {
+            table: Str("table"),
+            column: Str("column"),
+            column_type: ColumnTypeWire,
+            default: ValueWire,
+        },
+        2 => RemoveColumn {
+            table: Str("table"),
+            column: Str("column"),
+            column_type: ColumnTypeWire,
+            default: ValueWire,
+        },
+        3 => RenameColumn {
+            table: Str("table"),
+            old_name: Str("old_name"),
+            new_name: Str("new_name"),
+        },
+        4 => AddTable { table: Str("table"), schema: lens_table(version) },
+        5 => RemoveTable { table: Str("table"), schema: lens_table(version) },
+        6 => RenameTable { old_name: Str("old_name"), new_name: Str("new_name") },
     }
 }
 
-fn decode_current_lens_transform(
-    data: &[u8],
-    lens_version: u8,
-) -> Result<LensTransform, CatalogueEncodingError> {
-    let mut offset = 1;
-
-    let ops = read_seq(data, &mut offset, "lens_ops", |data, offset| {
-        decode_lens_op(data, offset, lens_version)
-    })?;
-    let draft_ops = read_seq(data, &mut offset, "lens_draft_ops", |data, offset| {
-        Ok(read_u32(data, offset)? as usize)
-    })?;
-
-    ensure_consumed(data, offset)?;
-    Ok(LensTransform { ops, draft_ops })
-}
-
-fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema, lens_version: u8) {
-    encode_row_descriptor(buf, &schema.columns);
-    encode_branch_bindings(buf, &schema.branch_by);
-    if lens_version >= LENS_COMPOSITE_VERSION {
-        encode_composite_indexes(buf, &schema.composite_indexes);
-    }
-}
-
-fn decode_table_schema(
-    data: &[u8],
-    offset: &mut usize,
-    lens_version: u8,
-) -> Result<TableSchema, CatalogueEncodingError> {
-    let schema_version = schema_version_for_lens_payload(lens_version);
-    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
-    let branch_by = decode_branch_bindings(data, offset)?;
-    let composite_indexes = if lens_version >= LENS_COMPOSITE_VERSION {
-        decode_composite_indexes(data, offset, &descriptor)?
-    } else {
-        Vec::new()
-    };
-    Ok(TableSchema {
-        columns: descriptor,
-        indexed_columns: None,
-        composite_indexes,
-        policies: TablePolicies::default(),
-        branch_by,
-    })
-}
-
-fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
-    if lens_version >= LENS_COMPOSITE_VERSION {
-        SCHEMA_COMPOSITE_VERSION
-    } else {
-        SCHEMA_VERSION
+/// A lens op's table schema: no indexed-column set, and composite indexes
+/// only in version-2 lens payloads.
+fn lens_table(lens_version: u8) -> TableWire {
+    TableWire {
+        indexed: false,
+        composite: lens_version >= LENS_COMPOSITE_VERSION,
     }
 }
 
@@ -851,9 +577,34 @@ const JSON_STRING: u8 = 5;
 const JSON_ARRAY: u8 = 6;
 const JSON_OBJECT: u8 = 7;
 
-fn encode_canonical_json_value(buf: &mut Vec<u8>, value: &serde_json::Value) {
-    buf.push(NESTED_CODEC_VERSION);
-    encode_canonical_json_value_body(buf, value);
+/// A JSON Schema declaration in the canonical nested grammar.
+struct JsonWire;
+
+impl Wire<serde_json::Value> for JsonWire {
+    fn put(&self, buf: &mut Vec<u8>, value: &serde_json::Value) {
+        buf.push(NESTED_CODEC_VERSION);
+        encode_canonical_json_value_body(buf, value);
+    }
+
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<serde_json::Value, CatalogueEncodingError> {
+        let start = *offset;
+        let version = read_u8(data, offset)?;
+        if version != NESTED_CODEC_VERSION {
+            return Err(CatalogueEncodingError::UnsupportedVersion {
+                found: version,
+                expected: NESTED_CODEC_VERSION,
+            });
+        }
+        let value = decode_canonical_json_value_body(data, offset)?;
+        let mut canonical = Vec::new();
+        self.put(&mut canonical, &value);
+        ensure_canonical_segment(data, start, *offset, &canonical, "json schema")?;
+        Ok(value)
+    }
 }
 
 fn encode_canonical_json_value_body(buf: &mut Vec<u8>, value: &serde_json::Value) {
@@ -885,25 +636,6 @@ fn encode_canonical_json_value_body(buf: &mut Vec<u8>, value: &serde_json::Value
             });
         }
     }
-}
-
-fn decode_canonical_json_value(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<serde_json::Value, CatalogueEncodingError> {
-    let start = *offset;
-    let version = read_u8(data, offset)?;
-    if version != NESTED_CODEC_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: NESTED_CODEC_VERSION,
-        });
-    }
-    let value = decode_canonical_json_value_body(data, offset)?;
-    let mut canonical = Vec::new();
-    encode_canonical_json_value(&mut canonical, &value);
-    ensure_canonical_segment(data, start, *offset, &canonical, "json schema")?;
-    Ok(value)
 }
 
 fn decode_canonical_json_value_body(
@@ -2542,6 +2274,18 @@ impl Named for ColumnName {
     }
 }
 
+impl Named for ColumnDescriptor {
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
+impl Named for EnumCaseDescriptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// A `u32`-length-prefixed UTF-8 string.
 struct Str(&'static str);
 
@@ -2574,6 +2318,19 @@ macro_rules! le_wire {
 }
 
 le_wire!(i32, i64, u64, f64);
+
+/// A `usize` stored as a `u32`.
+struct U32;
+
+impl Wire<usize> for U32 {
+    fn put(&self, buf: &mut Vec<u8>, value: &usize) {
+        write_u32(buf, *value as u32);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<usize, CatalogueEncodingError> {
+        Ok(read_u32(data, offset)? as usize)
+    }
+}
 
 /// A `1`/`0` byte. Any non-zero byte reads as `true`; payload decoders
 /// re-encode and compare, so a non-canonical byte is still rejected.
@@ -2665,6 +2422,22 @@ const fn strings(context: &'static str) -> Seq<Str> {
     Seq(context, Str(context))
 }
 
+/// A sequence whose items' names must be distinct; the string names the
+/// items in the duplicate error.
+struct Unique<C>(C, &'static str);
+
+impl<T: Named, C: Wire<Vec<T>>> Wire<Vec<T>> for Unique<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Vec<T>) {
+        self.0.put(buf, value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Vec<T>, CatalogueEncodingError> {
+        let items = self.0.get(data, offset)?;
+        ensure_unique_names(items.iter().map(Named::name), self.1)?;
+        Ok(items)
+    }
+}
+
 /// A lenient presence byte followed by the value (see [`read_opt`]).
 struct Opt<C>(C);
 
@@ -2695,6 +2468,19 @@ impl<T, C: Wire<T>> Wire<Option<T>> for Flag<C> {
     }
 }
 
+/// A boxed value, stored inline.
+struct Boxed<C>(C);
+
+impl<T, C: Wire<T>> Wire<Box<T>> for Boxed<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Box<T>) {
+        self.0.put(buf, value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Box<T>, CatalogueEncodingError> {
+        self.0.get(data, offset).map(Box::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2705,6 +2491,7 @@ mod tests {
     use serde_json::json;
 
     // Wire tags these tests spell out by hand.
+    const TYPE_ENUM: u8 = 9;
     const VALUE_ARRAY: u8 = 7;
     const POLICY_VALUE_SESSION_REF: u8 = 2;
     const REL_TABLE_SCAN: u8 = 1;
@@ -2924,7 +2711,7 @@ mod tests {
             b'a',
             JSON_NULL,
         ];
-        assert!(decode_canonical_json_value(&unordered_json, &mut offset).is_err());
+        assert!(JsonWire.get(&unordered_json, &mut offset).is_err());
 
         let rel = RelExpr::TableScan {
             table: TableName::new("docs"),
@@ -3038,7 +2825,7 @@ mod tests {
 
         let mut offset = 0;
         assert_count_bound(
-            decode_column_type(&with_huge(TYPE_ENUM), &mut offset, SCHEMA_VERSION),
+            ColumnTypeWire.get(&with_huge(TYPE_ENUM), &mut offset),
             "enum_variants",
         );
         let mut offset = 0;
