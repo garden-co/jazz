@@ -254,51 +254,25 @@ self.database.finish_persistence(persisted)?;
                 }
                 install_enum_case_ids(physical.scalar_enum_cases.entry(id).or_default(), ids, schema_version)?;
             }
+            // Each column writes only its own registry entries, so payload
+            // and non-payload columns hydrate in one pass.
             for column in &table.columns {
-                let records::ValueType::Enum(enum_schema) = &column.column_type else {
-                    continue;
-                };
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
                 let identities = &table_identities.columns[&column.name].enum_variants;
-                let ids = &identities["root"];
-                if ids.len() != enum_schema.cases.len() {
-                    return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                if let records::ValueType::Enum(enum_schema) = &column.column_type {
+                    let ids = &identities["root"];
+                    if ids.len() != enum_schema.cases.len() {
+                        return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                    }
+                    install_payload_enum_case_ids(
+                        physical.payload_enum_cases.entry(id).or_default(),
+                        ids,
+                        schema_version,
+                    )?;
                 }
-                install_payload_enum_case_ids(
-                    physical.payload_enum_cases.entry(id).or_default(),
-                    ids,
-                    schema_version,
-                )?;
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
-                hydrate_nested_scalar_enum_cases(
-                    &column.column_type,
-                    identities,
-                    schema_version,
-                    "root",
-                    "root",
-                    nested,
-                )?;
-                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
-                hydrate_nested_payload_enum_cases(
-                    &column.column_type,
-                    identities,
-                    schema_version,
-                    "root",
-                    "root",
-                    nested_payload,
-                )?;
-            }
-            for column in &table.columns {
-                if matches!(column.column_type, records::ValueType::Enum(_)) {
-                    continue;
-                }
-                let Some(id) = physical.columns.get(&column.name).copied() else {
-                    continue;
-                };
-                let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
-                let identities = &table_identities.columns[&column.name].enum_variants;
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
                     identities,
