@@ -1558,10 +1558,7 @@ where
 
         if supplied_row_id {
             match target {
-                ExactWriteTarget::Root => {
-                    self.ensure_row_absent(table, row, permission_subject.unwrap_or(made_by))
-                        .await?
-                }
+                ExactWriteTarget::Root => self.ensure_row_absent(table, row).await?,
                 ExactWriteTarget::Branch(_) => {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?
@@ -2033,12 +2030,7 @@ where
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?;
                 } else {
-                    self.ensure_row_absent(
-                        table,
-                        row,
-                        permission_subject.unwrap_or(self.identity.author),
-                    )
-                    .await?;
+                    self.ensure_row_absent(table, row).await?;
                 }
                 (cells, Vec::new(), None, true)
             }
@@ -2834,8 +2826,7 @@ where
             .transpose()?;
         let (_content_parents, _deletion_parents) = match target {
             ExactWriteTarget::Root => {
-                self.ensure_row_deleted(table, row, permission_subject.unwrap_or(made_by))
-                    .await?;
+                self.ensure_row_deleted(table, row).await?;
                 self.row_layer_parents(table, row).await?
             }
             ExactWriteTarget::Branch(_) => {
@@ -3401,12 +3392,7 @@ where
             .await?)
     }
 
-    async fn ensure_row_absent(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorSubject,
-    ) -> Result<(), Error> {
+    async fn ensure_row_absent(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.table_schema(table)?;
         let (content_parent, deletion_parent) = {
             let mut node = self.node.node.lock().await;
@@ -3455,12 +3441,7 @@ where
         Ok(())
     }
 
-    async fn ensure_row_deleted(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorSubject,
-    ) -> Result<(), Error> {
+    async fn ensure_row_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
             .node

@@ -6,14 +6,6 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Return whether two schema facades share one open-transaction runtime.
-    ///
-    /// This compares the private runtime capability, not caller-controlled ids.
-    #[doc(hidden)]
-    pub fn shares_runtime_with(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.node, &other.node)
-    }
-
     async fn lock_for_transaction_open(
         &self,
         open_tx_id: OpenTransactionId,
@@ -895,21 +887,6 @@ where
             id,
             Box::pin(async move { db.begin_exclusive_with_identity(id, identity).await }),
         )
-    }
-
-    /// Queue capture of an open transaction's immutable base snapshot behind
-    /// its already-admitted operations. Foreign-function bindings use this to
-    /// defer snapshot-scoped query coverage until transaction opening finishes.
-    #[doc(hidden)]
-    pub fn enqueue_open_transaction_snapshot(
-        &self,
-        id: OpenTransactionId,
-    ) -> futures::channel::oneshot::Receiver<Result<crate::tx::Snapshot, Error>> {
-        let db = self.clone_for_owner_operation();
-        self.node.enqueue_transaction_read(id, async move {
-            let node = db.lock_for_transaction_operation(id).await?;
-            node.open_transaction_snapshot(id).map_err(Into::into)
-        })
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.

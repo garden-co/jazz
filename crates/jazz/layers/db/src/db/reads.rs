@@ -128,13 +128,6 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
-    /// Normalize relation syntax into the same prepared-query representation
-    /// used by every other read path.
-    #[doc(hidden)]
-    pub fn prepare_relation_query(&self, query: &RelationQuery) -> Result<PreparedQuery, Error> {
-        self.prepare_query(&relation_query_to_query(query)?)
-    }
-
     /// Prepare a query after asynchronously acquiring the node owner.
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
@@ -1355,28 +1348,6 @@ where
         // identity. Re-projecting those rows against the physical source
         // schema would reinterpret alias positions as source columns.
         let rows = self.all(&prepared, opts).await?;
-        Ok(RelationSnapshot {
-            root_count: rows.len(),
-            rows,
-            edges: Vec::new(),
-        })
-    }
-
-    /// Tier-gated one-shot output-changing relation read evaluated as `author`.
-    pub async fn all_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
-            .await?;
-        ensure_default_read_view(&opts)?;
-        let prepared = self.prepare_relation_query_async(query).await?;
-        // The relation terminal already emits the requested aliases and row
-        // identity. Re-projecting those rows against the physical source
-        // schema would reinterpret alias positions as source columns.
-        let rows = self.all_for_identity(&prepared, opts, author).await?;
         Ok(RelationSnapshot {
             root_count: rows.len(),
             rows,
