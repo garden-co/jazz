@@ -969,13 +969,9 @@ where
                 (key, value)
             })
             .collect::<Vec<_>>();
-        // The baseline corpus intentionally has no scope-isolated relay
-        // attachment. Keep its historical receipt focused on settled state;
-        // populated relay and local-availability stores have separate receipts.
-        if (store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE
-            || store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE)
-            && rows.is_empty()
-        {
+        // Keep the baseline receipt focused on settled state; populated
+        // local-availability stores have separate receipts.
+        if store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE && rows.is_empty() {
             continue;
         }
         stores.insert(store_name, rows);

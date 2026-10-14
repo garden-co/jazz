@@ -43,10 +43,6 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// Retired: the scope relay's row-version repair ledger. Nothing writes or
-/// reads it since the repair lane was removed; it stays registered so stores
-/// that already hold it still open.
-pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue
@@ -556,26 +552,6 @@ impl RuntimeSchema {
                     ("row", ValueType::Uuid),
                 ]),
                 local_availability_record_descriptor(),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SCOPE_RELAY_REPAIR_LEDGER_STORE,
-                RecordDescriptor::new([
-                    ("scope_digest", ValueType::Bytes),
-                    ("physical_table_id", ValueType::U64),
-                    ("row_id", ValueType::Uuid),
-                    ("tx_time", ValueType::U64),
-                    ("tx_node", ValueType::Uuid),
-                ]),
-                // Full scope components are values so host supplied strings
-                // never enter a backend's bounded ordered-key space.
-                RecordDescriptor::new([
-                    ("format_version", ValueType::U64),
-                    ("storage_owner", ValueType::String),
-                    (
-                        "admitted_subject",
-                        ValueType::Nullable(Box::new(ValueType::String)),
-                    ),
-                ]),
             ))
     }
 }

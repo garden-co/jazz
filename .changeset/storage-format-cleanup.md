@@ -5,6 +5,7 @@
 **Breaking:** Simplified Jazz's persisted storage format:
 
 - Removed the retired subscription-cache stores and their recovery cleanup.
+- Removed the retired scope-relay repair ledger registration and its key/value descriptors, which were retained only to open older stores after the repair lane was removed.
 - Replaced the nullable string marker for partial transactions with an `is_partial` boolean, preserving transaction validation, forwarding, and partial-to-complete application behavior.
 - Consolidated Jazz compatibility markers into one format per node store, server catalogue, and account registry. Independent stores no longer inherit unrelated Jazz formats.
 - Removed retired Groove large-value scalar variants; the two supported tags are now primitive `0` and chunked `1`, guarded by `groove.large-value.v2`.
