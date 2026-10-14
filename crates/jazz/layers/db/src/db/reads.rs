@@ -181,31 +181,7 @@ where
         };
         let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
-        let (local_plan, global_plan) =
-            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
-                (
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Local,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Global,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+        let [local_plan, global_plan] = prepared_plans(&mut node, &shape, &binding).await?;
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -822,28 +798,10 @@ where
         self.ensure_open_schema_admitted()?;
         let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
-        let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self.node.node.borrow().uses_schema_projected_read(&shape)
-        {
-            let mut node = self.node.node.borrow_mut();
-            (
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Local,
-                    AuthorSubject::SYSTEM,
-                ))?),
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    AuthorSubject::SYSTEM,
-                ))?),
-            )
-        } else {
-            (None, None)
-        };
-        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
+        let mut node = self.node.node.borrow_mut();
+        let [local_plan, global_plan] =
+            super::block_on(prepared_plans(&mut node, &shape, &binding))?;
+        let groove_runtime_token = node.groove_runtime_token();
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -1354,6 +1312,26 @@ where
             edges: Vec::new(),
         })
     }
+}
+
+/// Install the `[local, global]` system plans a prepared query reuses, unless
+/// its shape is not worth preparing or reads through a schema projection.
+async fn prepared_plans<S: OrderedKvStorage>(
+    node: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> Result<[Option<PreparedQueryPlanHandle>; 2], Error> {
+    if !should_install_prepared_plan(shape) || node.uses_schema_projected_read(shape) {
+        return Ok([None, None]);
+    }
+    let mut plan = async |tier| {
+        node.prepared_query_plan(shape, binding, tier, AuthorSubject::SYSTEM)
+            .await
+    };
+    Ok([
+        Some(plan(DurabilityTier::Local).await?),
+        Some(plan(DurabilityTier::Global).await?),
+    ])
 }
 
 /// The descriptor on a terminal operation describes its root record. Nested
