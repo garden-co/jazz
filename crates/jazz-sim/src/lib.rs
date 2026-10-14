@@ -65,16 +65,6 @@ impl BenchProfile {
         }
     }
 
-    /// True when the benchmark should choose interactive defaults.
-    pub fn is_fast(self) -> bool {
-        self == Self::Fast
-    }
-
-    /// True when the benchmark should choose profiler-friendly defaults.
-    pub fn is_profile(self) -> bool {
-        self == Self::Profile
-    }
-
     /// Select a default value for the active benchmark scale.
     pub fn select<T>(self, fast: T, profile: T, full: T) -> T {
         match self {
@@ -86,11 +76,6 @@ impl BenchProfile {
 }
 
 const GLOBAL_TRANSPORT_CODEC_ENV: &str = "JAZZ_TRANSPORT_CODEC";
-
-/// True when benchmark configs should use fast interactive defaults.
-pub fn fast_bench_profile() -> bool {
-    BenchProfile::from_env().is_fast()
-}
 
 /// Active benchmark scale from `JAZZ_BENCH_PROFILE`.
 pub fn bench_profile() -> BenchProfile {
