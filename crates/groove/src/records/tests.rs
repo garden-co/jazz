@@ -162,6 +162,108 @@ fn descriptor_fields_remain_in_declaration_order() {
     assert_eq!(names, ["name", "age", "payload", "active"]);
 }
 
+/// Alice's persisted schemas retain every type and enum identity while omitting
+/// execution bindings. This codec-level test covers malformed bytes that the
+/// database API cannot construct.
+#[test]
+fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees() {
+    let child = RecordDescriptor::new([("value", ValueType::U48)]);
+    let types = vec![
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::U48,
+        ValueType::I32,
+        ValueType::I64,
+        ValueType::F64,
+        ValueType::Bool,
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::raw_string(),
+        ValueType::raw_bytes(),
+        ValueType::Uuid,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ValueType::EnumTag(
+            ScalarEnumSchema::new("state", ["open", "closed"])
+                .unwrap()
+                .with_system_registry(SystemVariantRegistry::deletion_state()),
+        ),
+        ValueType::Tuple(vec![ValueType::U8, ValueType::U64]),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new("empty", RecordDescriptor::default()),
+                    EnumCase::new("value", child),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(42),
+        )),
+    ];
+    for original in [RecordDescriptor::default(), descriptor(types)] {
+        let encoded = encode_persisted_record_descriptor(&original).unwrap();
+        let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(
+            encode_persisted_record_descriptor(&decoded).unwrap(),
+            encoded
+        );
+        for length in 0..encoded.len() {
+            assert!(decode_persisted_record_descriptor(&encoded[..length]).is_err());
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_persisted_record_descriptor(&trailing).is_err());
+    }
+    let bound_child = RecordDescriptor::new_with_fields([
+        DescriptorField::new("stored_name", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "runtime_name".into(),
+                slot: 7,
+            },
+        ),
+        DescriptorField {
+            name: None,
+            identity: Some(FieldIdentity::Slot(8)),
+            value_type: ValueType::Bool,
+        },
+    ]);
+    let expected_child =
+        RecordDescriptor::new_with_fields(bound_child.fields().iter().cloned().map(|mut field| {
+            field.identity = None;
+            field
+        }));
+    let bound = RecordDescriptor::new([("child", ValueType::Record(Box::new(bound_child)))]);
+    let expected = RecordDescriptor::new([("child", ValueType::Record(Box::new(expected_child)))]);
+    let encoded = encode_persisted_record_descriptor(&bound).unwrap();
+    assert_eq!(
+        decode_persisted_record_descriptor(&encoded).unwrap(),
+        expected
+    );
+    assert_eq!(
+        encode_persisted_record_descriptor(&expected).unwrap(),
+        encoded
+    );
+    let child_bytes = bound_child
+        .create(&[Value::U64(42), Value::Bool(true)])
+        .unwrap();
+    let row = bound
+        .create(&[Value::Record(OwnedRecord::new(child_bytes, bound_child))])
+        .unwrap();
+    assert_eq!(
+        expected
+            .create(&expected.bind(&row).to_values().unwrap())
+            .unwrap(),
+        row
+    );
+}
+
 #[test]
 fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     // A descriptor can cross a durable engine boundary (for example, inside a

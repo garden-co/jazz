@@ -23,4 +23,6 @@
 
 - Use one storage encoding for every catalogue schema and one counted v2 lineage-publication encoding for every predecessor set. Remove the retired v1 decoders; schema IDs stay unchanged, while affected publication IDs change with their canonical bytes.
 
+- Store record-descriptor nodes with fields specific to each kind, removing irrelevant metadata and fixed child counts. Field names, enum identities, type validation, and row value encodings are preserved; descriptor bytes and identities derived from them change.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.

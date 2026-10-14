@@ -1126,25 +1126,69 @@ pub fn decode_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Erro
     Ok(descriptor)
 }
 
-// The persisted descriptor grammar is distinct from execution bindings. Its
-// node record is frozen: tag, name, registry_id, children, strings. FieldIdentity
-// is compiler state and never adds a field to this authoritative encoding.
-fn persisted_descriptor_node() -> &'static RecordDescriptor {
-    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RecordDescriptor::new([
-            ("tag", ValueType::U8),
-            (
-                "name",
-                ValueType::Nullable(Box::new(ValueType::raw_string())),
-            ),
-            ("registry_id", ValueType::U64),
-            ("children", ValueType::U32),
-            (
-                "strings",
-                ValueType::Array(Box::new(ValueType::raw_string())),
-            ),
-        ])
+// Persisted descriptor v2 uses one payload per node kind. The enclosing
+// storage/wire contract selects this grammar; execution bindings stay local.
+fn persisted_descriptor_node_schema() -> &'static EnumSchema {
+    static SCHEMA: OnceLock<EnumSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let kinds = [
+            (DESCRIPTOR_NODE_DESCRIPTOR, "Descriptor"),
+            (DESCRIPTOR_NODE_FIELD, "Field"),
+            (DESCRIPTOR_NODE_U8, "U8"),
+            (DESCRIPTOR_NODE_U16, "U16"),
+            (DESCRIPTOR_NODE_U32, "U32"),
+            (DESCRIPTOR_NODE_U64, "U64"),
+            (DESCRIPTOR_NODE_I32, "I32"),
+            (DESCRIPTOR_NODE_I64, "I64"),
+            (DESCRIPTOR_NODE_F64, "F64"),
+            (DESCRIPTOR_NODE_BOOL, "Bool"),
+            (DESCRIPTOR_NODE_STRING, "String"),
+            (DESCRIPTOR_NODE_BYTES, "Bytes"),
+            (DESCRIPTOR_NODE_RAW_STRING, "RawString"),
+            (DESCRIPTOR_NODE_RAW_BYTES, "RawBytes"),
+            (DESCRIPTOR_NODE_STORED_BYTES, "StoredBytes"),
+            (DESCRIPTOR_NODE_STORED_STRING, "StoredString"),
+            (DESCRIPTOR_NODE_STORED_JSON, "StoredJson"),
+            (DESCRIPTOR_NODE_UUID, "Uuid"),
+            (DESCRIPTOR_NODE_ENUM_TAG, "EnumTag"),
+            (DESCRIPTOR_NODE_TUPLE, "Tuple"),
+            (DESCRIPTOR_NODE_ARRAY, "Array"),
+            (DESCRIPTOR_NODE_NULLABLE, "Nullable"),
+            (DESCRIPTOR_NODE_RECORD, "Record"),
+            (DESCRIPTOR_NODE_ENUM, "Enum"),
+            (DESCRIPTOR_NODE_ENUM_CASE, "EnumCase"),
+            (DESCRIPTOR_NODE_U48, "U48"),
+        ];
+        let cases = kinds.into_iter().enumerate().map(|(index, (tag, name))| {
+            assert_eq!(index, usize::from(tag));
+            let fields = match tag {
+                DESCRIPTOR_NODE_DESCRIPTOR | DESCRIPTOR_NODE_TUPLE => {
+                    vec![("children", ValueType::U32)]
+                }
+                DESCRIPTOR_NODE_FIELD => vec![(
+                    "name",
+                    ValueType::Nullable(Box::new(ValueType::raw_string())),
+                )],
+                DESCRIPTOR_NODE_ENUM_TAG => vec![
+                    ("name", ValueType::raw_string()),
+                    ("registry_id", ValueType::U64),
+                    (
+                        "strings",
+                        ValueType::Array(Box::new(ValueType::raw_string())),
+                    ),
+                ],
+                DESCRIPTOR_NODE_ENUM => vec![
+                    ("name", ValueType::raw_string()),
+                    ("registry_id", ValueType::U64),
+                    ("children", ValueType::U32),
+                ],
+                DESCRIPTOR_NODE_ENUM_CASE => vec![("name", ValueType::raw_string())],
+                _ => Vec::new(),
+            };
+            EnumCase::new(name, RecordDescriptor::new(fields))
+        });
+        EnumSchema::new("groove.persisted_descriptor.v2", cases)
+            .expect("fixed persisted descriptor node schema")
     })
 }
 
@@ -1153,11 +1197,109 @@ fn persisted_descriptor_envelope() -> &'static RecordDescriptor {
     DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([(
             "nodes",
-            ValueType::Array(Box::new(ValueType::Record(Box::new(
-                *persisted_descriptor_node(),
+            ValueType::Array(Box::new(ValueType::Enum(Box::new(
+                persisted_descriptor_node_schema().clone(),
             )))),
         )])
     })
+}
+
+fn persisted_descriptor_node_value(node: DescriptorCodecNode) -> Result<Value, Error> {
+    let fields = match node.tag {
+        DESCRIPTOR_NODE_DESCRIPTOR | DESCRIPTOR_NODE_TUPLE => vec![Value::U32(node.children)],
+        DESCRIPTOR_NODE_FIELD => {
+            vec![Value::Nullable(
+                node.name.map(|name| Box::new(Value::String(name))),
+            )]
+        }
+        DESCRIPTOR_NODE_ENUM_TAG => vec![
+            Value::String(node.name.ok_or(Error::NonCanonicalRecord)?),
+            Value::U64(node.registry_id),
+            Value::Array(node.strings.into_iter().map(Value::String).collect()),
+        ],
+        DESCRIPTOR_NODE_ENUM => vec![
+            Value::String(node.name.ok_or(Error::NonCanonicalRecord)?),
+            Value::U64(node.registry_id),
+            Value::U32(node.children),
+        ],
+        DESCRIPTOR_NODE_ENUM_CASE => {
+            vec![Value::String(node.name.ok_or(Error::NonCanonicalRecord)?)]
+        }
+        _ => Vec::new(),
+    };
+    let tag = u32::from(node.tag);
+    let payload = persisted_descriptor_node_schema().case(tag)?.payload;
+    Ok(Value::Enum(EnumValue::create(tag, payload, &fields)?))
+}
+
+fn persisted_descriptor_node_from_value(value: &Value) -> Result<DescriptorCodecNode, Error> {
+    let Value::Enum(value) = value else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    let tag = u8::try_from(value.tag).map_err(|_| Error::NonCanonicalRecord)?;
+    let fields = value.record.to_values()?;
+    let mut node = DescriptorCodecNode {
+        tag,
+        name: None,
+        identity_name: None,
+        identity_slot: None,
+        registry_id: 0,
+        children: 0,
+        strings: Vec::new(),
+    };
+    match (tag, fields.as_slice()) {
+        (DESCRIPTOR_NODE_DESCRIPTOR | DESCRIPTOR_NODE_TUPLE, [Value::U32(children)]) => {
+            node.children = *children;
+        }
+        (DESCRIPTOR_NODE_FIELD, [Value::Nullable(name)]) => {
+            node.name = match name.as_deref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                _ => return Err(Error::NonCanonicalRecord),
+            };
+            node.children = 1;
+        }
+        (
+            DESCRIPTOR_NODE_ENUM_TAG,
+            [
+                Value::String(name),
+                Value::U64(registry_id),
+                Value::Array(strings),
+            ],
+        ) => {
+            node.name = Some(name.clone());
+            node.registry_id = *registry_id;
+            node.strings = strings
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => Ok(value.clone()),
+                    _ => Err(Error::NonCanonicalRecord),
+                })
+                .collect::<Result<_, _>>()?;
+        }
+        (
+            DESCRIPTOR_NODE_ENUM,
+            [
+                Value::String(name),
+                Value::U64(registry_id),
+                Value::U32(children),
+            ],
+        ) => {
+            node.name = Some(name.clone());
+            node.registry_id = *registry_id;
+            node.children = *children;
+        }
+        (DESCRIPTOR_NODE_ENUM_CASE, [Value::String(name)]) => {
+            node.name = Some(name.clone());
+            node.children = 1;
+        }
+        (DESCRIPTOR_NODE_ARRAY | DESCRIPTOR_NODE_NULLABLE | DESCRIPTOR_NODE_RECORD, []) => {
+            node.children = 1;
+        }
+        (DESCRIPTOR_NODE_U8..=DESCRIPTOR_NODE_UUID | DESCRIPTOR_NODE_U48, []) => {}
+        _ => return Err(Error::NonCanonicalRecord),
+    }
+    Ok(node)
 }
 
 /// Encode a canonical persisted descriptor using exact durable field names and
@@ -1169,20 +1311,10 @@ fn persisted_descriptor_envelope() -> &'static RecordDescriptor {
 pub fn encode_persisted_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, Error> {
     let mut nodes = Vec::new();
     descriptor_codec_push_descriptor(&mut nodes, descriptor)?;
-    let node_descriptor = *persisted_descriptor_node();
     let nodes = nodes
         .into_iter()
-        .map(|node| {
-            let raw = node_descriptor.create(&[
-                Value::U8(node.tag),
-                Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
-                Value::U64(node.registry_id),
-                Value::U32(node.children),
-                Value::Array(node.strings.into_iter().map(Value::String).collect()),
-            ])?;
-            Ok(Value::Record(OwnedRecord::new(raw, node_descriptor)))
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .map(persisted_descriptor_node_value)
+        .collect::<Result<Vec<_>, _>>()?;
     persisted_descriptor_envelope().create(&[Value::Array(nodes)])
 }
 
@@ -1203,44 +1335,8 @@ pub fn decode_persisted_record_descriptor(encoded: &[u8]) -> Result<RecordDescri
     }
     let nodes = records
         .iter()
-        .map(|record| {
-            let Value::Record(record) = record else {
-                return Err(Error::NonCanonicalRecord);
-            };
-            let values = record.to_values()?;
-            let [
-                Value::U8(tag),
-                Value::Nullable(name),
-                Value::U64(registry_id),
-                Value::U32(children),
-                Value::Array(strings),
-            ] = values.as_slice()
-            else {
-                return Err(Error::NonCanonicalRecord);
-            };
-            let name = match name.as_deref() {
-                None => None,
-                Some(Value::String(name)) => Some(name.clone()),
-                Some(_) => return Err(Error::NonCanonicalRecord),
-            };
-            let strings = strings
-                .iter()
-                .map(|value| match value {
-                    Value::String(value) => Ok(value.clone()),
-                    _ => Err(Error::NonCanonicalRecord),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(DescriptorCodecNode {
-                tag: *tag,
-                name,
-                identity_name: None,
-                identity_slot: None,
-                registry_id: *registry_id,
-                children: *children,
-                strings,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .map(persisted_descriptor_node_from_value)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut cursor = 0;
     let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
     if cursor != nodes.len() || encode_persisted_record_descriptor(&descriptor)? != encoded {
