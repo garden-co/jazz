@@ -788,27 +788,16 @@ where
         if node_metrics(self.kind, &node)? != metrics {
             return Err(Error::DescriptorMismatch);
         }
-        let structural_hash = node_logical_hash(&node);
-        let encoded = encode_node(&node)?;
-        let object_hash = object_hash(&encoded);
-        let node_ref = NodeRef {
-            object_hash,
-            locator: (self.locator_for)(object_hash),
-        };
-        (self.stage)(StagedChunk {
-            node_ref: node_ref.clone(),
-            encoded,
-        })?;
-        self.stats.staged_chunk_count = self
-            .stats
-            .staged_chunk_count
-            .checked_add(1)
-            .ok_or(Error::MetricOverflow)?;
-        Ok(BuiltNode {
-            node_ref,
-            metrics,
-            structural_hash,
-        })
+        let (built, chunk) = seal_node(&node, metrics, |hash| ((self.locator_for)(hash), true))?;
+        if let Some(chunk) = chunk {
+            (self.stage)(chunk)?;
+            self.stats.staged_chunk_count = self
+                .stats
+                .staged_chunk_count
+                .checked_add(1)
+                .ok_or(Error::MetricOverflow)?;
+        }
+        Ok(built)
     }
 
     fn add_node(&mut self, mut level: usize, mut node: BuiltNode) -> Result<(), Error> {
@@ -856,22 +845,7 @@ where
     fn flush_group(&mut self, level: usize) -> Result<BuiltNode, Error> {
         let group = std::mem::take(&mut self.levels[level].pending);
         self.levels[level].hash = 0;
-        let mut group_metrics = group.iter().map(|child| child.metrics);
-        let first = group_metrics.next().ok_or(Error::MalformedNode)?;
-        let metrics = group_metrics.try_fold(first, add_metrics)?;
-        let children = group
-            .iter()
-            .map(|child| BranchChild {
-                node_ref: child.node_ref.clone(),
-                metrics: child.metrics,
-                logical_hash: child.structural_hash,
-            })
-            .collect();
-        let chunk_node = ChunkNode::Branch {
-            format: FORMAT_VERSION,
-            kind: self.kind,
-            children,
-        };
+        let (chunk_node, metrics) = branch_over(self.kind, &group)?;
         self.stage_node_to(chunk_node, metrics)
     }
 
@@ -895,18 +869,7 @@ where
                     // supplied below by the reader-facing facade; this builder
                     // never marks an unvalidated descriptor publishable there.
                 }
-                return Ok((
-                    LargeValueRef {
-                        kind: self.kind,
-                        format_version: FORMAT_VERSION,
-                        logical_hash: root.structural_hash,
-                        root: root.node_ref,
-                        byte_length: root.metrics.byte_length,
-                        utf16_length: root.metrics.utf16_length,
-                        edit_tail: Vec::new(),
-                    },
-                    self.stats,
-                ));
+                return Ok((root.into_value_ref(self.kind), self.stats));
             }
             if !self.levels[level].pending.is_empty() {
                 let node = self.flush_group(level)?;
@@ -1290,7 +1253,7 @@ pub(crate) fn consolidate_appends_attempt(
 
     for mut level in spine.into_iter().rev() {
         level.pop();
-        let mut rebuilt = level.into_iter().map(built_from_child).collect::<Vec<_>>();
+        let mut rebuilt = level.into_iter().map(BuiltNode::from).collect::<Vec<_>>();
         rebuilt.append(&mut replacement);
         replacement = stage_branch_level_reusing(
             value.kind,
@@ -1438,14 +1401,14 @@ pub(crate) fn consolidate_single_edit_attempt(
         let mut level = left.children[..left.selected]
             .iter()
             .cloned()
-            .map(built_from_child)
+            .map(BuiltNode::from)
             .collect::<Vec<_>>();
         level.append(&mut replacement);
         level.extend(
             right.children[right.selected + 1..]
                 .iter()
                 .cloned()
-                .map(built_from_child),
+                .map(BuiltNode::from),
         );
         let higher_path_has_siblings = left_path[..depth]
             .iter()
@@ -1503,15 +1466,7 @@ fn finish_rebuilt_tree(
         return Err(Error::DescriptorMismatch.into());
     }
     Ok(PreparedLargeValue {
-        value_ref: LargeValueRef {
-            kind: value.kind,
-            format_version: FORMAT_VERSION,
-            logical_hash: root.structural_hash,
-            root: root.node_ref,
-            byte_length: root.metrics.byte_length,
-            utf16_length: root.metrics.utf16_length,
-            edit_tail: Vec::new(),
-        },
+        value_ref: root.into_value_ref(value.kind),
         staged_chunks,
     })
 }
@@ -2242,6 +2197,85 @@ struct BuiltNode {
     structural_hash: ContentHash,
 }
 
+impl BuiltNode {
+    /// The tail-free current-format descriptor rooted at this node.
+    fn into_value_ref(self, kind: LargeValueKind) -> LargeValueRef {
+        LargeValueRef {
+            kind,
+            format_version: FORMAT_VERSION,
+            logical_hash: self.structural_hash,
+            root: self.node_ref,
+            byte_length: self.metrics.byte_length,
+            utf16_length: self.metrics.utf16_length,
+            edit_tail: Vec::new(),
+        }
+    }
+}
+
+impl From<&BuiltNode> for BranchChild {
+    fn from(node: &BuiltNode) -> Self {
+        Self {
+            node_ref: node.node_ref.clone(),
+            metrics: node.metrics,
+            logical_hash: node.structural_hash,
+        }
+    }
+}
+
+impl From<BranchChild> for BuiltNode {
+    fn from(child: BranchChild) -> Self {
+        Self {
+            node_ref: child.node_ref,
+            metrics: child.metrics,
+            structural_hash: child.logical_hash,
+        }
+    }
+}
+
+/// The current-format branch over `group`, with its summed metrics.
+fn branch_over(
+    kind: LargeValueKind,
+    group: &[BuiltNode],
+) -> Result<(ChunkNode, NodeMetrics), Error> {
+    let mut group_metrics = group.iter().map(|child| child.metrics);
+    let first = group_metrics.next().ok_or(Error::MalformedNode)?;
+    let metrics = group_metrics.try_fold(first, add_metrics)?;
+    let node = ChunkNode::Branch {
+        format: FORMAT_VERSION,
+        kind,
+        children: group.iter().map(BranchChild::from).collect(),
+    };
+    Ok((node, metrics))
+}
+
+/// Encode `node` and name it with the locator `locate` picks for its object
+/// hash. The encoded chunk is returned for staging only when `locate` says
+/// the locator is fresh; a reused locator names an already-stored chunk.
+fn seal_node(
+    node: &ChunkNode,
+    metrics: NodeMetrics,
+    locate: impl FnOnce(ContentHash) -> (Locator, bool),
+) -> Result<(BuiltNode, Option<StagedChunk>), Error> {
+    let structural_hash = node_logical_hash(node);
+    let encoded = encode_node(node)?;
+    let object_hash = object_hash(&encoded);
+    let (locator, fresh) = locate(object_hash);
+    let node_ref = NodeRef {
+        object_hash,
+        locator,
+    };
+    let chunk = fresh.then(|| StagedChunk {
+        node_ref: node_ref.clone(),
+        encoded,
+    });
+    let built = BuiltNode {
+        node_ref,
+        metrics,
+        structural_hash,
+    };
+    Ok((built, chunk))
+}
+
 #[derive(Clone)]
 struct PathFrame {
     node_ref: NodeRef,
@@ -2291,22 +2325,7 @@ fn prepare_with_locator(
         }
         let mut next = Vec::new();
         for range in branch_ranges(kind, &level) {
-            let group = &level[range];
-            let mut group_metrics = group.iter().map(|child| child.metrics);
-            let first_metrics = group_metrics.next().ok_or(Error::MalformedNode)?;
-            let metrics = group_metrics.try_fold(first_metrics, add_metrics)?;
-            let node = ChunkNode::Branch {
-                format: FORMAT_VERSION,
-                kind,
-                children: group
-                    .iter()
-                    .map(|child| BranchChild {
-                        node_ref: child.node_ref.clone(),
-                        metrics: child.metrics,
-                        logical_hash: child.structural_hash,
-                    })
-                    .collect(),
-            };
+            let (node, metrics) = branch_over(kind, &level[range])?;
             next.push(stage_node(
                 node,
                 metrics,
@@ -2318,15 +2337,7 @@ fn prepare_with_locator(
     }
     let root = level.pop().expect("empty values have one leaf");
     Ok(PreparedLargeValue {
-        value_ref: LargeValueRef {
-            kind,
-            format_version: FORMAT_VERSION,
-            logical_hash: root.structural_hash,
-            root: root.node_ref,
-            byte_length: root.metrics.byte_length,
-            utf16_length: root.metrics.utf16_length,
-            edit_tail: Vec::new(),
-        },
+        value_ref: root.into_value_ref(kind),
         staged_chunks,
     })
 }
@@ -3370,22 +3381,9 @@ fn stage_node(
     if node_metrics(node_kind(&node), &node)? != metrics {
         return Err(Error::DescriptorMismatch);
     }
-    let structural_hash = node_logical_hash(&node);
-    let encoded = encode_node(&node)?;
-    let object_hash = object_hash(&encoded);
-    let node_ref = NodeRef {
-        object_hash,
-        locator: locator_for(object_hash),
-    };
-    staged_chunks.push(StagedChunk {
-        node_ref: node_ref.clone(),
-        encoded,
-    });
-    Ok(BuiltNode {
-        node_ref,
-        metrics,
-        structural_hash,
-    })
+    let (built, chunk) = seal_node(&node, metrics, |hash| (locator_for(hash), true))?;
+    staged_chunks.extend(chunk);
+    Ok(built)
 }
 
 fn stage_node_reusing(
@@ -3397,40 +3395,12 @@ fn stage_node_reusing(
 ) -> Result<BuiltNode, Error> {
     validate_untyped_node_structure(&node)?;
     let metrics = node_metrics(kind, &node)?;
-    let structural_hash = node_logical_hash(&node);
-    let encoded = encode_node(&node)?;
-    let object_hash = object_hash(&encoded);
-    if let Some(locator) = existing.get(&object_hash) {
-        return Ok(BuiltNode {
-            node_ref: NodeRef {
-                object_hash,
-                locator: *locator,
-            },
-            metrics,
-            structural_hash,
-        });
-    }
-    let node_ref = NodeRef {
-        object_hash,
-        locator: fresh_locator(object_hash),
-    };
-    staged_chunks.push(StagedChunk {
-        node_ref: node_ref.clone(),
-        encoded,
-    });
-    Ok(BuiltNode {
-        node_ref,
-        metrics,
-        structural_hash,
-    })
-}
-
-fn built_from_child(child: BranchChild) -> BuiltNode {
-    BuiltNode {
-        node_ref: child.node_ref,
-        metrics: child.metrics,
-        structural_hash: child.logical_hash,
-    }
+    let (built, chunk) = seal_node(&node, metrics, |hash| match existing.get(&hash) {
+        Some(locator) => (*locator, false),
+        None => (fresh_locator(hash), true),
+    })?;
+    staged_chunks.extend(chunk);
+    Ok(built)
 }
 
 fn stage_leaves_reusing(
@@ -3467,14 +3437,7 @@ fn stage_branch_level_reusing(
 ) -> Result<Vec<BuiltNode>, Error> {
     let mut next = Vec::new();
     for range in branch_ranges(kind, level) {
-        let children = level[range]
-            .iter()
-            .map(|child| BranchChild {
-                node_ref: child.node_ref.clone(),
-                metrics: child.metrics,
-                logical_hash: child.structural_hash,
-            })
-            .collect();
+        let children = level[range].iter().map(BranchChild::from).collect();
         next.push(stage_node_reusing(
             kind,
             ChunkNode::Branch {
