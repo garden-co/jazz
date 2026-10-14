@@ -242,6 +242,8 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
+      - name: Record build host CPU
+        run: lscpu; grep -m1 -i '^Features' /proc/cpuinfo
       - name: Build and verify release runtime
         run: |
           pnpm --filter jazz-wasm build
@@ -280,6 +282,10 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: text-editor-runtime-${{ github.sha }}
+      # The runtime is compiled on another host; a CPU feature it lacks shows
+      # up below as SIGILL (#4049), so keep the comparison in the log.
+      - name: Record measurement host CPU
+        run: lscpu; grep -m1 -i '^Features' /proc/cpuinfo
       - name: Restore and verify this commit's runtime
         run: |
           tar -xzf text-editor-runtime.tar.gz
