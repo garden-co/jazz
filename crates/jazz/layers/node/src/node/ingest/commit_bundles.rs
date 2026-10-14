@@ -423,7 +423,48 @@ where
         ).await
     }
 
+    /// One admission attempt of a unit at the authority: its decision,
+    /// and, when it is refused, the superseded-writes markers the refusal
+    /// leaves (see [`Self::record_superseded_by_refusal`]).
     pub(super) async fn ingest_commit_unit_once(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
+        let tx_id = tx.tx_id;
+        let predecessors = versions
+            .iter()
+            .filter_map(|version| {
+                version.base().pending.map(|pending| {
+                    (
+                        version.schema_version(),
+                        version.table().to_owned(),
+                        version.branch_key().clone(),
+                        version.row_uuid(),
+                        pending,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcome =
+            Box::pin(self.decide_commit_unit(tx, versions, now_ms, ingest_context)).await?;
+        if !predecessors.is_empty()
+            && outcome.value.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::FateUpdate { tx_id: id, fate: Fate::Rejected(_), .. }
+                        if *id == tx_id
+                )
+            })
+        {
+            self.record_superseded_by_refusal(tx_id, predecessors).await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn decide_commit_unit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,

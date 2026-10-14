@@ -339,22 +339,31 @@ where
 
     /// The writes of `writer`'s node to a row that Core passes over by
     /// applying `writer`'s write: through its pending predecessor's time,
-    /// when Core holds no accepted fate for that predecessor. `None` when
-    /// the write passes nothing over.
+    /// when Core holds no decision for that predecessor (it never arrived,
+    /// or is stored Pending). `None` when the write passes nothing over.
     ///
     /// A writer's writes reach Core in the order they were written
-    /// (`INV-HIST-23`), so once a write chained on `P` arrives, none of its
-    /// node's writes at or before `P` arrives for a decision any more; Core
-    /// records the marker before it applies the write. It is what makes the
-    /// late check of a write without a base seq one point read: when such a
-    /// write `Y` arrives after Core accepted a later write of its node to the
-    /// row, the first of those, `Z`, was written while `Y` was still pending
-    /// at its writer, so `Z` is chained on `Y` or on a later write that Core
-    /// had not accepted either, and applying `Z` recorded a marker at or
-    /// after `Y`. Writing happens only when a write passes over a
-    /// predecessor (one that was rejected before it reached Core, or a
-    /// protocol violation); the ordinary chain over an accepted predecessor
-    /// writes nothing and reads at most the predecessor's transaction.
+    /// (`INV-HIST-23`), so once a write chained on `P` is decided, none of
+    /// its node's writes at or before `P` arrives for a decision any more;
+    /// Core records the marker before it applies the write, and also when it
+    /// refuses one (see [`Self::record_superseded_by_refusal`]). It is what
+    /// makes the late check of a write without a base seq one point read:
+    /// when such a write `Y` arrives after Core accepted a later write of its
+    /// node to the row, the first of those, `Z`, was written while `Y` was
+    /// still pending at its writer, so `Z` is chained on `Y` or on a later
+    /// write `X` that Core had not accepted either. If Core held no decision
+    /// for `X` (or `X` is `Y`), applying `Z` recorded a marker at or after
+    /// `Y`. If Core had refused `X`, the same holds one link down the chain:
+    /// refusing `X` recorded a marker at or after `Y` unless `X`'s own
+    /// predecessor had been refused before it, and so on down to the write
+    /// chained directly on `Y`, which Core decided while it held no
+    /// decision for `Y`. A predecessor Core already decided (accepted or
+    /// refused) therefore writes nothing: a redelivery of it is deduplicated
+    /// before this check, and the writes before it are covered by the
+    /// marker written when it was decided, if any was needed. Writing
+    /// happens only when a write passes over a predecessor Core never saw,
+    /// which takes a transport fault or a parked predecessor; the ordinary
+    /// chain writes nothing and reads at most the predecessor's transaction.
     pub(super) async fn passed_over_predecessor(
         &mut self,
         base: RowBase,
@@ -364,9 +373,6 @@ where
         let Some(pending) = base.pending else {
             return Ok(None);
         };
-        if pending_predecessor_refusal(pending, writer).is_some() {
-            return Ok(None);
-        }
         if current_writer
             .is_some_and(|current| current.node == writer.node && current.time >= pending.time)
         {
@@ -374,10 +380,54 @@ where
             // node Core accepted after it.
             return Ok(None);
         }
-        let accepted = self.query_transaction(pending).await?.is_some_and(|stored| {
-            matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some()
-        });
-        Ok((!accepted).then_some(pending.time))
+        self.undecided_predecessor(pending, writer).await
+    }
+
+    /// `pending`'s time when it is a well-formed predecessor of `writer`
+    /// that Core holds no decision for: not stored, or stored Pending.
+    async fn undecided_predecessor(
+        &mut self,
+        pending: TxId,
+        writer: TxId,
+    ) -> Result<Option<TxTime>, Error> {
+        if pending_predecessor_refusal(pending, writer).is_some() {
+            return Ok(None);
+        }
+        let undecided = self
+            .query_transaction(pending)
+            .await?
+            .is_none_or(|stored| matches!(stored.fate, Fate::Pending));
+        Ok(undecided.then_some(pending.time))
+    }
+
+    /// Record the marker a refused write `writer` leaves for each row it
+    /// addressed whose pending predecessor Core holds no decision for: a
+    /// later write chained on `writer` passes over the refused write without
+    /// a marker (see [`Self::passed_over_predecessor`]), so the refusal
+    /// records the writes it passed over itself. A version whose table this
+    /// node cannot resolve leaves none.
+    pub(super) async fn record_superseded_by_refusal(
+        &mut self,
+        writer: TxId,
+        predecessors: Vec<(SchemaVersionId, String, BranchKey, RowUuid, TxId)>,
+    ) -> Result<(), Error> {
+        for (schema_version, table, branch_key, row_uuid, pending) in predecessors {
+            let Ok(physical_table) = self.physical_table_id_for_schema(schema_version, &table)
+            else {
+                continue;
+            };
+            if let Some(through) = self.undecided_predecessor(pending, writer).await? {
+                self.record_superseded_writes(
+                    physical_table,
+                    &branch_key,
+                    row_uuid,
+                    writer.node,
+                    through,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Record that Core passed over `node`'s writes to a row through

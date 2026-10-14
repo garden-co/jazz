@@ -1789,3 +1789,84 @@ fn superseded_marker_survives_a_table_rename() {
     let late = core.apply_sync_message_settled(f1_unit).unwrap();
     assert!(refused_as_late(&late, f1), "{late:?}");
 }
+
+/// `unit` with its base seq far above any seq Core assigned: Core refuses
+/// it (`INV-HIST-20`) before it could pass anything over.
+fn with_unnameable_base(unit: SyncMessage, pending: Option<TxId>) -> SyncMessage {
+    with_base(
+        unit,
+        crate::protocol::RowBase {
+            seq: Some(GlobalTime(1_000_000_000)),
+            pending,
+        },
+    )
+}
+
+/// A write chained on a predecessor Core already refused records no
+/// marker: the redelivery of the refused write is deduplicated, and its
+/// writer's writes before it were decided before it.
+#[test]
+fn chain_over_a_refused_predecessor_records_no_marker() {
+    let target = row(0x9f);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = writers[0].1.node_uuid;
+    let (x, x_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "x")]);
+    let (z, z_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "z")]);
+    let refused = core
+        .apply_sync_message_settled(with_unnameable_base(x_unit, None))
+        .unwrap();
+    assert!(
+        matches!(fate_for(&refused, x), Some(Fate::Rejected(_))),
+        "{refused:?}"
+    );
+    let answer = core.apply_sync_message_settled(z_unit).unwrap();
+    assert_eq!(fate_for(&answer, z), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(superseded_marker(&core, target, carol), None);
+}
+
+/// INV-HIST-23 through a refused link: when Core refuses a write whose own
+/// predecessor it never saw, the refusal records the marker, so the write
+/// chained on the refused one needs none and the never-seen predecessor is
+/// still refused as late when it arrives.
+///
+/// ```text
+/// frank (never loaded the row) ═offline═ y, x (chained on y), z (chained on x)
+/// frank ──x──► core   rejected (base unnameable)   marker: frank through y
+/// frank ──z──► core   accepted                     no new marker
+/// dave  ──d──► core   accepted
+/// frank ──y──► core   rejected (late)
+/// ```
+#[test]
+fn refusal_of_a_chained_write_records_its_predecessors_marker() {
+    let target = row(0xa0);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x35), two_column_schema());
+    let (y, y_unit) = offline_edit(&mut frank, target, 100, &[("title", "y")]);
+    let (x, x_unit) = offline_edit(&mut frank, target, 101, &[("body", "x")]);
+    let (z, z_unit) = offline_edit(&mut frank, target, 102, &[("title", "z")]);
+    let refused = core
+        .apply_sync_message_settled(with_unnameable_base(x_unit, Some(y)))
+        .unwrap();
+    assert!(
+        matches!(fate_for(&refused, x), Some(Fate::Rejected(_))),
+        "{refused:?}"
+    );
+    assert_eq!(superseded_marker(&core, target, y.node), Some(y.time));
+    let z_unit = with_base(
+        z_unit,
+        crate::protocol::RowBase {
+            seq: None,
+            pending: Some(x),
+        },
+    );
+    let answer = core.apply_sync_message_settled(z_unit).unwrap();
+    assert_eq!(fate_for(&answer, z), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(
+        superseded_marker(&core, target, y.node),
+        Some(y.time),
+        "z passed over a refused predecessor and wrote nothing"
+    );
+    accept_edit(&mut core, &mut writers[0].1, target, 103, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(y_unit).unwrap();
+    assert!(refused_as_late(&late, y), "{late:?}");
+}

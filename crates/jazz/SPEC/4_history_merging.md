@@ -330,17 +330,30 @@ reached Core already or never will:
     `(branch, row, seq, tx_time, node)`. `N` had seen `B` when it wrote `P`,
     so a later write of `N` lies there if anywhere.
   - When `P` has no base seq (an insert, upsert or restore made over no
-    image of the row), it reads one per-row marker of `N`. When Core applies
-    a write `W` of `N` chained on a predecessor `X` it holds no accepted fate
-    for, it first records in the marker (the node-local direct record store
-    `jazz_superseded_writes_v1`, keyed by table, branch, row and node) that
-    `N`'s writes to the row through `X`'s transaction time were passed over;
-    a write of `N` at or before that time arriving later is late. The marker
-    is exact for `P`: the first write of `N` Core accepted after `P` was
-    written while `P` was still pending at `N`, so it was chained on `P` or
-    on a later write Core had not accepted either, and recorded a marker at
-    or after `P`. A chain over predecessors Core accepted records nothing
-    and reads at most the predecessor's transaction.
+    image of the row), it reads one per-row marker of `N`. When Core decides
+    a write `W` of `N` chained on a predecessor `X` it holds no decision for
+    (unknown, or stored Pending), it first records in the marker (the
+    node-local direct record store `jazz_superseded_writes_v1`, keyed by
+    physical table id, branch, row and node) that `N`'s writes to the row
+    through `X`'s transaction time were passed over; a write of `N` at or
+    before that time arriving later is late. Core records it before it
+    applies `W`, and also when it refuses `W`. The physical table id is kept
+    across table renames, so a marker recorded under one schema version
+    guards writes made under another. The marker is exact for `P`: the
+    first write of `N` Core accepted after `P` was written while `P` was
+    still pending at `N`, so it was chained on `P` or on a later write `X`
+    Core had not accepted either. If Core held no decision for `X`,
+    applying the write recorded a marker at or after `P`; if Core had
+    refused `X`, refusing `X` did, or one link further down the chain, down
+    to the write chained directly on `P`. A chain over predecessors Core
+    already decided (accepted or refused) records nothing and reads at most
+    the predecessor's transaction.
+  - Markers are never collected. Row deletion leaves a restorable tombstone
+    and keeps the row's history, so a late write to a deleted row must
+    still be refused, and nothing removes a branch's rows. A marker is
+    written only when a write passes over a predecessor Core never saw (a
+    transport fault, or a parked predecessor), so their number is bounded by
+    those events, not by write volume.
 
 A `P` rejected locally before it reached Core (for example its large value
 was not staged) therefore ends like a `P` rejected at Core: `W` applies over
