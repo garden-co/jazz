@@ -91,7 +91,7 @@ export function useShopper(): Shopper {
 function ShopperProvider({ children }: { children: ReactNode }) {
   const db = useDb();
   const session = useSession();
-  const { sessionActions: actions, account: handle } = useJazzAuth();
+  const { sessionActions: actions, account: handle, needsLogin } = useJazzAuth();
   const { data: auth, isPending } = authClient.useSession();
   const account = session?.user.account ?? handle?.id ?? "";
   const isSignedIn = handle?.identity.issuer === origin;
@@ -102,22 +102,19 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   // Deliberately keyed on the auth state only: `db`, `account` and `actions`
   // change identity as a consequence of the switch this effect starts, and
   // re-running on them would start a second switch.
-  // A signed-in account reopened after a reload has no credential yet, so it
-  // does not sync until it logs in again: revalidate it once per user.
-  const revalidated = useRef<string | null>(null);
   useEffect(() => {
     if (isPending || !auth?.user || restoring.current || changingAccount) return;
     if (isSignedIn) {
-      if (revalidated.current === auth.user.id) return;
-      revalidated.current = auth.user.id;
-      void actions.loginOrRegisterJWT({ getToken });
+      // A signed-in account reopened after a reload has no credential yet:
+      // Jazz reports `needsLogin` until it logs in again, and only then syncs.
+      if (needsLogin) void actions.loginOrRegisterJWT({ getToken });
       return;
     }
     restoring.current = true;
     void switchToAccount(db, account, () => actions.loginOrRegisterJWT({ getToken })).finally(
       () => (restoring.current = false),
     );
-  }, [isPending, auth?.user?.id, isSignedIn]);
+  }, [isPending, auth?.user?.id, isSignedIn, needsLogin]);
 
   // After switching accounts, claim the lines the guest had in their cart.
   // `db` is left out of the deps: it changes with the account, which is.
