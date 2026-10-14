@@ -73,6 +73,22 @@ merge.
   unreleased builds of this branch ever wrote stamps, so no codec id changes
   and no released root is affected. The native and browser corpora below were
   regenerated in this layout.
+- **Node-local direct store (alpha.60 epoch):** #4072 adds
+  `jazz_superseded_writes_v1` (`crates/jazz/layers/model/src/schema.rs`,
+  `SUPERSEDED_WRITES_STORE`), Core's superseded-writes markers (SPEC 4 §4.6,
+  `INV-HIST-23`). It is a new direct record store in the storage epoch the
+  alpha.60 wipe starts, so no root written before it holds one, and it adds
+  no codec family: an older linear-history root of this epoch opens with the
+  store empty. It is node-local and never on the wire; only the fate
+  authority writes it, and an empty store on clients and relays is harmless.
+  Key: physical table id (U64), branch key (Bytes), row (Uuid), writer node
+  (Uuid); value: `superseded_through` (U64 transaction time). The physical
+  table id is kept across table renames. The settlement corpus leaves the
+  store empty, so its native bytes (class-CF meta framing, key encoding and
+  value record) are pinned by
+  `native_storage_corpus.rs`, `superseded_writes_store_native_bytes_are_pinned`.
+  Markers are not part of history: a Core rebuilt from history alone
+  (`INV-HIST-17`) starts with none.
 
 ## What old peers see
 

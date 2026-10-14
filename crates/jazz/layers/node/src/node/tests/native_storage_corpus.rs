@@ -985,7 +985,9 @@ where
             .collect::<Vec<_>>();
         // The baseline corpus intentionally has no scope-isolated relay
         // attachment. Keep its historical receipt focused on settled state;
-        // populated relay and local-availability stores have separate receipts.
+        // populated relay, local-availability and superseded-writes stores
+        // have separate receipts (the last in
+        // `superseded_writes_store_native_bytes_are_pinned`).
         if (store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE
             || store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE
             || store_name == crate::schema::SUPERSEDED_WRITES_STORE)
@@ -2559,4 +2561,69 @@ fn published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_record
         before,
         "the refused alpha.56 root is not mutated"
     );
+}
+
+/// The `jazz_superseded_writes_v1` direct store (SPEC 4 §4.6) is empty in
+/// the settlement corpus, so its native layout is frozen here instead: a
+/// marker Core records on the production RocksDB adapter, read back raw
+/// after the node closes. Key: physical table id (U64), branch key
+/// (Bytes), row (Uuid), writer node (Uuid), in Groove's ordered key
+/// encoding; value: one U64 transaction time in a typed record.
+#[test]
+fn superseded_writes_store_native_bytes_are_pinned() {
+    let target = row(0x9c);
+    let (_writers, core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x32), two_column_schema());
+    let (f1, _) = offline_edit(&mut frank, target, 100, &[("title", "f1")]);
+    let (f2, f2_unit) = offline_edit(&mut frank, target, 101, &[("body", "f2")]);
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted));
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    let todos = core
+        .physical_table_id_for_schema(two_column_schema().version_id(), "todos")
+        .unwrap();
+    drop(core);
+
+    let schema = two_column_schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
+    // The class-CF layout stores the family in the shared meta class, each
+    // key framed by the family name's u32 big-endian length and the name.
+    let name = crate::schema::SUPERSEDED_WRITES_STORE.as_bytes();
+    let mut framed = u32::try_from(name.len()).unwrap().to_be_bytes().to_vec();
+    framed.extend_from_slice(name);
+    let entries = crate::local_executor::block_on(async {
+        groove::storage::collect_scan(
+            storage
+                .scan(groove::storage::ScanRequest::prefix(
+                    "__groove_class_meta".to_owned(),
+                    framed.clone(),
+                ))
+                .await?,
+        )
+        .await
+    })
+    .unwrap();
+    assert_eq!(todos.0, 1, "the corpus's first physical table");
+    assert_eq!(f1.time, TxTime(100 << 18), "f1's hybrid time at 100 ms");
+    let mut expected_key = framed;
+    // Physical table id: U64 tag 3, eight big-endian bytes.
+    expected_key.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // Branch key: Bytes tag 7, the default branch's canonical bytes with each
+    // 0x00 escaped as 0x00 0xff, then the 0x00 0x00 terminator.
+    expected_key.extend_from_slice(&[7, 1, 0, 255, 0, 255, 0, 255, 0, 255, 0, 0]);
+    // Row and writer node: Uuid tag 10, sixteen raw bytes each.
+    expected_key.push(10);
+    expected_key.extend_from_slice(&[0x9c; 16]);
+    expected_key.push(10);
+    expected_key.extend_from_slice(&[0x32; 16]);
+    // Value: one little-endian U64 transaction time.
+    let expected_value = (100u64 << 18).to_le_bytes().to_vec();
+    assert_eq!(
+        BranchKey::default().canonical_bytes(),
+        vec![1, 0, 0, 0, 0],
+        "the branch-key encoding this receipt pins"
+    );
+    assert_eq!(entries, vec![(expected_key, expected_value)]);
 }
