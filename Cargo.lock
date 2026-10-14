@@ -2673,12 +2673,10 @@ version = "3.0.0-alpha.0"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
- "rayon",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "tracing",
- "tracing-log",
  "tracing-subscriber",
  "wasm-bindgen",
  "wasm-bindgen-test",
