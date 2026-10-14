@@ -865,7 +865,64 @@ fn parameter_domain_for_request(
         domain.user_params.remove(&name);
         domain.claim_params.insert(name.clone(), claim);
     }
+    if request.input.binding.source_shape.is_some() {
+        // A filter equating a source field with a carried claim lowers to a
+        // join against the binding source, exactly like a parameter
+        // equality, so that claim routes the graph's rows (#4017).
+        let mut claim_paths = Vec::new();
+        for node in request.input.shape.nodes.values() {
+            if let RowSetExpr::Filter { predicate, .. } = node {
+                collect_equality_filter_claims(predicate, &mut claim_paths);
+            }
+        }
+        for path in claim_paths {
+            if let Some(slot) = claim_binding_slot(&domain, &path) {
+                domain.routing_params.insert(slot);
+            }
+        }
+    }
     Ok(domain)
+}
+
+/// The one binding slot carrying `path`, when a source equality against
+/// that claim can join the binding source instead of inlining its value.
+pub(crate) fn claim_binding_slot(domain: &ParameterDomain, path: &ClaimPath) -> Option<String> {
+    let mut slots = domain
+        .claim_params
+        .iter()
+        .filter(|(_, claim)| claim.path == *path);
+    match (slots.next(), slots.next()) {
+        (Some((slot, claim)), None) if claim_route_is_ordered_scalar(&claim.ty) => {
+            Some(slot.clone())
+        }
+        _ => None,
+    }
+}
+
+fn collect_equality_filter_claims(predicate: &PredicateExpr, claims: &mut Vec<ClaimPath>) {
+    match predicate {
+        PredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_equality_filter_claims(predicate, claims);
+            }
+        }
+        PredicateExpr::Compare {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+        } => {
+            if source_value_ref(left)
+                && let NormalizedValueRef::Claim(path) = right
+            {
+                claims.push(path.clone());
+            } else if source_value_ref(right)
+                && let NormalizedValueRef::Claim(path) = left
+            {
+                claims.push(path.clone());
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut BTreeSet<String>) {
