@@ -103,6 +103,20 @@ describe("local-first auth controller", () => {
     expect(controller.getState()).toEqual({ secret: "secret-a", isLoading: false, error: null });
   });
 
+  it("still reloads subscribers when clearing the secret rejects", async () => {
+    const store = memoryStore();
+    store.clearSecret.mockRejectedValueOnce(new Error("locked"));
+    const controller = getLocalFirstAuthController(store);
+    controller.subscribe(() => {});
+    await flush();
+
+    await expect(controller.signOut()).rejects.toThrow("locked");
+    await flush();
+
+    expect(store.getOrCreateSecret).toHaveBeenCalledTimes(2);
+    expect(controller.getState()).toEqual({ secret: "secret-a", isLoading: false, error: null });
+  });
+
   it("captures load failures, including synchronous throws, as error state", async () => {
     const store = memoryStore();
     store.getOrCreateSecret.mockImplementationOnce(() => {
@@ -114,6 +128,27 @@ describe("local-first auth controller", () => {
 
     expect(controller.getState()).toMatchObject({ secret: null, isLoading: false });
     expect(controller.getState().error?.message).toBe("malformed storage");
+  });
+
+  it("does not warn again when a reload fails with the same error", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = memoryStore();
+    const failure = new Error("boom");
+    store.getOrCreateSecret.mockRejectedValue(failure);
+    const controller = getLocalFirstAuthController(store);
+
+    controller.watch(() => {}, "test");
+    await flush();
+    await controller.login("secret-b");
+    await flush();
+    expect(store.getOrCreateSecret).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.getOrCreateSecret.mockRejectedValue(new Error("boom again"));
+    await controller.login("secret-c");
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
   });
 
   it("warns once per distinct load failure for each watcher", async () => {
