@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the browser WASM exactly as releases do (fat LTO, one codegen unit,
-# wasm-opt -O -g) and print its raw, gzip and Brotli sizes.
+# wasm-opt -O -g, then dev/artifacts/wasm-names.mjs drops symbol hashes from
+# function names) and print its raw, gzip and Brotli sizes.
 #
 # Usage: dev/benchmarks/wasm-size/build.sh OUT_DIR [--type-names]
 #
@@ -23,6 +24,7 @@ cargo build -p jazz-wasm --lib --target wasm32-unknown-unknown --release \
 wasm-bindgen --target web --out-dir "$out" \
   "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/jazz_wasm.wasm"
 wasm-opt "$out/jazz_wasm_bg.wasm" -O -g -o "$out/jazz_wasm_bg.wasm"
+node "$root/dev/artifacts/wasm-names.mjs" "$out/jazz_wasm_bg.wasm"
 
 wasm=$out/jazz_wasm_bg.wasm
 echo "raw=$(wc -c <"$wasm") gzip9=$(gzip -9c "$wasm" | wc -c) brotli11=$(python3 -c '

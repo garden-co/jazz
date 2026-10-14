@@ -25,6 +25,7 @@ import {
   artifactLockPath,
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
+import { stripSymbolHashesInFile } from "./wasm-names.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
@@ -531,6 +532,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       return;
     }
     if (wasmStage) {
+      if (profile === "release") stripSymbolHashesInFile(join(wasmStage.path, "jazz_wasm_bg.wasm"));
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,
