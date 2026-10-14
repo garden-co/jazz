@@ -1118,36 +1118,28 @@ function buildTablePolicyBuilder(
     collectRule(rule);
     return rule;
   };
-  const read: ActionBuilder<unknown, unknown> = {
-    where: ((input: unknown) =>
-      registerRule({
-        table,
-        action: "read",
-        using: resolveWhereInput(input, hasTypeColumn),
-      })) as ActionBuilder<unknown, unknown>["where"],
-    always: () => read.where(alwaysCondition()),
-    never: () => read.where(neverCondition()),
+  const actionBuilder = (
+    action: "read" | "insert" | "delete",
+    clause: "using" | "withCheck",
+  ): ActionBuilder<unknown, unknown> => {
+    const builder: ActionBuilder<unknown, unknown> = {
+      where: ((input: unknown) => {
+        const condition = resolveWhereInput(input, hasTypeColumn);
+        return registerRule(
+          clause === "using"
+            ? { table, action, using: condition }
+            : { table, action, withCheck: condition },
+        );
+      }) as ActionBuilder<unknown, unknown>["where"],
+      always: () => builder.where(alwaysCondition()),
+      never: () => builder.where(neverCondition()),
+    };
+    return builder;
   };
-  const insert: ActionBuilder<unknown, unknown> = {
-    where: ((input: unknown) =>
-      registerRule({
-        table,
-        action: "insert",
-        withCheck: resolveWhereInput(input, hasTypeColumn),
-      })) as ActionBuilder<unknown, unknown>["where"],
-    always: () => insert.where(alwaysCondition()),
-    never: () => insert.where(neverCondition()),
-  };
-  const del: ActionBuilder<unknown, unknown> = {
-    where: ((input: unknown) =>
-      registerRule({
-        table,
-        action: "delete",
-        using: resolveWhereInput(input, hasTypeColumn),
-      })) as ActionBuilder<unknown, unknown>["where"],
-    always: () => del.where(alwaysCondition()),
-    never: () => del.where(neverCondition()),
-  };
+  const read = actionBuilder("read", "using");
+  const insert = actionBuilder("insert", "withCheck");
+  const del = actionBuilder("delete", "using");
+  const relation = () => createTableRelation(table, relationsByTable);
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, hasTypeColumn, collectRule);
   const managedByCreator = (): void => {
@@ -1182,67 +1174,15 @@ function buildTablePolicyBuilder(
     },
     managedByCreator,
     exists,
-    where(input: unknown): PermissionRelation {
-      return createTableRelation(table, relationsByTable).where(input);
-    },
-    select(columns: Record<string, string>): PermissionRelation {
-      return createTableRelation(table, relationsByTable).select(columns);
-    },
-    hopTo(relation: string): PermissionRelation {
-      return createTableRelation(table, relationsByTable).hopTo(relation);
-    },
-    gather(options: {
-      start?: Record<string, unknown> | PermissionRelation;
-      step: (ctx: { current: unknown }) => PermissionRelation;
-      /** Maximum recursive hops. Zero evaluates the seed only. */
-      maxDepth?: number;
-    }): PermissionRelation {
-      return createTableRelation(table, relationsByTable).gather(options);
-    },
-    reachable_via(
-      access_table: string,
-      access_row_column: string,
-      access_team_column: string,
-      from: SessionRefValue,
-      edge_table: string,
-      edge_member_column: string,
-      edge_parent_column: string,
-      edge_filters?: Record<string, unknown>,
-    ): ReachableSeedBuilder {
-      return createTableRelation(table, relationsByTable).reachable_via(
-        access_table,
-        access_row_column,
-        access_team_column,
-        from,
-        edge_table,
-        edge_member_column,
-        edge_parent_column,
-        edge_filters,
-      );
-    },
-    reachable_via_with_access_filters(
-      access_table: string,
-      access_row_column: string,
-      access_team_column: string,
-      from: SessionRefValue,
-      access_filters: Record<string, unknown>,
-      edge_table: string,
-      edge_member_column: string,
-      edge_parent_column: string,
-      edge_filters?: Record<string, unknown>,
-    ): ReachableSeedBuilder {
-      return createTableRelation(table, relationsByTable).reachable_via_with_access_filters(
-        access_table,
-        access_row_column,
-        access_team_column,
-        from,
-        access_filters,
-        edge_table,
-        edge_member_column,
-        edge_parent_column,
-        edge_filters,
-      );
-    },
+    where: (input: unknown) => relation().where(input),
+    select: (columns: Record<string, string>) => relation().select(columns),
+    hopTo: (name: string) => relation().hopTo(name),
+    gather: (options: Parameters<PermissionRelation["gather"]>[0]) => relation().gather(options),
+    reachable_via: (...args: Parameters<PermissionRelation["reachable_via"]>) =>
+      relation().reachable_via(...args),
+    reachable_via_with_access_filters: (
+      ...args: Parameters<PermissionRelation["reachable_via_with_access_filters"]>
+    ) => relation().reachable_via_with_access_filters(...args),
   };
 }
 
@@ -2759,8 +2699,21 @@ function isBrandedPermissionExpression(
   return isPlainObject(input) && Reflect.get(input, PERMISSION_EXPRESSION_BRAND) === true;
 }
 
-function isAllowedRelationCondition(input: unknown): input is AllowedRelationCondition {
-  return isBrandedPermissionExpression(input) && input.__jazzPermissionKind === "allowed-relation";
+const isAllowedRelationCondition = kindGuard<AllowedRelationCondition>("allowed-relation", true);
+
+/**
+ * A guard for a permissions-DSL object of the given `__jazzPermissionKind`.
+ * `branded` additionally requires the permission-expression brand.
+ */
+function kindGuard<T>(
+  kind: string,
+  branded: boolean,
+  valid: (value: PlainObject) => boolean = () => true,
+): (input: unknown) => input is T {
+  return (input): input is T => {
+    if (!isPlainObject(input) || (branded && !isBrandedPermissionExpression(input))) return false;
+    return input.__jazzPermissionKind === kind && valid(input);
+  };
 }
 
 function isPolicyExpr(input: unknown): input is PermissionExpression {
@@ -2771,76 +2724,49 @@ function isPolicyExpressionDiscriminator(input: unknown): input is PolicyExpr["t
   return typeof input === "string" && Object.hasOwn(POLICY_EXPRESSION_DISCRIMINATORS, input);
 }
 
-function isSessionRefValue(input: unknown): input is SessionRefValue {
-  return (
-    isPlainObject(input) &&
-    input.__jazzPermissionKind === "session-ref" &&
-    Array.isArray(input.path)
-  );
-}
+const isSessionRefValue = kindGuard<SessionRefValue>("session-ref", false, (value) =>
+  Array.isArray(value.path),
+);
 
-function isSessionWhereCondition(input: unknown): input is SessionWhereCondition {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "session-where" &&
-    isPlainObject(input.where)
-  );
-}
+const isSessionWhereCondition = kindGuard<SessionWhereCondition>("session-where", true, (value) =>
+  isPlainObject(value.where),
+);
 
-function isRowRefValue(input: unknown): input is RowRefValue {
-  return (
-    isPlainObject(input) &&
-    input.__jazzPermissionKind === "row-ref" &&
-    typeof input.column === "string"
-  );
-}
+const isRowRefValue = kindGuard<RowRefValue>(
+  "row-ref",
+  false,
+  (value) => typeof value.column === "string",
+);
 
-function isExistsCondition(input: unknown): input is ExistsCondition {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "exists" &&
-    typeof input.table === "string" &&
-    isPlainObject(input.where)
-  );
-}
+const isExistsCondition = kindGuard<ExistsCondition>(
+  "exists",
+  true,
+  (value) => typeof value.table === "string" && isPlainObject(value.where),
+);
 
-function isExistsRelationCondition(input: unknown): input is ExistsRelationCondition {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "exists-relation" &&
-    isPlainObject(input.relation)
-  );
-}
+const isExistsRelationCondition = kindGuard<ExistsRelationCondition>(
+  "exists-relation",
+  true,
+  (value) => isPlainObject(value.relation),
+);
 
-function isWhereObjectCondition(input: unknown): input is WhereObjectCondition {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "where-object" &&
-    isPlainObject(input.where)
-  );
-}
+const isWhereObjectCondition = kindGuard<WhereObjectCondition>("where-object", true, (value) =>
+  isPlainObject(value.where),
+);
 
-function isCompoundConditionInput(input: unknown): input is CompoundConditionInput {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "compound-input" &&
-    (input.op === "And" || input.op === "Or") &&
-    Array.isArray(input.conditions)
-  );
-}
+const isCompoundConditionInput = kindGuard<CompoundConditionInput>(
+  "compound-input",
+  true,
+  (value) => (value.op === "And" || value.op === "Or") && Array.isArray(value.conditions),
+);
 
-function isCompoundCondition(input: unknown): input is CompoundCondition {
-  return (
-    isBrandedPermissionExpression(input) &&
-    input.__jazzPermissionKind === "compound" &&
-    (input.op === "And" || input.op === "Or") &&
-    Array.isArray(input.conditions)
-  );
-}
+const isCompoundCondition = kindGuard<CompoundCondition>(
+  "compound",
+  true,
+  (value) => (value.op === "And" || value.op === "Or") && Array.isArray(value.conditions),
+);
 
-function isRecursiveCurrentValue(input: unknown): input is RecursiveCurrentValue {
-  return isPlainObject(input) && input.__jazzPermissionKind === "recursive-current";
-}
+const isRecursiveCurrentValue = kindGuard<RecursiveCurrentValue>("recursive-current", false);
 
 function isUpdateRuleBuilder(input: unknown): input is UpdateRuleBuilder<unknown, unknown> {
   return isPlainObject(input) && typeof input.toRule === "function";
