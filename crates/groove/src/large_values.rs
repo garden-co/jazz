@@ -1800,6 +1800,28 @@ impl PhysicalTraversal {
         Ok(())
     }
 
+    /// Authenticate `encoded` as `entry`'s node of `value`, then queue the
+    /// node's children for discovery.
+    fn admit_encoded(
+        &mut self,
+        value: &LargeValueRef,
+        entry: &PhysicalTraversalEntry,
+        encoded: &[u8],
+    ) -> Result<(), Error> {
+        let node_ref = &entry.node_ref;
+        let node = decode_node_for_format(
+            value.format_version,
+            value.kind,
+            node_ref.object_hash,
+            encoded,
+        )?;
+        self.validate_node(value.kind, node_ref, &node)?;
+        if let ChunkNode::Branch { children, .. } = node {
+            self.discover_children(entry, children)?;
+        }
+        Ok(())
+    }
+
     fn discover_children(
         &mut self,
         parent: &PhysicalTraversalEntry,
@@ -1929,16 +1951,7 @@ pub(crate) async fn missing_upload_frontier(
             }
             Err(error) => return Err(crate::chunks::ChunkError::from(error).into()),
         };
-        let node = decode_node_for_format(
-            value.format_version,
-            value.kind,
-            node_ref.object_hash,
-            &encoded,
-        )?;
-        traversal.validate_node(value.kind, node_ref, &node)?;
-        if let ChunkNode::Branch { children, .. } = node {
-            traversal.discover_children(&entry, children)?;
-        }
+        traversal.admit_encoded(value, &entry, &encoded)?;
     }
     if missing.is_empty() {
         traversal.finish()?;
@@ -1969,21 +1982,8 @@ pub(crate) async fn validate_finalized_upload(
         if !descriptor_was_bound_before_completion && !uploaded_chunks.contains(node_ref) {
             return Err(Error::DescriptorMismatch.into());
         }
-        let encoded = reader
-            .get(node_ref.locator, node_ref.object_hash)
-            .await
-            .map_err(crate::chunks::ChunkError::from)?;
-        record_finalize_validation_bytes(encoded.len());
-        let node = decode_node_for_format(
-            value.format_version,
-            value.kind,
-            node_ref.object_hash,
-            &encoded,
-        )?;
-        traversal.validate_node(value.kind, node_ref, &node)?;
-        if let ChunkNode::Branch { children, .. } = node {
-            traversal.discover_children(&entry, children)?;
-        }
+        let encoded = read_for_validation(&reader, node_ref).await?;
+        traversal.admit_encoded(value, &entry, &encoded)?;
     }
     traversal.finish()?;
     Ok(())
@@ -2036,11 +2036,7 @@ pub(crate) async fn validate_derived_upload(
     // necessarily this one. Authenticate the edge against the root node
     // itself (one node read), so every base claim below derives from content-
     // addressed nodes and a forged base length, hash or kind fails closed.
-    let encoded_base_root = reader
-        .get(base.root.locator, base.root.object_hash)
-        .await
-        .map_err(crate::chunks::ChunkError::from)?;
-    record_finalize_validation_bytes(encoded_base_root.len());
+    let encoded_base_root = read_for_validation(&reader, &base.root).await?;
     let base_root = decode_node_for_format(
         base.format_version,
         base.kind,
@@ -2066,21 +2062,8 @@ pub(crate) async fn validate_derived_upload(
             traversal.seal_reused(node_ref);
             continue;
         }
-        let encoded = reader
-            .get(node_ref.locator, node_ref.object_hash)
-            .await
-            .map_err(crate::chunks::ChunkError::from)?;
-        record_finalize_validation_bytes(encoded.len());
-        let node = decode_node_for_format(
-            value.format_version,
-            value.kind,
-            node_ref.object_hash,
-            &encoded,
-        )?;
-        traversal.validate_node(value.kind, node_ref, &node)?;
-        if let ChunkNode::Branch { children, .. } = node {
-            traversal.discover_children(&entry, children)?;
-        }
+        let encoded = read_for_validation(&reader, node_ref).await?;
+        traversal.admit_encoded(value, &entry, &encoded)?;
     }
     traversal.finish()?;
     let depths = traversal.max_depths();
@@ -2109,11 +2092,7 @@ pub(crate) async fn validate_derived_upload(
         if visited.len() > MAX_PHYSICAL_TRAVERSAL_NODES {
             return Ok(false);
         }
-        let encoded = reader
-            .get(node_ref.locator, node_ref.object_hash)
-            .await
-            .map_err(crate::chunks::ChunkError::from)?;
-        record_finalize_validation_bytes(encoded.len());
+        let encoded = read_for_validation(&reader, &node_ref).await?;
         let node = decode_node_for_format(
             base.format_version,
             base.kind,
@@ -2178,6 +2157,20 @@ fn prove_reused_edge(
     }
     claims.remove(node_ref);
     Ok(ReuseProof::Proven)
+}
+
+/// Read one node back from local storage while validating an upload before
+/// its staging receipt is issued.
+async fn read_for_validation(
+    reader: &crate::chunks::LocalChunkReader,
+    node_ref: &NodeRef,
+) -> Result<bytes::Bytes, ReachabilityError> {
+    let encoded = reader
+        .get(node_ref.locator, node_ref.object_hash)
+        .await
+        .map_err(crate::chunks::ChunkError::from)?;
+    record_finalize_validation_bytes(encoded.len());
+    Ok(encoded)
 }
 
 // Scale-independence receipt for staging-receipt validation: the encoded node
