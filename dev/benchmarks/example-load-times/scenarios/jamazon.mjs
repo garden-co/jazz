@@ -79,8 +79,13 @@ export default function jamazon({ server, browser }) {
         if (found) break;
       }
       await page.getByText(PRODUCT, { exact: true }).first().click();
-      await page.getByRole("button", { name: /^Add (more )?to cart$/ }).click();
-      await page.goto(`${origin}/cart`);
+      await page.getByRole("button", { name: "Add to cart", exact: true }).click();
+      await visible(page.getByRole("button", { name: "Add more to cart", exact: true }));
+      // A full navigation right after the click can drop the cart write, so
+      // go to the cart in-app, then reload once to check that it was stored.
+      await page.getByRole("link", { name: "Cart" }).first().click();
+      await visible(quantity(page));
+      await page.reload();
       await visible(quantity(page));
     },
     scenarios: {
