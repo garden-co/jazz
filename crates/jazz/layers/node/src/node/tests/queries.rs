@@ -897,19 +897,156 @@ fn local_indexed_read_masks_origin_by_the_cheaper_presence_read() {
         );
         assert_eq!(metrics.source_index_probes, 2, "extra = {extra}");
         assert_eq!(metrics.source_full_scans, 0, "extra = {extra}");
+        let ahead = (
+            reads.ahead_current_rows.reads,
+            reads.ahead_current_rows.ranges,
+        );
         if extra == 0 {
-            // `kept` under the prefix, and `moved_out` looked up by the one
-            // settled candidate; never the twelve unrelated pending rows.
-            assert!(
-                reads.ahead_current_rows.reads <= 2,
-                "the mask read {} pending rows",
-                reads.ahead_current_rows.reads
-            );
+            // `kept` under the prefix (one range), and `moved_out` looked up
+            // by the one settled candidate (one probe); never the twelve
+            // unrelated pending rows.
+            assert_eq!(ahead, (2, 2), "lookup arm: {reads:?}");
         } else {
-            // The whole delta is the cheaper read here.
-            assert!(reads.ahead_current_rows.reads >= 14);
+            // The whole delta is the cheaper read here: `kept` under the
+            // prefix, then all fourteen pending rows in one range.
+            assert_eq!(ahead, (15, 2), "whole arm: {reads:?}");
         }
+        assert_eq!(metrics.local_mask_count_fallbacks, 0, "extra = {extra}");
     }
+}
+
+fn branched_access_path_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .branch_by("branch_id")
+                .index_only(["owner"]),
+        ),
+    )
+}
+
+/// The local delta's whole presence is read only under the read's own
+/// branch keys, so the choice of mask counts only their pending rows. A
+/// synced node holding a large local draft branch reads `main`, where
+/// little is pending and origin holds many candidates: the delta is read
+/// whole, exactly as if the draft did not exist, never looked up once per
+/// origin candidate because the draft's rows inflated the pending count.
+///
+/// ```text
+/// main,  settled: 20 owner_a rows (candidates), moved_out among them
+/// main,  pending: moved_out -> owner_b, kept@owner_a        (P = 2)
+/// draft, pending: `draft_rows` owner_a rows                 (0 or 40)
+/// Local owner_a on main ─► settled - moved_out + kept, same reads either way
+/// ```
+#[test]
+fn local_mask_choice_counts_only_the_read_branch_pending_rows() {
+    let schema = branched_access_path_schema();
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let kept = row(0x32);
+    let settled_rows = (0..20).map(|i| row(0x80 + i)).collect::<Vec<_>>();
+    let moved_out = settled_rows[0];
+    let main = branch_selector(0x01);
+    let draft = branch_selector(0xd7);
+    let mut measured = Vec::new();
+    for draft_rows in [0_u8, 40] {
+        let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+        for (tx_time, row_uuid) in settled_rows.iter().copied().enumerate() {
+            let tx_id = core
+                .commit_mergeable_settled(
+                    MergeableCommit::new("docs", row_uuid, 10 + tx_time as u64)
+                        .branch(main.clone())
+                        .cells(access_path_doc_cells(owner_a, "open", "settled")),
+                )
+                .unwrap();
+            let global_time = core.allocate_global_time_for_test();
+            core.apply_fate_update(
+                tx_id,
+                Fate::Accepted,
+                Some(global_time),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", moved_out, 100)
+                .branch(main.clone())
+                .cells(access_path_doc_cells(owner_b, "open", "pending owner change")),
+        )
+        .unwrap();
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", kept, 101)
+                .branch(main.clone())
+                .cells(access_path_doc_cells(owner_a, "open", "pending")),
+        )
+        .unwrap();
+        for offset in 0..draft_rows {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("docs", row(0x40 + offset), 102 + u64::from(offset))
+                    .branch(draft.clone())
+                    .cells(access_path_doc_cells(owner_a, "open", "draft")),
+            )
+            .unwrap();
+        }
+
+        let shape = Query::from("docs")
+            .filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::BranchView {
+                head: main.clone(),
+                base: None,
+            },
+        };
+        core.reset_query_engine_read_metrics();
+        core.reset_storage_read_metrics();
+        let snapshot = core
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &read_view,
+            )
+            .unwrap();
+        let reads = core.take_storage_read_metrics();
+        let metrics = core.query_engine_read_metrics().clone();
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .take(snapshot.root_count)
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            settled_rows[1..]
+                .iter()
+                .copied()
+                .chain([kept])
+                .collect::<BTreeSet<_>>(),
+            "draft_rows = {draft_rows}"
+        );
+        assert_eq!(metrics.source_full_scans, 0, "draft_rows = {draft_rows}");
+        assert_eq!(metrics.local_mask_count_fallbacks, 0);
+        // Origin's 20 candidates under the prefix, plus counting them only
+        // up to main's two pending rows. Counted against every branch's
+        // pending rows (42), the count would read all 20 and pick a lookup.
+        assert_eq!(
+            reads.global_current_indexes.reads, 22,
+            "draft_rows = {draft_rows}: {reads:?}"
+        );
+        measured.push(reads);
+    }
+    assert_eq!(
+        measured[0], measured[1],
+        "a draft branch's pending rows may not change a read of main's cost"
+    );
 }
 
 #[test]

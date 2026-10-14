@@ -570,9 +570,12 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
     many candidates (read whole); a local-only node, a long-offline one or
     a draft branch that exists only on this node holds a delta that is the
     whole table and few or no candidates (looked up). The node knows the
-    pending count per table in memory and counts the candidates from
-    origin's index keys under the prefix, stopping at the pending count, so
-    choosing never reads more than the cheaper mask does.
+    pending count per table and branch key in memory, summed over the
+    read's branch keys (pending rows on another branch are not read whole),
+    and counts the candidates from origin's index keys under the prefix
+    (an upper bound: tombstoned rows' entries and rows a further predicate
+    drops still count), stopping at the pending count, so choosing never
+    reads more than the cheaper mask does.
   - A branch view masks its base by the head's presence read by the base
     candidates' row ids: a keyed lookup of the head's refs
     ([#4005](https://github.com/garden-co/jazz/issues/4005)). A head can be
