@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
-import { buildInspectorLink } from "./inspector-link.js";
+import { logInspectorLink } from "./inspector-link.js";
 import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import { RuntimeOwners } from "./runtime-owners.js";
@@ -193,9 +193,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       owners.attachServer(holder, viteServer);
 
       Object.assign((viteServer.config.env ??= {}), runtime.clientEnv(managed));
-      console.log(
-        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
-      );
+      logInspectorLink(managed);
 
       if (options.inspector !== false) wireInspectorOverlay(viteServer);
 

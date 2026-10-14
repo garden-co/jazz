@@ -17,6 +17,7 @@ import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
 import { shortSchemaHash } from "./catalogue.js";
+import { toError } from "../runtime/util.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -26,10 +27,6 @@ const LOG_PREFIX = "[jazz]";
 
 function isSchemaPushNetworkError(error: unknown): boolean {
   return error instanceof TypeError && error.message === "fetch failed";
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function warnInitialSchemaPushSkipped(opts: {
@@ -42,9 +39,7 @@ function warnInitialSchemaPushSkipped(opts: {
       ? "remove the remote server URL option"
       : `comment out ${opts.envServerUrlKey}`;
   console.warn(
-    `${LOG_PREFIX} schema auto-push skipped because ${opts.serverUrl} is unreachable (${errorMessage(
-      opts.error,
-    )}). The dev server will keep using this app and server URL. To use a local Jazz dev server while offline, ${fallback}. Save schema.ts/permissions.ts or restart after reconnecting to publish again.`,
+    `${LOG_PREFIX} schema auto-push skipped because ${opts.serverUrl} is unreachable (${toError(opts.error).message}). The dev server will keep using this app and server URL. To use a local Jazz dev server while offline, ${fallback}. Save schema.ts/permissions.ts or restart after reconnecting to publish again.`,
   );
 }
 

@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildInspectorLink } from "./inspector-link.js";
+import { logInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import {
   OVERLAY_EMBEDDED_PREFIX,
@@ -185,9 +185,7 @@ export function withJazz(
       onSchemaPush: (hash) => writeSchemaHashStub(resolvedAppRoot, hash),
     });
     if (!hasLoggedInspectorLink) {
-      console.log(
-        `[jazz] Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
-      );
+      logInspectorLink(managed);
       hasLoggedInspectorLink = true;
     }
 
