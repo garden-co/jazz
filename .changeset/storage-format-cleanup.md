@@ -17,4 +17,6 @@
 
 - Omit the two always-zero UTF-16 coordinates from binary large-value edits, saving another sixteen bytes per edit; text edits retain them.
 
+- Omit UTF-16 length from binary large-value descriptors and store it as a required integer for text/JSON, saving nine bytes per binary descriptor and one byte per text descriptor.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.

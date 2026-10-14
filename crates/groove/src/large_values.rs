@@ -2833,7 +2833,7 @@ fn large_value_ref_payload_schema(kind: LargeValueKind) -> &'static DurableLarge
         LargeValueKind::String | LargeValueKind::Json => &TEXT,
     };
     schema.get_or_init(|| {
-        durable_large_value_record_descriptor([
+        let mut fields = vec![
             (
                 LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
                 "format_version",
@@ -2855,18 +2855,21 @@ fn large_value_ref_payload_schema(kind: LargeValueKind) -> &'static DurableLarge
                 ValueType::U64,
             ),
             (
-                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
-                "utf16_length",
-                ValueType::Nullable(Box::new(ValueType::U64)),
-            ),
-            (
                 LARGE_VALUE_REF_EDIT_TAIL_FIELD,
                 "edit_tail",
                 ValueType::Array(Box::new(ValueType::Record(Box::new(
                     large_value_edit_descriptor(kind),
                 )))),
             ),
-        ])
+        ];
+        if kind != LargeValueKind::Bytes {
+            fields.push((
+                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
+                "utf16_length",
+                ValueType::U64,
+            ));
+        }
+        durable_large_value_record_descriptor(fields)
     })
 }
 
@@ -2882,8 +2885,8 @@ const LARGE_VALUE_REF_FORMAT_VERSION_FIELD: u16 = 1;
 const LARGE_VALUE_REF_LOGICAL_HASH_FIELD: u16 = 2;
 const LARGE_VALUE_REF_ROOT_FIELD: u16 = 3;
 const LARGE_VALUE_REF_BYTE_LENGTH_FIELD: u16 = 4;
-const LARGE_VALUE_REF_UTF16_LENGTH_FIELD: u16 = 5;
-const LARGE_VALUE_REF_EDIT_TAIL_FIELD: u16 = 6;
+const LARGE_VALUE_REF_EDIT_TAIL_FIELD: u16 = 5;
+const LARGE_VALUE_REF_UTF16_LENGTH_FIELD: u16 = 6;
 
 #[derive(Clone)]
 struct DurableLargeValueRecordSchema {
@@ -3113,66 +3116,73 @@ fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
 
 fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
     let kind = value.kind;
+    let mut fields = vec![
+        (
+            LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
+            Value::U8(value.format_version),
+        ),
+        (
+            LARGE_VALUE_REF_LOGICAL_HASH_FIELD,
+            Value::Bytes(value.logical_hash.0.to_vec()),
+        ),
+        (LARGE_VALUE_REF_ROOT_FIELD, node_ref_value(&value.root)),
+        (
+            LARGE_VALUE_REF_BYTE_LENGTH_FIELD,
+            Value::U64(value.byte_length),
+        ),
+        (
+            LARGE_VALUE_REF_EDIT_TAIL_FIELD,
+            Value::Array(
+                value
+                    .edit_tail
+                    .iter()
+                    .map(|edit_value| {
+                        let mut fields = vec![
+                            (EDIT_OFFSET_FIELD, Value::U64(edit_value.offset)),
+                            (
+                                EDIT_DELETE_LENGTH_FIELD,
+                                Value::U64(edit_value.delete_length),
+                            ),
+                            (
+                                EDIT_INSERT_BYTES_FIELD,
+                                Value::Bytes(edit_value.insert_bytes.clone()),
+                            ),
+                        ];
+                        if kind != LargeValueKind::Bytes {
+                            fields.extend([
+                                (EDIT_UTF16_OFFSET_FIELD, Value::U64(edit_value.utf16_offset)),
+                                (
+                                    EDIT_DELETE_UTF16_LENGTH_FIELD,
+                                    Value::U64(edit_value.delete_utf16_length),
+                                ),
+                            ]);
+                        }
+                        let fields = large_value_edit_schema(kind)
+                            .ordered_values(fields)
+                            .expect("all internal edit fields are present");
+                        Value::Record(crate::records::OwnedRecord::new(
+                            large_value_edit_descriptor(kind)
+                                .create(&fields)
+                                .expect("internal edit record"),
+                            large_value_edit_descriptor(kind),
+                        ))
+                    })
+                    .collect(),
+            ),
+        ),
+    ];
+    if kind != LargeValueKind::Bytes {
+        fields.push((
+            LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
+            Value::U64(
+                value
+                    .utf16_length
+                    .expect("validated text descriptor has a UTF-16 length"),
+            ),
+        ));
+    }
     large_value_ref_payload_schema(kind)
-        .ordered_values([
-            (
-                LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
-                Value::U8(value.format_version),
-            ),
-            (
-                LARGE_VALUE_REF_LOGICAL_HASH_FIELD,
-                Value::Bytes(value.logical_hash.0.to_vec()),
-            ),
-            (LARGE_VALUE_REF_ROOT_FIELD, node_ref_value(&value.root)),
-            (
-                LARGE_VALUE_REF_BYTE_LENGTH_FIELD,
-                Value::U64(value.byte_length),
-            ),
-            (
-                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
-                Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
-            ),
-            (
-                LARGE_VALUE_REF_EDIT_TAIL_FIELD,
-                Value::Array(
-                    value
-                        .edit_tail
-                        .iter()
-                        .map(|edit_value| {
-                            let mut fields = vec![
-                                (EDIT_OFFSET_FIELD, Value::U64(edit_value.offset)),
-                                (
-                                    EDIT_DELETE_LENGTH_FIELD,
-                                    Value::U64(edit_value.delete_length),
-                                ),
-                                (
-                                    EDIT_INSERT_BYTES_FIELD,
-                                    Value::Bytes(edit_value.insert_bytes.clone()),
-                                ),
-                            ];
-                            if kind != LargeValueKind::Bytes {
-                                fields.extend([
-                                    (EDIT_UTF16_OFFSET_FIELD, Value::U64(edit_value.utf16_offset)),
-                                    (
-                                        EDIT_DELETE_UTF16_LENGTH_FIELD,
-                                        Value::U64(edit_value.delete_utf16_length),
-                                    ),
-                                ]);
-                            }
-                            let fields = large_value_edit_schema(kind)
-                                .ordered_values(fields)
-                                .expect("all internal edit fields are present");
-                            Value::Record(crate::records::OwnedRecord::new(
-                                large_value_edit_descriptor(kind)
-                                    .create(&fields)
-                                    .expect("internal edit record"),
-                                large_value_edit_descriptor(kind),
-                            ))
-                        })
-                        .collect(),
-                ),
-            ),
-        ])
+        .ordered_values(fields)
         .expect("all internal large-value reference fields are present")
 }
 
@@ -3195,20 +3205,20 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
     else {
         return Err(Error::MalformedScalar);
     };
-    let Value::Nullable(utf16_length) =
-        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_UTF16_LENGTH_FIELD)?
-    else {
-        return Err(Error::MalformedScalar);
+    let utf16_length = if kind == LargeValueKind::Bytes {
+        None
+    } else {
+        let Value::U64(length) =
+            take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_UTF16_LENGTH_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        Some(length)
     };
     let Value::Array(edits) =
         take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_EDIT_TAIL_FIELD)?
     else {
         return Err(Error::MalformedScalar);
-    };
-    let utf16_length = match utf16_length.as_deref() {
-        None => None,
-        Some(Value::U64(value)) => Some(*value),
-        _ => return Err(Error::MalformedScalar),
     };
     let mut edit_tail = Vec::with_capacity(edits.len());
     for value in edits {
@@ -5873,7 +5883,7 @@ mod tests {
         let descriptor_bytes = encode_large_value_ref(&value_ref).unwrap();
         assert_eq!(
             hex(&descriptor_bytes),
-            "00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065",
+            "00010a000000000000003100000075000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065",
             "v1 descriptor bytes are a reviewed storage fixture"
         );
         let decoded_ref = decode_large_value_ref(&descriptor_bytes).unwrap();
@@ -5896,7 +5906,7 @@ mod tests {
         let scalar_bytes = encode_stored_scalar(LargeValueKind::Bytes, &scalar).unwrap();
         assert_eq!(
             hex(&scalar_bytes),
-            "01010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065",
+            "01010a000000000000003100000075000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065",
             "schema-known stored-scalar kind does not add a descriptor kind tag"
         );
         assert_eq!(
@@ -6095,7 +6105,7 @@ mod tests {
         );
         assert_eq!(
             hex(&encode_large_value_ref(&with_tail).unwrap()),
-            "02013e00000000000000013b000000000000003a0000007e0000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab82400000014dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf3714dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+            "02013e000000000000003b00000000000000390000007d0000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab82400000014dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf3714dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
         );
         let scalar = encode_stored_scalar(
             LargeValueKind::Json,
@@ -6104,7 +6114,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hex(&scalar),
-            "01013e00000000000000013b000000000000003a0000007e0000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab82400000014dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf3714dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+            "01013e000000000000003b00000000000000390000007d0000004a267f38a9486460670c54d2ca475f4058aee0dc528742ddd18ed8f3dae8bab82400000014dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf3714dff6ca13ae13d1dd320af8f190088393f1ffaf270a0a66172f3b4a18beaf370100000000000000000000005400000000000000000000000000000054000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
         );
         assert_eq!(
             decode_stored_scalar(LargeValueKind::Json, &scalar),
@@ -7104,6 +7114,43 @@ mod tests {
             updated.utf16_length,
             Some(base.encode_utf16().count() as u64 + suffix.encode_utf16().count() as u64)
         );
+    }
+
+    /// Alice persists each value kind; Bob restores its required length semantics.
+    /// The codec boundary pins field widths that logical row reads cannot expose.
+    #[test]
+    fn descriptor_utf16_length_layout_follows_value_kind() {
+        for (kind, bytes, utf16) in [
+            (LargeValueKind::Bytes, b"bytes".as_slice(), None),
+            (LargeValueKind::String, "é🙂".as_bytes(), Some(3_u64)),
+            (LargeValueKind::Json, "\"🙂\"".as_bytes(), Some(4)),
+        ] {
+            let value = prepare_with_locator(kind, bytes, deterministic_locator)
+                .unwrap()
+                .value_ref;
+            let encoded = encode_large_value_ref(&value).unwrap();
+            assert_eq!(encoded.len(), if utf16.is_some() { 130 } else { 122 });
+            assert_eq!(&encoded[2..10], &(bytes.len() as u64).to_le_bytes());
+            if let Some(length) = utf16 {
+                assert_eq!(&encoded[10..18], &length.to_le_bytes());
+            }
+            assert_eq!(decode_large_value_ref(&encoded).unwrap(), value);
+            assert_eq!(value.utf16_length, utf16);
+            let scalar = StoredScalar::Chunked(value.clone());
+            let stored = encode_stored_scalar(kind, &scalar).unwrap();
+            assert_eq!(decode_stored_scalar(kind, &stored).unwrap(), scalar);
+
+            let mut invalid = value;
+            invalid.utf16_length = if utf16.is_some() { None } else { Some(0) };
+            assert_eq!(
+                encode_large_value_ref(&invalid),
+                Err(Error::MalformedScalar)
+            );
+            assert_eq!(
+                encode_stored_scalar(kind, &StoredScalar::Chunked(invalid)),
+                Err(Error::MalformedScalar)
+            );
+        }
     }
 
     /// Alice persists byte/text edits; Bob derives insertion metrics on reopen.

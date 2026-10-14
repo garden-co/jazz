@@ -50,7 +50,7 @@ StoredScalar<kind> = enum {
     logical_hash,
     root: { object_hash, locator },
     byte_length,
-    utf16_length?,
+    /* string/JSON only: */ utf16_length,
     edit_tail: [ { offset, delete_length, insert_bytes,
                    /* string/JSON only: */ utf16_offset, delete_utf16_length } ],
   },
@@ -62,7 +62,7 @@ LargeValueRef {
   logical_hash,
   root: NodeRef { object_hash, locator },
   byte_length,
-  utf16_length?,
+  /* string/JSON only: */ utf16_length,
   edit_tail,
 }
 ```
@@ -78,8 +78,7 @@ string/JSON edits additionally have `{ 4: utf16_offset, 5: delete_utf16_length }
 The enclosing value kind selects the edit layout without another tag.
 `LargeValueRef` is
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
-5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
-refactor. Implementations normalize source declarations by ID, then materialize
+5: edit_tail }`, with required `6: utf16_length` for string/JSON descriptors. Changing an ID is a format change, not a refactor. Implementations normalize source declarations by ID, then materialize
 each ID as its actual record ordinal. IDs MUST be contiguous starting at one;
 empty layouts, zero IDs, duplicates and gaps are rejected when the schema is
 constructed. Source reorder is harmless. Changing a field's ordinal or
@@ -106,6 +105,11 @@ Every independently addressed immutable tree node carries and authenticates its
 own format and kind before traversal. Internal raw string/bytes backing primitives
 only terminate this self-hosting enum encoding and are impossible at the public
 schema or logical-operator boundary.
+
+The descriptor's UTF-16 length is omitted for bytes and required for string/JSON.
+The value kind selects this layout; there is no nullable flag or reserved null
+payload. In-memory descriptors retain `None` for bytes and `Some(length)` for
+text. This saves nine bytes per binary descriptor and one per text descriptor.
 
 The edit's inserted UTF-16 length is not persisted: decoding derives it from
 `insert_bytes` for string/JSON values and sets it to zero for byte values.
@@ -263,7 +267,7 @@ For the bytes leaf above, locator `44` repeated 32 times, logical hash
 insert:"e", utf16:* = 0 }`, the descriptor fixture is:
 
 ```text
-00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065
+00010a000000000000003100000075000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065
 ```
 
 The same value wrapped in the bytes schema's ordinary `Chunked = 1` scalar arm
