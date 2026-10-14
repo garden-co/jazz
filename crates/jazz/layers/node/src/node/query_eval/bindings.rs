@@ -161,59 +161,9 @@ pub(super) fn bind_scope_claim_operands(
     claim_values: &BTreeMap<String, Value>,
     binding_values: &mut BTreeMap<String, Value>,
 ) {
-    for predicate in &mut query.filters {
+    query.for_each_condition_mut(&mut |predicate| {
         bind_scope_claim_predicate(predicate, claim_values, binding_values);
-    }
-    for join in &mut query.joins {
-        bind_scope_claim_join(join, claim_values, binding_values);
-    }
-    for reachable in &mut query.reachable {
-        for predicate in &mut reachable.access_filters {
-            bind_scope_claim_predicate(predicate, claim_values, binding_values);
-        }
-        for predicate in &mut reachable.edge_filters {
-            bind_scope_claim_predicate(predicate, claim_values, binding_values);
-        }
-        if let Some(seed) = &mut reachable.seed {
-            for predicate in &mut seed.filters {
-                bind_scope_claim_predicate(predicate, claim_values, binding_values);
-            }
-        }
-    }
-    for branch in &mut query.policy_branches {
-        for predicate in &mut branch.filters {
-            bind_scope_claim_predicate(predicate, claim_values, binding_values);
-        }
-        for join in &mut branch.joins {
-            bind_scope_claim_join(join, claim_values, binding_values);
-        }
-        for reachable in &mut branch.reachable {
-            for predicate in &mut reachable.access_filters {
-                bind_scope_claim_predicate(predicate, claim_values, binding_values);
-            }
-            for predicate in &mut reachable.edge_filters {
-                bind_scope_claim_predicate(predicate, claim_values, binding_values);
-            }
-            if let Some(seed) = &mut reachable.seed {
-                for predicate in &mut seed.filters {
-                    bind_scope_claim_predicate(predicate, claim_values, binding_values);
-                }
-            }
-        }
-    }
-}
-
-fn bind_scope_claim_join(
-    join: &mut JoinVia,
-    claim_values: &BTreeMap<String, Value>,
-    binding_values: &mut BTreeMap<String, Value>,
-) {
-    for predicate in &mut join.filters {
-        bind_scope_claim_predicate(predicate, claim_values, binding_values);
-    }
-    for join in &mut join.nested_joins {
-        bind_scope_claim_join(join, claim_values, binding_values);
-    }
+    });
 }
 
 fn bind_scope_claim_predicate(
@@ -341,81 +291,15 @@ pub(super) fn typed_claim_param_alias(name: &str, ty: &ColumnType) -> String {
 }
 
 fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>) {
-    for predicate in &mut query.filters {
-        rename_predicate_params(predicate, aliases);
-    }
-    for join in &mut query.joins {
-        rename_join_params(join, aliases);
-    }
-    for reachable in &mut query.reachable {
-        rename_reachable_params(reachable, aliases);
-    }
-    for branch in &mut query.policy_branches {
-        for predicate in &mut branch.filters {
-            rename_predicate_params(predicate, aliases);
-        }
-        for join in &mut branch.joins {
-            rename_join_params(join, aliases);
-        }
-        for reachable in &mut branch.reachable {
-            rename_reachable_params(reachable, aliases);
-        }
-    }
-}
-
-fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, String>) {
-    for predicate in &mut join.filters {
-        rename_predicate_params(predicate, aliases);
-    }
-    for join in &mut join.nested_joins {
-        rename_join_params(join, aliases);
-    }
-}
-
-fn rename_reachable_params(
-    reachable: &mut crate::query::ReachableVia,
-    aliases: &BTreeMap<String, String>,
-) {
-    rename_operand_param(&mut reachable.from, aliases);
-    for predicate in &mut reachable.access_filters {
-        rename_predicate_params(predicate, aliases);
-    }
-    for predicate in &mut reachable.edge_filters {
-        rename_predicate_params(predicate, aliases);
-    }
-    if let Some(seed) = &mut reachable.seed {
-        for predicate in &mut seed.filters {
-            rename_predicate_params(predicate, aliases);
-        }
-    }
-}
-
-fn rename_predicate_params(predicate: &mut Predicate, aliases: &BTreeMap<String, String>) {
-    match predicate {
-        Predicate::All(predicates) | Predicate::Any(predicates) => {
-            for predicate in predicates {
-                rename_predicate_params(predicate, aliases);
-            }
-        }
-        Predicate::Not(predicate) => rename_predicate_params(predicate, aliases),
-        Predicate::Eq(left, right)
-        | Predicate::Ne(left, right)
-        | Predicate::Gt(left, right)
-        | Predicate::Gte(left, right)
-        | Predicate::Lt(left, right)
-        | Predicate::Lte(left, right)
-        | Predicate::Contains(left, right) => {
-            rename_operand_param(left, aliases);
-            rename_operand_param(right, aliases);
-        }
-        Predicate::In(left, values) => {
-            rename_operand_param(left, aliases);
-            for value in values {
-                rename_operand_param(value, aliases);
-            }
-        }
-        Predicate::IsNull(operand) => rename_operand_param(operand, aliases),
-        Predicate::EnumMatch { payload, .. } => rename_predicate_params(payload, aliases),
+    let mut rename = |operand: &mut Operand| rename_operand_param(operand, aliases);
+    query.for_each_condition_mut(&mut |predicate| predicate.for_each_operand_mut(&mut rename));
+    for reachable in query.reachable.iter_mut().chain(
+        query
+            .policy_branches
+            .iter_mut()
+            .flat_map(|branch| &mut branch.reachable),
+    ) {
+        rename(&mut reachable.from);
     }
 }
 
@@ -439,27 +323,7 @@ fn predicate_contains_unbound_claim(
     predicate: &Predicate,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    match predicate {
-        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
-            .iter()
-            .any(|predicate| predicate_contains_unbound_claim(predicate, claims)),
-        Predicate::Not(predicate) => predicate_contains_unbound_claim(predicate, claims),
-        Predicate::Eq(left, right)
-        | Predicate::Ne(left, right)
-        | Predicate::Gt(left, right)
-        | Predicate::Gte(left, right)
-        | Predicate::Lt(left, right)
-        | Predicate::Lte(left, right)
-        | Predicate::Contains(left, right) => operands_contain_unbound_claim([left, right], claims),
-        Predicate::In(left, values) => {
-            operand_contains_unbound_claim(left, claims)
-                || values
-                    .iter()
-                    .any(|operand| operand_contains_unbound_claim(operand, claims))
-        }
-        Predicate::IsNull(operand) => operand_contains_unbound_claim(operand, claims),
-        Predicate::EnumMatch { payload, .. } => predicate_contains_unbound_claim(payload, claims),
-    }
+    predicate.any_operand(&mut |operand| operand_contains_unbound_claim(operand, claims))
 }
 
 fn operands_contain_unbound_claim<'a>(
