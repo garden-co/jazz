@@ -1723,105 +1723,21 @@ function relationFilterToPredicates(filter: RelationFilterEntry): RelPredicateEx
     ];
   }
 
-  const predicates: RelPredicateExpr[] = [];
-  for (const [op, value] of Object.entries(raw)) {
-    if (value === undefined) {
-      continue;
-    }
-    switch (op) {
-      case "eq":
-        if (value === null) {
-          predicates.push({ IsNull: { column: left } });
-        } else {
-          predicates.push({
-            Cmp: {
-              left,
-              op: "Eq",
-              right: toRelValueRef(value, { allowRowRefs: true }),
-            },
-          });
-        }
-        break;
-      case "ne":
-        if (value === null) {
-          predicates.push({ IsNotNull: { column: left } });
-        } else {
-          predicates.push({
-            Cmp: {
-              left,
-              op: "Ne",
-              right: toRelValueRef(value, { allowRowRefs: true }),
-            },
-          });
-        }
-        break;
-      case "gt":
-        predicates.push({
-          Cmp: {
-            left,
-            op: "Gt",
-            right: toRelValueRef(value, { allowRowRefs: true }),
-          },
-        });
-        break;
-      case "gte":
-        predicates.push({
-          Cmp: {
-            left,
-            op: "Ge",
-            right: toRelValueRef(value, { allowRowRefs: true }),
-          },
-        });
-        break;
-      case "lt":
-        predicates.push({
-          Cmp: {
-            left,
-            op: "Lt",
-            right: toRelValueRef(value, { allowRowRefs: true }),
-          },
-        });
-        break;
-      case "lte":
-        predicates.push({
-          Cmp: {
-            left,
-            op: "Le",
-            right: toRelValueRef(value, { allowRowRefs: true }),
-          },
-        });
-        break;
-      case "isNull":
-        if (typeof value !== "boolean") {
-          throw new Error(`"${filter.column}.isNull" expects a boolean value.`);
-        }
-        predicates.push(value ? { IsNull: { column: left } } : { IsNotNull: { column: left } });
-        break;
-      case "in":
-        if (!Array.isArray(value)) {
-          throw new Error(`"${filter.column}.in" expects an array value.`);
-        }
-        predicates.push({
-          In: {
-            left,
-            values: value.map((entry) => toRelValueRef(entry, { allowRowRefs: true })),
-          },
-        });
-        break;
-      case "contains":
-        predicates.push({
-          Contains: {
-            left,
-            right: toRelValueRef(value, { allowRowRefs: true }),
-          },
-        });
-        break;
-      default:
-        throw new Error(`Unsupported where operator "${op}" in relation IR lowering.`);
-    }
-  }
-
-  return predicates.length > 0 ? predicates : ["True"];
+  const right = (value: unknown) => toRelValueRef(value, { allowRowRefs: true });
+  return lowerWhereOperators<RelPredicateExpr>(raw, {
+    isNull: (isNull) => (isNull ? { IsNull: { column: left } } : { IsNotNull: { column: left } }),
+    cmp: (op, value) => ({ Cmp: { left, op, right: right(value) } }),
+    contains: (value) => ({ Contains: { left, right: right(value) } }),
+    in: (value) => {
+      if (!Array.isArray(value)) {
+        throw new Error(`"${filter.column}.in" expects an array value.`);
+      }
+      return { In: { left, values: value.map(right) } };
+    },
+    isNullError: `"${filter.column}.isNull" expects a boolean value.`,
+    unsupported: (op) => `Unsupported where operator "${op}" in relation IR lowering.`,
+    empty: "True",
+  });
 }
 
 function whereObjectToRelationPredicates(
@@ -2275,78 +2191,26 @@ function columnFilterToExprs(
     return [cmpExpr(column, "Eq", raw, options)];
   }
   if (isPlainObject(raw)) {
-    const exprs: PolicyExpr[] = [];
-    for (const [op, value] of Object.entries(raw)) {
-      if (value === undefined) {
-        continue;
-      }
-      switch (op) {
-        case "eq":
-          if (value === null) {
-            exprs.push({ type: "IsNull", column });
-          } else {
-            exprs.push(cmpExpr(column, "Eq", value, options));
-          }
-          break;
-        case "ne":
-          if (value === null) {
-            exprs.push({ type: "IsNotNull", column });
-          } else {
-            exprs.push(cmpExpr(column, "Ne", value, options));
-          }
-          break;
-        case "gt":
-          exprs.push(cmpExpr(column, "Gt", value, options));
-          break;
-        case "gte":
-          exprs.push(cmpExpr(column, "Ge", value, options));
-          break;
-        case "lt":
-          exprs.push(cmpExpr(column, "Lt", value, options));
-          break;
-        case "lte":
-          exprs.push(cmpExpr(column, "Le", value, options));
-          break;
-        case "isNull":
-          if (typeof value !== "boolean") {
-            throw new Error(`"${column}.isNull" expects a boolean value.`);
-          }
-          exprs.push(value ? { type: "IsNull", column } : { type: "IsNotNull", column });
-          break;
-        case "contains":
-          exprs.push({
-            type: "Contains",
-            column,
-            value: toPolicyValue(value, options),
-          });
-          break;
-        case "in":
-          if (isSessionRefValue(value)) {
-            exprs.push({
-              type: "In",
-              column,
-              session_path: value.path,
-            });
-            break;
-          }
-          if (!Array.isArray(value)) {
-            throw new Error(`"${column}.in" expects an array or session reference.`);
-          }
-          if (value.length === 0) {
-            exprs.push({ type: "False" });
-            break;
-          }
-          exprs.push({
-            type: "InList",
-            column,
-            values: value.map((entry) => toPolicyValue(entry, options)),
-          });
-          break;
-        default:
-          throw new Error(`Unsupported where operator "${op}" in permissions DSL.`);
-      }
-    }
-    return exprs.length === 0 ? [{ type: "True" }] : exprs;
+    return lowerWhereOperators<PolicyExpr>(raw, {
+      isNull: (isNull) => ({ type: isNull ? "IsNull" : "IsNotNull", column }),
+      cmp: (op, value) => cmpExpr(column, op, value, options),
+      contains: (value) => ({ type: "Contains", column, value: toPolicyValue(value, options) }),
+      in: (value) => {
+        if (isSessionRefValue(value)) return { type: "In", column, session_path: value.path };
+        if (!Array.isArray(value)) {
+          throw new Error(`"${column}.in" expects an array or session reference.`);
+        }
+        if (value.length === 0) return { type: "False" };
+        return {
+          type: "InList",
+          column,
+          values: value.map((entry) => toPolicyValue(entry, options)),
+        };
+      },
+      isNullError: `"${column}.isNull" expects a boolean value.`,
+      unsupported: (op) => `Unsupported where operator "${op}" in permissions DSL.`,
+      empty: { type: "True" },
+    });
   }
   return [cmpExpr(column, "Eq", raw, options)];
 }
@@ -2373,70 +2237,88 @@ function sessionPathFilterToExprs(path: string, raw: unknown): PolicyExpr[] {
     return [sessionCmpExpr(sessionPath, "Eq", raw, path)];
   }
 
-  const exprs: PolicyExpr[] = [];
+  return lowerWhereOperators<PolicyExpr>(raw, {
+    isNull: (isNull) => ({
+      type: isNull ? "SessionIsNull" : "SessionIsNotNull",
+      path: sessionPath,
+    }),
+    cmp: (op, value, name) => {
+      if (op !== "Eq" && op !== "Ne") {
+        throw new Error(`Unsupported session.where operator "${name}" in permissions DSL.`);
+      }
+      return sessionCmpExpr(sessionPath, op, value, path);
+    },
+    contains: (value) => ({
+      type: "SessionContains",
+      path: sessionPath,
+      value: toPolicyLiteralValue(value, `session.where("${path}.contains")`),
+    }),
+    in: (value) => {
+      if (!Array.isArray(value)) {
+        throw new Error(`session.where("${path}.in") expects an array of literal values.`);
+      }
+      if (value.length === 0) return { type: "False" };
+      return {
+        type: "SessionInList",
+        path: sessionPath,
+        values: value.map((entry) => toPolicyLiteralValue(entry, `session.where("${path}.in")`)),
+      };
+    },
+    isNullError: `session.where("${path}.isNull") expects a boolean value.`,
+    unsupported: (op) =>
+      `Unsupported session.where operator "${op}" in permissions DSL. Nested object claim syntax is not supported; use dotted path keys instead.`,
+    empty: { type: "True" },
+  });
+}
+
+const WHERE_CMP_OPS: Readonly<Record<string, PolicyCmpOp>> = {
+  eq: "Eq",
+  ne: "Ne",
+  gt: "Gt",
+  gte: "Ge",
+  lt: "Lt",
+  lte: "Le",
+};
+
+/** How one filter target (column, relation column or session path) lowers each where operator. */
+interface WhereOperatorLowering<R> {
+  isNull(isNull: boolean): R;
+  cmp(op: PolicyCmpOp, value: unknown, name: string): R;
+  contains(value: unknown): R;
+  in(value: unknown): R;
+  isNullError: string;
+  unsupported(op: string): string;
+  empty: R;
+}
+
+/**
+ * Lower a where-operator object (`{ eq, ne, gt, gte, lt, lte, isNull, contains, in }`)
+ * to one node per present operator; `eq: null`/`ne: null` become null checks.
+ */
+function lowerWhereOperators<R>(
+  raw: Record<string, unknown>,
+  lowering: WhereOperatorLowering<R>,
+): R[] {
+  const out: R[] = [];
   for (const [op, value] of Object.entries(raw)) {
-    if (value === undefined) {
-      continue;
-    }
-    switch (op) {
-      case "eq":
-        if (value === null) {
-          exprs.push({ type: "SessionIsNull", path: sessionPath });
-        } else {
-          exprs.push(sessionCmpExpr(sessionPath, "Eq", value, path));
-        }
-        break;
-      case "ne":
-        if (value === null) {
-          exprs.push({ type: "SessionIsNotNull", path: sessionPath });
-        } else {
-          exprs.push(sessionCmpExpr(sessionPath, "Ne", value, path));
-        }
-        break;
-      case "gt":
-      case "gte":
-      case "lt":
-      case "lte":
-        throw new Error(`Unsupported session.where operator "${op}" in permissions DSL.`);
-      case "isNull":
-        if (typeof value !== "boolean") {
-          throw new Error(`session.where("${path}.isNull") expects a boolean value.`);
-        }
-        exprs.push(
-          value
-            ? { type: "SessionIsNull", path: sessionPath }
-            : { type: "SessionIsNotNull", path: sessionPath },
-        );
-        break;
-      case "contains":
-        exprs.push({
-          type: "SessionContains",
-          path: sessionPath,
-          value: toPolicyLiteralValue(value, `session.where("${path}.contains")`),
-        });
-        break;
-      case "in":
-        if (!Array.isArray(value)) {
-          throw new Error(`session.where("${path}.in") expects an array of literal values.`);
-        }
-        if (value.length === 0) {
-          exprs.push({ type: "False" });
-          break;
-        }
-        exprs.push({
-          type: "SessionInList",
-          path: sessionPath,
-          values: value.map((entry) => toPolicyLiteralValue(entry, `session.where("${path}.in")`)),
-        });
-        break;
-      default:
-        throw new Error(
-          `Unsupported session.where operator "${op}" in permissions DSL. Nested object claim syntax is not supported; use dotted path keys instead.`,
-        );
+    if (value === undefined) continue;
+    const cmpOp = Object.hasOwn(WHERE_CMP_OPS, op) ? WHERE_CMP_OPS[op] : undefined;
+    if (op === "isNull") {
+      if (typeof value !== "boolean") throw new Error(lowering.isNullError);
+      out.push(lowering.isNull(value));
+    } else if (value === null && (op === "eq" || op === "ne")) {
+      out.push(lowering.isNull(op === "eq"));
+    } else if (cmpOp) {
+      out.push(lowering.cmp(cmpOp, value, op));
+    } else if (op === "contains") {
+      out.push(lowering.contains(value));
+    } else if (op === "in") {
+      out.push(lowering.in(value));
+    } else {
+      throw new Error(lowering.unsupported(op));
     }
   }
-
-  return exprs.length === 0 ? [{ type: "True" }] : exprs;
+  return out.length > 0 ? out : [lowering.empty];
 }
 
 function cmpExpr(
