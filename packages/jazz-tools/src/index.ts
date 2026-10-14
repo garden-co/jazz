@@ -193,6 +193,7 @@ export type {
   JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
+  NeedsLoginState,
 } from "./session/state.js";
 
 export {

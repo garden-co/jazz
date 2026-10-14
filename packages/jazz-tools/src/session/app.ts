@@ -10,6 +10,7 @@ import {
   type JazzSessionActions,
   type JazzSessionSnapshot,
   type JazzSessionConsumer,
+  type NeedsLoginState,
 } from "./state.js";
 
 export type JazzAuth =
@@ -21,7 +22,7 @@ export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind"
   kind: "jwt",
   ...options,
 });
-export interface JazzAppSnapshot<Client> {
+export interface JazzAppSnapshot<Client> extends NeedsLoginState {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;
   readonly account?: JazzSessionSnapshot<Client>["account"];
@@ -72,7 +73,10 @@ export function createJazzAppOwner<Config, Client>(
   let manualActionPending = false;
   let pendingLogouts = 0;
   let retrying: Promise<void> | undefined;
-  let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
+  let snapshot: JazzAppSnapshot<Client> = Object.freeze({
+    status: "starting",
+    needsLogin: false,
+  });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = new Set<() => void>();
   const consumers = new Set<{ lease?: JazzSessionConsumer<Client> }>();
@@ -102,6 +106,7 @@ export function createJazzAppOwner<Config, Client>(
       recovery,
       client: status === "ready" ? current?.client : undefined,
       account: current?.account,
+      needsLogin: !!current?.needsLogin,
       error,
     };
     // Keep the raw snapshot version even when a provider hides a still-ready client.
@@ -109,6 +114,7 @@ export function createJazzAppOwner<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.account === next.account &&
+      snapshot.needsLogin === next.needsLogin &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
       (!current || versions.get(snapshot) === current)
