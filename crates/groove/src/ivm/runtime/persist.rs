@@ -86,39 +86,7 @@ pub(super) async fn apply_persist_delta_with(
         }
     }
 
-    let mut operations = leading;
-    if unique {
-        operations.extend(unique_pending_operations(&store, durable_storage, pending).await?);
-        return Ok(store.write_many(operations).await?);
-    }
-
-    operations.reserve(pending.len());
-    for (key, entry) in pending {
-        if entry.weight > 0 {
-            let record = entry
-                .positive_record
-                .ok_or(IvmRuntimeError::PersistRecordMismatch)?;
-            operations.push(OwnedWriteOperation::Set {
-                cf: durable_storage.column_family.clone(),
-                key,
-                value: record,
-            });
-        } else if entry.weight < 0 {
-            operations.push(OwnedWriteOperation::Delete {
-                cf: durable_storage.column_family.clone(),
-                key,
-            });
-        } else if let Some(record) = entry.positive_record
-            && store.get_raw(&key).await?.is_some()
-        {
-            operations.push(OwnedWriteOperation::Set {
-                cf: durable_storage.column_family.clone(),
-                key,
-                value: record,
-            });
-        }
-    }
-    Ok(store.write_many(operations).await?)
+    write_pending(&store, durable_storage, unique, pending, leading).await
 }
 
 /// Persist `IndexBy` records as compact durable index entries.
@@ -160,9 +128,24 @@ async fn apply_index_persist_delta(
         );
     }
 
+    write_pending(&store, durable_storage, unique, pending, leading).await
+}
+
+/// Write the consolidated durable state of every pending key after `leading`,
+/// in one atomic storage write.
+async fn write_pending<S>(
+    store: &RecordStore<'_, S>,
+    durable_storage: &DurableStorage,
+    unique: bool,
+    pending: BTreeMap<Vec<u8>, PendingPersistKey>,
+    leading: Vec<OwnedWriteOperation>,
+) -> Result<(), IvmRuntimeError>
+where
+    S: OrderedKvStorage + ?Sized,
+{
     let mut operations = leading;
     if unique {
-        operations.extend(unique_pending_operations(&store, durable_storage, pending).await?);
+        operations.extend(unique_pending_operations(store, durable_storage, pending).await?);
         return Ok(store.write_many(operations).await?);
     }
 
@@ -280,16 +263,12 @@ where
         }
         if owner.is_some() {
             return Err(IvmRuntimeError::UniqueIndexViolation {
-                index: durable_storage_name(durable_storage),
+                index: durable_storage.name.clone(),
             });
         }
         owner = Some(record.to_vec());
     }
     Ok(owner)
-}
-
-fn durable_storage_name(durable_storage: &DurableStorage) -> String {
-    durable_storage.name.clone()
 }
 
 fn persist_record_keys(
