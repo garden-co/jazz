@@ -552,10 +552,7 @@ impl LogicalValueValidator {
             Ok(text) => {
                 self.utf16_length = self
                     .utf16_length
-                    .checked_add(
-                        u64::try_from(text.encode_utf16().count())
-                            .map_err(|_| Error::MetricOverflow)?,
-                    )
+                    .checked_add(utf16_length_of(text)?)
                     .ok_or(Error::MetricOverflow)?;
                 if let Some(json) = &mut self.json {
                     json.push(text.as_bytes())
@@ -572,10 +569,7 @@ impl LogicalValueValidator {
                     .expect("UTF-8 parser reported a valid prefix");
                 self.utf16_length = self
                     .utf16_length
-                    .checked_add(
-                        u64::try_from(valid_text.encode_utf16().count())
-                            .map_err(|_| Error::MetricOverflow)?,
-                    )
+                    .checked_add(utf16_length_of(valid_text)?)
                     .ok_or(Error::MetricOverflow)?;
                 if let Some(json) = &mut self.json {
                     json.push(valid_text.as_bytes())
@@ -966,16 +960,50 @@ impl ConsolidationContinuation {
     }
 }
 
+/// A descriptor with one more tail edit, and whether that tail has reached
+/// its bounds so the value must be consolidated before it grows further.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TailAppendOutcome {
+pub enum TailOutcome {
     Updated(LargeValueRef),
     ConsolidationRequired(LargeValueRef),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TailEditOutcome {
-    Updated(LargeValueRef),
-    ConsolidationRequired(LargeValueRef),
+pub type TailAppendOutcome = TailOutcome;
+pub type TailEditOutcome = TailOutcome;
+
+/// Append `edit` to `updated`, the edited copy of `value`. Consolidation is
+/// required when `value`'s tail already holds `MAX_EDIT_COUNT` edits or the
+/// new tail (24 accounting bytes plus the inserted bytes per edit) exceeds
+/// `MAX_EDIT_TAIL_BYTES`.
+fn push_tail_edit(
+    value: &LargeValueRef,
+    mut updated: LargeValueRef,
+    edit: ReplaceEdit,
+    enforce_tail_bounds: bool,
+) -> Result<TailOutcome, Error> {
+    let next_tail_bytes =
+        value
+            .edit_tail
+            .iter()
+            .chain([&edit])
+            .try_fold(0_usize, |total, edit| {
+                total
+                    .checked_add(edit.insert_bytes.len())
+                    .and_then(|total| total.checked_add(24))
+                    .ok_or(Error::MetricOverflow)
+            })?;
+    let over_bounds =
+        value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES;
+    updated.edit_tail.push(edit);
+    Ok(if enforce_tail_bounds && over_bounds {
+        TailOutcome::ConsolidationRequired(updated)
+    } else {
+        TailOutcome::Updated(updated)
+    })
+}
+
+fn utf16_length_of(text: &str) -> Result<u64, Error> {
+    u64::try_from(text.encode_utf16().count()).map_err(|_| Error::MetricOverflow)
 }
 
 /// Physical arm stored inside a logical bytes/string/JSON cell.
@@ -1011,57 +1039,32 @@ pub fn append_tail(
         // preparation, which may suspend on the affected source ranges.
         LargeValueKind::Json => return Err(Error::InvalidJson),
     }
-    let edit = ReplaceEdit {
-        offset: value.byte_length,
-        delete_length: 0,
-        insert_bytes,
-        utf16_offset: value.utf16_length.unwrap_or(0),
-        delete_utf16_length: 0,
-        insert_utf16_length: 0,
-    };
-    let next_tail_bytes = value
-        .edit_tail
-        .iter()
-        .try_fold(0_usize, |total, edit| {
-            total
-                .checked_add(edit.insert_bytes.len())
-                .and_then(|total| total.checked_add(24))
-                .ok_or(Error::MetricOverflow)
-        })?
-        .checked_add(edit.insert_bytes.len())
-        .and_then(|total| total.checked_add(24))
-        .ok_or(Error::MetricOverflow)?;
-    let inserted_length =
-        u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+    let inserted_length = u64::try_from(insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
     let mut updated = value.clone();
     updated.byte_length = updated
         .byte_length
         .checked_add(inserted_length)
         .ok_or(Error::MetricOverflow)?;
     if let Some(utf16_length) = &mut updated.utf16_length {
-        let inserted_utf16 = u64::try_from(
-            std::str::from_utf8(&edit.insert_bytes)
-                .map_err(|_| Error::InvalidUtf8)?
-                .encode_utf16()
-                .count(),
-        )
-        .map_err(|_| Error::MetricOverflow)?;
+        let inserted_utf16 =
+            utf16_length_of(std::str::from_utf8(&insert_bytes).map_err(|_| Error::InvalidUtf8)?)?;
         *utf16_length = utf16_length
             .checked_add(inserted_utf16)
             .ok_or(Error::MetricOverflow)?;
     }
-    let mut edit = edit;
-    edit.insert_utf16_length = updated
-        .utf16_length
-        .zip(value.utf16_length)
-        .and_then(|(next, previous)| next.checked_sub(previous))
-        .unwrap_or(0);
-    updated.edit_tail.push(edit);
-    if value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES {
-        Ok(TailAppendOutcome::ConsolidationRequired(updated))
-    } else {
-        Ok(TailAppendOutcome::Updated(updated))
-    }
+    let edit = ReplaceEdit {
+        offset: value.byte_length,
+        delete_length: 0,
+        insert_bytes,
+        utf16_offset: value.utf16_length.unwrap_or(0),
+        delete_utf16_length: 0,
+        insert_utf16_length: updated
+            .utf16_length
+            .zip(value.utf16_length)
+            .and_then(|(next, previous)| next.checked_sub(previous))
+            .unwrap_or(0),
+    };
+    push_tail_edit(value, updated, edit, true)
 }
 
 /// Add one canonical replacement to the bounded tail. Bytes edits need no
@@ -1099,18 +1102,6 @@ fn replace_tail_with_bounds_attempt(
         .checked_sub(delete_length)
         .and_then(|length| length.checked_add(inserted_length))
         .ok_or(Error::MetricOverflow)?;
-    let next_tail_bytes = value
-        .edit_tail
-        .iter()
-        .try_fold(0_usize, |total, edit| {
-            total
-                .checked_add(edit.insert_bytes.len())
-                .and_then(|total| total.checked_add(24))
-                .ok_or(Error::MetricOverflow)
-        })?
-        .checked_add(insert_bytes.len())
-        .and_then(|total| total.checked_add(24))
-        .ok_or(Error::MetricOverflow)?;
     let (next_utf16, utf16_offset, delete_utf16_length, insert_utf16_length) = match value.kind {
         LargeValueKind::Bytes => (None, 0, 0, 0),
         LargeValueKind::String => {
@@ -1129,10 +1120,8 @@ fn replace_tail_with_bounds_attempt(
             let deleted = byte_range_attempt(value, offset..end, inputs)?;
             let deleted = std::str::from_utf8(&deleted).map_err(|_| Error::InvalidUtf8)?;
             let utf16_offset = utf16_length_for_byte_range_attempt(value, 0..offset, inputs)?;
-            let delete_utf16_length =
-                u64::try_from(deleted.encode_utf16().count()).map_err(|_| Error::MetricOverflow)?;
-            let insert_utf16_length = u64::try_from(inserted.encode_utf16().count())
-                .map_err(|_| Error::MetricOverflow)?;
+            let delete_utf16_length = utf16_length_of(deleted)?;
+            let insert_utf16_length = utf16_length_of(inserted)?;
             let current = value.utf16_length.ok_or(Error::MalformedScalar)?;
             (
                 Some(
@@ -1151,13 +1140,9 @@ fn replace_tail_with_bounds_attempt(
                 return Err(Error::InvalidJson.into());
             }
             validate_logical(LargeValueKind::Json, &insert_bytes)?;
-            let insert_utf16_length = u64::try_from(
-                std::str::from_utf8(&insert_bytes)
-                    .map_err(|_| Error::InvalidUtf8)?
-                    .encode_utf16()
-                    .count(),
-            )
-            .map_err(|_| Error::MetricOverflow)?;
+            let insert_utf16_length = utf16_length_of(
+                std::str::from_utf8(&insert_bytes).map_err(|_| Error::InvalidUtf8)?,
+            )?;
             (
                 Some(insert_utf16_length),
                 0,
@@ -1169,21 +1154,15 @@ fn replace_tail_with_bounds_attempt(
     let mut updated = value.clone();
     updated.byte_length = next_length;
     updated.utf16_length = next_utf16;
-    updated.edit_tail.push(ReplaceEdit {
+    let edit = ReplaceEdit {
         offset,
         delete_length,
         insert_bytes,
         utf16_offset,
         delete_utf16_length,
         insert_utf16_length,
-    });
-    if enforce_tail_bounds
-        && (value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES)
-    {
-        Ok(TailEditOutcome::ConsolidationRequired(updated))
-    } else {
-        Ok(TailEditOutcome::Updated(updated))
-    }
+    };
+    Ok(push_tail_edit(value, updated, edit, enforce_tail_bounds)?)
 }
 
 /// Consolidate an append-only tail by walking only the old tree's right
@@ -4571,10 +4550,7 @@ fn utf16_length_for_byte_range_attempt(
         let result = match piece {
             RangePiece::Inserted(bytes) => std::str::from_utf8(&bytes)
                 .map_err(|_| IvmRuntimeError::from(Error::InvalidUtf8))
-                .and_then(|text| {
-                    u64::try_from(text.encode_utf16().count())
-                        .map_err(|_| Error::MetricOverflow.into())
-                }),
+                .and_then(|text| Ok(utf16_length_of(text)?)),
             RangePiece::Base(range) => {
                 base_utf16_length_for_byte_range_attempt(value, base_length, range, inputs)
             }
@@ -4641,10 +4617,7 @@ fn base_utf16_length_for_byte_range_attempt(
                     .map_err(|_| Error::MetricOverflow)?;
                 let text = std::str::from_utf8(&bytes[a..b]).map_err(|_| Error::InvalidUtf8)?;
                 total = total
-                    .checked_add(
-                        u64::try_from(text.encode_utf16().count())
-                            .map_err(|_| Error::MetricOverflow)?,
-                    )
+                    .checked_add(utf16_length_of(text)?)
                     .ok_or(Error::MetricOverflow)?;
             }
             ChunkNode::Branch { children, .. } => {
