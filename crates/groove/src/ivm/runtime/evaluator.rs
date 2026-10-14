@@ -104,6 +104,26 @@ pub(super) enum OperatorState {
     Lookup(AsOf<LookupState, SubTick>),
 }
 
+/// Memory held by grouped operator state (arg-max/min, top-by, collect).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct OperatorStateFootprint {
+    pub(super) groups: usize,
+    pub(super) rows: usize,
+    pub(super) encoded_bytes: usize,
+}
+
+impl OperatorState {
+    /// The grouped state's footprint, if this operator keeps grouped state.
+    pub(super) fn grouped_footprint(&self) -> Option<OperatorStateFootprint> {
+        match self {
+            Self::ArgBy(groups) => Some(groups.value().footprint()),
+            Self::TopBy(state) => Some(state.value().groups.footprint()),
+            Self::CollectBy(state) => Some(state.groups.footprint()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct StreamingChecksumOperatorState {
     pending: Option<PendingStreamingChecksum>,
@@ -436,6 +456,26 @@ impl SparseGroups {
     pub(super) fn clear(&mut self) {
         self.base = Rc::default();
         self.overlay = Rc::default();
+    }
+
+    /// Groups, positive rows and their encoded bytes (group keys plus row
+    /// bytes, the same measure as `ArrangementState::encoded_bytes`).
+    pub(super) fn footprint(&self) -> OperatorStateFootprint {
+        let mut footprint = OperatorStateFootprint::default();
+        for key in self.present_keys() {
+            let Some(group) = self.get(key) else {
+                continue;
+            };
+            footprint.groups += 1;
+            footprint.encoded_bytes += key.len();
+            for ((_, row), weight) in group.iter() {
+                if *weight > 0 {
+                    footprint.rows += 1;
+                    footprint.encoded_bytes += row.len();
+                }
+            }
+        }
+        footprint
     }
 
     /// Present group keys in ascending order: untouched base keys merged

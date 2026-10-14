@@ -87,6 +87,12 @@ impl IvmRuntime {
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
         }
         for state in self.operator_states.values() {
+            if let Some(footprint) = state.grouped_footprint() {
+                stats.operator_state_count += 1;
+                stats.operator_state_groups += footprint.groups;
+                stats.operator_state_rows += footprint.rows;
+                stats.operator_state_encoded_bytes += footprint.encoded_bytes;
+            }
             let OperatorState::Recursive(recursive) = state else {
                 continue;
             };
