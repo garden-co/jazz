@@ -62,10 +62,12 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &[
     crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
     "jazz.history-version-current.v4",
+    // Transaction record with a canonical boolean is_partial at field 12.
+    "jazz.transaction-record.v1",
 ];
 
 /// The closed profile for a root that stores Jazz rows: the epoch-one base
-/// plus [`JAZZ_NODE_STORAGE_CODECS`]. Auxiliary roots that hold no row
+/// plus [`JAZZ_NODE_STORAGE_CODECS`], including the transaction-record layout. Auxiliary roots that hold no row
 /// history (account registry, server catalogue entries) keep the base profile.
 pub fn node_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
     epoch_1_storage_codec_profile()?
@@ -137,7 +139,7 @@ mod tests {
             &node_storage_codec_profile().expect("valid node profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0e\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v4\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x0f\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v4\x1ejazz.transaction-durability.v2\x1ajazz.transaction-record.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(node.encode().expect("canonical manifest"), expected);
 
         let base_root = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
@@ -159,7 +161,8 @@ mod tests {
                     missing,
                     vec![
                         "groove.durable-index.v2".to_owned(),
-                        "jazz.history-version-current.v4".to_owned()
+                        "jazz.history-version-current.v4".to_owned(),
+                        "jazz.transaction-record.v1".to_owned()
                     ]
                 );
                 assert!(unknown.is_empty());
@@ -290,7 +293,8 @@ mod tests {
                         missing,
                         vec![
                             "groove.durable-index.v2".to_owned(),
-                            "jazz.history-version-current.v4".to_owned()
+                            "jazz.history-version-current.v4".to_owned(),
+                            "jazz.transaction-record.v1".to_owned()
                         ]
                     );
                     assert_eq!(unknown, vec![retired.to_owned()]);

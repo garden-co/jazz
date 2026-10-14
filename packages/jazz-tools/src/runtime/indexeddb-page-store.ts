@@ -81,6 +81,7 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   // family and fails manifest admission.
   "jazz.history-version-current.v4",
   "jazz.transaction-durability.v2",
+  "jazz.transaction-record.v1",
 ] as const;
 
 /**

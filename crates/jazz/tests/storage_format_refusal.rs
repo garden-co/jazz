@@ -15,6 +15,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use sha2::{Digest, Sha256};
 
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
+const TRANSACTION_RECORD: &str = "jazz.transaction-record.v1";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
 const DURABILITY_V2: &str = "jazz.transaction-durability.v2";
 
@@ -94,6 +95,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
                     DURABLE_INDEX_V2.to_owned(),
                     ROW_HISTORY.to_owned(),
                     DURABILITY_V2.to_owned(),
+                    TRANSACTION_RECORD.to_owned(),
                 ],
                 "{store}"
             );
@@ -118,7 +120,8 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                               missing [groove.durable-index.v2,
 ///                                                        jazz.history-version-current.v4,
-///                                                        jazz.transaction-durability.v2]
+///                                                        jazz.transaction-durability.v2,
+///                                                        jazz.transaction-record.v1]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
@@ -232,7 +235,7 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let pre_index_v2_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
         .expect("base profile")
-        .with_additional_codecs([ROW_HISTORY])
+        .with_additional_codecs([ROW_HISTORY, TRANSACTION_RECORD])
         .expect("pre-index-v2 node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
@@ -269,7 +272,8 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 ///
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                                  missing [jazz.transaction-durability.v2]
+///                                                  missing [jazz.transaction-durability.v2,
+///                                                        jazz.transaction-record.v1]
 /// ```
 #[test]
 fn linear_history_root_without_the_durability_v2_family_is_refused() {
@@ -284,7 +288,9 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
                 .copied()
                 .filter(|codec| *codec != DURABILITY_V2),
         )
-        .and_then(|profile| profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY]))
+        .and_then(|profile| {
+            profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY, TRANSACTION_RECORD])
+        })
         .expect("pre-durability-v2 node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
@@ -309,4 +315,32 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
         Ok(()) => panic!("a root without the durability-v2 family must not open"),
     }
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
+}
+
+/// Alice opens a database with the former nullable transaction marker. The
+/// adapter refuses its profile before touching records or changing the file.
+#[test]
+fn transaction_string_marker_root_is_refused_before_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let old = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
+        .unwrap()
+        .with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY])
+        .unwrap();
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &old,
+        )
+        .unwrap(),
+    );
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(open_sqlite(&path),
+        Err(StorageError::UnsupportedStorageCodecs { missing, unknown, .. })
+        if missing == [TRANSACTION_RECORD] && unknown.is_empty()));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

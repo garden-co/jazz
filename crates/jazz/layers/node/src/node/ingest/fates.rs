@@ -59,7 +59,7 @@ where
 
         if already_accepted
             && stored.tx.kind == TxKind::Mergeable
-            && !stored.view_scoped_cardinality
+            && !stored.is_partial
             && stored.global_time.is_some()
             && stored.global_time == previous_global_time
             && stored.durability == previous_durability
@@ -93,13 +93,13 @@ where
         )?;
         batch.update(
             "jazz_transactions",
-            transaction_values_with_cardinality_scope(
+            transaction_values_with_partial_flag(
                 stored.node_alias,
                 &stored.tx,
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
-                stored.view_scoped_cardinality,
+                stored.is_partial,
                 contribution_merge,
             )?,
         );

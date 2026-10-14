@@ -419,16 +419,20 @@ bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
 made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
-view_scoped_cardinality_marker, fate, global_time, rejection_reason,
+is_partial: bool, fate, global_time, rejection_reason,
 cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
 `None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
-`view-scoped-cardinality` marker is exactly the internal string
-`"view-scoped-cardinality"` in retained position 12; it says only that the
-stored `n_total_writes` is view-redacted, and is cleared when a complete payload
-arrives. Fate/global time and durability remain separate lattice observations:
+`is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
+`jazz.transaction-record.v1`. True means the transaction was learned from
+selected fragments, so `n_total_writes` is not an authoritative total. A
+complete payload clears the flag; later fragments do not downgrade it.
+False does not guarantee that every row remains cached after eviction.
+Roots with the former nullable string field lack this codec and are refused
+at manifest admission, without migration or a physical epoch/wire bump.
+Fate/global time and durability remain separate lattice observations:
 accepted/global uses an authority `GlobalTime`, rejection has no global winner,
 and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot

@@ -175,7 +175,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await expect(
       withTimeout(createDb(config), 5_000, "published alpha.54 open did not reject"),
     ).rejects.toThrow(
-      'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2"] required by this build and declares ["jazz.subscription-program-fact-key.v1"] that this build does not read',
+      'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2","jazz.transaction-record.v1"] required by this build and declares ["jazz.subscription-program-fact-key.v1"] that this build does not read',
     );
     expect(await rawRecords(physicalDbName)).toEqual(published);
   }, 30_000);
@@ -574,7 +574,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     await pinnedPhase("refused-open", () =>
       expect(openPersistentDb(config, "pinned-refused")).rejects.toThrow(
-        'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2"] required by this build and declares ["jazz.subscription-program-fact-key.v1"] that this build does not read',
+        'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2","jazz.transaction-record.v1"] required by this build and declares ["jazz.subscription-program-fact-key.v1"] that this build does not read',
       ),
     );
     expect(await pinnedPhase("read-refused-records", () => rawRecords(physicalDbName))).toEqual(

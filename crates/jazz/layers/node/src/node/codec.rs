@@ -113,9 +113,7 @@ groove::define_record! {
         9 => user_metadata: Option<String>,
         10 => contribution_merge: Option<OwnedRecord>,
         11 => permission_subject: Option<AuthorSubject>,
-        // Retained physical slot, now used internally to mark redacted
-        // view-scoped transaction cardinality without changing row alignment.
-        12 => merge_strategy: Option<String>,
+        12 => is_partial: bool,
         13 => fate: FateTag,
         14 => global_time: Option<GlobalTime>,
         15 => rejection_reason: Option<RejectionReasonTag>,
@@ -2210,8 +2208,9 @@ pub(super) struct StoredTransaction {
     pub(super) fate: Fate,
     pub(super) global_time: Option<GlobalTime>,
     pub(super) durability: DurabilityTier,
-    /// True when `n_total_writes` is only the locally known view cardinality.
-    pub(super) view_scoped_cardinality: bool,
+    /// Learned from selected fragments rather than a complete transaction.
+    /// False does not imply that all of its rows remain cached after eviction.
+    pub(super) is_partial: bool,
 }
 
 impl StoredTransaction {
@@ -3612,7 +3611,7 @@ pub(super) fn transaction_values(
     durability: DurabilityTier,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
-    transaction_values_with_cardinality_scope(
+    transaction_values_with_partial_flag(
         node_alias,
         tx,
         fate,
@@ -3623,13 +3622,13 @@ pub(super) fn transaction_values(
     )
 }
 
-pub(super) fn transaction_values_with_cardinality_scope(
+pub(super) fn transaction_values_with_partial_flag(
     node_alias: NodeAlias,
     tx: &Transaction,
     fate: Fate,
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
-    view_scoped_cardinality: bool,
+    is_partial: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
     // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
@@ -3662,10 +3661,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
         ),
         contribution_merge,
         Value::Nullable(tx.permission_subject.map(|id| Box::new(id.to_value()))),
-        Value::Nullable(
-            view_scoped_cardinality
-                .then(|| Box::new(Value::String("view-scoped-cardinality".to_owned()))),
-        ),
+        Value::Bool(is_partial),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
@@ -4713,6 +4709,45 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    /// Internal byte receipt: Alice's transaction flag must use exactly the
+    /// canonical bool bytes at field 12, not the former nullable string layout.
+    /// Public query results alone cannot detect a changed durable spelling.
+    #[test]
+    fn transaction_partial_flag_has_canonical_boolean_bytes() {
+        use crate::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("notes").column("body", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let lowered = schema.lower_to_groove();
+        let descriptor = lowered.table("jazz_transactions").unwrap().record_schema();
+        assert_eq!(TransactionRowRecord::FIELD_IS_PARTIAL_IDX, 12);
+        TransactionRowRecord::assert_layout(&descriptor);
+        for (is_partial, expected) in [(false, [0]), (true, [1])] {
+            let mut bytes = Vec::new();
+            descriptor
+                .encode_field_into(12, &Value::Bool(is_partial), &mut bytes)
+                .unwrap();
+            assert_eq!(bytes, expected);
+        }
+        assert!(
+            descriptor
+                .encode_field_into(12, &Value::Nullable(None), &mut Vec::new())
+                .is_err()
+        );
+        assert!(
+            descriptor
+                .encode_field_into(
+                    12,
+                    &Value::String("view-scoped-cardinality".into()),
+                    &mut Vec::new()
+                )
+                .is_err()
+        );
+    }
 
     // Internal because application values cannot reveal descriptor construction
     // frequency or accidental reuse of a different physical enum registry.

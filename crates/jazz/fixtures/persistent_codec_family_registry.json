@@ -690,6 +690,33 @@
           "anchor": "fn linear_history_root_without_the_durability_v2_family_is_refused"
         }
       ]
+    },
+    {
+      "id": "jazz.transaction-record.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "**Transaction audit record.**"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "fn transaction_partial_flag_has_canonical_boolean_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn transaction_string_marker_root_is_refused_before_mutation"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/sync/receiver_batches.rs",
+          "anchor": "fn is_partial_survives_reopen_and_upgrades_to_complete_payload"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
+          "anchor": "fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        }
+      ]
     }
   ]
 }

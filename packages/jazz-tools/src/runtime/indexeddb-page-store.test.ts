@@ -629,6 +629,11 @@ describe("IndexedDbPageStore", () => {
       [withoutLinearHistory, ["groove.durable-index.v2", "jazz.history-version-current.v4"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
       [
+        required.filter((codec) => codec !== "jazz.transaction-record.v1"),
+        ["jazz.transaction-record.v1"],
+        [],
+      ],
+      [
         [...required, "jazz.subscription-program-fact-key.v1"].sort(),
         [],
         ["jazz.subscription-program-fact-key.v1"],

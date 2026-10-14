@@ -1430,7 +1430,7 @@ fn transactions_table() -> GrooveTableSchema {
                 "permission_subject",
                 crate::ids::AuthorSubject::value_type().nullable(),
             ),
-            column("merge_strategy", GrooveColumnType::String.nullable()),
+            column("is_partial", GrooveColumnType::Bool),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.

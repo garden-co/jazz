@@ -50,10 +50,11 @@ account registry and catalogue-entry store) keep the base profile unchanged.
 - codec registry, in canonical order: the base list with
   `groove.durable-index.v2` inserted first and
   `jazz.history-version-current.v4` inserted after
-  `jazz.catalogue.write-pointer.v1` (14 families)
+  `jazz.catalogue.write-pointer.v1`, and `jazz.transaction-record.v1`
+  after `jazz.transaction-durability.v2` (15 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `073b0fa63c80f85b1703a73cedcb5525271be866aa3e828988d9853e476dc987`
+  `6896b582d20a425895f39ad5061655363bea2327308b96aa8cc04246626083ef`
   (historical durability-v2 profile, before cache removal and without
   `groove.durable-index.v2`, 14 families:
   `b0d8e4455d94b9a7e62dc625e5d65ca89403d35481e42681da27709ed87e9c73`)
