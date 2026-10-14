@@ -112,22 +112,28 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     buf
 }
 
-/// Decode a Schema from binary format.
-pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    if data.is_empty() {
+/// Read a top-level payload's leading format-version byte. `accepted` lists
+/// the versions this decoder understands, current first; a rejected version
+/// is reported against that current one.
+fn read_format_version(data: &[u8], accepted: &[u8]) -> Result<u8, CatalogueEncodingError> {
+    let Some(&version) = data.first() else {
         return Err(CatalogueEncodingError::TruncatedData {
             expected: 1,
             actual: 0,
         });
-    }
-
-    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_COMPOSITE_VERSION {
+    };
+    if !accepted.contains(&version) {
         return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: data[0],
-            expected: SCHEMA_VERSION,
+            found: version,
+            expected: accepted[0],
         });
     }
+    Ok(version)
+}
 
+/// Decode a Schema from binary format.
+pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    read_format_version(data, &[SCHEMA_VERSION, SCHEMA_COMPOSITE_VERSION])?;
     let schema = decode_current_schema(data)?;
     ensure_canonical_payload(data, &encode_schema(&schema), "schema")?;
     Ok(schema)
@@ -640,21 +646,7 @@ pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
 
 /// Decode a LensTransform from binary format.
 pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != LENS_VERSION && version != LENS_COMPOSITE_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: LENS_VERSION,
-        });
-    }
-
+    let version = read_format_version(data, &[LENS_VERSION, LENS_COMPOSITE_VERSION])?;
     let transform = decode_current_lens_transform(data, version)?;
     ensure_canonical_payload(data, &encode_lens_transform(&transform), "lens")?;
     Ok(transform)
@@ -2027,21 +2019,7 @@ pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Ve
 pub fn decode_permissions(
     data: &[u8],
 ) -> Result<HashMap<TableName, TablePolicies>, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_VERSION,
-        });
-    }
-
+    read_format_version(data, &[PERMISSIONS_VERSION])?;
     let mut offset = 1;
     let table_count = read_count(data, &mut offset, "permissions_tables")?;
     let mut permissions = HashMap::new();
@@ -2091,21 +2069,7 @@ type DecodedPermissionsBundle = (
 pub fn decode_permissions_bundle(
     data: &[u8],
 ) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_BUNDLE_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_BUNDLE_VERSION,
-        });
-    }
-
+    read_format_version(data, &[PERMISSIONS_BUNDLE_VERSION])?;
     let decoded = decode_current_permissions_bundle(data)?;
     ensure_canonical_payload(
         data,
@@ -2170,21 +2134,7 @@ type DecodedPermissionsHead = (SchemaHash, u64, Option<ObjectId>, ObjectId);
 pub fn decode_permissions_head(
     data: &[u8],
 ) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_HEAD_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_HEAD_VERSION,
-        });
-    }
-
+    read_format_version(data, &[PERMISSIONS_HEAD_VERSION])?;
     let decoded = decode_active_schema_summary(data)?;
     ensure_canonical_payload(
         data,
