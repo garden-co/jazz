@@ -5,6 +5,34 @@ export function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+/**
+ * Change listeners, notified in subscription order over a copy so they may
+ * unsubscribe mid-notify. With `errorLabel`, a throwing listener is logged and
+ * the rest still run; without it, the error propagates.
+ */
+export function createListeners(errorLabel?: string) {
+  const listeners = new Set<() => void>();
+  return {
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    notify(): void {
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch (error) {
+          if (errorLabel === undefined) throw error;
+          console.error(errorLabel, error);
+        }
+      }
+    },
+    clear: () => listeners.clear(),
+  };
+}
+
 /** A non-null, non-array object. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
