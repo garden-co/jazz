@@ -59,6 +59,7 @@ function stripFunctionNames(subsection) {
     let index, length;
     [index, offset] = readU32(subsection, offset);
     [length, offset] = readU32(subsection, offset);
+    if (offset + length > subsection.length) throw new Error("truncated function name");
     const name = decoder.decode(subsection.subarray(offset, offset + length));
     offset += length;
     const stripped = encoder.encode(name.replace(LEGACY_HASH_SUFFIX, ""));
@@ -74,6 +75,7 @@ function stripNameSection(payload, nameEnd) {
   while (offset < payload.length) {
     const id = payload[offset];
     const [size, start] = readU32(payload, offset + 1);
+    if (start + size > payload.length) throw new Error("truncated name subsection");
     let body = payload.subarray(start, start + size);
     if (id === FUNCTION_NAMES) body = stripFunctionNames(body);
     parts.push(Uint8Array.of(id), writeU32(body.length), body);

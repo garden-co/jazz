@@ -83,3 +83,20 @@ test("rejects a truncated module instead of writing a broken one", () => {
   const module = moduleWithNames(["f::h0123456789abcdef"]);
   assert.throws(() => stripSymbolHashes(module.subarray(0, module.length - 3)), /truncated/);
 });
+
+// A module with no functions whose name section is `subsections` verbatim.
+const moduleWithNameSection = (subsections) =>
+  Uint8Array.from([...MAGIC_AND_VERSION, ...section(0, [...string("name"), ...subsections])]);
+
+// `WebAssembly.validate` ignores custom sections, so these check the rewrite
+// itself rejects malformed names instead of emitting a different module.
+test("rejects a name subsection that claims more bytes than the section has", () => {
+  const module = moduleWithNameSection([0, 0x7f, ...string("jazz_wasm")]);
+  assert.throws(() => stripSymbolHashes(module), /truncated name subsection/);
+});
+
+test("rejects a function name longer than its subsection", () => {
+  const functionNames = [...u32(1), ...u32(0), 0x7f, ...encoder.encode("f::h0123456789abcdef")];
+  const module = moduleWithNameSection(section(1, functionNames));
+  assert.throws(() => stripSymbolHashes(module), /truncated function name/);
+});
