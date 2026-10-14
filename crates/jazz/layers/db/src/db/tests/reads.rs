@@ -114,12 +114,12 @@ fn indexed_branch_todos_schema() -> JazzSchema {
 /// index). An unindexed read of the same view is the control: it scans both
 /// branch keys.
 ///
-/// What got cheaper is the content: the deletion registers and the draft's
-/// presence mask are not index-bounded (a draft row can be deleted by its
-/// main image anywhere in main, #4005), so main's settled rows are still all
-/// read once, through main's deletion register. The storage counters say so:
-/// the indexed read reads more settled rows than the unindexed control,
-/// whose content and register share one scan of main.
+/// The deletion registers and the draft's presence are not index-bounded
+/// (a draft row can be deleted by its main image anywhere in main), so they
+/// are looked up by the content candidates' row ids
+/// (`indexed_branch_view_registers_are_read_by_candidate_row_ids`): no
+/// layer reads main whole, and the storage counters say so against the
+/// unindexed control, which reads all of main.
 ///
 /// White-box because the read path's source and storage counters are not
 /// public.
@@ -223,12 +223,12 @@ fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
     );
     // Draft and main each read local, origin and origin's shadow.
     assert_eq!(metrics.source_index_probes, 6, "{metrics:?}");
-    // Both deletion registers and the draft's presence read whole.
-    assert_eq!(metrics.source_branch_register_full_scans, 3, "{metrics:?}");
-    // All 44 settled main rows through main's register, plus the 3 settled
-    // `needle` images main's index prefix finds (overridden, inherited and
-    // moved_out's settled image).
-    assert_eq!(storage.global_current_rows.reads, 44 + 3, "{storage:?}");
+    // Both deletion registers and the draft's presence are looked up by
+    // the candidates' row ids: none reads a branch key whole.
+    assert_eq!(metrics.source_branch_register_full_scans, 0, "{metrics:?}");
+    // Settled rows read: main's prefix hits and the register lookups by
+    // candidate id, 6 against the control's whole main (44).
+    assert_eq!(storage.global_current_rows.reads, 6, "{storage:?}");
 
     let all = db
         .prepare_query(&db.table("todos"))
@@ -398,7 +398,8 @@ fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
     // specialized from the outer `todos` source and shares its deduplicated
     // physical branch layers, so they are counted once, for the outer read:
     // draft and main each read local, origin and origin's shadow under the
-    // prefix; both deletion registers and the draft's presence stay whole.
+    // prefix; both deletion registers and the draft's presence are looked
+    // up by the candidates' row ids.
     // The specialized proof is compiled for this read, and its `labels`
     // source, correlated only through the outer row, reads whole. The
     // control reads both branch keys and both registers whole, no presence.
@@ -426,7 +427,7 @@ fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
             metrics.source_full_scans,
             metrics.source_branch_register_full_scans,
         ),
-        (1, 6, 1, 3),
+        (1, 6, 1, 0),
         "{metrics:?}"
     );
     assert_eq!(
@@ -538,6 +539,122 @@ fn by_id_branch_view_read_is_bounded_by_the_row_key() {
     assert!(
         storage.global_current_rows.reads <= 4,
         "a by-id branch-view read must not read main's other rows: {storage:?}"
+    );
+}
+
+/// Alice reads `title = needle` on her draft over main, where main also
+/// holds settled rows outside the prefix, half of them deleted. Content reads
+/// only the index prefix, and every deletion-register layer of both branches,
+/// like the draft's presence that masks main, is read by the row ids of the
+/// content candidates (a keyed lookup), so the read's storage work is the
+/// same with 20 or 60 such rows (read whole, the registers cost one read per
+/// row of main: 28 against 68 reads). White-box because storage-read
+/// attribution is not public.
+///
+/// ```text
+/// main (settled): a=needle  b=needle  hay x n  (every other hay row deleted)
+/// draft (pending): a deleted
+/// alice ──title = needle, draft over main──► {b}   (reads independent of n)
+/// ```
+#[test]
+fn indexed_branch_view_registers_are_read_by_candidate_row_ids() {
+    let read = |hay: u8| {
+        let schema = indexed_branch_todos_schema();
+        let db = block_on(Db::open_history_complete(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xd9; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+        }))
+        .expect("open history-complete authority");
+        let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+        let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+        let on_main = || crate::db::WriteTarget::BranchView {
+            head: main.clone(),
+            base: None,
+        };
+        let (a, b) = (row(1), row(2));
+        let rows = [(a, "needle"), (b, "needle")]
+            .into_iter()
+            .chain((0..hay).map(|n| (row(0x10 + n), "hay")));
+        for (row_id, value) in rows {
+            let write = block_on(db.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(value.to_owned()))]),
+                crate::db::InsertOptions {
+                    row_id: Some(row_id),
+                    target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                    ..Default::default()
+                },
+            ))
+            .expect("seed main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main row");
+        }
+        for n in (0..hay).step_by(2) {
+            let write = block_on(db.delete(
+                "todos",
+                row(0x10 + n),
+                crate::db::DeleteOptions {
+                    target: on_main(),
+                    ..Default::default()
+                },
+            ))
+            .expect("delete main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main delete");
+        }
+        block_on(db.delete(
+            "todos",
+            a,
+            crate::db::DeleteOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: draft.clone(),
+                    base: Some(BranchViewBase::current(main.clone())),
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("pending draft delete");
+        let view = ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(draft, Some(BranchViewBase::current(main)));
+        let needle = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+            .expect("prepare indexed query");
+        // Warm the plan so the measured read is the row read alone.
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view.clone())).expect("warm read")),
+            vec![b]
+        );
+        db.reset_storage_read_metrics_for_test();
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view)).expect("indexed read")),
+            vec![b]
+        );
+        db.take_storage_read_metrics_for_test()
+    };
+    let small = read(20);
+    let large = read(60);
+    assert_eq!(
+        (
+            small.global_current_rows.reads,
+            small.ahead_current_rows.reads
+        ),
+        (
+            large.global_current_rows.reads,
+            large.ahead_current_rows.reads
+        ),
+        "main's rows outside the prefix must not be read: {small:?} vs {large:?}"
+    );
+    assert!(
+        small.global_current_rows.reads <= 8,
+        "only the candidates' rows are read: {small:?}"
     );
 }
 

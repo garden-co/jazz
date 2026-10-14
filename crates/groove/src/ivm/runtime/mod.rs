@@ -31,11 +31,11 @@ use crate::ivm::{
     CollectByMode, CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder,
     DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
     IndexSourceOp, InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
-    MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
-    OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
-    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
-    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    LookupOp, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId,
+    NodeOutput, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec,
+    StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
+    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
@@ -592,6 +592,9 @@ pub enum IvmRuntimeError {
     UnsupportedIndexIntersectionScan,
     #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
     UnsupportedIndexCandidateFilter,
+    /// A keyed lookup whose shape the runtime cannot probe by key.
+    #[error("unsupported keyed lookup: {0}")]
+    UnsupportedLookup(&'static str),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

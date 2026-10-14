@@ -37,10 +37,12 @@ pub(in crate::node) enum Mask {
     /// edit that moved a row out of an index prefix still masks its origin
     /// image, because the shadow holds that image.
     Shadow(GraphBuilder),
-    /// Every `row_uuid` of the layer, read without the access path that
-    /// bounds its rows. A branch view masks its base by the head's presence
-    /// this way, so a head edit that left the predicate still hides the
-    /// base row (SPEC 11 "Masking precedes predicates").
+    /// The layer's `row_uuid`s, read without the access path that bounds its
+    /// rows. A branch view masks its base by the head's presence this way,
+    /// so a head edit that left the predicate still hides the base row (SPEC
+    /// 11 "Masking precedes predicates"). Only ids the layers below hold can
+    /// hide anything, so the presence is read just for those ids: a keyed
+    /// lookup by the base candidates' row ids.
     Presence(GraphBuilder),
 }
 

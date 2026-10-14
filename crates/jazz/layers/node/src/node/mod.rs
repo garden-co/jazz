@@ -2478,9 +2478,10 @@ pub struct QueryEngineReadMetrics {
     /// Visible-current source resolutions that fell back to a full source scan.
     pub source_full_scans: u64,
     /// Branch-view deletion-register and presence-mask layers that read a
-    /// whole branch key. Only a primary-key access path bounds them; under an
-    /// index they stay whole (#4005), even when every content layer reads
-    /// only its index prefix.
+    /// whole branch key. A primary-key access path bounds them by its prefix,
+    /// and under an index they are looked up by the content candidates' row
+    /// ids; they stay whole without an access path and inside a recursive
+    /// step, where no lookup can run.
     pub source_branch_register_full_scans: u64,
 }
 
