@@ -1010,7 +1010,7 @@ where
             Err(error) => Err(error),
         };
         if let Ok(program) = result.as_mut() {
-            resolver.node.isolate_route_unsafe_program(program);
+            resolver.node.scope_program_binding_source(program);
             program
                 .lowered
                 .targeted_refresh_tables

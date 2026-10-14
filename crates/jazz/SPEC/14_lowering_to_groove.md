@@ -101,6 +101,9 @@ from; one that cannot be expanded must depend on no route.
 
 A program that breaks a rule is not shared: its binding source is renamed to a
 per-session, per-binding name, so it behaves exactly as a private preparation.
+A program that passes reads a binding source named after its own lowered
+graphs. Equal programs share it, and a program whose graph inlines a session's
+claims reads only its own bindings, never every session's of its signature.
 The check is the safety net; lowering paths that keep routes (closure joins
 key on routes both sides carry, include-deleted policy sources declare their
 routes) are what let a program share.

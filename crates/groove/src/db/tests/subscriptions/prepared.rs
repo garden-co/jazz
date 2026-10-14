@@ -1772,3 +1772,48 @@ async fn shared_shape_reprepared_after_dropped_receiver_binds() {
     );
     assert_eq!(database.runtime_stats().active_prepared_shapes, 1);
 }
+
+/// A binding source goes with the last prepared shape that reads it, so a
+/// retired name keeps no entry behind: preparing it again, even under
+/// another descriptor, starts from nothing.
+#[futures_test::test]
+async fn retiring_last_shape_of_a_binding_source_drops_the_source() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let prepare = |descriptor: RecordDescriptor| {
+        [RoutedMultisinkTerminal::new(
+            "rows",
+            GraphBuilder::binding_source("retired_source", descriptor),
+            ["route"],
+            ["route"],
+        )]
+    };
+    let string_descriptor = RecordDescriptor::new([("route", ColumnType::String.clone())]);
+    let shape = database
+        .prepare_shared(
+            prepare(string_descriptor),
+            "retired_source",
+            string_descriptor,
+        )
+        .await
+        .unwrap();
+    let subscription = database
+        .bind_shape_with_lifetime_and_root_values(
+            shape.id(),
+            &[Value::String("only".to_owned())],
+            crate::db::SubscriptionLifetime::Retained,
+            crate::db::RootIndirectValues::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(database.unsubscribe(subscription.id()));
+    database.drive_progress().await.unwrap();
+    assert_eq!(database.runtime_stats().active_prepared_shapes, 0);
+
+    let u64_descriptor = RecordDescriptor::new([("route", ColumnType::U64.clone())]);
+    database
+        .prepare_shared(prepare(u64_descriptor), "retired_source", u64_descriptor)
+        .await
+        .expect("a retired binding source must not pin its old descriptor");
+}

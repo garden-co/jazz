@@ -551,9 +551,11 @@ where
             }
             GraphBuilder::Recursive { .. }
             | GraphBuilder::RecursiveStepWitness { .. }
+            | GraphBuilder::StreamingChecksum { .. }
             | GraphBuilder::TypedTemplate { .. }
             | GraphBuilder::TemplateInput { .. } => {
-                // Not route-aware yet: keep them private to one binding.
+                // Not route-aware yet: keep them private to one binding. A
+                // checksum folds every input row into one value.
                 // Templates are expanded before the check, so one reaches
                 // here only when it could not be.
                 let depends = self.depends(node);
@@ -598,6 +600,7 @@ fn operator_name(node: &GraphBuilder) -> &'static str {
         GraphBuilder::RecursiveStepWitness { .. } => "RecursiveStepWitness",
         GraphBuilder::TypedTemplate { .. } => "TypedTemplate",
         GraphBuilder::TemplateInput { .. } => "TemplateInput",
+        GraphBuilder::StreamingChecksum { .. } => "StreamingChecksum",
         GraphBuilder::Join { .. } => "join",
         GraphBuilder::SemiJoin { .. } => "semi-join",
         GraphBuilder::AntiJoin { .. } => "anti-join",
@@ -644,6 +647,21 @@ fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. } => Vec::new(),
     }
+}
+
+/// A binding-source suffix naming `program` by its lowered graphs. Equal
+/// programs get equal suffixes. A collision only makes two programs share a
+/// source, which is what every program of a signature did before; delivery
+/// stays correct, since the route check holds for any set of bindings.
+fn program_binding_suffix(program: &QueryProgram) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    for terminal in &program.lowered.terminals {
+        terminal.sink.hash(&mut hasher);
+        terminal.graph.hash(&mut hasher);
+    }
+    program.lowered.internal_app_rows_graph.hash(&mut hasher);
+    format!(":program:{:016x}", hasher.finish())
 }
 
 /// Renames every binding source `graph` reads by appending `suffix`.
@@ -764,14 +782,27 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Gives a program that fails [`check_route_discipline`] a binding
-    /// source of its own, so its graph never serves another binding.
+    /// Names the binding source `program` reads after the program itself.
     ///
-    /// The name is scoped to this session's claims and this binding's
-    /// values: equal bindings of one session still share a graph, since they
-    /// read exactly the same rows.
-    pub(super) fn isolate_route_unsafe_program(&self, program: &mut QueryProgram) {
+    /// Bindings of one parameter signature share a source name, but only
+    /// programs with equal graphs share a prepared shape. A program whose
+    /// graph inlines a session's claims would otherwise read every other
+    /// session's bindings too, and a route-free policy proof pairs each
+    /// admitted row with each of them. So the source is named after the
+    /// program's graphs: equal programs still share one source, and a
+    /// program of its own reads only its own bindings.
+    ///
+    /// Client-local sources are already scoped to their one session, so
+    /// they keep their name.
+    ///
+    /// A program that fails [`check_route_discipline`] gets a source scoped
+    /// to this session's claims and this binding's values instead, so its
+    /// graph never serves another binding. Equal bindings of one session
+    /// still share it, since they read exactly the same rows.
+    pub(super) fn scope_program_binding_source(&self, program: &mut QueryProgram) {
         let Some(source_shape) = program.request.input.binding.source_shape.clone() else {
+            // Lowering emits a binding source only under a source name; a
+            // program without one inlines its parameters.
             return;
         };
         if matches!(
@@ -781,15 +812,23 @@ where
             // A subplan is embedded in, and checked with, its outer program.
             return;
         }
-        let Err(violation) = self.check_program_route_discipline(program) else {
-            return;
+        let suffix = match self.check_program_route_discipline(program) {
+            // A client-local source already belongs to one session, and
+            // its bindings attach to it by the name computed before any
+            // program compiles.
+            Ok(()) if program.request.authorization_mode == QueryAuthorizationMode::ClientLocal => {
+                return;
+            }
+            Ok(()) => program_binding_suffix(program),
+            Err(violation) => {
+                if crate::debug_env::covered_input_trace() {
+                    eprintln!(
+                        "JAZZ_COVERED_INPUT_TRACE stage=isolate_binding_source source_shape={source_shape} reason={violation:?}"
+                    );
+                }
+                self.isolated_binding_suffix(&program.request)
+            }
         };
-        let suffix = self.isolated_binding_suffix(&program.request);
-        if crate::debug_env::covered_input_trace() {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=isolate_binding_source source_shape={source_shape} reason={violation:?}"
-            );
-        }
         for terminal in &mut program.lowered.terminals {
             terminal.graph = isolate_binding_sources(&terminal.graph, &suffix);
         }
@@ -860,5 +899,85 @@ where
         hasher.update(session.as_bytes());
         hasher.update(format!("{:?}", request.input.binding.id).as_bytes());
         format!(":isolated:{}", hasher.finalize().to_hex())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use groove::ivm::ProjectField;
+    use groove::records::ValueType;
+
+    const ROUTE: &str = "__jazz_route_chat";
+
+    /// Output names only: the check reads field names, never values.
+    fn infer(node: &GraphBuilder) -> Result<RecordDescriptor, ()> {
+        let names = match node {
+            GraphBuilder::BindingSource { output, .. } => return Ok(*output),
+            GraphBuilder::Lookup { .. } => vec!["id".to_owned(), "chat".to_owned()],
+            GraphBuilder::Join { left, right, .. } => [("left", left), ("right", right)]
+                .into_iter()
+                .map(|(side, input)| {
+                    Ok(infer(input)?
+                        .fields()
+                        .iter()
+                        .filter_map(|field| field.name.clone())
+                        .map(|name| format!("{side}.{name}"))
+                        .collect::<Vec<_>>())
+                })
+                .collect::<Result<Vec<_>, ()>>()?
+                .concat(),
+            GraphBuilder::Project { fields, .. } => fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .collect(),
+            _ => return Err(()),
+        };
+        Ok(RecordDescriptor::new(
+            names.into_iter().map(|name| (name, ValueType::String)),
+        ))
+    }
+
+    fn binding() -> GraphBuilder {
+        GraphBuilder::binding_source(
+            "chats",
+            RecordDescriptor::new([("chat", ValueType::String)]),
+        )
+    }
+
+    /// Messages of every bound chat at once: a binding-keyed lookup.
+    fn lookup() -> GraphBuilder {
+        let table = GraphBuilder::Table {
+            table: "messages".to_owned(),
+            scan: None,
+            variant_projection: None,
+        };
+        GraphBuilder::lookup(table, binding(), ["chat"]).expect("table lookup")
+    }
+
+    fn check(graph: &GraphBuilder) -> Result<(), RouteViolation> {
+        check_route_discipline(
+            [("rows", graph, BTreeSet::from([ROUTE.to_owned()]))],
+            &BTreeMap::from([("chat".to_owned(), ROUTE.to_owned())]),
+            infer,
+        )
+    }
+
+    #[test]
+    fn binding_keyed_lookup_is_not_delivered_unpaired() {
+        // Its rows are the union over every binding's chat and carry no
+        // route, so a terminal cannot tell whose rows they are.
+        let violation = check(&lookup()).expect_err("unpaired lookup must not share");
+        assert!(violation.0.contains("never paired"), "{violation:?}");
+    }
+
+    #[test]
+    fn binding_keyed_lookup_paired_with_its_route_is_sound() {
+        let routes = binding().project_fields([ProjectField::renamed("chat", ROUTE)]);
+        let paired = GraphBuilder::join(lookup(), routes, ["chat"], [ROUTE]).project_fields([
+            ProjectField::renamed("left.id", "id"),
+            ProjectField::renamed(format!("right.{ROUTE}"), ROUTE),
+        ]);
+        check(&paired).expect("each row belongs to the binding its join paired");
     }
 }

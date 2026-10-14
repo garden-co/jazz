@@ -215,3 +215,4 @@ fn dropping_subscription_while_node_mutex_is_held_queues_finalization() {
     );
 }
 mod shared_program_isolation;
+mod shared_program_matrix;

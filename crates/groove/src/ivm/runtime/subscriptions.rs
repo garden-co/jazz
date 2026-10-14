@@ -4552,9 +4552,10 @@ impl IvmRuntime {
     }
 
     /// Remove a caller-owned prepared shape after all of its bindings have
-    /// been unsubscribed. Binding-source entries are intentionally retained:
-    /// multiple prepared shapes may share the same source descriptor, while
-    /// their graph retainers are owned by this exact shape id.
+    /// been unsubscribed. Several prepared shapes may read one binding source,
+    /// while their graph retainers are owned by this exact shape id, so the
+    /// source's entry goes only with the last shape that reads it, and only
+    /// once no binding remains in it.
     pub fn retire_prepared_shape(
         &mut self,
         shape_id: PreparedShapeId,
@@ -4587,6 +4588,20 @@ impl IvmRuntime {
             );
         }
         self.collect_unretained_ephemeral_nodes();
+        if !self
+            .prepared_shapes
+            .values()
+            .any(|other| other.shape == shape.shape)
+        {
+            let key = BindingSourceKey::prepared(shape.shape);
+            if self
+                .binding_sources
+                .get(&key)
+                .is_some_and(|source| source.refcounts.is_empty())
+            {
+                self.binding_sources.remove(&key);
+            }
+        }
         Ok(())
     }
 
