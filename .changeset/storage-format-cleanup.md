@@ -13,4 +13,6 @@
 
 - Remove the repeated 32-byte magic prefix from each stored chunk (`groove.ordered-chunk-storage.v2`), retaining installation receipts and content integrity checks.
 
+- Derive inserted UTF-16 lengths from the stored insertion bytes instead of persisting them, saving eight bytes per large-value edit.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.
