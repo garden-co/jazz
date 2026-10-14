@@ -1548,25 +1548,15 @@ where
         let content_fields = global_current_storage_fields(table, true, true);
         let mut image_fields = content_fields.clone();
         image_fields.push("_deletion".to_owned());
-        let global = self
-            .physical_current_source_graph(
-                schema_version,
-                &table.name,
-                PhysicalCurrentClass::Global,
-            )?
-            .project(image_fields.clone());
         // Select the winning row image, then drop it when it is deleted.
+        let layers = layer_stack::try_ref_layers(tier, |r| {
+            self.physical_current_source_graph(schema_version, &table.name, r.physical_class())
+                .map(|rows| layer_stack::Layer::new(rows.project(image_fields.clone())))
+        })?;
         let current = if tier == DurabilityTier::Global {
-            global
+            layer_stack::compose(layers)
         } else {
-            let ahead = self
-                .physical_current_source_graph(
-                    schema_version,
-                    &table.name,
-                    PhysicalCurrentClass::Ahead,
-                )?
-                .project(image_fields.clone());
-            crate::node::codec::pending_overlay_over(global, ahead).project(image_fields)
+            layer_stack::compose(layers).project(image_fields)
         };
         Ok(current
             .filter(not_deleted_predicate())

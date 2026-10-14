@@ -104,7 +104,6 @@ where
             None,
         )
         .await?;
-        self.flush_ahead_shadows(&mut batch).await?;
         let persistence = self.apply_node_batch(batch).await?;
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
@@ -199,7 +198,6 @@ where
         )
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
-        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
@@ -749,7 +747,6 @@ where
                 contribution_merge,
             )?,
         );
-        self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;

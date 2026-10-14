@@ -523,7 +523,11 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
-        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
+        // A branch view's layers are masked before their predicates (SPEC 4
+        // §4.7), so an index bounds each of its content layers for a one-shot
+        // read as much as for a maintained one.
+        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView)
+            || matches!(read_view.source, ReadViewSourceSpec::BranchView { .. });
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
             binding,

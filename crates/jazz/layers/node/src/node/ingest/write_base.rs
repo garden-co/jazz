@@ -36,6 +36,40 @@ fn authored_overlap(
     }
 }
 
+/// Why Core cannot chain a write over the pending predecessor its base names,
+/// or `None` when it can: the predecessor is an older transaction of the
+/// writer's own node (`INV-HIST-20`).
+///
+/// This is the only place cross-writer chains are refused. Nothing stored or
+/// sent encodes the rule (`base_pending` is a full `TxId`), so a peer remote
+/// whose writes chain over another node's pending write needs only this
+/// check relaxed, together with what SPEC 4 §4.7 lists for peers. The
+/// conflict walk's counterpart is [`in_writers_chain`].
+pub(super) fn pending_predecessor_refusal(
+    predecessor: TxId,
+    writer: TxId,
+) -> Option<&'static str> {
+    if predecessor.node != writer.node {
+        return Some("its pending predecessor was written by another node");
+    }
+    if predecessor.time >= writer.time {
+        return Some("its pending predecessor is not older than the write");
+    }
+    None
+}
+
+/// Whether the accepted write `record` belongs to the chain a write's
+/// pending predecessor `pending` names: the predecessor's node's accepted
+/// writes no newer than it (`INV-HIST-21`). Such records never count against
+/// the write.
+///
+/// Together with [`pending_predecessor_refusal`] this is the only place the
+/// conflict analysis assumes a chain is one writer's own. A peer chain (the
+/// chain the writer saw, of any author) would replace this one predicate.
+fn in_writers_chain(pending: TxId, record: TxId) -> bool {
+    record.node == pending.node && record.time <= pending.time
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -83,15 +117,8 @@ where
             ))));
         }
         if let Some(pending) = base.pending {
-            if pending.node != writer.node {
-                return Ok(Err(not_supported(
-                    "its pending predecessor was written by another node".to_owned(),
-                )));
-            }
-            if pending.time >= writer.time {
-                return Ok(Err(not_supported(
-                    "its pending predecessor is not older than the write".to_owned(),
-                )));
+            if let Some(refusal) = pending_predecessor_refusal(pending, writer) {
+                return Ok(Err(not_supported(refusal.to_owned())));
             }
             // An unknown or still pending predecessor is answered with
             // `RetryLater` before this check (`commit_unit_awaited_predecessor`);
@@ -233,7 +260,7 @@ where
             let predecessor = base.pending.and_then(|pending| {
                 earlier
                     .iter()
-                    .rposition(|(_, id, ..)| id.node == pending.node && id.time <= pending.time)
+                    .rposition(|(_, id, ..)| in_writers_chain(pending, *id))
             });
             let seen_seq = base.seq.max(predecessor.and_then(|at| seen[at]));
             seen.push(seen_seq);
@@ -241,7 +268,7 @@ where
             // pending predecessor. They never count against the write.
             let own_chain = |id: &TxId| {
                 base.pending
-                    .is_some_and(|pending| id.node == pending.node && id.time <= pending.time)
+                    .is_some_and(|pending| in_writers_chain(pending, *id))
             };
             let after_seen =
                 seen_seq.map_or(0, |seen| earlier.partition_point(|(seq, ..)| *seq <= seen));
