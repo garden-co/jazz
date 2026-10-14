@@ -1505,39 +1505,13 @@ pub struct ServerRuntimePlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerShell {
     config: ServerConfig,
-    drain_state: DrainState,
 }
 
 impl ServerShell {
     /// Create a shell after validating its configuration.
     pub fn new(config: ServerConfig) -> Result<Self> {
         validate_config(&config)?;
-        Ok(Self {
-            config,
-            drain_state: DrainState::Running,
-        })
-    }
-
-    /// Borrow the validated shell configuration.
-    pub fn config(&self) -> &ServerConfig {
-        &self.config
-    }
-
-    /// Return the current shutdown/drain state.
-    pub fn drain_state(&self) -> DrainState {
-        self.drain_state
-    }
-
-    /// Validate the shell configuration without constructing a shell.
-    pub fn validate_config(config: &ServerConfig) -> Result<()> {
-        validate_config(config)
-    }
-
-    /// Validate shell configuration plus schema-facing storage requirements.
-    ///
-    /// This checks only names and paths; it does not open storage.
-    pub fn validate_config_for_schema(config: &ServerConfig, schema: &JazzSchema) -> Result<()> {
-        validate_config_for_schema(config, schema)
+        Ok(Self { config })
     }
 
     /// Validate startup policy and return the report a real start would expose.
@@ -1546,20 +1520,7 @@ impl ServerShell {
     /// runtime.
     pub fn start_dry_run(&self) -> Result<DryRunReport> {
         validate_config(&self.config)?;
-        Ok(self.dry_run_report(0))
-    }
-
-    /// Validate startup policy against a Jazz schema and return a dry-run plan.
-    ///
-    /// This method deliberately does not open storage, bind sockets, or start a
-    /// runtime.
-    pub fn start_dry_run_for_schema(&self, schema: &JazzSchema) -> Result<DryRunReport> {
-        validate_config_for_schema(&self.config, schema)?;
-        Ok(self.dry_run_report(required_column_families(schema).len()))
-    }
-
-    fn dry_run_report(&self, schema_column_family_count: usize) -> DryRunReport {
-        DryRunReport {
+        Ok(DryRunReport {
             role: self.config.role,
             profile: self.config.profile,
             listener: self.config.listener.bind_addr,
@@ -1568,16 +1529,15 @@ impl ServerShell {
                 core_role: self.config.role,
                 profile: self.config.profile,
                 storage_kind: self.config.storage.kind(),
-                schema_column_family_count,
+                schema_column_family_count: 0,
             },
             health: HealthSnapshot {
                 role: self.config.role,
                 profile: self.config.profile,
-                drain_state: self.drain_state,
                 ..HealthSnapshot::default()
             },
             metrics: MetricsSnapshot::default(),
-        }
+        })
     }
 }
 
@@ -1603,45 +1563,6 @@ pub fn validate_config(config: &ServerConfig) -> Result<()> {
         && !config.drain_on_shutdown
     {
         return Err(ConfigError::ProductionRequiresDrain);
-    }
-    Ok(())
-}
-
-/// Return RocksDB column families required by a Jazz schema.
-///
-/// This is a pure schema-lowering helper and does not open storage.
-pub fn required_column_families(schema: &JazzSchema) -> Vec<String> {
-    schema.column_families()
-}
-
-/// Validate a shell configuration against schema-facing storage requirements.
-///
-/// This does not instantiate `NodeState`, `Db`, sockets, or storage.
-pub fn validate_config_for_schema(config: &ServerConfig, schema: &JazzSchema) -> Result<()> {
-    validate_config(config)?;
-    let column_families = required_column_families(schema);
-    validate_schema_column_families(&column_families)?;
-    if let StorageConfig::RocksDb { path } = &config.storage
-        && path.as_os_str().is_empty()
-    {
-        return Err(ConfigError::MissingStoragePath {
-            storage_kind: StorageKind::RocksDb,
-        });
-    }
-    Ok(())
-}
-
-fn validate_schema_column_families(column_families: &[String]) -> Result<()> {
-    if column_families.is_empty() {
-        return Err(ConfigError::MissingSchemaColumnFamilies);
-    }
-    if let Some(column_family) = column_families
-        .iter()
-        .find(|column_family| column_family.trim().is_empty())
-    {
-        return Err(ConfigError::InvalidSchemaColumnFamily {
-            value: column_family.clone(),
-        });
     }
     Ok(())
 }
@@ -1674,18 +1595,6 @@ pub enum ConfigError {
     ProductionRequiresDurableStorage,
     /// Production Core role requires coordinated drain.
     ProductionRequiresDrain,
-    /// Durable storage config did not name a usable path.
-    MissingStoragePath {
-        /// Storage backend kind whose path was missing.
-        storage_kind: StorageKind,
-    },
-    /// Schema lowering did not produce any column families.
-    MissingSchemaColumnFamilies,
-    /// Schema lowering produced an invalid column-family name.
-    InvalidSchemaColumnFamily {
-        /// Invalid column-family name.
-        value: String,
-    },
 }
 
 impl fmt::Display for ConfigError {
@@ -1701,15 +1610,6 @@ impl fmt::Display for ConfigError {
             }
             Self::ProductionRequiresDrain => {
                 write!(f, "production core role requires drain_on_shutdown")
-            }
-            Self::MissingStoragePath { storage_kind } => {
-                write!(f, "{storage_kind:?} storage path must not be empty")
-            }
-            Self::MissingSchemaColumnFamilies => {
-                write!(f, "schema must provide at least one column family")
-            }
-            Self::InvalidSchemaColumnFamily { value } => {
-                write!(f, "schema column-family name must not be empty: {value:?}")
             }
         }
     }
@@ -2031,7 +1931,7 @@ mod tests {
     fn validates_local_default_config() {
         let config = ServerConfig::local("dev-core");
 
-        ServerShell::validate_config(&config).unwrap();
+        validate_config(&config).unwrap();
         let shell = ServerShell::new(config).unwrap();
         let report = shell.start_dry_run().unwrap();
 
@@ -2119,7 +2019,7 @@ mod tests {
 
     #[test]
     fn exposes_required_column_families_for_jazz_schema() {
-        let column_families = required_column_families(&simple_schema());
+        let column_families = simple_schema().column_families();
 
         assert!(
             column_families
@@ -2140,51 +2040,6 @@ mod tests {
             column_families
                 .iter()
                 .any(|name| name == "__groove_class_indices")
-        );
-    }
-
-    #[test]
-    fn schema_dry_run_maps_server_config_to_runtime_plan() {
-        let schema = simple_schema();
-        let mut config = ServerConfig::local("core-a");
-        config.role = NodeRole::Core;
-        config.storage = StorageConfig::RocksDb {
-            path: PathBuf::from("/var/lib/jazz/core-a"),
-        };
-        let expected_column_family_count = required_column_families(&schema).len();
-
-        ServerShell::validate_config_for_schema(&config, &schema).unwrap();
-        let report = ServerShell::new(config)
-            .unwrap()
-            .start_dry_run_for_schema(&schema)
-            .unwrap();
-
-        assert_eq!(
-            report.runtime_plan,
-            ServerRuntimePlan {
-                core_role: NodeRole::Core,
-                profile: DeploymentProfile::Local,
-                storage_kind: StorageKind::RocksDb,
-                schema_column_family_count: expected_column_family_count,
-            }
-        );
-        assert_eq!(report.storage.kind(), StorageKind::RocksDb);
-    }
-
-    #[test]
-    fn rocksdb_schema_validation_requires_path() {
-        let mut config = ServerConfig::local("core-a");
-        config.storage = StorageConfig::RocksDb {
-            path: PathBuf::new(),
-        };
-
-        let err = validate_config_for_schema(&config, &simple_schema()).unwrap_err();
-
-        assert_eq!(
-            err,
-            ConfigError::MissingStoragePath {
-                storage_kind: StorageKind::RocksDb
-            }
         );
     }
 }
