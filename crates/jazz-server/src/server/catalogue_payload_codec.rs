@@ -12,7 +12,7 @@ use jazz::protocol_limits::{
     MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
 };
 use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
+use jazz::tools::public_schema::{CmpOp, Operation, OperationPolicy, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
@@ -1396,51 +1396,28 @@ const JOIN_CONDITIONS: Seq<JoinConditionWire> = Seq("relation_join_conditions", 
 const PROJECT_COLUMNS: Seq<ProjectColumnWire> = Seq("relation_project_columns", ProjectColumnWire);
 const DEDUPE_KEYS: Seq<KeyRefWire> = Seq("relation_dedupe_keys", KeyRefWire);
 
-fn encode_string_list(buf: &mut Vec<u8>, values: &[String]) {
-    write_seq(buf, values, |buf, value| write_string(buf, value));
-}
-
-fn decode_string_list(
-    data: &[u8],
-    offset: &mut usize,
-    context: &'static str,
-) -> Result<Vec<String>, CatalogueEncodingError> {
-    read_seq(data, offset, context, |data, offset| {
-        read_string(data, offset, context)
-    })
-}
-
 // ============================================================================
 // Policy Encoding
 // ============================================================================
 
-const POLICY_EXPR_CMP: u8 = 1;
-const POLICY_EXPR_IS_NULL: u8 = 2;
-const POLICY_EXPR_IS_NOT_NULL: u8 = 3;
-const POLICY_EXPR_IN: u8 = 4;
 const POLICY_EXPR_EXISTS: u8 = 5;
 const POLICY_EXPR_INHERITS: u8 = 6;
 const POLICY_EXPR_AND: u8 = 7;
 const POLICY_EXPR_OR: u8 = 8;
 const POLICY_EXPR_NOT: u8 = 9;
-const POLICY_EXPR_TRUE: u8 = 10;
-const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 const POLICY_EXPR_EXISTS_REL: u8 = 13;
-const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
-const POLICY_EXPR_CONTAINS: u8 = 15;
-const POLICY_EXPR_IN_LIST: u8 = 16;
-const POLICY_EXPR_SESSION_CMP: u8 = 17;
-const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
-const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
-const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
-const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
 fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
-    encode_operation_policy(buf, &policies.select);
-    encode_operation_policy(buf, &policies.insert);
-    encode_operation_policy(buf, &policies.update);
-    encode_operation_policy(buf, &policies.delete);
+    for operation in [
+        &policies.select,
+        &policies.insert,
+        &policies.update,
+        &policies.delete,
+    ] {
+        write_opt(buf, operation.using.as_ref(), encode_policy_expr);
+        write_opt(buf, operation.with_check.as_ref(), encode_policy_expr);
+    }
 }
 
 fn decode_table_policies(
@@ -1448,25 +1425,33 @@ fn decode_table_policies(
     offset: &mut usize,
     budget: &mut PolicyExpressionDecodeBudget,
 ) -> Result<TablePolicies, CatalogueEncodingError> {
+    let mut expr = || {
+        read_opt(data, offset, |data, offset| {
+            decode_policy_expr(data, offset, budget)
+        })
+    };
+    let mut operation = || -> Result<OperationPolicy, CatalogueEncodingError> {
+        Ok(OperationPolicy {
+            using: expr()?,
+            with_check: expr()?,
+        })
+    };
     Ok(TablePolicies {
-        select: decode_operation_policy(data, offset, budget)?,
-        insert: decode_operation_policy(data, offset, budget)?,
-        update: decode_operation_policy(data, offset, budget)?,
-        delete: decode_operation_policy(data, offset, budget)?,
+        select: operation()?,
+        insert: operation()?,
+        update: operation()?,
+        delete: operation()?,
     })
 }
 
 pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(PERMISSIONS_VERSION);
-
+    let mut buf = vec![PERMISSIONS_VERSION];
     let mut entries: Vec<_> = permissions.iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
     write_seq(&mut buf, &entries, |buf, (table_name, policies)| {
         write_string(buf, table_name.as_str());
         encode_table_policies(buf, policies);
     });
-
     buf
 }
 
@@ -1480,7 +1465,7 @@ pub fn decode_permissions(
     let mut budget = PolicyExpressionDecodeBudget::default();
 
     for _ in 0..table_count {
-        let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
+        let table_name = Str("table_name").get(data, &mut offset)?;
         let policies = decode_table_policies(data, &mut offset, &mut budget)?;
         permissions.insert(table_name, policies);
     }
@@ -1490,7 +1475,13 @@ pub fn decode_permissions(
     Ok(permissions)
 }
 
-const PARENT_BUNDLE: Oid = Oid("parent permissions bundle object id");
+/// The schema hash, version and parent bundle that open both a permissions
+/// bundle and a permissions head.
+const PERMISSIONS_HEADER: (HashWire, Le, Opt<Oid>) = (
+    HashWire,
+    Le,
+    Opt(Oid("parent permissions bundle object id")),
+);
 
 pub fn encode_permissions_bundle(
     schema_hash: SchemaHash,
@@ -1498,14 +1489,9 @@ pub fn encode_permissions_bundle(
     parent_bundle_object_id: Option<ObjectId>,
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Vec<u8> {
-    let encoded_permissions = encode_permissions(permissions);
-    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len());
-    buf.push(PERMISSIONS_BUNDLE_VERSION);
-    buf.extend_from_slice(schema_hash.as_bytes());
-    write_u64(&mut buf, version);
-    Opt(PARENT_BUNDLE).put(&mut buf, &parent_bundle_object_id);
-    write_u32(&mut buf, encoded_permissions.len() as u32);
-    buf.extend_from_slice(&encoded_permissions);
+    let mut buf = vec![PERMISSIONS_BUNDLE_VERSION];
+    PERMISSIONS_HEADER.put(&mut buf, &(schema_hash, version, parent_bundle_object_id));
+    Raw.put(&mut buf, &encode_permissions(permissions));
     buf
 }
 
@@ -1520,32 +1506,25 @@ pub fn decode_permissions_bundle(
     data: &[u8],
 ) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
     read_format_version(data, &[PERMISSIONS_BUNDLE_VERSION])?;
-    let decoded = decode_current_permissions_bundle(data)?;
+    let mut offset = 1;
+    let (schema_hash, version, parent) = PERMISSIONS_HEADER.get(data, &mut offset)?;
+    let payload: Vec<u8> = Raw.get(data, &mut offset)?;
+    let permissions = decode_permissions(&payload)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(
         data,
-        &encode_permissions_bundle(decoded.0, decoded.1, decoded.2, &decoded.3),
+        &encode_permissions_bundle(schema_hash, version, parent, &permissions),
         "permissions bundle",
     )?;
-    Ok(decoded)
+    Ok((schema_hash, version, parent, permissions))
 }
 
-fn decode_current_permissions_bundle(
-    data: &[u8],
-) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
-    let mut offset = 1;
-    let schema_hash = SchemaHash::from_bytes(
-        read_bytes(data, &mut offset, 32)?
-            .try_into()
-            .expect("schema hash length should be exact"),
-    );
-    let version = read_u64(data, &mut offset)?;
-    let parent_bundle_object_id = Opt(PARENT_BUNDLE).get(data, &mut offset)?;
-    let payload_len = read_u32(data, &mut offset)? as usize;
-    let payload = read_bytes(data, &mut offset, payload_len)?;
-    let permissions = decode_permissions(payload)?;
-    ensure_consumed(data, offset)?;
-    Ok((schema_hash, version, parent_bundle_object_id, permissions))
-}
+const PERMISSIONS_HEAD: (HashWire, Le, Opt<Oid>, Oid) = (
+    HashWire,
+    Le,
+    Opt(Oid("parent permissions bundle object id")),
+    Oid("permissions bundle object id"),
+);
 
 pub fn encode_permissions_head(
     schema_hash: SchemaHash,
@@ -1553,12 +1532,14 @@ pub fn encode_permissions_head(
     parent_bundle_object_id: Option<ObjectId>,
     bundle_object_id: ObjectId,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 16);
-    buf.push(PERMISSIONS_HEAD_VERSION);
-    buf.extend_from_slice(schema_hash.as_bytes());
-    write_u64(&mut buf, version);
-    Opt(PARENT_BUNDLE).put(&mut buf, &parent_bundle_object_id);
-    Oid("permissions bundle object id").put(&mut buf, &bundle_object_id);
+    let mut buf = vec![PERMISSIONS_HEAD_VERSION];
+    let head = (
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        bundle_object_id,
+    );
+    PERMISSIONS_HEAD.put(&mut buf, &head);
     buf
 }
 
@@ -1568,7 +1549,9 @@ pub fn decode_permissions_head(
     data: &[u8],
 ) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
     read_format_version(data, &[PERMISSIONS_HEAD_VERSION])?;
-    let decoded = decode_active_schema_summary(data)?;
+    let mut offset = 1;
+    let decoded = PERMISSIONS_HEAD.get(data, &mut offset)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(
         data,
         &encode_permissions_head(decoded.0, decoded.1, decoded.2, decoded.3),
@@ -1577,118 +1560,8 @@ pub fn decode_permissions_head(
     Ok(decoded)
 }
 
-fn decode_active_schema_summary(
-    data: &[u8],
-) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
-    let mut offset = 1;
-    let schema_hash = SchemaHash::from_bytes(
-        read_bytes(data, &mut offset, 32)?
-            .try_into()
-            .expect("schema hash length should be exact"),
-    );
-    let version = read_u64(data, &mut offset)?;
-    let parent_bundle_object_id = Opt(PARENT_BUNDLE).get(data, &mut offset)?;
-    let bundle_object_id = Oid("permissions bundle object id").get(data, &mut offset)?;
-    ensure_consumed(data, offset)?;
-    Ok((
-        schema_hash,
-        version,
-        parent_bundle_object_id,
-        bundle_object_id,
-    ))
-}
-
-fn encode_operation_policy(
-    buf: &mut Vec<u8>,
-    policy: &jazz::tools::public_schema::OperationPolicy,
-) {
-    encode_optional_policy_expr(buf, policy.using.as_ref());
-    encode_optional_policy_expr(buf, policy.with_check.as_ref());
-}
-
-fn decode_operation_policy(
-    data: &[u8],
-    offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<jazz::tools::public_schema::OperationPolicy, CatalogueEncodingError> {
-    Ok(jazz::tools::public_schema::OperationPolicy {
-        using: decode_optional_policy_expr(data, offset, budget)?,
-        with_check: decode_optional_policy_expr(data, offset, budget)?,
-    })
-}
-
-fn encode_optional_policy_expr(buf: &mut Vec<u8>, expr: Option<&PolicyExpr>) {
-    write_opt(buf, expr, encode_policy_expr);
-}
-
-fn decode_optional_policy_expr(
-    data: &[u8],
-    offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<Option<PolicyExpr>, CatalogueEncodingError> {
-    read_opt(data, offset, |data, offset| {
-        decode_policy_expr(data, offset, budget)
-    })
-}
-
 fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
     match expr {
-        PolicyExpr::Cmp { column, op, value } => {
-            buf.push(POLICY_EXPR_CMP);
-            write_string(buf, column);
-            CmpOpWire.put(buf, op);
-            PolicyValueWire.put(buf, value);
-        }
-        PolicyExpr::SessionCmp { path, op, value } => {
-            buf.push(POLICY_EXPR_SESSION_CMP);
-            encode_string_list(buf, path);
-            CmpOpWire.put(buf, op);
-            ValueWire.put(buf, value);
-        }
-        PolicyExpr::IsNull { column } => {
-            buf.push(POLICY_EXPR_IS_NULL);
-            write_string(buf, column);
-        }
-        PolicyExpr::SessionIsNull { path } => {
-            buf.push(POLICY_EXPR_SESSION_IS_NULL);
-            encode_string_list(buf, path);
-        }
-        PolicyExpr::IsNotNull { column } => {
-            buf.push(POLICY_EXPR_IS_NOT_NULL);
-            write_string(buf, column);
-        }
-        PolicyExpr::SessionIsNotNull { path } => {
-            buf.push(POLICY_EXPR_SESSION_IS_NOT_NULL);
-            encode_string_list(buf, path);
-        }
-        PolicyExpr::Contains { column, value } => {
-            buf.push(POLICY_EXPR_CONTAINS);
-            write_string(buf, column);
-            PolicyValueWire.put(buf, value);
-        }
-        PolicyExpr::SessionContains { path, value } => {
-            buf.push(POLICY_EXPR_SESSION_CONTAINS);
-            encode_string_list(buf, path);
-            ValueWire.put(buf, value);
-        }
-        PolicyExpr::In {
-            column,
-            session_path,
-        } => {
-            buf.push(POLICY_EXPR_IN);
-            write_string(buf, column);
-            encode_string_list(buf, session_path);
-        }
-        PolicyExpr::InList { column, values } => {
-            buf.push(POLICY_EXPR_IN_LIST);
-            write_string(buf, column);
-            Seq("policy_in_list_values", PolicyValueWire).put(buf, values);
-        }
-        PolicyExpr::SessionInList { path, values } => {
-            buf.push(POLICY_EXPR_SESSION_IN_LIST);
-            encode_string_list(buf, path);
-            Seq("policy_session_in_list_values", ValueWire).put(buf, values);
-        }
         PolicyExpr::Exists { table, condition } => {
             buf.push(POLICY_EXPR_EXISTS);
             write_string(buf, table);
@@ -1698,6 +1571,7 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(POLICY_EXPR_EXISTS_REL);
             encode_canonical_relation_expr(buf, rel);
         }
+        // Two tags, chosen by whether a depth is present, so coded by hand.
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -1711,22 +1585,8 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             OperationWire.put(buf, operation);
             write_string(buf, via_column);
             if let Some(depth) = max_depth {
-                write_u32(buf, *depth as u32);
+                U32.put(buf, depth);
             }
-        }
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => {
-            buf.push(POLICY_EXPR_INHERITS_REFERENCING);
-            OperationWire.put(buf, operation);
-            write_string(buf, source_table);
-            write_string(buf, via_column);
-            write_opt(buf, max_depth.as_ref(), |buf, &depth| {
-                write_u32(buf, depth as u32)
-            });
         }
         PolicyExpr::And(exprs) => {
             buf.push(POLICY_EXPR_AND);
@@ -1740,8 +1600,44 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(POLICY_EXPR_NOT);
             encode_policy_expr(buf, expr);
         }
-        PolicyExpr::True => buf.push(POLICY_EXPR_TRUE),
-        PolicyExpr::False => buf.push(POLICY_EXPR_FALSE),
+        leaf => assert!(PolicyLeafWire.put_variant(buf, leaf)),
+    }
+}
+
+wire_enum! {
+    partial PolicyLeafWire: PolicyExpr {
+        1 => Cmp { column: Str("policy_cmp_column"), op: CmpOpWire, value: PolicyValueWire },
+        2 => IsNull { column: Str("policy_is_null_column") },
+        3 => IsNotNull { column: Str("policy_is_not_null_column") },
+        4 => In {
+            column: Str("policy_in_column"),
+            session_path: strings("policy_in_session_path"),
+        },
+        10 => True,
+        11 => False,
+        14 => InheritsReferencing {
+            operation: OperationWire,
+            source_table: Str("policy_inherits_referencing_source"),
+            via_column: Str("policy_inherits_referencing_via_column"),
+            max_depth: Opt(U32),
+        },
+        15 => Contains { column: Str("policy_contains_column"), value: PolicyValueWire },
+        16 => InList {
+            column: Str("policy_in_list_column"),
+            values: Seq("policy_in_list_values", PolicyValueWire),
+        },
+        17 => SessionCmp {
+            path: strings("policy_session_cmp_path"),
+            op: CmpOpWire,
+            value: ValueWire,
+        },
+        18 => SessionIsNull { path: strings("policy_session_is_null_path") },
+        19 => SessionIsNotNull { path: strings("policy_session_is_not_null_path") },
+        20 => SessionContains { path: strings("policy_session_contains_path"), value: ValueWire },
+        21 => SessionInList {
+            path: strings("policy_session_in_list_path"),
+            values: Seq("policy_session_in_list_values", ValueWire),
+        },
     }
 }
 
@@ -1840,63 +1736,10 @@ fn decode_policy_expr_node(
 ) -> Result<DecodedPolicyNode, CatalogueEncodingError> {
     let complete = |expression| Ok(DecodedPolicyNode::Complete(expression));
     let tag = read_u8(data, offset)?;
+    if let Some(leaf) = PolicyLeafWire.get_variant(tag, data, offset)? {
+        return complete(leaf);
+    }
     match tag {
-        POLICY_EXPR_CMP => {
-            let column = read_string(data, offset, "policy_cmp_column")?;
-            let op = CmpOpWire.get(data, offset)?;
-            let value = PolicyValueWire.get(data, offset)?;
-            complete(PolicyExpr::Cmp { column, op, value })
-        }
-        POLICY_EXPR_SESSION_CMP => {
-            let path = decode_string_list(data, offset, "policy_session_cmp_path")?;
-            let op = CmpOpWire.get(data, offset)?;
-            let value = ValueWire.get(data, offset)?;
-            complete(PolicyExpr::SessionCmp { path, op, value })
-        }
-        POLICY_EXPR_IS_NULL => {
-            let column = read_string(data, offset, "policy_is_null_column")?;
-            complete(PolicyExpr::IsNull { column })
-        }
-        POLICY_EXPR_SESSION_IS_NULL => {
-            let path = decode_string_list(data, offset, "policy_session_is_null_path")?;
-            complete(PolicyExpr::SessionIsNull { path })
-        }
-        POLICY_EXPR_IS_NOT_NULL => {
-            let column = read_string(data, offset, "policy_is_not_null_column")?;
-            complete(PolicyExpr::IsNotNull { column })
-        }
-        POLICY_EXPR_SESSION_IS_NOT_NULL => {
-            let path = decode_string_list(data, offset, "policy_session_is_not_null_path")?;
-            complete(PolicyExpr::SessionIsNotNull { path })
-        }
-        POLICY_EXPR_CONTAINS => {
-            let column = read_string(data, offset, "policy_contains_column")?;
-            let value = PolicyValueWire.get(data, offset)?;
-            complete(PolicyExpr::Contains { column, value })
-        }
-        POLICY_EXPR_SESSION_CONTAINS => {
-            let path = decode_string_list(data, offset, "policy_session_contains_path")?;
-            let value = ValueWire.get(data, offset)?;
-            complete(PolicyExpr::SessionContains { path, value })
-        }
-        POLICY_EXPR_IN => {
-            let column = read_string(data, offset, "policy_in_column")?;
-            let session_path = decode_string_list(data, offset, "policy_in_session_path")?;
-            complete(PolicyExpr::In {
-                column,
-                session_path,
-            })
-        }
-        POLICY_EXPR_IN_LIST => {
-            let column = read_string(data, offset, "policy_in_list_column")?;
-            let values = Seq("policy_in_list_values", PolicyValueWire).get(data, offset)?;
-            complete(PolicyExpr::InList { column, values })
-        }
-        POLICY_EXPR_SESSION_IN_LIST => {
-            let path = decode_string_list(data, offset, "policy_session_in_list_path")?;
-            let values = Seq("policy_session_in_list_values", ValueWire).get(data, offset)?;
-            complete(PolicyExpr::SessionInList { path, values })
-        }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
             Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Exists {
@@ -1907,35 +1750,16 @@ fn decode_policy_expr_node(
             let rel = decode_canonical_relation_expr(data, offset, budget)?;
             complete(PolicyExpr::ExistsRel { rel })
         }
-        POLICY_EXPR_INHERITS => {
+        POLICY_EXPR_INHERITS | POLICY_EXPR_INHERITS_WITH_DEPTH => {
             let operation = OperationWire.get(data, offset)?;
             let via_column = read_string(data, offset, "policy_inherits_via_column")?;
+            let max_depth = if tag == POLICY_EXPR_INHERITS_WITH_DEPTH {
+                Some(U32.get(data, offset)?)
+            } else {
+                None
+            };
             complete(PolicyExpr::Inherits {
                 operation,
-                via_column,
-                max_depth: None,
-            })
-        }
-        POLICY_EXPR_INHERITS_WITH_DEPTH => {
-            let operation = OperationWire.get(data, offset)?;
-            let via_column = read_string(data, offset, "policy_inherits_via_column")?;
-            let max_depth = read_u32(data, offset)? as usize;
-            complete(PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth: Some(max_depth),
-            })
-        }
-        POLICY_EXPR_INHERITS_REFERENCING => {
-            let operation = OperationWire.get(data, offset)?;
-            let source_table = read_string(data, offset, "policy_inherits_referencing_source")?;
-            let via_column = read_string(data, offset, "policy_inherits_referencing_via_column")?;
-            let max_depth = read_opt(data, offset, |data, offset| {
-                Ok(read_u32(data, offset)? as usize)
-            })?;
-            complete(PolicyExpr::InheritsReferencing {
-                operation,
-                source_table,
                 via_column,
                 max_depth,
             })
@@ -1963,8 +1787,6 @@ fn decode_policy_expr_node(
             }))
         }
         POLICY_EXPR_NOT => Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Not)),
-        POLICY_EXPR_TRUE => complete(PolicyExpr::True),
-        POLICY_EXPR_FALSE => complete(PolicyExpr::False),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "policy_expr",
@@ -2481,6 +2303,41 @@ impl<T, C: Wire<T>> Wire<Box<T>> for Boxed<C> {
     }
 }
 
+/// A schema hash as its 32 raw bytes.
+struct HashWire;
+
+impl Wire<SchemaHash> for HashWire {
+    fn put(&self, buf: &mut Vec<u8>, value: &SchemaHash) {
+        buf.extend_from_slice(value.as_bytes());
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<SchemaHash, CatalogueEncodingError> {
+        let bytes = read_bytes(data, offset, 32)?;
+        Ok(SchemaHash::from_bytes(bytes.try_into().expect("32 bytes")))
+    }
+}
+
+/// A tuple of codecs describes a tuple of values written in order.
+macro_rules! tuple_wire {
+    ($(($($codec:ident $value:ident $index:tt),+)),+) => {$(
+        impl<$($value, $codec: Wire<$value>),+> Wire<($($value,)+)> for ($($codec,)+) {
+            fn put(&self, buf: &mut Vec<u8>, value: &($($value,)+)) {
+                $(self.$index.put(buf, &value.$index);)+
+            }
+
+            fn get(
+                &self,
+                data: &[u8],
+                offset: &mut usize,
+            ) -> Result<($($value,)+), CatalogueEncodingError> {
+                Ok(($(self.$index.get(data, offset)?,)+))
+            }
+        }
+    )+};
+}
+
+tuple_wire!((A TA 0, B TB 1, C TC 2), (A TA 0, B TB 1, C TC 2, D TD 3));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2496,6 +2353,14 @@ mod tests {
     const POLICY_VALUE_SESSION_REF: u8 = 2;
     const REL_TABLE_SCAN: u8 = 1;
     const REL_PREDICATE_TRUE: u8 = 10;
+    const POLICY_EXPR_IN: u8 = 4;
+    const POLICY_EXPR_TRUE: u8 = 10;
+    const POLICY_EXPR_IN_LIST: u8 = 16;
+    const POLICY_EXPR_SESSION_CMP: u8 = 17;
+    const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
+    const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
+    const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
+    const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
     #[test]
     fn schema_roundtrip_simple() {
