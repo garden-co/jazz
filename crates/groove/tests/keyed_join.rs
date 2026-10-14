@@ -411,3 +411,27 @@ async fn recursive_steps_keep_whole_table_joins() {
     assert_eq!(live, oracle(&mut db, graph).await);
     assert_eq!(live.len(), 5, "{live:?}");
 }
+
+/// Subscriptions differing only in the pinned owner share one parameterised
+/// graph, so they share its lookup: more subscribers add keys, not lookups.
+#[futures_test::test]
+async fn subscriptions_of_one_shape_share_their_lookup() {
+    let mut lookups = Vec::new();
+    for owners in [1_u64, 20] {
+        let mut db = open_db().await;
+        seed(&mut db).await;
+        let mut subscriptions = Vec::new();
+        for bucket in 0..owners {
+            let graph = GraphBuilder::join(
+                GraphBuilder::table("docs").filter(PredicateExpr::eq("owner", owner(bucket))),
+                project_source(),
+                ["project"],
+                ["id"],
+            );
+            subscriptions.push(db.subscribe_one_sink(graph).await.unwrap());
+        }
+        lookups.push(db.runtime_stats().lookup_count);
+    }
+    assert!(lookups[0] > 0);
+    assert_eq!(lookups[0], lookups[1]);
+}
