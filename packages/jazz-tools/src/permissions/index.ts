@@ -1330,48 +1330,17 @@ function buildGatherSeedState(
     return seedState;
   }
 
-  const startWhere = resolveRelationWhereInput(start);
-  const baseScope = currentRelationScope(state);
   const joins = [...state.joins];
   const filters = [...state.filters];
-  const qualifiedRelationByPrefix = new Map<string, Relation>();
-  const qualifiedScopeByPrefix = new Map<string, string>();
-
-  for (const [column, raw] of Object.entries(startWhere)) {
-    if (raw === undefined) {
-      continue;
-    }
-
-    const [prefix, bare] = splitQualifiedColumn(column);
-    if (!prefix || prefix === state.outputTable) {
-      filters.push({ column: bare, raw, scope: baseScope });
-      continue;
-    }
-
-    const relation = resolveQualifiedGatherStartRelation(
-      relationsByTable,
-      state.outputTable,
-      prefix,
-      bare,
-    );
-    const existingRelation = qualifiedRelationByPrefix.get(prefix);
-    if (existingRelation && existingRelation.name !== relation.name) {
-      throw new Error(
-        `gather(...) qualified start table "${prefix}" is ambiguous from "${state.outputTable}"; use an explicit relation seed instead.`,
-      );
-    }
-    qualifiedRelationByPrefix.set(prefix, relation);
-
-    let scope = qualifiedScopeByPrefix.get(prefix);
-    if (!scope) {
-      const join = relationToJoinSpec(relation, baseScope);
-      joins.push(join);
-      scope = relationJoinAlias(state.kind, join, joins.length - 1);
-      qualifiedScopeByPrefix.set(prefix, scope);
-    }
-
-    filters.push({ column: bare, raw, scope });
-  }
+  collectQualifiedWhere(
+    resolveRelationWhereInput(start),
+    state.outputTable,
+    currentRelationScope(state),
+    state.kind,
+    relationsByTable,
+    { joins, filters },
+    { subject: "gather(...) qualified start", alternative: "explicit relation seed" },
+  );
 
   return {
     ...state,
@@ -1380,64 +1349,75 @@ function buildGatherSeedState(
   };
 }
 
-function resolveQualifiedGatherStartRelation(
-  relationsByTable: Map<string, Relation[]>,
+/**
+ * Adds a filter per entry of `where` to `into`. A column qualified with another
+ * table name is resolved through the single direct relation from `outputTable`
+ * to that table, joined once per qualifying table. Returns whether any column
+ * was qualified.
+ */
+function collectQualifiedWhere(
+  where: Record<string, unknown>,
   outputTable: string,
-  qualifiedTable: string,
-  column: string,
-): Relation {
-  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
-    (relation) => relation.toTable === qualifiedTable,
-  );
-  if (candidates.length === 0) {
-    throw new Error(
-      `gather(...) qualified start column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
-    );
-  }
-  if (candidates.length === 1) {
-    return candidates[0]!;
-  }
-
-  const disambiguated = candidates.filter((relation) =>
-    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
-  );
-  if (disambiguated.length === 1) {
-    return disambiguated[0]!;
-  }
-
-  throw new Error(
-    `gather(...) qualified start table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation seed instead.`,
-  );
-}
-
-function resolveQualifiedRuleRelation(
+  baseScope: string,
+  kind: RelationExprState["kind"],
   relationsByTable: Map<string, Relation[]>,
-  outputTable: string,
-  qualifiedTable: string,
-  column: string,
-): Relation {
-  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
-    (relation) => relation.toTable === qualifiedTable,
-  );
-  if (candidates.length === 0) {
-    throw new Error(
-      `Qualified where(...) column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
+  into: { joins: RelationJoinSpec[]; filters: RelationFilterEntry[] },
+  errors: { subject: string; alternative: string },
+): boolean {
+  const { joins, filters } = into;
+  const qualifiedRelationByPrefix = new Map<string, Relation>();
+  const qualifiedScopeByPrefix = new Map<string, string>();
+  const ambiguous = (prefix: string) =>
+    new Error(
+      `${errors.subject} table "${prefix}" is ambiguous from "${outputTable}"; use an ${errors.alternative} instead.`,
     );
-  }
-  if (candidates.length === 1) {
-    return candidates[0]!;
+  let hasQualifiedFilters = false;
+
+  for (const [column, raw] of Object.entries(where)) {
+    if (raw === undefined) {
+      continue;
+    }
+
+    const [prefix, bare] = splitQualifiedColumn(column);
+    if (!prefix || prefix === outputTable) {
+      filters.push({ column: bare, raw, scope: baseScope });
+      continue;
+    }
+
+    hasQualifiedFilters = true;
+    const candidates = (relationsByTable.get(outputTable) ?? []).filter(
+      (relation) => relation.toTable === prefix,
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        `${errors.subject} column "${prefix}.${bare}" does not match a direct relation from "${outputTable}".`,
+      );
+    }
+    const matching =
+      candidates.length === 1
+        ? candidates
+        : candidates.filter((relation) =>
+            relation.type === "forward" ? relation.fromColumn === bare : relation.toColumn === bare,
+          );
+    if (matching.length !== 1) throw ambiguous(prefix);
+    const relation = matching[0]!;
+
+    const existingRelation = qualifiedRelationByPrefix.get(prefix);
+    if (existingRelation && existingRelation.name !== relation.name) throw ambiguous(prefix);
+    qualifiedRelationByPrefix.set(prefix, relation);
+
+    let scope = qualifiedScopeByPrefix.get(prefix);
+    if (!scope) {
+      const join = relationToJoinSpec(relation, baseScope);
+      joins.push(join);
+      scope = relationJoinAlias(kind, join, joins.length - 1);
+      qualifiedScopeByPrefix.set(prefix, scope);
+    }
+
+    filters.push({ column: bare, raw, scope });
   }
 
-  const disambiguated = candidates.filter((relation) =>
-    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
-  );
-  if (disambiguated.length === 1) {
-    return disambiguated[0]!;
-  }
-
-  throw new Error(
-    `Qualified where(...) table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation instead.`,
-  );
+  return hasQualifiedFilters;
 }
 
 function relationToJoinSpec(relation: Relation, leftScope: string): RelationJoinSpec {
@@ -2208,41 +2188,15 @@ function analyzeQualifiedWhereObject(
 ): QualifiedWhereAnalysis {
   const joins: RelationJoinSpec[] = [];
   const filters: RelationFilterEntry[] = [];
-  const qualifiedRelationByPrefix = new Map<string, Relation>();
-  const qualifiedScopeByPrefix = new Map<string, string>();
-  let hasQualifiedFilters = false;
-
-  for (const [column, raw] of Object.entries(where)) {
-    if (raw === undefined) {
-      continue;
-    }
-
-    const [prefix, bare] = splitQualifiedColumn(column);
-    if (!prefix || prefix === table) {
-      filters.push({ column: bare, raw, scope: table });
-      continue;
-    }
-
-    hasQualifiedFilters = true;
-    const relation = resolveQualifiedRuleRelation(relationsByTable, table, prefix, bare);
-    const existingRelation = qualifiedRelationByPrefix.get(prefix);
-    if (existingRelation && existingRelation.name !== relation.name) {
-      throw new Error(
-        `Qualified where(...) table "${prefix}" is ambiguous from "${table}"; use an explicit relation instead.`,
-      );
-    }
-    qualifiedRelationByPrefix.set(prefix, relation);
-
-    let scope = qualifiedScopeByPrefix.get(prefix);
-    if (!scope) {
-      const join = relationToJoinSpec(relation, table);
-      joins.push(join);
-      scope = relationJoinAlias("table", join, joins.length - 1);
-      qualifiedScopeByPrefix.set(prefix, scope);
-    }
-
-    filters.push({ column: bare, raw, scope });
-  }
+  const hasQualifiedFilters = collectQualifiedWhere(
+    where,
+    table,
+    table,
+    "table",
+    relationsByTable,
+    { joins, filters },
+    { subject: "Qualified where(...)", alternative: "explicit relation" },
+  );
 
   return {
     hasQualifiedFilters,
