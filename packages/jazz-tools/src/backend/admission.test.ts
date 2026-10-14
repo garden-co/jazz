@@ -78,6 +78,66 @@ describe("backend admission", () => {
     expect(clock.sleeps).toEqual([3_000, 7_000]);
   });
 
+  it.each(["0", "Tue, 13 Oct 2026 00:00:00 GMT"])(
+    "never retries faster than backoff for Retry-After %s",
+    async (retryAfter) => {
+      const clock = virtualClock(Date.parse("2026-10-14T00:00:00Z"));
+      const fetcher = vi
+        .fn<TestFetch>()
+        .mockResolvedValueOnce(status(503, { "Retry-After": retryAfter }))
+        .mockResolvedValueOnce(status(503, { "Retry-After": retryAfter }))
+        .mockResolvedValueOnce(status(204));
+      await admitBackendSecret(url, "secret", { fetch: fetcher as typeof fetch, ...clock.options });
+      expect(clock.sleeps).toEqual([250, 500]);
+    },
+  );
+
+  it("bounds the request rate when a gateway always answers Retry-After: 0", async () => {
+    const clock = virtualClock();
+    const fetcher = vi.fn<TestFetch>().mockResolvedValue(status(503, { "Retry-After": "0" }));
+    await expect(
+      admitBackendSecret(url, "secret", {
+        fetch: fetcher as typeof fetch,
+        // Bottom of each jittered step: the fastest possible schedule.
+        ...clock.options,
+        random: () => 0,
+      }),
+    ).rejects.toThrow("Backend admission failed (503)");
+    // 180 s at a 2.5 s floor once backoff saturates, plus the ramp-up.
+    expect(fetcher.mock.calls.length).toBeLessThan(80);
+  });
+
+  it.each([
+    ["a secret with a line break", url, "secret\nX-Injected: 1", "not allowed in an HTTP header"],
+    ["an empty secret", url, "", "not allowed in an HTTP header"],
+    ["an invalid URL", "not a url", "secret", "valid serverUrl"],
+    ["a non-http URL", "ftp://core.example/admit", "secret", "http(s) serverUrl"],
+  ])("rejects %s at once without echoing the secret", async (_case, target, secret, message) => {
+    const fetcher = vi.fn<TestFetch>();
+    const failure = await admitBackendSecret(target, secret, {
+      fetch: fetcher as typeof fetch,
+    }).catch((error: Error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(message);
+    if (secret) expect((failure as Error).message).not.toContain(secret);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("names the connection error code once the budget is spent", async () => {
+    const clock = virtualClock();
+    const refused = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" }),
+    });
+    const fetcher = vi.fn<TestFetch>().mockRejectedValue(refused);
+    await expect(
+      admitBackendSecret(url, "secret", {
+        fetch: fetcher as typeof fetch,
+        wakeBudgetMs: 5_000,
+        ...clock.options,
+      }),
+    ).rejects.toThrow("Backend admission could not reach the app: fetch failed (ECONNREFUSED)");
+  });
+
   it("caps an excessive Retry-After", async () => {
     const clock = virtualClock();
     const fetcher = vi
@@ -149,8 +209,8 @@ describe("backend admission", () => {
     const fetcher = vi.fn<TestFetch>().mockImplementation(never);
     const admitted = expect(
       admitBackendSecret(url, "secret", { fetch: fetcher as typeof fetch }),
-    ).rejects.toThrow("Backend admission timed out: the app did not answer within 120s");
-    await vi.advanceTimersByTimeAsync(120_000);
+    ).rejects.toThrow("Backend admission timed out: the app did not answer within 180s");
+    await vi.advanceTimersByTimeAsync(180_000);
     await admitted;
     expect(vi.getTimerCount()).toBe(0);
   });

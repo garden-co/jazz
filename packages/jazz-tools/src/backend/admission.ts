@@ -1,8 +1,10 @@
 // A hibernated Jazz Cloud app wakes on its first request: the gateway holds or
 // refuses that request while the core boots, which can take from a few seconds
-// up to a couple of minutes when a node must be provisioned. Admission is a
+// up to a few minutes when a node must be provisioned. Admission is a
 // read-only secret check, so it is safe to repeat until the core answers.
-const WAKE_BUDGET_MS = 120_000;
+// Matches the cloud gateway's 180 s hold, so a slow wake (node provisioning,
+// volume attach, boot) is waited out rather than abandoned.
+const WAKE_BUDGET_MS = 180_000;
 const ATTEMPT_TIMEOUT_MS = 30_000;
 const RETRY_INITIAL_DELAY_MS = 250;
 const RETRY_MAX_DELAY_MS = 5_000;
@@ -36,6 +38,22 @@ export function parseRetryAfter(value: string | null, now: number): number | und
 
 class AttemptTimeout extends Error {}
 
+// An HTTP field value: visible ASCII, space, tab and obs-text. Anything else
+// makes fetch throw a TypeError that would otherwise read as a network failure.
+const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]+$/;
+
+/** A connection-level fetch failure, naming its cause code (ECONNREFUSED, ENOTFOUND, ...). */
+function describeNetworkError(error: TypeError): string {
+  const cause = error.cause as { code?: unknown; message?: unknown } | undefined;
+  const detail =
+    typeof cause?.code === "string"
+      ? cause.code
+      : typeof cause?.message === "string"
+        ? cause.message
+        : undefined;
+  return detail ? `${error.message} (${detail})` : error.message;
+}
+
 /**
  * Admit a backend secret with the core at `url`, waiting out an app wake.
  * Gateway/unready statuses (502, 503, 504), network failures and stalled
@@ -47,6 +65,18 @@ export async function admitBackendSecret(
   backendSecret: string,
   options: BackendAdmissionOptions = {},
 ): Promise<void> {
+  // Reject inputs fetch would refuse before retrying anything, and never echo
+  // the secret: Node includes an invalid header value in its error message.
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Backend admission needs a valid serverUrl");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    throw new Error("Backend admission needs an http(s) serverUrl");
+  if (!HEADER_VALUE.test(backendSecret))
+    throw new Error("Backend secret contains characters not allowed in an HTTP header");
   const fetcher = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
@@ -75,15 +105,22 @@ export async function admitBackendSecret(
           `Backend admission timed out: the app did not answer within ${Math.round(wakeBudgetMs / 1_000)}s`,
         );
       } else if (error instanceof TypeError) {
-        // fetch rejects with TypeError for connection-level failures.
-        failure = new Error(`Backend admission could not reach the app: ${error.message}`, {
-          cause: error,
-        });
+        // With the URL and header validated, fetch rejects with TypeError only
+        // for connection-level failures.
+        failure = new Error(
+          `Backend admission could not reach the app: ${describeNetworkError(error)}`,
+          { cause: error },
+        );
       } else {
         throw error;
       }
     }
-    const delay = Math.min(retryAfter ?? retryDelay(retry, random), RETRY_AFTER_MAX_MS);
+    // Retry-After may lengthen the backoff but never shorten it: `0` or a past
+    // date must not turn a waking app into a tight request loop.
+    const delay = Math.min(
+      Math.max(retryAfter ?? 0, retryDelay(retry, random)),
+      RETRY_AFTER_MAX_MS,
+    );
     if (now() + delay >= deadline) throw failure;
     await sleep(delay);
   }
