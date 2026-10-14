@@ -318,16 +318,21 @@ fn hydrate_nested_payload_enum_cases(
 
 /// The local delta's rows, held in memory: overlay row key (physical table,
 /// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
-/// image it holds, plus how many rows each physical table holds. No caller
-/// needs ordering, so the maps use the low-overhead deterministic hasher.
+/// image it holds, plus how many rows each physical table holds under each
+/// branch key. No caller needs ordering, so the maps use the low-overhead
+/// deterministic hasher.
 ///
-/// The per-table count is what a read pays to mask origin by the delta's
-/// whole presence, known without reading storage (see
-/// `JazzSourceGraphPreparer::local_mask_read`).
+/// The per-branch-key count is what a read pays to mask origin by the
+/// delta's whole presence, known without reading storage (see
+/// `JazzSourceGraphPreparer::local_mask_read`). It is kept per branch key
+/// because that read covers only the read's own branch keys: a large draft
+/// branch's pending rows cost nothing to a read of another branch.
 #[derive(Debug, Default)]
 pub(in crate::node) struct AheadCurrentKeys {
     keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
-    rows_per_table: FxHashMap<PhysicalTableId, usize>,
+    /// Physical table -> encoded branch-key part of the overlay key
+    /// ([`global_current_key_branch_prefix`]) -> rows. Holds no zero counts.
+    rows_per_branch: FxHashMap<PhysicalTableId, FxHashMap<Vec<u8>, usize>>,
 }
 
 impl AheadCurrentKeys {
@@ -345,9 +350,15 @@ impl AheadCurrentKeys {
         tx_id: TxId,
     ) -> Option<TxId> {
         let table_id = key.0;
+        let branch = global_current_key_branch_prefix(&key.1).to_vec();
         let previous = self.keys.insert(key, tx_id);
         if previous.is_none() {
-            *self.rows_per_table.entry(table_id).or_default() += 1;
+            *self
+                .rows_per_branch
+                .entry(table_id)
+                .or_default()
+                .entry(branch)
+                .or_default() += 1;
         }
         previous
     }
@@ -355,11 +366,17 @@ impl AheadCurrentKeys {
     pub(in crate::node) fn remove(&mut self, key: &(PhysicalTableId, Vec<u8>)) -> Option<TxId> {
         let removed = self.keys.remove(key);
         if removed.is_some()
-            && let Some(rows) = self.rows_per_table.get_mut(&key.0)
+            && let Some(branches) = self.rows_per_branch.get_mut(&key.0)
         {
-            *rows -= 1;
-            if *rows == 0 {
-                self.rows_per_table.remove(&key.0);
+            let branch = global_current_key_branch_prefix(&key.1);
+            if let Some(rows) = branches.get_mut(branch) {
+                *rows -= 1;
+                if *rows == 0 {
+                    branches.remove(branch);
+                }
+            }
+            if branches.is_empty() {
+                self.rows_per_branch.remove(&key.0);
             }
         }
         removed
@@ -367,13 +384,23 @@ impl AheadCurrentKeys {
 
     pub(in crate::node) fn clear(&mut self) {
         self.keys.clear();
-        self.rows_per_table.clear();
+        self.rows_per_branch.clear();
     }
 
-    /// How many pending rows `table_id`'s local delta holds, over every
-    /// branch key.
-    pub(in crate::node) fn table_rows(&self, table_id: PhysicalTableId) -> usize {
-        self.rows_per_table.get(&table_id).copied().unwrap_or(0)
+    /// How many pending rows `table_id`'s local delta holds under
+    /// `branch_key`.
+    pub(in crate::node) fn branch_rows(
+        &self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+    ) -> usize {
+        self.rows_per_branch
+            .get(&table_id)
+            .and_then(|branches| {
+                branches.get(global_current_branch_key_prefix(branch_key).as_slice())
+            })
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -2538,6 +2565,11 @@ pub struct QueryEngineReadMetrics {
     /// ids; they stay whole without an access path and inside a recursive
     /// step, where no lookup can run.
     pub source_branch_register_full_scans: u64,
+    /// Indexed `Local` reads whose choice of how the local delta masks
+    /// origin failed to count origin's candidates (a table or index mapping
+    /// mismatch, or a storage error) and fell back to reading the delta
+    /// whole. Exact either way; nonzero only signals a lost optimization.
+    pub local_mask_count_fallbacks: u64,
 }
 
 /// Wall-clock attribution for one synchronous query materialization.
