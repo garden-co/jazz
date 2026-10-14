@@ -1098,97 +1098,18 @@ fn convert_policy_with_native_select_inherits(
     // nested below a boolean operator must not escape this validation merely
     // because that operator is rejected by a later lowering stage.
     validate_exists_rel_policy_join_conditions(table, path, expr)?;
-    match expr {
-        PolicyExpr::And(exprs) => {
-            if !exprs.iter().any(policy_requires_branch) {
-                return query_with_predicate_filters(
-                    table.as_str(),
-                    predicate_filters_for_expr(table, path, expr)?,
-                );
-            }
-            let mut query = Query::from(table.as_str());
-            for (index, expr) in exprs.iter().enumerate() {
-                query = append_policy_clause(
-                    schema,
-                    table_schema,
-                    table,
-                    &format!("{path}.And[{index}]"),
-                    query,
-                    expr,
-                    native_select_inherits,
-                    expansion_path,
-                )?;
-            }
-            Ok(query)
-        }
-        PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
-            let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
-            for (index, expr) in exprs.iter().enumerate() {
-                let branch = convert_policy_with_native_select_inherits(
-                    schema,
-                    table_schema,
-                    table,
-                    &format!("{path}.Or[{index}]"),
-                    expr,
-                    native_select_inherits,
-                    expansion_path,
-                )?;
-                for branch in PolicyBranch::alternatives_from_query(branch) {
-                    query = query.policy_branch(branch);
-                }
-            }
-            Ok(query)
-        }
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => append_inherited_policy(
-            schema,
-            table_schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            *operation,
-            via_column,
-            *max_depth,
-            native_select_inherits,
-            expansion_path,
-        ),
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth: _,
-        } => append_inherited_referencing_policy(
-            schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            *operation,
-            source_table,
-            via_column,
-            expansion_path,
-        ),
-        PolicyExpr::Exists {
-            table: exists_table,
-            condition,
-        } => append_exists_policy_clause(
-            schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            exists_table,
-            condition,
-        ),
-        PolicyExpr::ExistsRel { rel } => {
-            append_exists_rel_policy_clause(schema, table, path, Query::from(table.as_str()), rel)
-        }
-        _ => query_with_predicate_filters(
-            table.as_str(),
-            predicate_filters_for_expr(table, path, expr)?,
-        ),
-    }
+    // A fresh query has no earlier alternatives, so appending the policy as
+    // its only clause is exactly its standalone conversion.
+    append_policy_clause(
+        schema,
+        table_schema,
+        table,
+        path,
+        Query::from(table.as_str()),
+        expr,
+        native_select_inherits,
+        expansion_path,
+    )
 }
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
@@ -1348,13 +1269,6 @@ fn append_policy_clause(
             predicate_filters_for_expr(table, path, expr)?,
         )),
     }
-}
-
-fn query_with_predicate_filters(
-    table: &str,
-    filters: Vec<Predicate>,
-) -> Result<Query, SchemaConversionError> {
-    Ok(append_predicate_filters(Query::from(table), filters))
 }
 
 fn append_predicate_filters(mut query: Query, filters: Vec<Predicate>) -> Query {
