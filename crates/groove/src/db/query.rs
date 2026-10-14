@@ -442,8 +442,7 @@ impl Database {
         let subscription = self
             .ivm_runtime
             .subscribe_one_sink_with_waker(graph, &storage, None)
-            .await
-            .map_err(Error::IvmRuntime)?;
+            .await?;
         // A direct async opening owns the immediately-resident continuation
         // chain, but it must not await a cold read with no durable owner to
         // resume it. Drain only self-scheduled cooperative slices here.
@@ -517,15 +516,13 @@ impl Database {
     {
         self.ensure_not_poisoned()?;
         let storage = self.owned_read_storage();
-        self.ivm_runtime
-            .subscribe_with_lifetime(
-                sinks,
-                &storage,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-            )
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.subscribe_with_lifetime(
+            sinks,
+            &storage,
+            lifetime,
+            root_indirect_values,
+            progress_waker,
+        )?)
     }
 
     /// Subscribe to a SQL-ish query by letting the planner lower it into an IVM
@@ -703,19 +700,15 @@ impl Database {
         let live = self
             .ivm_runtime
             .prepare_live_attach(prepared.id, &values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_output_and_waker(
-                prepared.id,
-                &values,
-                prepared.output,
-                &storage,
-                None,
-                live,
-            )
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_output_and_waker(
+            prepared.id,
+            &values,
+            prepared.output,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -738,7 +731,8 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_one_sink(
                 graph,
                 binding_source_shape,
@@ -746,8 +740,7 @@ impl Database {
                 output_key_fields,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare a one-sink shape with separate public-output and route-carrying
@@ -769,7 +762,8 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_one_sink_with_routing(
                 output_graph,
                 routing_graph,
@@ -778,8 +772,7 @@ impl Database {
                 routing_key_fields,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare the canonical parameterized multisink shape.
@@ -801,15 +794,15 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare(
                 terminals,
                 binding_source_shape,
                 binding_descriptor,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare a routed shape that callers with identical terminals share.
@@ -828,15 +821,15 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_shared(
                 terminals,
                 binding_source_shape,
                 binding_descriptor,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Retire a shared prepared shape that no retained binding holds, for a
@@ -894,12 +887,14 @@ impl Database {
         let live = self
             .ivm_runtime
             .prepare_live_attach(shape, binding_values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None, live)
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_waker(
+            shape,
+            binding_values,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -922,19 +917,15 @@ impl Database {
         let live = self
             .ivm_runtime
             .prepare_live_attach(shape, binding_values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_output_and_waker(
-                shape,
-                binding_values,
-                public_output,
-                &storage,
-                None,
-                live,
-            )
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_output_and_waker(
+            shape,
+            binding_values,
+            public_output,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -1028,22 +1019,19 @@ impl Database {
         let live = if lifetime == SubscriptionLifetime::Retained {
             self.ivm_runtime
                 .prepare_live_attach(shape, binding_values, &storage)
-                .await
-                .map_err(Error::IvmRuntime)?
+                .await?
         } else {
             None
         };
-        self.ivm_runtime
-            .bind_shape_with_lifetime(
-                shape,
-                binding_values,
-                &storage,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-                live,
-            )
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.bind_shape_with_lifetime(
+            shape,
+            binding_values,
+            &storage,
+            lifetime,
+            root_indirect_values,
+            progress_waker,
+            live,
+        )?)
     }
 
     /// Bind a retained subscription and transfer the shape's ownership to
@@ -1164,10 +1152,10 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .query_snapshot_with_root_values(graph, &storage, root_indirect_values)
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Run several named graph outputs against the same current storage
@@ -1180,10 +1168,7 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
-            .query_snapshots(sinks, &storage)
-            .await
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.query_snapshots(sinks, &storage).await?)
     }
 
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
@@ -1195,9 +1180,7 @@ impl Database {
     /// callers must retire dynamically compiled shapes to release graph nodes.
     pub fn retire_prepared_shape(&mut self, shape: PreparedShapeId) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
-            .retire_prepared_shape(shape)
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.retire_prepared_shape(shape)?)
     }
 
     /// Retire subscriptions whose receiving handles have already been
@@ -1205,10 +1188,10 @@ impl Database {
     /// notification channel.
     pub async fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prune_dropped_subscriptions_with_storage(&self.storage)
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 }
 
