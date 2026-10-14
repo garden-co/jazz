@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, RecordDeltas, SubTick,
-    composite_keys, consolidate_deltas, encode_key_part, expands_to_key_parts,
+    composite_keys, consolidate_deltas, encode_key_part, expands_to_key_parts, integer_value,
     record_projection::{resolve_field_name, resolve_field_ref},
 };
 
@@ -327,10 +327,7 @@ enum JoinLookup<'a> {
 impl JoinLookup<'_> {
     fn bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
         match self {
-            Self::Arrangement(arrangement) => match arrangement.overlay.get(key) {
-                Some(bucket) => bucket.as_ref(),
-                None => arrangement.index.get(key),
-            },
+            Self::Arrangement(arrangement) => arrangement.bucket(key),
             Self::Index(index) => index.get(key),
         }
     }
@@ -740,27 +737,16 @@ impl ArrangementState {
     }
 
     pub(super) fn row_count(&self) -> usize {
-        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
-        keys.extend(self.overlay.keys().cloned());
-        keys.into_iter()
-            .filter_map(|key| self.bucket(&key))
-            .map(|bucket| bucket.iter().filter(|(_, weight)| **weight != 0).count())
+        self.buckets()
+            .map(|(_, bucket)| bucket.iter().filter(|(_, weight)| **weight != 0).count())
             .sum()
     }
 
     pub(super) fn encoded_bytes(&self) -> usize {
-        let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
-        keys.extend(self.overlay.keys().cloned());
-        keys.into_iter()
-            .filter_map(|key| {
-                self.bucket(&key).map(|bucket| {
-                    (
-                        key.len(),
-                        bucket.iter().map(|(record, _)| record.len()).sum::<usize>(),
-                    )
-                })
+        self.buckets()
+            .map(|(key, bucket)| {
+                key.len() + bucket.iter().map(|(record, _)| record.len()).sum::<usize>()
             })
-            .map(|(key_len, record_bytes)| key_len + record_bytes)
             .sum()
     }
 
@@ -808,10 +794,10 @@ impl ArrangementState {
     }
 
     fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
-        let key = JoinKey::from_slice(key);
-        match self.overlay.get(&key) {
+        // `JoinKey` hashes and compares as its byte slice.
+        match self.overlay.get(key) {
             Some(bucket) => bucket.as_ref(),
-            None => self.index.get(&key),
+            None => self.index.get(key),
         }
     }
 
@@ -1096,38 +1082,16 @@ fn encode_join_key_part(
     comparison: ValueComparison,
 ) -> Result<(), IvmRuntimeError> {
     if matches!(comparison, ValueComparison::Policy) {
-        match value {
-            crate::records::Value::Nullable(Some(value)) => {
-                return encode_join_key_part(key, value, comparison);
-            }
-            crate::records::Value::U8(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            crate::records::Value::U16(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            crate::records::Value::U32(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            crate::records::Value::U64(value) | crate::records::Value::U48(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            crate::records::Value::I32(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            crate::records::Value::I64(value) => {
-                return encode_join_integer_key(key, i128::from(*value));
-            }
-            _ => {}
+        if let Some(value) = integer_value(value) {
+            key.push(0xfe);
+            key.extend(value.to_be_bytes());
+            return Ok(());
+        }
+        if let crate::records::Value::Nullable(Some(value)) = value {
+            return encode_join_key_part(key, value, comparison);
         }
     }
     encode_key_part(key, value)
-}
-
-fn encode_join_integer_key(key: &mut Vec<u8>, value: i128) -> Result<(), IvmRuntimeError> {
-    key.push(0xfe);
-    key.extend(value.to_be_bytes());
-    Ok(())
 }
 
 pub(super) fn create_join_record(

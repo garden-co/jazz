@@ -474,7 +474,7 @@ fn compare_values(
     }
 }
 
-fn integer_value(value: &Value) -> Option<i128> {
+pub(super) fn integer_value(value: &Value) -> Option<i128> {
     match value {
         Value::U8(value) => Some(i128::from(*value)),
         Value::U16(value) => Some(i128::from(*value)),
