@@ -81,7 +81,7 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
         let masked = checker.masked(graph)?;
         if !masked.is_empty() {
             return Err(RouteViolation(format!(
-                "terminal {sink} reads lookup rows never paired with binding routes {masked:?}"
+                "terminal {sink} reads binding-keyed lookup rows for routes {masked:?}, which shared programs do not support yet"
             )));
         }
     }
@@ -189,10 +189,12 @@ where
         Ok(carried)
     }
 
-    /// Binding routes `node` depends on only through a binding lookup
+    /// Binding routes `node` depends on through a binding lookup
     /// (`GraphBuilder::Lookup` keyed by binding values). Such rows are a
-    /// superset for every binding at once and carry no route, so they are
-    /// sound only once a join pairs them with the route itself.
+    /// superset for every binding at once and carry no route. A join could
+    /// pair them with their route only on the lookup's own key, which this
+    /// check cannot yet tell from the table's other columns, so a program
+    /// that reads one is not shared.
     fn masked(&mut self, node: &GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
         let key = std::ptr::from_ref(node);
         if let Some(masked) = self.masks.get(&key) {
@@ -200,19 +202,6 @@ where
         }
         let masked = match node {
             GraphBuilder::Lookup { keys, .. } => self.depends(keys),
-            GraphBuilder::Join {
-                left,
-                right,
-                left_on,
-                right_on,
-                ..
-            } => {
-                let mut masked = self.masked(left)?;
-                masked.extend(self.masked(right)?);
-                let resolved = self.mask_resolutions(left, right, left_on, right_on)?;
-                masked.retain(|route| !resolved.contains(route));
-                masked
-            }
             _ => {
                 let mut masked = BTreeSet::new();
                 for child in children(node) {
@@ -223,32 +212,6 @@ where
         };
         self.masks.insert(key, masked.clone());
         Ok(masked)
-    }
-
-    /// Routes a join pairs with a lookup-masked side: one side's key is
-    /// the route itself, carried by that side, so every output row belongs
-    /// to exactly the bindings whose route equals the other side's key.
-    fn mask_resolutions(
-        &mut self,
-        left: &GraphBuilder,
-        right: &GraphBuilder,
-        left_on: &[FieldRef],
-        right_on: &[FieldRef],
-    ) -> Result<BTreeSet<String>, RouteViolation> {
-        let left_carried = self.carried(left)?;
-        let right_carried = self.carried(right)?;
-        let mut resolved = BTreeSet::new();
-        for (left_key, right_key) in left_on.iter().zip(right_on) {
-            let left_key = self.key_route(left, left_key)?;
-            let right_key = self.key_route(right, right_key)?;
-            if right_carried.contains(&right_key) {
-                resolved.insert(right_key);
-            }
-            if left_carried.contains(&left_key) {
-                resolved.insert(left_key);
-            }
-        }
-        Ok(resolved)
     }
 
     fn output_names(&self, node: &GraphBuilder) -> Result<Vec<String>, RouteViolation> {
@@ -424,25 +387,11 @@ where
                 // on, or the join cannot tell whose rows it is matching.
                 let left_carried = self.carried(left)?;
                 let right_carried = self.carried(right)?;
-                // A lookup-masked side need not carry its masked routes when
-                // an inner join pairs it with them here.
-                let resolved = if matches!(node, GraphBuilder::Join { .. }) {
-                    self.mask_resolutions(left, right, left_on, right_on)?
-                } else {
-                    BTreeSet::new()
-                };
-                let left_masked = self.masked(left)?;
-                let right_masked = self.masked(right)?;
-                for (side, depends, carried, masked) in [
-                    ("left", &left_depends, &left_carried, &left_masked),
-                    ("right", &right_depends, &right_carried, &right_masked),
+                for (side, depends, carried) in [
+                    ("left", &left_depends, &left_carried),
+                    ("right", &right_depends, &right_carried),
                 ] {
-                    let unresolved = depends
-                        .iter()
-                        .filter(|route| !(masked.contains(*route) && resolved.contains(*route)))
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    if !unresolved.is_subset(carried) {
+                    if !depends.is_subset(carried) {
                         return Err(RouteViolation(format!(
                             "{} {side} input depends on binding routes {depends:?} but carries {carried:?} (sketch {}; left names {:?}, right names {:?})",
                             operator_name(node),
@@ -665,6 +614,30 @@ fn program_binding_suffix(program: &QueryProgram) -> String {
 }
 
 /// Renames every binding source `graph` reads by appending `suffix`.
+/// The name of the binding source `program`'s graphs read, if any.
+fn program_binding_source_name(program: &QueryProgram) -> Option<String> {
+    let mut name = None;
+    let graphs = program
+        .lowered
+        .terminals
+        .iter()
+        .map(|terminal| &terminal.graph)
+        .chain(program.lowered.internal_app_rows_graph.as_ref());
+    for graph in graphs {
+        rewrite_graph(graph, &mut |node| {
+            if let GraphBuilder::BindingSource { shape, .. } = &node {
+                debug_assert!(
+                    name.as_ref().is_none_or(|name| name == shape),
+                    "a program reads one binding source",
+                );
+                name.get_or_insert_with(|| shape.clone());
+            }
+            node
+        });
+    }
+    name
+}
+
 pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> GraphBuilder {
     rewrite_graph(graph, &mut |mut node| {
         if let GraphBuilder::BindingSource { shape, .. } = &mut node {
@@ -800,9 +773,18 @@ where
     /// graph never serves another binding. Equal bindings of one session
     /// still share it, since they read exactly the same rows.
     pub(super) fn scope_program_binding_source(&self, program: &mut QueryProgram) {
-        let Some(source_shape) = program.request.input.binding.source_shape.clone() else {
-            // Lowering emits a binding source only under a source name; a
-            // program without one inlines its parameters.
+        // A program with no source name may still read a binding source
+        // (recursive and frontier policies seed from claim slots), and its
+        // subscription then binds under the signature's fallback name, so it
+        // is checked and scoped like any other.
+        let Some(source_shape) = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .or_else(|| program_binding_source_name(program))
+        else {
             return;
         };
         if matches!(
@@ -914,7 +896,9 @@ mod tests {
     fn infer(node: &GraphBuilder) -> Result<RecordDescriptor, ()> {
         let names = match node {
             GraphBuilder::BindingSource { output, .. } => return Ok(*output),
-            GraphBuilder::Lookup { .. } => vec!["id".to_owned(), "chat".to_owned()],
+            GraphBuilder::Lookup { .. } => {
+                vec!["id".to_owned(), "chat".to_owned(), "author".to_owned()]
+            }
             GraphBuilder::Join { left, right, .. } => [("left", left), ("right", right)]
                 .into_iter()
                 .map(|(side, input)| {
@@ -968,16 +952,26 @@ mod tests {
         // Its rows are the union over every binding's chat and carry no
         // route, so a terminal cannot tell whose rows they are.
         let violation = check(&lookup()).expect_err("unpaired lookup must not share");
-        assert!(violation.0.contains("never paired"), "{violation:?}");
+        assert!(
+            violation.0.contains("binding-keyed lookup"),
+            "{violation:?}"
+        );
     }
 
     #[test]
-    fn binding_keyed_lookup_paired_with_its_route_is_sound() {
+    fn binding_keyed_lookup_is_not_shared_even_when_paired() {
+        // Pairing on the lookup's own key would be sound, but a pairing on
+        // any other column lets one binding's rows depend on another's
+        // (a row reaches X when its author is X's chat while its chat is
+        // Y's), and the check cannot yet tell the two apart.
         let routes = binding().project_fields([ProjectField::renamed("chat", ROUTE)]);
-        let paired = GraphBuilder::join(lookup(), routes, ["chat"], [ROUTE]).project_fields([
-            ProjectField::renamed("left.id", "id"),
-            ProjectField::renamed(format!("right.{ROUTE}"), ROUTE),
-        ]);
-        check(&paired).expect("each row belongs to the binding its join paired");
+        for key in ["chat", "author"] {
+            let paired = GraphBuilder::join(lookup(), routes.clone(), [key], [ROUTE])
+                .project_fields([
+                    ProjectField::renamed("left.id", "id"),
+                    ProjectField::renamed(format!("right.{ROUTE}"), ROUTE),
+                ]);
+            check(&paired).expect_err("a binding-keyed lookup is not shared yet");
+        }
     }
 }

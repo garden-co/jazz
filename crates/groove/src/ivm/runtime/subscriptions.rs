@@ -5123,14 +5123,11 @@ impl IvmRuntime {
             binding: Some((delta.key.clone(), binding_key)),
             published: false,
         };
+        // No pending evaluation touches the slice this tick changes, so it
+        // runs beside them rather than first draining unrelated work.
         admission
             .runtime
-            .tick_with_params(
-                Vec::new(),
-                vec![delta],
-                OwnedStorage::new(Rc::clone(storage)),
-                None,
-            )
+            .tick_beside_pending(vec![delta], OwnedStorage::new(Rc::clone(storage)))
             .await?;
         admission.published = true;
         // A receiver dropped concurrently with the attach tick is discovered
@@ -5259,7 +5256,6 @@ impl IvmRuntime {
                 .pending_binding_retractions
                 .iter()
                 .any(|pending| pending.key == source_key)
-            || self.has_pending_incremental()
             || self
                 .multisink_subscriptions
                 .values()
@@ -5307,6 +5303,23 @@ impl IvmRuntime {
             {
                 pending.extend(graph_node.descriptor.inputs.iter().copied());
             }
+        }
+        // Only evaluations over this shape's nodes, or over what the attach
+        // tick changes, keep it off the live path: while one is pending a
+        // borrowed node may not be current. Work elsewhere in the runtime
+        // does not, or a crowd of binds arriving together would push each
+        // other onto the full path, which hydrates the shared graph for
+        // every live binding.
+        let mut touched = self
+            .graph
+            .activation_plan(std::iter::empty(), std::iter::once(&source_key))
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?
+            .affected
+            .as_ref()
+            .clone();
+        touched.extend(borrowed.iter().copied());
+        if self.pending_evaluation_touches(&touched) {
+            return Ok(None);
         }
         Ok(Some(borrowed))
     }

@@ -92,12 +92,15 @@ source for it lies below. Then:
   every route its right input depends on;
 - aggregates, arg-max/min, windows and collect-by group on every route their
   input depends on;
-- a lookup keyed by binding values is only a mask: a join must pair its rows
-  with the route before they are delivered;
-- recursive operators depend on no route.
+- a lookup keyed by binding values depends on no route: its rows serve every
+  binding at once, and pairing them with a route is sound only on the
+  lookup's own key, which the check cannot yet identify;
+- recursive operators and streaming checksums depend on no route.
 
 A typed query template is checked as the declarative operators it was compiled
-from; one that cannot be expanded must depend on no route.
+from; one that cannot be expanded must depend on no route. Every program whose
+graphs read a binding source is checked, including one compiled without a
+source name (recursive and frontier policies seeded from claim slots).
 
 A program that breaks a rule is not shared: its binding source is renamed to a
 per-session, per-binding name, so it behaves exactly as a private preparation.
@@ -107,6 +110,13 @@ claims reads only its own bindings, never every session's of its signature.
 The check is the safety net; lowering paths that keep routes (closure joins
 key on routes both sides carry, include-deleted policy sources declare their
 routes) are what let a program share.
+
+A later binding of a shared program attaches live: one tick admits it through
+the shared nodes, and only its own nodes hydrate. Only an evaluation still
+pending over the shape's nodes, or over what admitting the binding changes,
+sends a bind to full hydration, which evaluates the shared graph for every
+live binding. Pending work elsewhere does not, and the attach does not wait on
+it, so a crowd reconnecting together costs each member its own rows.
 
 ### 14.2 Schema → groove
 

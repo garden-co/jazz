@@ -3016,6 +3016,194 @@ mod incremental_attach;
 mod parameters;
 mod prepared;
 
+/// A bind onto a live prepared shape attaches live while an unrelated graph
+/// has an evaluation parked on a chunk fetch. The full path it used to fall
+/// back to hydrates the shared graph for every live binding, so a crowd of
+/// binds arriving beside other pending work cost quadratic in its size; and
+/// the attach must not wait on the parked work either.
+#[futures_test::test]
+async fn bind_attaches_live_beside_an_unrelated_parked_evaluation() {
+    use bytes::Bytes;
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone)]
+    struct DeferredResolver {
+        chunks: Rc<BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
+        ready: Rc<Cell<bool>>,
+    }
+
+    impl crate::chunks::MissingChunkResolver for DeferredResolver {
+        fn resolve(
+            &self,
+            request: crate::chunks::ChunkRequest,
+        ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+            let chunks = Rc::clone(&self.chunks);
+            let ready = Rc::clone(&self.ready);
+            Box::pin(async move {
+                std::future::poll_fn(|_| {
+                    ready.get().then_some(()).map_or(Poll::Pending, Poll::Ready)
+                })
+                .await;
+                chunks
+                    .get(&request)
+                    .cloned()
+                    .ok_or(crate::chunks::ChunkError::Unavailable)
+            })
+        }
+    }
+
+    let mut tables = albums_artists_schema().tables;
+    tables.push(
+        TableSchema::new(
+            "objects",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    );
+    let schema = DatabaseSchema::new(tables);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema.clone(), storage).await.unwrap();
+    database.set_auto_direct_family_enabled(false);
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let mut batch = database.open_batch();
+    for id in 1..=12_u64 {
+        batch.insert(
+            "albums",
+            vec![
+                Value::U64(id),
+                Value::U64(id % 3 + 1),
+                Value::String(format!("title-{id:02}")),
+            ],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+
+    let artist = RecordDescriptor::new([("artist", ColumnType::U64)]);
+    let bound = GraphBuilder::join(
+        GraphBuilder::binding_source("beside_parked", artist.clone())
+            .project_fields([ProjectField::named("artist")]),
+        GraphBuilder::table("albums"),
+        ["artist"],
+        ["artist_id"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("left.artist", "artist"),
+    ]);
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                bound,
+                ["artist"],
+                ["id"],
+            )],
+            "beside_parked",
+            artist,
+        )
+        .await
+        .unwrap()
+        .id();
+    let first = database.bind_shape(shape, &[Value::U64(1)]).await.unwrap();
+    database.drive_progress().await.unwrap();
+
+    // Park an evaluation of an unrelated graph on a chunk fetch.
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES * 2],
+    )
+    .unwrap();
+    let resolver_chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                crate::chunks::ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect();
+    let ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredResolver {
+        chunks: Rc::new(resolver_chunks),
+        ready: Rc::clone(&ready),
+    }));
+    let checksum = database
+        .subscribe_one_sink(
+            GraphBuilder::table("objects").streaming_checksum("payload", "checksum", 64, 64),
+        )
+        .await
+        .unwrap();
+    let objects = schema.table("objects").unwrap().record_schema();
+    database
+        .ivm_runtime
+        .tick_resident_staged(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "objects".to_owned(),
+                descriptor: objects.clone(),
+                deltas: vec![RecordDelta {
+                    record: objects
+                        .create(&[
+                            Value::U64(1),
+                            Value::Large(Box::new(prepared.value_ref.clone())),
+                        ])
+                        .unwrap()
+                        .into(),
+                    weight: 1,
+                }],
+            }],
+            OwnedStorage::new(Rc::clone(&database.storage)),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        database.has_pending_progress(),
+        "the checksum parks an evaluation"
+    );
+
+    let attaches = database.live_attaches();
+    let second = database.bind_shape(shape, &[Value::U64(2)]).await.unwrap();
+    assert_eq!(
+        database.live_attaches(),
+        attaches + 1,
+        "a bind beside unrelated parked work attaches live"
+    );
+    assert!(
+        database.has_pending_progress(),
+        "the attach does not wait on the parked evaluation"
+    );
+
+    ready.set(true);
+    database.drive_progress().await.unwrap();
+    for (subscription, artist) in [(&first, 1_u64), (&second, 2)] {
+        let mut rows = 0_i64;
+        while let Ok(deltas) = subscription.try_recv() {
+            for (sink, deltas) in deltas.sinks {
+                assert_eq!(sink, "rows");
+                rows += deltas
+                    .to_values()
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, weight)| weight)
+                    .sum::<i64>();
+            }
+        }
+        let expected = (1..=12_u64).filter(|id| id % 3 + 1 == artist).count() as i64;
+        assert_eq!(rows, expected, "artist {artist} reads its own albums");
+    }
+    drop(checksum);
+}
+
 /// This is intentionally an internal runtime-lifecycle receipt. Public
 /// subscriptions expose only their terminal stream, so they cannot show the
 /// interval where a resident incremental evaluation owns graph nodes after its

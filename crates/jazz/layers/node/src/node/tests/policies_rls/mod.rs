@@ -11,3 +11,4 @@ include!("recursive.rs");
 include!("windows.rs");
 include!("shared_program_isolation.rs");
 include!("shared_program_matrix.rs");
+include!("shared_program_contexts.rs");
