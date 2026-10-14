@@ -75,6 +75,15 @@ fn aggregate_is_policy_scoped<S: OrderedKvStorage>(
     )
 }
 
+fn traced_bundle_count(update: &SyncMessage) -> usize {
+    match update {
+        SyncMessage::ViewUpdate(view) => {
+            view_update_singleton_bundles(&view.version_carriers).len()
+        }
+        _ => 0,
+    }
+}
+
 /// Reconcile a retained downstream result set against a cold maintained-view
 /// snapshot that contains a static deletion witness. The active membership is
 /// authoritative for removals. Publishability only gates members the
@@ -1379,13 +1388,6 @@ impl PeerState {
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
-            let bundle_count = match &update {
-                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    version_carriers,
-                    ..
-                }) => view_update_singleton_bundles(version_carriers).len(),
-                _ => 0,
-            };
             let drain_reads = drain_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             eprintln!(
@@ -1397,7 +1399,7 @@ impl PeerState {
                 result_remove_count,
                 fact_add_count,
                 fact_remove_count,
-                bundle_count,
+                traced_bundle_count(&update),
                 drain_reads.total.reads,
                 drain_reads.total.ranges,
                 bundle_reads.total.reads,
@@ -2015,13 +2017,6 @@ impl PeerState {
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
-            let bundle_count = match &update {
-                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    version_carriers,
-                    ..
-                }) => view_update_singleton_bundles(version_carriers).len(),
-                _ => 0,
-            };
             let open_reads = open_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             let positioned_members = trace_positioned_members.expect("trace positioned members");
@@ -2040,7 +2035,7 @@ impl PeerState {
                 raw_fact_add_count,
                 result_add_count,
                 result_remove_count,
-                bundle_count,
+                traced_bundle_count(&update),
                 open_reads.total.reads,
                 open_reads.total.ranges,
                 storage_read_metrics_buckets(&open_reads),
