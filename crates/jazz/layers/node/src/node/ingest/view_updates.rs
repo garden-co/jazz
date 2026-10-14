@@ -277,16 +277,32 @@ where
         let batch = self.database.open_batch();
         for version in versions {
             let schema_version = version.schema_version();
+            let (current_seq, current_writer) = self
+                .global_current_seq_and_writer_in_batch(
+                    &batch,
+                    schema_version,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                )
+                .await?
+                .unwrap_or((None, None));
+            if let Some(reason) = self
+                .late_write_refusal(
+                    &batch,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                    version.base(),
+                    tx_id,
+                    current_seq,
+                    current_writer,
+                )
+                .await?
+            {
+                return Ok(Some(RejectionReason::MalformedCommit(reason)));
+            }
             if !version.base().is_empty() {
-                let current_seq = self
-                    .global_current_seq_in_batch(
-                        &batch,
-                        schema_version,
-                        version.table(),
-                        version.branch_key(),
-                        version.row_uuid(),
-                    )
-                    .await?;
                 if let Err(reason) = self
                     .validate_write_base(
                         &batch,
@@ -602,6 +618,29 @@ where
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<Option<GlobalTime>, Error> {
+        Ok(self
+            .global_current_seq_and_writer_in_batch(
+                batch,
+                schema_version,
+                table,
+                branch_key,
+                row_uuid,
+            )
+            .await?
+            .and_then(|(seq, _)| seq))
+    }
+
+    /// The row's current accepted seq and the transaction that wrote its
+    /// current image, read from the one global-current record. `None` when
+    /// the row has no global-current record.
+    pub(super) async fn global_current_seq_and_writer_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(Option<GlobalTime>, Option<TxId>)>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -621,11 +660,18 @@ where
         else {
             return Ok(None);
         };
+        let record = raw.record();
         // `global_time` is a nullable field: read it as one.
-        Ok(raw
-            .record()
+        let seq = record
             .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
-            .map(GlobalTime))
+            .map(GlobalTime);
+        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias =
+            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let writer = self
+            .node_for_alias(tx_node_alias)
+            .map(|node| TxId::new(tx_time, node));
+        Ok(Some((seq, writer)))
     }
 
     async fn query_global_winner_in_batch(

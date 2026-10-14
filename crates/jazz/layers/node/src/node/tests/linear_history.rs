@@ -647,6 +647,107 @@ fn unit_with_unknown_schema_waits_and_is_decided_once_it_arrives() {
     );
 }
 
+/// INV-HIST-20, INV-HIST-23: a write chained on a predecessor that Core
+/// holds parked (its schema is not known yet) parks behind it, even though
+/// the write's own schema is known. When the schema arrives Core decides the
+/// predecessor first, then the write, so neither is refused as late.
+///
+/// ```text
+/// carol ── p (evolved schema) ──► core   parked: schema unknown
+/// carol ── w (chained on p) ────► core   parked behind p
+/// core  ◄── evolved schema               p accepted, then w accepted
+/// ```
+#[test]
+fn write_chained_on_a_parked_predecessor_parks_behind_it() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let (_evolved_dir, mut carol_evolved) = open_node_with_schema(node(0x32), evolved.clone());
+    let (_base_dir, mut carol_base) = open_node_with_schema(node(0x32), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x39), base.clone());
+    let target = row(0x81);
+    let (p, p_unit) = carol_evolved
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", target, 50).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("parked")),
+                ("body".to_owned(), v("evolved")),
+            ]),
+        ))
+        .unwrap();
+    let (w, w_unit) = carol_base
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 51).cells(title_cells("behind")),
+        )
+        .unwrap();
+    assert_eq!(p.node, w.node);
+    assert!(p.time < w.time);
+    let SyncMessage::CommitUnit { tx, versions } = w_unit else {
+        panic!("expected a commit unit");
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            version.with_base(crate::protocol::RowBase {
+                seq: None,
+                pending: Some(p),
+            })
+        })
+        .collect();
+    let w_unit = SyncMessage::CommitUnit { tx, versions };
+
+    assert!(core.apply_sync_message_settled(p_unit).unwrap().is_empty());
+    assert!(
+        core.apply_sync_message_settled(w_unit).unwrap().is_empty(),
+        "w waits behind its parked predecessor"
+    );
+    assert!(core.query_transaction(w).unwrap().is_none());
+    assert!(core.parking.parked_commit_units.contains_key(&w));
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let decided = updates
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate,
+                global_time,
+                ..
+            } if *tx_id == p || *tx_id == w => Some((*tx_id, fate.clone(), *global_time)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            decided.as_slice(),
+            [
+                (first, Fate::Accepted, Some(p_seq)),
+                (second, Fate::Accepted, Some(w_seq)),
+            ] if *first == p && *second == w && p_seq < w_seq
+        ),
+        "p then w, both accepted: {decided:?}"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+}
+
 /// INV-TX-23: a node that relays a client's commit unit upstream is not the
 /// fate authority. It keeps the unit pending: no fate, no seq, nothing at the
 /// Global tier. Only Core's fate settles it there.

@@ -58,12 +58,18 @@ session metadata or semantic permission checks.
 | RegisterShape, Subscribe, Unsubscribe                                                                                 | Requests                                                 | One FIFO preserves registration-before-subscription and request cancellation order        |
 | AuthorizationScopeIntent, CurrentRowsRequest, CurrentRowsCancel                                                       | Requests                                                 | Request FIFO; connection/request identities remain semantic correlation                   |
 | CommitUnit                                                                                                            | Writes                                                   | One FIFO; commit units retain their authored ordering                                     |
-| RetryLater                                                                                                            | Writes                                                   | Same FIFO as fates: never overtakes the fate of the predecessor it names                  |
 | ViewUpdate, ViewUpdatePart, SubscribeRejected                                                                         | Delivery keyed by complete SubscriptionKey               | Ordered delivery for each subscription; an update's parts are contiguous, final part last |
 | AuthorizationScopeView, AuthorizationScopeAggregateReceipt, AuthorizationScopeUnavailable, AuthorizationScopeDecision | Delivery keyed by intent/request id                      | All clause views precede aggregate proof                                                  |
 | CurrentRowsReceipt                                                                                                    | Delivery keyed by request id in a separate key namespace | Existing authority/session validation remains mandatory                                   |
 | ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                 | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite           |
 | ChunkRequestBatch, ChunkResponseBatch                                                                                 | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits    |
+
+The Writes FIFO is the order the fate authority relies on: one writer node's
+commit units reach it in the order they were written, and it decides them in
+arrival order (SPEC 4 §4.6, `INV-HIST-23`). It never waits for a predecessor
+and has no "come back later" answer. An uploader that holds one of a writer's
+units back (a large value still uploading or rate-limited) holds back that
+writer's later units on the link too.
 
 FateUpdate uses the Writes channel with a bilateral canonical barrier. A local-first
 query can deliver another author's Pending transaction carrier. After accepting

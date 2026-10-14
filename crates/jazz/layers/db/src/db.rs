@@ -2274,7 +2274,6 @@ fn release_local_replay_fates(routes: &LocalFateRoutes) {
 
 fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     let terminal = local_fate_is_terminal(fate);
-    let retry_later = matches!(fate, SyncMessage::RetryLater { .. });
     let mut routes = routes.borrow_mut();
     let Some(pending) = routes.get_mut(&tx_id) else {
         return;
@@ -2284,16 +2283,10 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
             // The durable transaction state is authoritative; retaining the
             // latest wire fate only covers the interval before a repair-ready
             // route can reconstruct and emit it. Never replace a terminal
-            // fate with a later non-terminal progress update. A forwarded
-            // `RetryLater` is held too (the relay dropped its own copy of the
-            // write, so it is the author's only signal to resend); a later
-            // progress update, which readiness reconstructs anyway, does not
-            // replace it.
+            // fate with a later non-terminal progress update.
             let replace = match candidate.held_fate.as_ref() {
-                None => true,
                 Some(held) if local_fate_is_terminal(held) => terminal,
-                Some(SyncMessage::RetryLater { .. }) => terminal || retry_later,
-                Some(_) => true,
+                _ => true,
             };
             if replace {
                 candidate.held_fate = Some(fate.clone());
@@ -2481,12 +2474,34 @@ where
         .iter()
         .filter_map(|pending| pending.unit.as_ref().map(|_| pending.tx_id))
         .collect::<BTreeSet<_>>();
+    // Pending units to upload, complete or blocked, keyed so they are queued
+    // in one transaction-ordered pass: a blocked unit is never queued behind
+    // a later complete unit of its writer (SPEC 14, per-writer order).
+    let mut uploads = BTreeMap::new();
     for (tx_id, unit) in replay_units {
         // A reopened main-thread runtime has no transaction history. Send
         // accepted causal ancestors before each pending unit so the latter
         // can be ingested before its Local ack or later authority fate.
         downstream_fates.borrow_mut().push(unit.clone());
-        if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
+        if pending_set.contains(&tx_id) {
+            uploads.insert(tx_id, unit);
+        }
+    }
+    for tx_id in &roots {
+        if !pending_set.contains(tx_id)
+            || matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete))
+        {
+            continue;
+        }
+        if let Some(unit) = blocked_units
+            .get(tx_id)
+            .or_else(|| retained_replay_units.get(tx_id))
+        {
+            uploads.insert(*tx_id, unit.clone());
+        }
+    }
+    for (tx_id, unit) in uploads {
+        if outbox_units.insert(tx_id) {
             // Durable recovery omits exclusive snapshot/read evidence. A live
             // sibling may already retain the exact authored unit; never
             // replace that unit with its redacted history replay.
@@ -2514,14 +2529,7 @@ where
             .get(&tx_id)
             .cloned()
             .or_else(|| retained_replay_units.get(&tx_id).cloned());
-        register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
-        if pending_set.contains(&tx_id)
-            && let Some(unit) = unit
-        {
-            if outbox_units.insert(tx_id) {
-                queue_pending_upload_in(outbox, tx_id, Some(unit));
-            }
-        }
+        register_local_replay_route(routes, tx_id, downstream_fates, author, unit);
     }
     queue_local_acknowledgements(routes, node).await;
     release_local_replay_fates(routes);
@@ -2963,42 +2971,6 @@ impl UploadOutbox {
             return false;
         }
         self.entries.push_back(pending);
-        true
-    }
-
-    /// Where `tx_id` stands in upload order.
-    fn position(&self, tx_id: TxId) -> Option<usize> {
-        if !self.tx_ids.contains(&tx_id) {
-            return None;
-        }
-        self.entries
-            .iter()
-            .position(|pending| pending.tx_id == tx_id)
-    }
-
-    /// Move queued `tx_id` to just before queued `before` when it sits after
-    /// it: a predecessor a queued upload waits for goes up first (SPEC 8).
-    fn move_before(&mut self, tx_id: TxId, before: TxId) {
-        let (Some(from), Some(to)) = (self.position(tx_id), self.position(before)) else {
-            return;
-        };
-        if from > to {
-            let pending = self.entries.remove(from).expect("position is in range");
-            self.entries.insert(to, pending);
-        }
-    }
-
-    /// Queue `tx_id` to go up just before `before`: a write a queued upload
-    /// waits for (SPEC 8). Without `before` queued it goes last.
-    fn insert_before(&mut self, tx_id: TxId, before: TxId) -> bool {
-        if !self.tx_ids.insert(tx_id) {
-            return false;
-        }
-        let pending = PendingUpload { tx_id, unit: None };
-        match self.position(before) {
-            Some(index) => self.entries.insert(index, pending),
-            None => self.entries.push_back(pending),
-        }
         true
     }
 

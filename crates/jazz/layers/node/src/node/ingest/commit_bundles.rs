@@ -544,8 +544,6 @@ where
                 durability: None,
             }]));
         }
-        // The cheap identity checks run before the predecessor check below,
-        // so only an admitted writer is ever asked to retry.
         if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -560,16 +558,6 @@ where
         // looked up for it.
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
-        }
-        // A write chained on its writer's pending predecessor is decided only
-        // after that predecessor (SPEC 4 §4.6). Core does not hold it: it
-        // stores nothing and asks the writer to send it again, naming the
-        // predecessor it waits for (SPEC 8).
-        if let Some(awaiting) = self.commit_unit_awaited_predecessor(&tx, &versions).await? {
-            return Ok(PublicationOutcome::settled(vec![SyncMessage::RetryLater {
-                tx_id: tx.tx_id,
-                awaiting,
-            }]));
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,

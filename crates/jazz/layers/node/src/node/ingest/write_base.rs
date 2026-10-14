@@ -130,22 +130,11 @@ where
             if let Some(refusal) = pending_predecessor_refusal(pending, writer) {
                 return Ok(Err(not_supported(refusal.to_owned())));
             }
-            // An unknown or still pending predecessor is answered with
-            // `RetryLater` before this check (`commit_unit_awaited_predecessor`);
-            // reaching either here means no fate will come.
-            match self.query_transaction(pending).await? {
-                None => {
-                    return Ok(Err(not_supported(
-                        "its pending predecessor is unknown here".to_owned(),
-                    )));
-                }
-                Some(stored) if matches!(stored.fate, Fate::Pending) => {
-                    return Ok(Err(not_supported(
-                        "its pending predecessor has no fate here yet".to_owned(),
-                    )));
-                }
-                Some(_) => {}
-            }
+            // The predecessor's fate is not looked up. A writer's writes
+            // reach Core in their authored order, so a predecessor Core has
+            // not decided by now never arrives: like one Core rejected, it
+            // is not in history, and the write applies as written over the
+            // row's current image (`INV-HIST-20`).
         }
         let Some(seq) = base.seq else {
             return Ok(Ok(()));
@@ -177,6 +166,84 @@ where
             ))));
         }
         Ok(Ok(()))
+    }
+
+    /// Why Core refuses `writer`'s write to a row as arriving after a later
+    /// write of its own node that Core already accepted there, or `None`.
+    /// A writer's writes reach Core in their authored order (SPEC 14), so
+    /// such a write is a protocol violation; applying it would put an older
+    /// image over a newer one (`INV-HIST-23`).
+    ///
+    /// The row's current image names its newest write. When that write is
+    /// the writer's own, or is the write's base, nothing more is read.
+    /// Otherwise the row's accepted records after the base seq (all of them
+    /// for a write without a base seq) are scanned for one of the writer's
+    /// node newer than the write.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn late_write_refusal(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        base: RowBase,
+        writer: TxId,
+        current_seq: Option<GlobalTime>,
+        current_writer: Option<TxId>,
+    ) -> Result<Option<String>, Error> {
+        let late = || {
+            format!(
+                "the write to '{table}' row {} arrived after a later write of its writer; a writer's writes must reach the authority in the order they were written",
+                row_uuid.0
+            )
+        };
+        let Some(current_seq) = current_seq else {
+            // No accepted write of the row.
+            return Ok(None);
+        };
+        if let Some(current_writer) = current_writer
+            && current_writer.node == writer.node
+        {
+            // The writer's newest accepted write of the row is the current
+            // image's: its writes before that were accepted in order.
+            return Ok((current_writer.time > writer.time).then(late));
+        }
+        if base.seq == Some(current_seq) {
+            // Nothing was accepted after the image the writer had seen.
+            return Ok(None);
+        }
+        let after = base.seq.unwrap_or(GlobalTime(0));
+        let prefix = [
+            Value::Bytes(branch_key.canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+        ];
+        for history_table in self.version_storage_sources(table)? {
+            let mut later = Vec::new();
+            for raw in self
+                .database
+                .primary_key_scan_raw_in_batch(batch, &history_table, &prefix)
+                .await?
+            {
+                let record = raw.record();
+                let time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
+                if time <= writer.time {
+                    continue;
+                }
+                let alias = NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                if self.node_for_alias(alias) == Some(writer.node) {
+                    later.push(raw.owned_record());
+                }
+            }
+            for record in later {
+                let version = self.decode_history_owned_record("", &history_table, record)?;
+                // Seq 0 keeps writes without an accepted fate.
+                let seq = version.seq()?;
+                if seq > after && seq != GlobalTime(0) {
+                    return Ok(Some(late()));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Whether the accepted write `tx` to a row is maybe conflicting, and

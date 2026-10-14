@@ -757,11 +757,17 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        if versions.iter().all(|version| {
+        let schemas_known = versions.iter().all(|version| {
             self.catalogue
                 .catalogue_schemas
                 .contains_key(&version.schema_version())
-        }) {
+        });
+        // A write chained on a predecessor parked here waits behind it, so
+        // the authority still decides one node's writes in their order
+        // (SPEC 4 §4.6). The lookup is in memory.
+        let behind_parked_predecessor = mode.ingress_role == ParkedIngressRole::Authority
+            && self.has_parked_same_node_predecessor(tx, versions);
+        if schemas_known && !behind_parked_predecessor {
             return Ok(false);
         }
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
@@ -783,8 +789,10 @@ where
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
-        self.sync_metrics.parked_catalogue_orphans += 1;
-        self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        if !schemas_known {
+            self.sync_metrics.parked_catalogue_orphans += 1;
+            self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        }
         self.parking.parked_commit_units.insert(
             tx.tx_id,
             ParkedCommitUnit {
@@ -798,33 +806,24 @@ where
         Ok(true)
     }
 
-    /// The pending predecessor a version of the unit names, of its own
-    /// writer and older than it, that has no fate here yet. The fate
-    /// authority answers such a unit with `RetryLater` and stores nothing
-    /// (SPEC 4 §4.6).
-    pub(super) async fn commit_unit_awaited_predecessor(
-        &mut self,
+    /// Whether a version of the unit names, as its pending predecessor, an
+    /// older write of the unit's own node that is parked here for the
+    /// authority.
+    fn has_parked_same_node_predecessor(
+        &self,
         tx: &Transaction,
         versions: &[VersionRecord],
-    ) -> Result<Option<TxId>, Error> {
-        for version in versions {
-            let Some(predecessor) = version.base().pending else {
-                continue;
-            };
-            // A predecessor Core would refuse is answered by validation,
-            // not waited for.
-            if pending_predecessor_refusal(predecessor, tx.tx_id).is_some() {
-                continue;
-            }
-            match self.query_transaction(predecessor).await? {
-                None => return Ok(Some(predecessor)),
-                Some(stored) if matches!(stored.fate, Fate::Pending) => {
-                    return Ok(Some(predecessor));
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(None)
+    ) -> bool {
+        versions.iter().any(|version| {
+            version.base().pending.is_some_and(|predecessor| {
+                pending_predecessor_refusal(predecessor, tx.tx_id).is_none()
+                    && self
+                        .parking
+                        .parked_commit_units
+                        .get(&predecessor)
+                        .is_some_and(|unit| unit.ingress_role == ParkedIngressRole::Authority)
+            })
+        })
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -846,6 +845,8 @@ where
                                 .catalogue_schemas
                                 .contains_key(&version.schema_version())
                         })
+                        // Its parked predecessor goes first, on a later pass.
+                        && !self.has_parked_same_node_predecessor(&unit.tx, &unit.versions)
                 })
                 .map(|(tx_id, _)| *tx_id)
                 .collect::<Vec<_>>();

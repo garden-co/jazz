@@ -2506,8 +2506,6 @@ where
                     large_value_uploads: transferred_large_value_uploads,
                     awaiting_large_value_uploads: BTreeMap::new(),
                     failed_large_value_uploads: BTreeSet::new(),
-                    deferred_uploads: BTreeMap::new(),
-                    retry_later_attempts: BTreeMap::new(),
                     missing_body_resends: BTreeSet::new(),
                     expected_scope_authority,
                     scope_lease_manager: AuthorizationScopeLeaseManager::default(),
