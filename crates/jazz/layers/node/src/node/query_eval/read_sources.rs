@@ -3011,10 +3011,11 @@ where
     /// (`INV-BVIEW-9`).
     ///
     /// Under an index access path every content layer reads only its index
-    /// prefix: the local delta masks origin through the shadow, and the head
-    /// masks the base by its presence. Everything else is read by the
-    /// content candidates' row ids (a keyed lookup, #4005), so it costs the
-    /// candidates rather than the branches:
+    /// prefix. Within each branch the local delta masks origin by its
+    /// presence, read whole or by origin's candidates, whichever costs less
+    /// (see [`Self::local_mask_read`]).
+    /// Everything else is read by the content candidates' row ids (a keyed
+    /// lookup, #4005), so it costs the candidates rather than the branches:
     ///
     /// - the head's presence is looked up by the base candidates' row ids:
     ///   anti-joining the base candidates only needs the head rows that
@@ -3031,10 +3032,11 @@ where
     /// by the same prefix.
     ///
     /// A source inside a recursive step cannot look rows up (see
-    /// [`source_in_recursive_step`]). There the head's presence and every
-    /// deletion-register layer are read whole, as without the lookup: exact,
-    /// at the cost of the branches' rows outside the prefix. Only the
-    /// trusted include-deleted read hands an index path to a step source.
+    /// [`source_in_recursive_step`]). There every presence (see
+    /// [`Self::presence`]) and every deletion-register layer is read whole,
+    /// as without the lookup: exact, at the cost of the branches' rows
+    /// outside the prefix. Only the trusted include-deleted read hands an
+    /// index path to a step source.
     async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
@@ -3103,11 +3105,17 @@ where
             )
             .await?;
         let head_content = if indexed {
-            let presence = self.branch_presence(
+            if source_in_recursive_step(request) {
+                // No lookup: the head's presence reads its whole branch key.
+                self.record_branch_layer_read(|metrics| {
+                    metrics.source_branch_register_full_scans += 1
+                });
+            }
+            let presence = self.presence(
                 request,
-                tier,
+                Ref::stack(tier),
                 &head_keys,
-                base_content.clone().project(["row_uuid"]),
+                PresenceRead::Lookup(base_content.clone().project(["row_uuid"])),
             )?;
             layer_stack::Layer::masked_by(head_content, layer_stack::Mask::Presence(presence))
         } else {
@@ -3122,27 +3130,117 @@ where
         ))
     }
 
-    /// The `row_uuid`s a branch key holds at `tier` among `row_ids`,
-    /// whatever their values: the union of its refs' rows, each looked up by
-    /// those ids and read through the system-field winner projection.
+    /// How the local delta masks origin under an index prefix: by its whole
+    /// presence or by a lookup of origin's candidates, whichever reads fewer
+    /// rows. Both are exact (see [`Self::presence`]); they differ in what
+    /// they cost:
     ///
-    /// Inside a recursive step, where a lookup cannot run, it is the refs'
-    /// rows read whole: exact (the extra ids match no candidate, so they
-    /// hide nothing) and costs the head's rows, never the base's.
-    fn branch_presence(
+    /// - `Whole` reads every pending row of the table (`P`), whatever the
+    ///   prefix. Cheap when little is pending, however many settled rows
+    ///   the prefix holds (a synced client).
+    /// - `Lookup` probes the delta once per origin candidate under the
+    ///   prefix (`C`). Cheap when the prefix holds few settled rows, however
+    ///   much is pending (a local-only or long-offline node, whose delta is
+    ///   the whole table and whose origin is empty).
+    ///
+    /// `P` is known exactly in memory. `C` is counted from origin's index
+    /// keys under the prefix (before intersections, so an upper bound), and
+    /// only up to `P`: deciding never reads more than the cheaper mask
+    /// would. Ties and failures read the delta whole.
+    ///
+    /// The choice is made when the graph is built. A maintained read keeps
+    /// it as sizes later change; either stays exact, only the cost of a
+    /// re-hydration moves.
+    #[allow(clippy::too_many_arguments)]
+    async fn local_mask_read(
         &mut self,
         request: &SourceRequest,
-        tier: DurabilityTier,
+        table: &TableSchema,
         stored_keys: &BTreeSet<BranchKey>,
-        row_ids: GraphBuilder,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        let in_recursive_step = source_in_recursive_step(request);
-        if in_recursive_step {
-            // No lookup: the mask reads the whole branch key.
-            self.record_branch_layer_read(|metrics| metrics.source_branch_register_full_scans += 1);
+        column: &str,
+        order_column: Option<&str>,
+        prefix: &[Value],
+        origin_candidates: &GraphBuilder,
+    ) -> PresenceRead {
+        if source_in_recursive_step(request) {
+            return PresenceRead::Whole;
         }
+        let read_schema = self.read_view.read_schema;
+        let Ok(table_id) = self
+            .node
+            .physical_table_id_for_schema(read_schema, &table.name)
+        else {
+            return PresenceRead::Whole;
+        };
+        let pending = self.node.ahead_current_keys.table_rows(table_id);
+        let mut settled = 0;
+        for branch_key in stored_keys {
+            if settled >= pending {
+                return PresenceRead::Whole;
+            }
+            match self
+                .node
+                .physical_current_index_prefix_rows_up_to(
+                    PhysicalCurrentClass::Global,
+                    table,
+                    read_schema,
+                    branch_key,
+                    column,
+                    order_column,
+                    prefix,
+                    pending - settled,
+                )
+                .await
+            {
+                Ok(rows) => settled += rows,
+                Err(_) => return PresenceRead::Whole,
+            }
+        }
+        if settled < pending {
+            PresenceRead::Lookup(origin_candidates.clone().project(["row_uuid"]))
+        } else {
+            PresenceRead::Whole
+        }
+    }
+
+    /// The `row_uuid`s a branch key holds in `refs`, whatever their values,
+    /// read through the system-field winner projection: a
+    /// [`layer_stack::Mask::Presence`]. It masks the layers below by row id
+    /// alone, so a masking row whose indexed value left the prefix still
+    /// hides the row below.
+    ///
+    /// `among` picks how the presence is read:
+    ///
+    /// - [`PresenceRead::Lookup`] reads it only for the given row ids, by a
+    ///   keyed lookup of the refs' rows. It costs one probe per distinct id,
+    ///   whatever the masking layer holds. A branch view's head masks its
+    ///   base this way (`refs` = the head's ref stack, ids = the base
+    ///   candidates): the head can be as large as the base.
+    /// - [`PresenceRead::Whole`] reads the refs' rows whole. It costs the
+    ///   masking layer's rows, never the layers below.
+    ///
+    /// The local delta masks origin by whichever costs less for the read at
+    /// hand ([`Self::local_mask_read`]).
+    ///
+    /// Either is exact: ids outside the candidates match nothing, so they hide
+    /// nothing. And either stays exact under maintenance, whatever the sizes
+    /// later become; the choice only moves cost.
+    ///
+    /// A source inside a recursive step cannot look rows up
+    /// ([`source_in_recursive_step`]), so there every presence is read whole.
+    fn presence(
+        &self,
+        request: &SourceRequest,
+        refs: &[Ref],
+        stored_keys: &BTreeSet<BranchKey>,
+        among: PresenceRead,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let row_ids = match among {
+            PresenceRead::Lookup(row_ids) if !source_in_recursive_step(request) => Some(row_ids),
+            PresenceRead::Lookup(_) | PresenceRead::Whole => None,
+        };
         let mut rows = Vec::new();
-        for r in Ref::stack(tier) {
+        for r in refs {
             for branch_key in stored_keys {
                 let marker = self
                     .node
@@ -3154,12 +3252,11 @@ where
                         None,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-                let present = if in_recursive_step {
-                    marker
-                } else {
-                    lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
+                let present = match &row_ids {
+                    None => marker,
+                    Some(row_ids) => lookup_by_row_id(marker, row_ids.clone()).map_err(|_| {
                         source_resolution_error(request, SourceGap::SchemaProjection)
-                    })?
+                    })?,
                 };
                 rows.push(present.project(["row_uuid"]));
             }
@@ -3213,13 +3310,9 @@ where
             BranchLayerAccess::Full => metrics.source_full_scans += 1,
             BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
             BranchLayerAccess::Index { intersections, .. } => {
-                // Each ref, plus the shadow under the local delta.
-                let scans = if tier == DurabilityTier::Global {
-                    refs
-                } else {
-                    refs + 1
-                };
-                metrics.source_index_probes += scans * keys * (1 + intersections.len() as u64);
+                // Each ref under the prefix; the local delta's mask over
+                // origin is a keyed lookup, not an index probe.
+                metrics.source_index_probes += refs * keys * (1 + intersections.len() as u64);
             }
         });
         // One class's rows under every stored spelling of the key.
@@ -3273,14 +3366,48 @@ where
                 .map(GraphBuilder::union)
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
         };
+        let origin = class_rows(self, Ref::Remote(Remote::Origin).physical_class())?
+            .project(physical_fields.clone());
+        // Under an index prefix the local delta masks origin by its presence,
+        // read whichever way costs less here (see `local_mask_read`).
+        let local_mask = match access {
+            BranchLayerAccess::Index {
+                column,
+                order_column,
+                prefix,
+                ..
+            } if tier != DurabilityTier::Global => Some(
+                self.local_mask_read(
+                    request,
+                    table,
+                    stored_keys,
+                    column,
+                    order_column.as_deref(),
+                    prefix,
+                    &origin,
+                )
+                .await,
+            ),
+            _ => None,
+        };
         let layers = layer_stack::try_ref_layers(tier, |r| {
+            if r == Ref::Remote(Remote::Origin) {
+                return Ok(layer_stack::Layer::new(origin.clone()));
+            }
             let rows = class_rows(self, r.physical_class())?.project(physical_fields.clone());
-            Ok(match (r, access) {
-                // Under an index prefix the local delta masks origin through
-                // the shadow, read under that same prefix.
-                (Ref::Local, BranchLayerAccess::Index { .. }) => layer_stack::Layer::masked_by(
+            Ok(match (access, &local_mask) {
+                // Under an index prefix the local delta masks origin by its
+                // presence, never by its rows under the prefix: a pending
+                // edit that moved a row out of the prefix still hides its
+                // origin image.
+                (BranchLayerAccess::Index { .. }, Some(among)) => layer_stack::Layer::masked_by(
                     rows,
-                    layer_stack::Mask::Shadow(class_rows(self, PhysicalCurrentClass::AheadShadow)?),
+                    layer_stack::Mask::Presence(self.presence(
+                        request,
+                        &[r],
+                        stored_keys,
+                        among.clone(),
+                    )?),
                 ),
                 _ => layer_stack::Layer::new(rows),
             })
@@ -3569,12 +3696,14 @@ where
                 global
             } else {
                 let global = global.project(physical_fields.clone());
-                // An unlimited index read stays index-bounded on the overlay
-                // too: overlay rows under the prefix join the result, and the
-                // shadow (synced copies of overlaid rows, same indexes) names
-                // the settled candidates they replace. A pending edit that
-                // moved a row out of the prefix still shadows its settled
-                // copy, because the shadow holds the settled image.
+                // An unlimited index read stays index-bounded on the local
+                // delta's rows: delta rows under the prefix join the result,
+                // and the delta's presence names the settled candidates they
+                // replace. A pending edit that moved a row out of the prefix
+                // still hides its settled image: the presence is the delta's
+                // row ids, whatever their indexed values. It is read whole or
+                // by the settled candidates, whichever costs less
+                // (`local_mask_read`).
                 if let Some(CurrentAccessPath::Index {
                     column,
                     order_column,
@@ -3608,17 +3737,27 @@ where
                         )
                     };
                     self.node.query_engine_read_metrics.source_index_probes +=
-                        2 * (1 + intersections.len() as u64);
+                        1 + intersections.len() as u64;
                     let ahead = scan(self, PhysicalCurrentClass::Ahead).map_err(|_| {
                         source_resolution_error(request, SourceGap::SchemaProjection)
                     })?;
-                    let shadow = scan(self, PhysicalCurrentClass::AheadShadow).map_err(|_| {
-                        source_resolution_error(request, SourceGap::SchemaProjection)
-                    })?;
+                    let stored_keys = BTreeSet::from([BranchKey::default()]);
+                    let among = self
+                        .local_mask_read(
+                            request,
+                            read_table,
+                            &stored_keys,
+                            column,
+                            order_column.as_deref(),
+                            prefix,
+                            &global,
+                        )
+                        .await;
+                    let presence = self.presence(request, &[Ref::Local], &stored_keys, among)?;
                     let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                     let ahead = ahead.project(physical_fields.clone());
                     let content = layer_stack::compose([
-                        layer_stack::Layer::masked_by(ahead, layer_stack::Mask::Shadow(shadow)),
+                        layer_stack::Layer::masked_by(ahead, layer_stack::Mask::Presence(presence)),
                         layer_stack::Layer::new(global),
                     ])
                     .project(physical_fields)
@@ -3882,6 +4021,16 @@ pub(super) enum BranchLayerAccess {
         intersections: Vec<(String, Vec<Value>)>,
         maintained: bool,
     },
+}
+
+/// How [`JazzSourceGraphPreparer::presence`] reads a masking layer's row ids.
+#[derive(Clone)]
+enum PresenceRead {
+    /// Only these row ids (a relation with a `row_uuid` field), by a keyed
+    /// lookup: one probe per distinct id.
+    Lookup(GraphBuilder),
+    /// Every row id the layer holds.
+    Whole,
 }
 
 /// The rows of a physical current table source, keyed `(branch_key,
@@ -5295,6 +5444,57 @@ where
             candidate_filter,
             projection_target,
         )
+    }
+
+    /// How many rows a [`Self::physical_current_source_for_index_scan_in`]
+    /// read of `class` under `prefix` of one branch key starts from (its
+    /// first index, before any intersection), counting no further than
+    /// `max_items`. Reads index keys only.
+    #[allow(clippy::too_many_arguments)]
+    async fn physical_current_index_prefix_rows_up_to(
+        &self,
+        class: PhysicalCurrentClass,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        branch_key: &BranchKey,
+        column: &str,
+        order_column: Option<&str>,
+        prefix: &[Value],
+        max_items: usize,
+    ) -> Result<usize, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table.name))
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index table mapping missing",
+            ))?;
+        let column_id = |column: &str| {
+            mapping
+                .columns
+                .get(column)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical current index column mapping missing",
+                ))
+        };
+        let index = match order_column {
+            Some(order_column) => physical_current_composite_index_name(&[
+                column_id(column)?,
+                column_id(order_column)?,
+            ]),
+            None => physical_current_index_name(column_id(column)?),
+        };
+        let storage_table =
+            self.physical_current_table_for_schema(schema_version, &table.name, class)?;
+        let scan_prefix = std::iter::once(Value::Bytes(branch_key.canonical_bytes()))
+            .chain(prefix.iter().cloned())
+            .collect::<Vec<_>>();
+        Ok(self
+            .database
+            .index_prefix_entries_up_to(&storage_table, &index, &scan_prefix, max_items)
+            .await?)
     }
 
     /// Read one physical current class under an index prefix of one branch

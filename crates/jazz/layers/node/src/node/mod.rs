@@ -316,6 +316,67 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+/// The local delta's rows, held in memory: overlay row key (physical table,
+/// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
+/// image it holds, plus how many rows each physical table holds. No caller
+/// needs ordering, so the maps use the low-overhead deterministic hasher.
+///
+/// The per-table count is what a read pays to mask origin by the delta's
+/// whole presence, known without reading storage (see
+/// `JazzSourceGraphPreparer::local_mask_read`).
+#[derive(Debug, Default)]
+pub(in crate::node) struct AheadCurrentKeys {
+    keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
+    rows_per_table: FxHashMap<PhysicalTableId, usize>,
+}
+
+impl AheadCurrentKeys {
+    pub(in crate::node) fn get(&self, key: &(PhysicalTableId, Vec<u8>)) -> Option<&TxId> {
+        self.keys.get(key)
+    }
+
+    pub(in crate::node) fn contains_key(&self, key: &(PhysicalTableId, Vec<u8>)) -> bool {
+        self.keys.contains_key(key)
+    }
+
+    pub(in crate::node) fn insert(
+        &mut self,
+        key: (PhysicalTableId, Vec<u8>),
+        tx_id: TxId,
+    ) -> Option<TxId> {
+        let table_id = key.0;
+        let previous = self.keys.insert(key, tx_id);
+        if previous.is_none() {
+            *self.rows_per_table.entry(table_id).or_default() += 1;
+        }
+        previous
+    }
+
+    pub(in crate::node) fn remove(&mut self, key: &(PhysicalTableId, Vec<u8>)) -> Option<TxId> {
+        let removed = self.keys.remove(key);
+        if removed.is_some()
+            && let Some(rows) = self.rows_per_table.get_mut(&key.0)
+        {
+            *rows -= 1;
+            if *rows == 0 {
+                self.rows_per_table.remove(&key.0);
+            }
+        }
+        removed
+    }
+
+    pub(in crate::node) fn clear(&mut self) {
+        self.keys.clear();
+        self.rows_per_table.clear();
+    }
+
+    /// How many pending rows `table_id`'s local delta holds, over every
+    /// branch key.
+    pub(in crate::node) fn table_rows(&self, table_id: PhysicalTableId) -> usize {
+        self.rows_per_table.get(&table_id).copied().unwrap_or(0)
+    }
+}
+
 pub mod api_error;
 mod catalogue_ingest;
 mod codec;
@@ -599,15 +660,9 @@ pub struct NodeState<S = BoxedStorage> {
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
     absent_node_alias: Option<NodeUuid>,
-    /// Exact ahead-current keys used to make peer replay idempotent. No caller
-    /// needs ordering, so use the low-overhead deterministic hasher here.
-    /// Overlay row key -> the pending transaction whose image it holds.
-    ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
-    /// Rows whose overlay or synced image changed in the open batch; their
-    /// shadow copies are brought in line by `flush_ahead_shadows`. The flag
-    /// says whether the row may already hold a shadow (it had an overlay
-    /// before this batch touched it).
-    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
+    /// Exact ahead-current keys used to make peer replay idempotent, and
+    /// how many each physical table holds.
+    ahead_current_keys: AheadCurrentKeys,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
     /// the transaction's `jazz_tx_touched_rows` list.
