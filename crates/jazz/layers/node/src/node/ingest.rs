@@ -14,8 +14,9 @@ use crate::schema::ColumnSchema;
 
 /// How long a write chained on a predecessor parked at the authority (its
 /// schema not known yet) waits behind it, measured from when the predecessor
-/// parked on the authority's ingest clock. See
-/// `NodeState::has_parked_same_node_predecessor`.
+/// parked on the authority's ingest clock (the newest `now_ms` of any commit
+/// ingest; in memory, never driven by a timer, so it runs out only when a
+/// later commit arrives). See `NodeState::has_parked_same_node_predecessor`.
 pub(crate) const PARKED_PREDECESSOR_WAIT_MS: u64 = 60_000;
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;

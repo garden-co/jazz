@@ -316,6 +316,13 @@ reached Core already or never will:
   ingest decides `W` as written, as if `P` never arrived. If `P`'s schema
   arrives after that, `P` is late and refused (below), so a write whose
   schema never arrives costs only itself, not its writer's later writes.
+  The ingest clock is the newest wall time any commit ingest has seen, held
+  in memory with the parked units, and no timer drives it: on an idle Core
+  `W` stays parked past the wait until the next commit ingest (or `P`'s
+  schema) arrives, and a forward jump of Core's clock runs out every
+  parked wait at once. A restart drops the parked units and the clock
+  together; writers resend their pending writes in order and the waits
+  start again.
 - When `P` reaches Core after Core accepted a newer write of `N` to the same
   row, the order was violated. Core rejects `P` with a `MalformedCommit`
   reason saying it arrived after a later write of its writer, and does not
@@ -348,6 +355,11 @@ reached Core already or never will:
     to the write chained directly on `P`. A chain over predecessors Core
     already decided (accepted or refused) records nothing and reads at most
     the predecessor's transaction.
+  - Markers are not history. A Core rebuilt from history alone
+    (`INV-HIST-17`) starts with none, so until a writer passes over a
+    predecessor again, a write without a base seq that arrives after a
+    later write of its node accepted before the rebuild is no longer
+    refused as late; writes with a base seq keep the exact range check.
   - Markers are never collected. Row deletion leaves a restorable tombstone
     and keeps the row's history, so a late write to a deleted row must
     still be refused, and nothing removes a branch's rows. A marker is

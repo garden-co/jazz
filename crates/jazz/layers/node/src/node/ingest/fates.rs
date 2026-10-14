@@ -818,6 +818,18 @@ where
     /// its schema arrive after all, the predecessor is then late and refused
     /// (`INV-HIST-23`), so one write whose schema never arrives costs itself,
     /// not the rest of its writer's chain.
+    ///
+    /// The wait is measured on the authority's ingest clock, the newest
+    /// `now_ms` any commit ingest has seen, and nothing else drives it:
+    /// - No timer runs it out. On an idle Core the chained write stays
+    ///   parked past the wait until the next commit ingest (of any writer)
+    ///   advances the clock, or the predecessor's schema arrives.
+    /// - The clock is wall time, never moved back. A forward jump of Core's
+    ///   clock runs out every parked wait at the next ingest; a backward
+    ///   jump only lengthens them until wall time catches up.
+    /// - The clock and the parked units are in memory. A restart drops both,
+    ///   so a writer resends its pending writes in order and the wait starts
+    ///   again from their new arrival.
     fn has_parked_same_node_predecessor(
         &self,
         tx: &Transaction,
