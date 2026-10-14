@@ -694,9 +694,8 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
-    let path = format!("$.{}.{}", table.as_str(), column.name.as_str());
     crate::model::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
-        .map_err(|message| err(path, message))?;
+        .map_err(|message| column_err(table, column.name.as_str(), message))?;
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
     if column.nullable {
         column_type = column_type.nullable();
@@ -724,16 +723,12 @@ fn convert_column_default(
         &column.column_type,
         column.name.as_str(),
     )
-    .map_err(|message| {
-        err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            message,
-        )
-    })?;
+    .map_err(|message| column_err(table, column.name.as_str(), message))?;
     if matches!(value, Value::Null) {
         if !column.nullable {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            return Err(column_err(
+                table,
+                column.name.as_str(),
                 "null default requires a nullable column",
             ));
         }
@@ -763,8 +758,9 @@ fn convert_default_for_column_type(
         }
         (ColumnType::Enum { variants }, Value::Text(value)) => {
             if !variants.contains(value) {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), column),
+                return Err(column_err(
+                    table,
+                    column,
                     format!("enum default value {value:?} is not declared"),
                 ));
             }
@@ -779,14 +775,16 @@ fn convert_default_for_column_type(
                 .enumerate()
                 .find(|(_, entry)| entry.name == *case)
                 .ok_or_else(|| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
+                    column_err(
+                        table,
+                        column,
                         format!("payload enum default case {case:?} is not declared"),
                     )
                 })?;
             if entry.fields.len() != values.len() {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), column),
+                return Err(column_err(
+                    table,
+                    column,
                     "payload enum default field count does not match its case",
                 ));
             }
@@ -822,20 +820,11 @@ fn convert_default_for_column_type(
                 fields.push((field.name.as_str().to_owned(), value_type));
                 converted.push(value);
             }
-            let case_tag = u32::try_from(case_index).map_err(|_| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column),
-                    "payload enum case index exceeds u32",
-                )
-            })?;
+            let case_tag = u32::try_from(case_index)
+                .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
             EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
                 .map(GrooveValue::Enum)
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
         (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(GrooveValue::U64(*value)),
         (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
@@ -844,8 +833,9 @@ fn convert_default_for_column_type(
         (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I32(*value)),
         (ColumnType::Integer, Value::BigInt(value)) => {
             i32::try_from(*value).map(GrooveValue::I32).map_err(|_| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column),
+                column_err(
+                    table,
+                    column,
                     format!("BIGINT default {value} is outside INTEGER range"),
                 )
             })
@@ -857,8 +847,9 @@ fn convert_default_for_column_type(
             .map(|value| convert_default_for_column_type(table, column, element.as_ref(), value))
             .collect::<Result<Vec<_>, _>>()
             .map(GrooveValue::Array),
-        _ => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+        _ => Err(column_err(
+            table,
+            column,
             format!("default {value:?} does not match column type {column_type:?}"),
         )),
     }
@@ -880,21 +871,13 @@ fn convert_column_type(
         ColumnType::ScalarEnum { name, variants } => {
             groove::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
                 .map(GrooveColumnType::EnumTag)
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
             let mut converted_cases = Vec::with_capacity(cases.len());
             for case in cases {
                 if case.name.is_empty() {
-                    return Err(err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        "enum case names cannot be empty",
-                    ));
+                    return Err(column_err(table, column, "enum case names cannot be empty"));
                 }
                 let mut fields = Vec::with_capacity(case.fields.len());
                 for field in &case.fields {
@@ -917,12 +900,7 @@ fn convert_column_type(
             };
             EnumSchema::new(enum_name, converted_cases)
                 .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
@@ -931,13 +909,15 @@ fn convert_column_type(
         ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
-        ColumnType::TransactionId => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+        ColumnType::TransactionId => Err(column_err(
+            table,
+            column,
             "TransactionId columns are not supported by core schema conversion yet",
         )),
         ColumnType::Json { .. } => Ok(GrooveColumnType::String),
-        ColumnType::Row { .. } => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+        ColumnType::Row { .. } => Err(column_err(
+            table,
+            column,
             "nested Row columns are not supported by core schema conversion yet",
         )),
     }
@@ -1002,12 +982,9 @@ fn convert_merge_strategy(
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
 ) -> Result<MergeStrategy, SchemaConversionError> {
-    column.validate_merge_strategy().map_err(|message| {
-        err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            message,
-        )
-    })?;
+    column
+        .validate_merge_strategy()
+        .map_err(|message| column_err(table, column.name.as_str(), message))?;
 
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
@@ -3308,6 +3285,15 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 /// The error path of `path` within `table`'s policies.
 fn policy_path(table: &TableName, path: &str) -> String {
     format!("$.{}.{path}", table.as_str())
+}
+
+/// An error about `column` of `table`, reported at `$.<table>.<column>`.
+fn column_err(
+    table: &TableName,
+    column: &str,
+    message: impl Into<String>,
+) -> SchemaConversionError {
+    err(format!("$.{}.{column}", table.as_str()), message)
 }
 
 #[cfg(test)]
