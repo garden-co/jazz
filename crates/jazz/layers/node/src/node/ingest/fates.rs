@@ -808,7 +808,16 @@ where
 
     /// Whether a version of the unit names, as its pending predecessor, an
     /// older write of the unit's own node that is parked here for the
-    /// authority.
+    /// authority, and has been for less than
+    /// [`PARKED_PREDECESSOR_WAIT_MS`].
+    ///
+    /// The wait is bounded: a predecessor whose schema has not arrived by
+    /// then stops holding its writer's later writes back, and the next
+    /// authority ingest decides them as written over the row's current image
+    /// (the predecessor is treated as never arriving, `INV-HIST-20`). Should
+    /// its schema arrive after all, the predecessor is then late and refused
+    /// (`INV-HIST-23`), so one write whose schema never arrives costs itself,
+    /// not the rest of its writer's chain.
     fn has_parked_same_node_predecessor(
         &self,
         tx: &Transaction,
@@ -821,7 +830,11 @@ where
                         .parking
                         .parked_commit_units
                         .get(&predecessor)
-                        .is_some_and(|unit| unit.ingress_role == ParkedIngressRole::Authority)
+                        .is_some_and(|unit| {
+                            unit.ingress_role == ParkedIngressRole::Authority
+                                && unit.now_ms.saturating_add(PARKED_PREDECESSOR_WAIT_MS)
+                                    > self.parking.newest_ingest_ms
+                        })
             })
         })
     }

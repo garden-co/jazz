@@ -48,6 +48,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.parking.newest_ingest_ms = self.parking.newest_ingest_ms.max(now_ms);
         // A session or relay transport may not select a durable policy
         // capability. Its authenticated context is evaluated separately; only
         // trusted local/backend paths retain an explicit permission subject.
