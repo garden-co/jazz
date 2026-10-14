@@ -80,172 +80,37 @@ pub(super) fn encode_record_field_key_part(
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
     let borrowed = descriptor.bind(record);
+    let i = field_idx;
+    // Typed reads skip materializing a `Value`; the bytes are exactly those
+    // `encode_key_part` writes for the same value.
     match &field.value_type {
-        ValueType::U8 => {
-            key.push(0);
-            key.push(borrowed.get_u8(field_idx)?);
-            Ok(())
-        }
-        ValueType::U32 => {
-            key.push(2);
-            key.extend(borrowed.get_u32(field_idx)?.to_be_bytes());
-            Ok(())
-        }
-        ValueType::U64 => {
-            key.push(3);
-            key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
-            Ok(())
-        }
-        ValueType::U48 => {
-            key.push(16);
-            key.extend(crate::records::u48_be_bytes(borrowed.get_u48(field_idx)?)?);
-            Ok(())
-        }
-        ValueType::I32 => {
-            key.push(14);
-            key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
-            Ok(())
-        }
-        ValueType::I64 => {
-            key.push(13);
-            key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
-            Ok(())
-        }
-        ValueType::F64 => {
-            let value = borrowed.get_f64(field_idx)?;
-            if value.is_nan() {
-                return Err(IvmRuntimeError::RecordEncoding(
-                    records::Error::InvalidF64NaN,
-                ));
+        ValueType::U8 => put_u8(key, borrowed.get_u8(i)?),
+        ValueType::U32 => put_u32(key, borrowed.get_u32(i)?),
+        ValueType::U64 => put_u64(key, borrowed.get_u64(i)?),
+        ValueType::U48 => put_u48(key, borrowed.get_u48(i)?),
+        ValueType::I32 => put_i32(key, borrowed.get_i32(i)?),
+        ValueType::I64 => put_i64(key, borrowed.get_i64(i)?),
+        ValueType::F64 => put_f64(key, non_nan(borrowed.get_f64(i)?)?),
+        ValueType::Bool => put_bool(key, borrowed.get_bool(i)?),
+        ValueType::String => put_str(key, borrowed.get_str(i)?),
+        ValueType::Bytes => put_bytes(key, borrowed.get_bytes(i)?),
+        ValueType::Uuid => put_uuid(key, borrowed.get_uuid(i)?),
+        ValueType::EnumTag(_) => put_u8(key, borrowed.get_enum(i)?),
+        ValueType::Nullable(inner) => match inner.as_ref() {
+            ValueType::U64 => put_nullable(key, borrowed.get_nullable_u64(i)?, put_u64),
+            ValueType::I64 => put_nullable(key, borrowed.get_nullable_i64(i)?, put_i64),
+            ValueType::I32 => put_nullable(key, borrowed.get_nullable_i32(i)?, put_i32),
+            ValueType::F64 => {
+                let value = borrowed.get_nullable_f64(i)?.map(non_nan).transpose()?;
+                put_nullable(key, value, put_f64)
             }
-            key.push(4);
-            key.extend(order_preserving_f64_bits(value).to_be_bytes());
-            Ok(())
-        }
-        ValueType::Bool => {
-            key.push(5);
-            key.push(u8::from(borrowed.get_bool(field_idx)?));
-            Ok(())
-        }
-        ValueType::String => {
-            key.push(6);
-            encode_ordered_bytes(key, borrowed.get_str(field_idx)?.as_bytes());
-            Ok(())
-        }
-        ValueType::Bytes => {
-            key.push(7);
-            encode_ordered_bytes(key, borrowed.get_bytes(field_idx)?);
-            Ok(())
-        }
-        ValueType::Uuid => {
-            key.push(10);
-            key.extend_from_slice(borrowed.get_uuid(field_idx)?.as_bytes());
-            Ok(())
-        }
-        ValueType::EnumTag(_) => {
-            let value = borrowed.get_enum(field_idx)?;
-            encode_key_part(key, &Value::U8(value))
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::U64) => {
-            match borrowed.get_nullable_u64(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(3);
-                    key.extend(value.to_be_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I64) => {
-            match borrowed.get_nullable_i64(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(13);
-                    key.extend(order_preserving_i64_bits(value).to_be_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I32) => {
-            match borrowed.get_nullable_i32(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(14);
-                    key.extend(order_preserving_i32_bits(value).to_be_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::F64) => {
-            match borrowed.get_nullable_f64(field_idx)? {
-                Some(value) => {
-                    if value.is_nan() {
-                        return Err(IvmRuntimeError::RecordEncoding(
-                            records::Error::InvalidF64NaN,
-                        ));
-                    }
-                    key.push(9);
-                    key.push(4);
-                    key.extend(order_preserving_f64_bits(value).to_be_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::String) => {
-            match borrowed.get_nullable_string(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(6);
-                    encode_ordered_bytes(key, value.as_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Bytes) => {
-            match borrowed.get_nullable_bytes(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(7);
-                    encode_ordered_bytes(key, value);
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Uuid) => {
-            match borrowed.get_nullable_uuid(field_idx)? {
-                Some(value) => {
-                    key.push(9);
-                    key.push(10);
-                    key.extend_from_slice(value.as_bytes());
-                }
-                None => key.push(8),
-            }
-            Ok(())
-        }
-        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::EnumTag(_)) => {
-            match borrowed.get_nullable_enum(field_idx)? {
-                Some(value) => {
-                    encode_key_part(key, &Value::Nullable(Some(Box::new(Value::U8(value)))))
-                }
-                None => encode_key_part(key, &Value::Nullable(None)),
-            }
-        }
-        _ => {
-            let field_name = field
-                .name
-                .as_deref()
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
-            let value = descriptor.bind(record).get_idx(field_idx)?;
-            encode_key_part(key, &value)
-        }
+            ValueType::String => put_nullable(key, borrowed.get_nullable_string(i)?, put_str),
+            ValueType::Bytes => put_nullable(key, borrowed.get_nullable_bytes(i)?, put_bytes),
+            ValueType::Uuid => put_nullable(key, borrowed.get_nullable_uuid(i)?, put_uuid),
+            ValueType::EnumTag(_) => put_nullable(key, borrowed.get_nullable_enum(i)?, put_u8),
+            _ => encode_key_part(key, &named_field_value(descriptor, record, field_idx)?),
+        },
+        _ => encode_key_part(key, &named_field_value(descriptor, record, field_idx)?),
     }
 }
 
@@ -419,14 +284,10 @@ pub(super) fn record_field_literal_ordering(
         (ValueType::I64, LiteralValue::I64(expected)) => {
             Ok(ordering(&record.get_i64(field_idx)?, expected))
         }
-        (ValueType::F64, LiteralValue::F64(expected)) => {
-            let expected = f64::from_bits(*expected);
-            Ok(record
-                .get_f64(field_idx)?
-                .partial_cmp(&expected)
-                .map(FieldLiteralOrdering::Compared)
-                .unwrap_or(FieldLiteralOrdering::SqlNull))
-        }
+        (ValueType::F64, LiteralValue::F64(expected)) => Ok(ordering(
+            &record.get_f64(field_idx)?,
+            &f64::from_bits(*expected),
+        )),
         (ValueType::Bool, LiteralValue::Bool(expected)) => {
             Ok(ordering(&record.get_bool(field_idx)?, expected))
         }
@@ -436,12 +297,10 @@ pub(super) fn record_field_literal_ordering(
         (ValueType::Bytes, LiteralValue::Bytes(expected)) => {
             Ok(ordering(record.get_bytes(field_idx)?, expected.as_slice()))
         }
-        (ValueType::Uuid, LiteralValue::Uuid(expected)) => Ok(record
-            .get_uuid(field_idx)?
-            .as_bytes()
-            .partial_cmp(expected.as_bytes())
-            .map(FieldLiteralOrdering::Compared)
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::Uuid, LiteralValue::Uuid(expected)) => Ok(ordering(
+            record.get_uuid(field_idx)?.as_bytes(),
+            expected.as_bytes(),
+        )),
         (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => {
             Ok(ordering(&record.get_enum(field_idx)?, expected))
         }
@@ -459,50 +318,42 @@ fn nullable_record_field_literal_ordering(
     inner: &ValueType,
     expected: &LiteralValue,
 ) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
-    match (inner, expected) {
-        (ValueType::U64, LiteralValue::U64(expected)) => Ok(record
-            .get_nullable_u64(field_idx)?
-            .map(|actual| ordering(&actual, expected))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::U48, LiteralValue::U48(expected)) => Ok(record
-            .get_nullable_u48(field_idx)?
-            .map(|actual| ordering(&actual, expected))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::I64, LiteralValue::I64(expected)) => Ok(record
-            .get_nullable_i64(field_idx)?
-            .map(|actual| ordering(&actual, expected))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::I32, LiteralValue::I32(expected)) => Ok(record
-            .get_nullable_i32(field_idx)?
-            .map(|actual| ordering(&actual, expected))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::F64, LiteralValue::F64(expected)) => {
-            let expected = f64::from_bits(*expected);
-            Ok(record
-                .get_nullable_f64(field_idx)?
-                .and_then(|actual| actual.partial_cmp(&expected))
-                .map(FieldLiteralOrdering::Compared)
-                .unwrap_or(FieldLiteralOrdering::SqlNull))
+    let r = record;
+    let i = field_idx;
+    Ok(match (inner, expected) {
+        (ValueType::U64, LiteralValue::U64(e)) => nullable_ordering(r.get_nullable_u64(i)?, e),
+        (ValueType::U48, LiteralValue::U48(e)) => nullable_ordering(r.get_nullable_u48(i)?, e),
+        (ValueType::I64, LiteralValue::I64(e)) => nullable_ordering(r.get_nullable_i64(i)?, e),
+        (ValueType::I32, LiteralValue::I32(e)) => nullable_ordering(r.get_nullable_i32(i)?, e),
+        (ValueType::F64, LiteralValue::F64(e)) => {
+            nullable_ordering(r.get_nullable_f64(i)?, &f64::from_bits(*e))
         }
-        (ValueType::String, LiteralValue::String(expected)) => Ok(record
-            .get_nullable_string(field_idx)?
-            .map(|actual| ordering(actual, expected.as_str()))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Bytes, LiteralValue::Bytes(expected)) => Ok(record
-            .get_nullable_bytes(field_idx)?
-            .map(|actual| ordering(actual, expected.as_slice()))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::Uuid, LiteralValue::Uuid(expected)) => Ok(record
-            .get_nullable_uuid(field_idx)?
-            .and_then(|actual| actual.as_bytes().partial_cmp(expected.as_bytes()))
-            .map(FieldLiteralOrdering::Compared)
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        (ValueType::EnumTag(_), LiteralValue::EnumTag(expected)) => Ok(record
-            .get_nullable_enum(field_idx)?
-            .map(|actual| ordering(&actual, expected))
-            .unwrap_or(FieldLiteralOrdering::SqlNull)),
-        _ => Ok(FieldLiteralOrdering::Unsupported),
-    }
+        (ValueType::String, LiteralValue::String(e)) => {
+            nullable_ordering(r.get_nullable_string(i)?, e.as_str())
+        }
+        (ValueType::Bytes, LiteralValue::Bytes(e)) => {
+            nullable_ordering(r.get_nullable_bytes(i)?, e.as_slice())
+        }
+        (ValueType::Uuid, LiteralValue::Uuid(e)) => nullable_ordering(
+            r.get_nullable_uuid(i)?.as_ref().map(uuid::Uuid::as_bytes),
+            e.as_bytes(),
+        ),
+        (ValueType::EnumTag(_), LiteralValue::EnumTag(e)) => {
+            nullable_ordering(r.get_nullable_enum(i)?, e)
+        }
+        _ => FieldLiteralOrdering::Unsupported,
+    })
+}
+
+/// [`ordering`] of a nullable field; a null field compares as SQL null.
+fn nullable_ordering<A, T>(actual: Option<A>, expected: &T) -> FieldLiteralOrdering
+where
+    A: std::borrow::Borrow<T>,
+    T: PartialOrd + ?Sized,
+{
+    actual.map_or(FieldLiteralOrdering::SqlNull, |actual| {
+        ordering(actual.borrow(), expected)
+    })
 }
 
 pub(super) fn ordering<T: PartialOrd + ?Sized>(actual: &T, expected: &T) -> FieldLiteralOrdering {
@@ -697,62 +548,142 @@ pub(super) fn encode_scalar_key_part(
     value: &Value,
 ) -> Result<(), IvmRuntimeError> {
     match value {
-        Value::U8(value) | Value::EnumTag(value) => {
-            key.push(0);
-            key.push(*value);
-        }
+        Value::U8(value) | Value::EnumTag(value) => put_u8(key, *value),
         Value::U16(value) => {
             key.push(1);
             key.extend(value.to_be_bytes());
+            Ok(())
         }
-        Value::U32(value) => {
-            key.push(2);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            key.push(3);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U48(value) => {
-            key.push(16);
-            key.extend(crate::records::u48_be_bytes(*value)?);
-        }
-        Value::I32(value) => {
-            key.push(14);
-            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
-        }
-        Value::I64(value) => {
-            key.push(13);
-            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
-        }
-        Value::F64(value) => {
-            key.push(4);
-            key.extend(order_preserving_f64_bits(*value).to_be_bytes());
-        }
-        Value::Bool(value) => {
-            key.push(5);
-            key.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            key.push(6);
-            encode_ordered_bytes(key, value.as_bytes());
-        }
-        Value::Bytes(value) => {
-            key.push(7);
-            encode_ordered_bytes(key, value);
-        }
-        Value::Uuid(value) => {
-            key.push(10);
-            key.extend_from_slice(value.as_bytes());
-        }
+        Value::U32(value) => put_u32(key, *value),
+        Value::U64(value) => put_u64(key, *value),
+        Value::U48(value) => put_u48(key, *value),
+        Value::I32(value) => put_i32(key, *value),
+        Value::I64(value) => put_i64(key, *value),
+        Value::F64(value) => put_f64(key, *value),
+        Value::Bool(value) => put_bool(key, *value),
+        Value::String(value) => put_str(key, value),
+        Value::Bytes(value) => put_bytes(key, value),
+        Value::Uuid(value) => put_uuid(key, *value),
         Value::Tuple(_)
         | Value::Nullable(_)
         | Value::Array(_)
         | Value::Record(_)
         | Value::Enum(_)
-        | Value::Large(_) => return Err(IvmRuntimeError::UnsupportedJoinKey),
+        | Value::Large(_) => Err(IvmRuntimeError::UnsupportedJoinKey),
     }
+}
+
+// One tagged writer per scalar key type, shared by the `Value` encoder and
+// the typed record-field fast path so the tag table lives in one place.
+
+type KeyResult = Result<(), IvmRuntimeError>;
+
+#[inline]
+fn put_u8(key: &mut Vec<u8>, value: u8) -> KeyResult {
+    key.extend([0, value]);
     Ok(())
+}
+
+#[inline]
+fn put_u32(key: &mut Vec<u8>, value: u32) -> KeyResult {
+    key.push(2);
+    key.extend(value.to_be_bytes());
+    Ok(())
+}
+
+#[inline]
+fn put_u64(key: &mut Vec<u8>, value: u64) -> KeyResult {
+    key.push(3);
+    key.extend(value.to_be_bytes());
+    Ok(())
+}
+
+#[inline]
+fn put_u48(key: &mut Vec<u8>, value: u64) -> KeyResult {
+    key.push(16);
+    key.extend(crate::records::u48_be_bytes(value)?);
+    Ok(())
+}
+
+#[inline]
+fn put_i32(key: &mut Vec<u8>, value: i32) -> KeyResult {
+    key.push(14);
+    key.extend(order_preserving_i32_bits(value).to_be_bytes());
+    Ok(())
+}
+
+#[inline]
+fn put_i64(key: &mut Vec<u8>, value: i64) -> KeyResult {
+    key.push(13);
+    key.extend(order_preserving_i64_bits(value).to_be_bytes());
+    Ok(())
+}
+
+/// Callers that may see NaN reject it first with [`non_nan`].
+#[inline]
+fn put_f64(key: &mut Vec<u8>, value: f64) -> KeyResult {
+    key.push(4);
+    key.extend(order_preserving_f64_bits(value).to_be_bytes());
+    Ok(())
+}
+
+#[inline]
+fn put_bool(key: &mut Vec<u8>, value: bool) -> KeyResult {
+    key.extend([5, u8::from(value)]);
+    Ok(())
+}
+
+#[inline]
+fn put_str(key: &mut Vec<u8>, value: &str) -> KeyResult {
+    put_bytes_tagged(key, 6, value.as_bytes())
+}
+
+#[inline]
+fn put_bytes(key: &mut Vec<u8>, value: &[u8]) -> KeyResult {
+    put_bytes_tagged(key, 7, value)
+}
+
+#[inline]
+fn put_bytes_tagged(key: &mut Vec<u8>, tag: u8, value: &[u8]) -> KeyResult {
+    key.push(tag);
+    encode_ordered_bytes(key, value);
+    Ok(())
+}
+
+#[inline]
+fn put_uuid(key: &mut Vec<u8>, value: uuid::Uuid) -> KeyResult {
+    key.push(10);
+    key.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+/// `Value::Nullable` framing: 8 for null, else 9 followed by the value.
+#[inline]
+fn put_nullable<T>(
+    key: &mut Vec<u8>,
+    value: Option<T>,
+    put: impl FnOnce(&mut Vec<u8>, T) -> KeyResult,
+) -> KeyResult {
+    match value {
+        Some(value) => {
+            key.push(9);
+            put(key, value)
+        }
+        None => {
+            key.push(8);
+            Ok(())
+        }
+    }
+}
+
+#[inline]
+fn non_nan(value: f64) -> Result<f64, IvmRuntimeError> {
+    if value.is_nan() {
+        return Err(IvmRuntimeError::RecordEncoding(
+            records::Error::InvalidF64NaN,
+        ));
+    }
+    Ok(value)
 }
 
 fn order_preserving_f64_bits(value: f64) -> u64 {
