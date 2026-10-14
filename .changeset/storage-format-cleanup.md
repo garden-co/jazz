@@ -15,4 +15,6 @@
 
 - Derive inserted UTF-16 lengths from the stored insertion bytes instead of persisting them, saving eight bytes per large-value edit.
 
+- Omit the two always-zero UTF-16 coordinates from binary large-value edits, saving another sixteen bytes per edit; text edits retain them.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.

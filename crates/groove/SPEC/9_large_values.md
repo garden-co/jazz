@@ -52,7 +52,7 @@ StoredScalar<kind> = enum {
     byte_length,
     utf16_length?,
     edit_tail: [ { offset, delete_length, insert_bytes,
-                   utf16_offset, delete_utf16_length } ],
+                   /* string/JSON only: */ utf16_offset, delete_utf16_length } ],
   },
 }
 
@@ -72,9 +72,11 @@ The `groove.large-value.v2` scalar enum has exactly two cases:
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 Every engine-owned record field has a permanent, one-based numeric record-slot
-identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
-`{ 1: offset, 2: delete_length, 3: insert_bytes, 4: utf16_offset,
-5: delete_utf16_length }`, and `LargeValueRef` is
+identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`.
+Byte edits are `{ 1: offset, 2: delete_length, 3: insert_bytes }`;
+string/JSON edits additionally have `{ 4: utf16_offset, 5: delete_utf16_length }`.
+The enclosing value kind selects the edit layout without another tag.
+`LargeValueRef` is
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
 5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
 refactor. Implementations normalize source declarations by ID, then materialize
@@ -108,8 +110,10 @@ schema or logical-operator boundary.
 The edit's inserted UTF-16 length is not persisted: decoding derives it from
 `insert_bytes` for string/JSON values and sets it to zero for byte values.
 The in-memory `ReplaceEdit::insert_utf16_length` remains available to traversal
-and validation. The other UTF-16 coordinates remain stored because deriving
-them requires reading the base text.
+and validation. For string/JSON edits, the other UTF-16 coordinates remain stored because
+deriving them requires reading the base text. Byte edits omit these two always-zero
+coordinates and restore them as zero in memory, saving another sixteen bytes
+per byte edit.
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
@@ -259,7 +263,7 @@ For the bytes leaf above, locator `44` repeated 32 times, logical hash
 insert:"e", utf16:* = 0 }`, the descriptor fixture is:
 
 ```text
-00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e444444444444444444444444444444444444444444444444444444444444444401000000090000000000000001000000000000000000000000000000000000000000000065
+00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065
 ```
 
 The same value wrapped in the bytes schema's ordinary `Chunked = 1` scalar arm
