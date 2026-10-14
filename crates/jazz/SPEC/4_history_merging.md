@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
-- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's whole presence over origin under an index, the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
+- `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
 - `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
@@ -562,15 +562,17 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
   share a lower candidate's id can hide one, and ids no candidate holds hide
   nothing, so the presence may be read whole or just for those ids, and it
   is read whichever way is bounded by the smaller side:
-  - Under an index the local delta masks origin by its whole presence (a
-    pending edit that moved a row out of the prefix still hides its origin
-    image). The delta is sparse, only this node's pending rows, while
-    origin's candidates under a prefix can be most of the table: the read
-    costs the pending rows, not one probe per origin candidate. The one
-    case that reads more than before: a draft branch that exists only on
-    this node has an empty origin, so its delta is the whole branch, and an
-    indexed read of it reads every row of the branch for the mask. That is
-    bounded by what an unindexed read of the branch costs.
+  - Under an index the local delta masks origin by its presence read
+    whichever way reads fewer rows (a pending edit that moved a row out of
+    the prefix still hides its origin image either way). Read whole, it
+    costs the delta's pending rows; looked up by origin's candidates under
+    the prefix, one probe each. A synced node holds few pending rows and
+    many candidates (read whole); a local-only node, a long-offline one or
+    a draft branch that exists only on this node holds a delta that is the
+    whole table and few or no candidates (looked up). The node knows the
+    pending count per table in memory and counts the candidates from
+    origin's index keys under the prefix, stopping at the pending count, so
+    choosing never reads more than the cheaper mask does.
   - A branch view masks its base by the head's presence read by the base
     candidates' row ids: a keyed lookup of the head's refs
     ([#4005](https://github.com/garden-co/jazz/issues/4005)). A head can be

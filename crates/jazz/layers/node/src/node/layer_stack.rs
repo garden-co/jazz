@@ -35,8 +35,8 @@ pub(in crate::node) enum Mask {
     /// rows, so a layer edit that left the predicate still hides the row
     /// below (SPEC 11 "Masking precedes predicates"). Only ids the layers
     /// below hold can hide anything, so the presence may be read whole or
-    /// just for those ids, whichever is bounded: the local delta masks
-    /// origin under an index by its whole presence (only pending rows; a
+    /// just for those ids, whichever is cheaper: the local delta masks
+    /// origin under an index by its presence read either way, by size (a
     /// pending edit that moved a row out of the prefix still hides its
     /// origin image), and a branch view masks its base by the head's
     /// presence looked up by the base candidates' row ids.

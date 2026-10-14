@@ -23,6 +23,53 @@ impl Database {
         Ok(false)
     }
 
+    /// How many entries of `table`'s index `index_name` start with `prefix`,
+    /// counting no further than `max_items`: the number of rows an index
+    /// prefix scan of the same values (`StaticScanSpec::Prefix`) would read,
+    /// capped. Like [`Self::table_has_stored_rows`] it observes the applied
+    /// resident state, requests at most `max_items` storage entries and
+    /// decodes nothing, so it costs at most the capped scan's keys.
+    pub async fn index_prefix_entries_up_to(
+        &self,
+        table: &str,
+        index_name: &str,
+        prefix: &[Value],
+        max_items: usize,
+    ) -> Result<usize, Error> {
+        if max_items == 0 {
+            return Ok(0);
+        }
+        let index = self.index(table, index_name)?;
+        if prefix.len() > index.columns.len() {
+            return Err(Error::IndexKeyArity {
+                index: index_name.to_owned(),
+                expected: index.columns.len(),
+                actual: prefix.len(),
+            });
+        }
+        // The same bytes as an IVM index prefix scan of these values.
+        let mut storage_prefix =
+            durable_index_key_prefix(self.ivm_runtime.index_storage_id(table, index));
+        for value in prefix {
+            encode_key_part(&mut storage_prefix, value).map_err(Error::IvmRuntime)?;
+        }
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
+        let mut cursor = storage
+            .scan(
+                crate::storage::ScanRequest::prefix("indices".to_owned(), storage_prefix)
+                    .with_max_items(max_items),
+            )
+            .await?;
+        let mut entries = 0;
+        while entries < max_items
+            && let Some(rows) = cursor.next_batch().await?
+        {
+            entries += rows.len();
+        }
+        Ok(entries.min(max_items))
+    }
+
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///

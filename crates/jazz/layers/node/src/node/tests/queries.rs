@@ -655,7 +655,8 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
         // A Local read also probes the local delta; its mask over origin is
-        // the delta's whole presence (its pending rows), not an index probe.
+        // the delta's presence (read whole or by origin's candidates), not an
+        // index probe.
         let probes = if tier == DurabilityTier::Local { 2 } else { 1 };
         assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
@@ -746,8 +747,8 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
     // Origin and local-delta index probes; a newer pending winner that
-    // changed owner masks its origin image through the delta's whole
-    // presence, which costs the pending rows, not origin's candidates.
+    // changed owner masks its origin image through the delta's presence,
+    // not an index probe.
     assert_eq!(local_metrics.source_index_probes, 2);
     assert_eq!(local_metrics.source_full_scans, 0);
 }
@@ -821,6 +822,94 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
     // Origin and the local delta each probe the index once.
     assert_eq!(metrics.source_index_probes, 2);
     assert_eq!(metrics.source_full_scans, 0);
+}
+
+/// The local delta masks origin under an index by its presence, read whole
+/// or by origin's candidates, whichever reads fewer rows. Both regimes stay
+/// exact for a pending edit that moved a row out of the prefix, and a node
+/// whose delta dwarfs origin's candidates (a local-only node: everything
+/// pending, nothing settled) reads the delta's rows under the prefix only,
+/// not the whole delta.
+///
+/// ```text
+/// settled owner_a: moved_out (+ `extra` more settled owner_a rows)
+/// pending:         moved_out -> owner_b, plus 12 new owner_b rows, plus kept@owner_a
+/// Local owner_a ─► {kept, extra..}   (never moved_out)
+/// ```
+#[test]
+fn local_indexed_read_masks_origin_by_the_cheaper_presence_read() {
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let moved_out = row(0x31);
+    let kept = row(0x32);
+    let new_rows = (0..12).map(|i| row(0x40 + i)).collect::<Vec<_>>();
+    // 0 extra settled rows: 1 settled candidate < 14 pending rows, so the
+    // delta is looked up by the candidates. 20: 21 >= 14, read whole.
+    for extra in [0_u8, 20] {
+        let (_core_dir, mut core) = open_node_with_schema(node(9), access_path_schema());
+        let extra_rows = (0..extra).map(|i| row(0x80 + i)).collect::<Vec<_>>();
+        for (tx_time, row_uuid) in std::iter::once(moved_out)
+            .chain(extra_rows.iter().copied())
+            .enumerate()
+        {
+            let tx_id = core
+                .commit_mergeable_settled(
+                    MergeableCommit::new("docs", row_uuid, 10 + tx_time as u64)
+                        .cells(access_path_doc_cells(owner_a, "open", "settled")),
+                )
+                .unwrap();
+            let global_time = core.allocate_global_time_for_test();
+            core.apply_fate_update(
+                tx_id,
+                Fate::Accepted,
+                Some(global_time),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        core.commit_mergeable_settled(MergeableCommit::new("docs", moved_out, 100).cells(
+            access_path_doc_cells(owner_b, "open", "pending owner change"),
+        ))
+        .unwrap();
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", kept, 101)
+                .cells(access_path_doc_cells(owner_a, "open", "pending")),
+        )
+        .unwrap();
+        for (offset, row_uuid) in new_rows.iter().copied().enumerate() {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("docs", row_uuid, 102 + offset as u64)
+                    .cells(access_path_doc_cells(owner_b, "open", "pending")),
+            )
+            .unwrap();
+        }
+
+        let query =
+            Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))));
+        core.reset_storage_read_metrics();
+        let (local, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+        let reads = core.take_storage_read_metrics();
+
+        assert_eq!(
+            local.into_iter().collect::<BTreeSet<_>>(),
+            std::iter::once(kept).chain(extra_rows).collect::<BTreeSet<_>>(),
+            "extra = {extra}"
+        );
+        assert_eq!(metrics.source_index_probes, 2, "extra = {extra}");
+        assert_eq!(metrics.source_full_scans, 0, "extra = {extra}");
+        if extra == 0 {
+            // `kept` under the prefix, and `moved_out` looked up by the one
+            // settled candidate; never the twelve unrelated pending rows.
+            assert!(
+                reads.ahead_current_rows.reads <= 2,
+                "the mask read {} pending rows",
+                reads.ahead_current_rows.reads
+            );
+        } else {
+            // The whole delta is the cheaper read here.
+            assert!(reads.ahead_current_rows.reads >= 14);
+        }
+    }
 }
 
 #[test]

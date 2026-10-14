@@ -714,15 +714,16 @@ fn update_pending(db: &Db, row_id: RowUuid, title: &str) -> TxId {
 
 /// Alice reads `title = needle` at `Local` while she holds pending edits,
 /// some of them on rows outside the prefix. Origin is read under the index
-/// prefix, and the local delta masks origin's candidates by its whole
-/// presence: the delta holds only pending rows, so the read never visits
-/// origin's rows outside the prefix and never probes the delta once per
-/// origin candidate. Its storage work is the same with 20 settled rows as
-/// with 60, the same with 40 more origin candidates under the prefix (the
-/// #4022 regression: a keyed lookup paid one delta probe per candidate),
-/// and grows only by the extra pending rows themselves. A pending edit that
-/// moved a candidate out of the prefix still hides it; one that moved a row
-/// in is found by the delta's own index.
+/// prefix, and the local delta masks origin's candidates by its presence,
+/// read whichever way reads fewer rows: whole (its pending rows) when it is
+/// smaller than origin's candidates, else looked up by those candidates. So
+/// the read never visits origin's rows outside the prefix, never probes the
+/// delta once per candidate when the delta is the smaller side (the #4022
+/// `pages_live` regression), and never reads every pending row when the
+/// candidates are fewer (the #4022 local-only regressions: a node whose
+/// delta is the whole table). A pending edit that moved a candidate out of
+/// the prefix still hides it either way; one that moved a row in is found
+/// by the delta's own index.
 ///
 /// White-box because storage-read attribution and the read path's source
 /// counters are not public.
@@ -731,10 +732,12 @@ fn update_pending(db: &Db, row_id: RowUuid, title: &str) -> TxId {
 /// origin:  a=needle  b=needle  out=needle  in=hay  needle x m  hay x n
 /// local:   out -> hay   in -> needle   k hay rows -> straw
 /// alice ──title = needle, Local──► {a, b, in, needle x m}
-///          origin reads independent of n; delta reads independent of n, m
+///          origin reads independent of n and k;
+///          delta reads independent of n, of m once m + 3 > k + 2,
+///          and of k once k + 2 > m + 3
 /// ```
 #[test]
-fn indexed_local_read_masks_origin_by_the_whole_pending_delta() {
+fn indexed_local_read_masks_origin_by_the_cheaper_pending_presence() {
     let read = |hay: u8, needles: u8, pending_hay: u8| {
         let schema = indexed_todos_schema();
         let db = open_settling_authority(0xda, &schema);
@@ -794,6 +797,8 @@ fn indexed_local_read_masks_origin_by_the_whole_pending_delta() {
         );
         db.take_storage_read_metrics_for_test()
     };
+    // Three candidates (a, b, out) and four pending rows: the delta is
+    // looked up by the candidates.
     let base = read(20, 0, 2);
     let more_hay = read(60, 0, 2);
     assert_eq!(
@@ -801,23 +806,41 @@ fn indexed_local_read_masks_origin_by_the_whole_pending_delta() {
         (more_hay.global_current_rows, more_hay.ahead_current_rows),
         "origin's rows outside the prefix may not be read: {base:?} vs {more_hay:?}"
     );
-    let more_candidates = read(20, 40, 2);
+    // Many more pending rows than candidates: the delta is still looked up
+    // by the three candidates, so its reads do not grow with it.
+    let more_pending = read(60, 0, 20);
+    let most_pending = read(60, 0, 40);
     assert_eq!(
-        base.ahead_current_rows, more_candidates.ahead_current_rows,
-        "origin's candidates may not cost reads of the delta: {base:?} vs {more_candidates:?}"
-    );
-    let more_pending = read(20, 0, 20);
-    assert_eq!(
-        base.global_current_rows, more_pending.global_current_rows,
-        "unrelated pending rows may not cost origin reads: {base:?} vs {more_pending:?}"
+        (base.global_current_rows, base.ahead_current_rows),
+        (
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {base:?} vs {more_pending:?}"
     );
     assert_eq!(
         (
-            more_pending.ahead_current_rows.reads - base.ahead_current_rows.reads,
-            more_pending.ahead_current_rows.ranges - base.ahead_current_rows.ranges,
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
         ),
-        (18, 0),
-        "the mask reads each pending row once: {base:?} vs {more_pending:?}"
+        (
+            most_pending.global_current_rows,
+            most_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {more_pending:?} vs {most_pending:?}"
+    );
+    // Many more candidates than pending rows: the delta is read whole, so
+    // its reads do not grow with origin's candidates.
+    let more_candidates = read(20, 40, 2);
+    let most_candidates = read(20, 80, 2);
+    assert_eq!(
+        more_candidates.ahead_current_rows, most_candidates.ahead_current_rows,
+        "origin's candidates may not cost reads of the delta: \
+         {more_candidates:?} vs {most_candidates:?}"
+    );
+    assert!(
+        more_candidates.ahead_current_rows.reads <= base.ahead_current_rows.reads + 4,
+        "the whole delta is its four pending rows: {base:?} vs {more_candidates:?}"
     );
 }
 
