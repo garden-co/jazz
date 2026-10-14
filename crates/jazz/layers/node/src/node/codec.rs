@@ -2645,16 +2645,9 @@ impl VersionRow {
     }
 
     /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
-    /// empty on a settled image or a layout without the field.
+    /// empty on a settled image.
     pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
-        let Some(field) = self
-            .record
-            .descriptor()
-            .field_index(crate::schema::COUNTER_SIGNS_FIELD)
-        else {
-            return Ok(Vec::new());
-        };
-        match self.record.borrowed().get_idx(field)? {
+        match self.trailing_field(crate::schema::COUNTER_SIGNS_FIELD)? {
             Value::Bytes(bytes) => Ok(bytes),
             _ => Err(Error::InvalidStoredValue(
                 "counter_signs field must be bytes",
@@ -2662,56 +2655,51 @@ impl VersionRow {
         }
     }
 
-    fn trailing_field(&self, name: &str) -> Result<Option<Value>, Error> {
-        let Some(field) = self.record.descriptor().field_index(name) else {
-            return Ok(None);
-        };
-        Ok(Some(self.record.borrowed().get_idx(field)?))
+    fn trailing_field_index(&self, name: &str) -> Result<usize, Error> {
+        self.record
+            .descriptor()
+            .field_index(name)
+            .ok_or(Error::InvalidStoredValue("history merge field missing"))
+    }
+
+    fn trailing_field(&self, name: &str) -> Result<Value, Error> {
+        Ok(self
+            .record
+            .borrowed()
+            .get_idx(self.trailing_field_index(name)?)?)
     }
 
     /// The write's accepted seq; `0` while it has no accepted fate (SPEC 4
-    /// §4.6, "Durable layout"), and on a layout without the field.
+    /// §4.6, "Durable layout").
     pub(super) fn seq(&self) -> Result<GlobalTime, Error> {
         match self.trailing_field(crate::schema::SEQ_FIELD)? {
-            None => Ok(GlobalTime(0)),
-            Some(Value::U64(seq)) => Ok(GlobalTime(seq)),
-            Some(_) => Err(Error::InvalidStoredValue("history seq must be u64")),
+            Value::U64(seq) => Ok(GlobalTime(seq)),
+            _ => Err(Error::InvalidStoredValue("history seq must be u64")),
         }
     }
 
     /// The write's base (SPEC 4 §4.6, "Base of a write").
     pub(super) fn base(&self) -> Result<RowBase, Error> {
-        let seq = match self.trailing_field(crate::schema::BASE_SEQ_FIELD)? {
+        let seq = match nullable_value(self.trailing_field(crate::schema::BASE_SEQ_FIELD)?)? {
             None => None,
-            Some(value) => match nullable_value(value)? {
-                None => None,
-                Some(Value::U64(seq)) => Some(GlobalTime(seq)),
-                Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
-            },
+            Some(Value::U64(seq)) => Some(GlobalTime(seq)),
+            Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
         };
-        let pending = match self.trailing_field(crate::schema::BASE_PENDING_FIELD)? {
-            None => None,
-            Some(value) => nullable_value(value)?.map(tx_id_from_value).transpose()?,
-        };
+        let pending = nullable_value(self.trailing_field(crate::schema::BASE_PENDING_FIELD)?)?
+            .map(tx_id_from_value)
+            .transpose()?;
         Ok(RowBase { seq, pending })
     }
 
-    /// This image with its trailing merge fields replaced. A layout without
-    /// the fields (none is written today) keeps its record.
+    /// This image with its required merge fields replaced.
     pub(super) fn with_merge_fields(&self, seq: GlobalTime, base: RowBase) -> Result<Self, Error> {
-        let descriptor = self.record.descriptor();
-        let Some(seq_idx) = descriptor.field_index(crate::schema::SEQ_FIELD) else {
-            return Ok(self.clone());
-        };
+        let seq_idx = self.trailing_field_index(crate::schema::SEQ_FIELD)?;
+        let base_seq_idx = self.trailing_field_index(crate::schema::BASE_SEQ_FIELD)?;
+        let base_pending_idx = self.trailing_field_index(crate::schema::BASE_PENDING_FIELD)?;
         let mut values = self.record.to_values()?;
         values[seq_idx] = Value::U64(seq.0);
-        let mut set = |name: &str, value: Value| {
-            if let Some(idx) = descriptor.field_index(name) {
-                values[idx] = value;
-            }
-        };
-        set(crate::schema::BASE_SEQ_FIELD, base_seq_value(base));
-        set(crate::schema::BASE_PENDING_FIELD, base_pending_value(base));
+        values[base_seq_idx] = base_seq_value(base);
+        values[base_pending_idx] = base_pending_value(base);
         self.with_record_values(values)
     }
 
@@ -4576,6 +4564,79 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    /// Alice's stored merge metadata may contain null bases, but never missing
+    /// columns. This internal test builds truncated descriptors because public
+    /// writers always produce the complete history layout.
+    #[test]
+    fn history_merge_fields_require_columns_and_preserve_null_bases() {
+        use crate::schema::{BASE_PENDING_FIELD, BASE_SEQ_FIELD, COUNTER_SIGNS_FIELD, SEQ_FIELD};
+        use records::{RecordDescriptor, ValueType};
+
+        let fields = [
+            (
+                COUNTER_SIGNS_FIELD,
+                ValueType::Bytes,
+                Value::Bytes(Vec::new()),
+            ),
+            (SEQ_FIELD, ValueType::U64, Value::U64(0)),
+            (
+                BASE_SEQ_FIELD,
+                ValueType::U64.nullable(),
+                Value::Nullable(None),
+            ),
+            (
+                BASE_PENDING_FIELD,
+                ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid]).nullable(),
+                Value::Nullable(None),
+            ),
+        ];
+        let row = |missing: Option<&str>| {
+            let descriptor = RecordDescriptor::new(
+                fields
+                    .iter()
+                    .filter(|(name, _, _)| Some(*name) != missing)
+                    .map(|(name, ty, _)| (*name, ty.clone())),
+            );
+            let values = fields
+                .iter()
+                .filter(|(name, _, _)| Some(*name) != missing)
+                .map(|(_, _, value)| value.clone())
+                .collect::<Vec<_>>();
+            VersionRow {
+                table: groove::Intern::new("notes".to_owned()),
+                branch_key: BranchKey::default(),
+                record: OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+            }
+        };
+        let complete = row(None);
+        assert_eq!(complete.counter_signs().unwrap(), Vec::<u8>::new());
+        assert_eq!(complete.seq().unwrap(), GlobalTime(0));
+        assert_eq!(complete.base().unwrap(), RowBase::default());
+        let base = RowBase {
+            seq: Some(GlobalTime(7)),
+            pending: Some(TxId::new(TxTime(8), NodeUuid(uuid::Uuid::from_u128(9)))),
+        };
+        let updated = complete.with_merge_fields(GlobalTime(10), base).unwrap();
+        assert_eq!(updated.seq().unwrap(), GlobalTime(10));
+        assert_eq!(updated.base().unwrap(), base);
+        let cleared = updated
+            .with_merge_fields(GlobalTime(0), RowBase::default())
+            .unwrap();
+        assert_eq!(cleared.base().unwrap(), RowBase::default());
+        assert!(row(Some(COUNTER_SIGNS_FIELD)).counter_signs().is_err());
+        assert!(row(Some(SEQ_FIELD)).seq().is_err());
+        for missing in [BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
+            assert!(row(Some(missing)).base().is_err());
+        }
+        for missing in [SEQ_FIELD, BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
+            assert!(
+                row(Some(missing))
+                    .with_merge_fields(GlobalTime(10), base)
+                    .is_err()
+            );
+        }
+    }
 
     /// Internal byte receipt: Alice's transaction flag must use exactly the
     /// canonical bool bytes at field 12, not the former nullable string layout.

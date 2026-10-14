@@ -5,6 +5,7 @@
 **Breaking:** Simplified Jazz's persisted storage format:
 
 - Removed the retired subscription-cache stores and their recovery cleanup.
+- Require history-row counter signs, sequence, and base columns instead of accepting obsolete layouts with missing columns. Nullable base values remain supported; merge-field updates reject missing columns instead of silently skipping them.
 - Removed the redundant catalogue write-pointer table and startup upgrades. Initialization and snapshot imports persist the active schema selection directly; reopening an initialized catalogue requires that record.
 - Removed legacy empty-schema sentinel handling from the server catalogue. Empty schemas now undergo the same metadata validation and indexing as every other schema, even without active selections or migration references.
 - Removed the retired scope-relay repair ledger registration and its key/value descriptors, which were retained only to open older stores after the repair lane was removed.
