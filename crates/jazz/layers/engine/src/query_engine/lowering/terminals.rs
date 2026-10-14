@@ -169,17 +169,15 @@ fn collect_publication_fields(
 pub(super) fn validate_app_row_publication_schema(rows: &AppRowSchema) -> CapabilityResult<()> {
     for field in rows.descriptor.fields() {
         let name = field.name.as_deref().ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(
-                "application row descriptor has an unnamed field".to_owned(),
-            ))
+            CapabilityReport::runtime("application row descriptor has an unnamed field")
         })?;
         if name != "row_uuid"
             && !rows.hidden_fields.contains(name)
             && !rows.publication_fields.contains_key(name)
         {
-            return Err(single_gap_report(UnsupportedReason::Runtime(format!(
+            return Err(CapabilityReport::runtime(format!(
                 "application row field {name:?} has no publication binding"
-            ))));
+            )));
         }
     }
     Ok(())
@@ -341,11 +339,7 @@ pub(super) fn lowered_terminals(
         .result_members
         .iter()
         .map(|(source_id, graph)| {
-            let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "closure source {source_id:?} was not resolved"
-                )))
-            })?;
+            let resolved_source = ResolvedSource::lookup(resolved_sources, &source_id, "closure")?;
             Ok((
                 source_id.clone(),
                 graph
@@ -375,12 +369,8 @@ pub(super) fn lowered_terminals(
     // receiver will join.  Omitting this made a flat receipt look complete
     // while containing only its root scan, which cannot reproduce the join.
     for contribution in &request.input.shape.join_contributions {
-        let resolved_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "join contribution source {:?} was not resolved",
-                contribution.source
-            )))
-        })?;
+        let resolved_source =
+            ResolvedSource::lookup(resolved_sources, &contribution.source, "join contribution")?;
         let contribution_route_fields =
             source_terminal_route_fields(resolved_source, &root_route_fields);
         let graph = if contribution.id.starts_with("flat_join:") {
@@ -397,14 +387,12 @@ pub(super) fn lowered_terminals(
             let (visible_parent, parent_source) = match &contribution.parent {
                 Some(parent) => (
                     covered_source_members.get(parent).cloned().ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(
-                            "nested join contribution requires its admitted parent".to_owned(),
-                        ))
+                        CapabilityReport::runtime(
+                            "nested join contribution requires its admitted parent",
+                        )
                     })?,
                     resolved_sources.get(parent).ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(
-                            "nested join parent source was not resolved".to_owned(),
-                        ))
+                        CapabilityReport::runtime("nested join parent source was not resolved")
                     })?,
                 ),
                 None => (closure.visible_root.clone(), source),
@@ -431,12 +419,11 @@ pub(super) fn lowered_terminals(
     // authority has applied the parent read policy.  Do not publish nested
     // policy proof sources: those are absent from the client query AST.
     for contribution in &request.input.shape.inherited_contributions {
-        let parent_source = resolved_sources.get(&contribution.source).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "inherited contribution source {:?} was not resolved",
-                contribution.source
-            )))
-        })?;
+        let parent_source = ResolvedSource::lookup(
+            resolved_sources,
+            &contribution.source,
+            "inherited contribution",
+        )?;
         let parent_route_fields = source_terminal_route_fields(parent_source, &root_route_fields);
         let graph = closure::inherited_contribution_membership_graph(
             visible_root_with_routes.clone(),
@@ -461,14 +448,11 @@ pub(super) fn lowered_terminals(
     // multisink partitioning chooses the recipient. CoveredInput encodes only
     // source/version identities, never these private routing fields.
     for contribution in &request.input.shape.reachable_contributions {
-        let access_source = resolved_sources
-            .get(&contribution.access_source)
-            .ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "reachable contribution source {:?} was not resolved",
-                    contribution.access_source
-                )))
-            })?;
+        let access_source = ResolvedSource::lookup(
+            resolved_sources,
+            &contribution.access_source,
+            "reachable contribution",
+        )?;
         let access_route_fields = source_terminal_route_fields(access_source, &root_route_fields);
         let graph = closure::reachable_contribution_membership_graph(
             visible_root_with_routes.clone(),
@@ -646,10 +630,9 @@ pub(super) fn lowered_terminals(
                                 | crate::query::RelationProjectExpr::RowId(
                                     crate::query::RelationRowIdRef::Frontier,
                                 ) => {
-                                    return Err(single_gap_report(UnsupportedReason::Operator(
-                                        "outer/frontier row-id relation projections are not unified yet"
-                                            .to_owned(),
-                                    )));
+                                    return Err(CapabilityReport::operator(
+                                        "outer/frontier row-id relation projections are not unified yet",
+                                    ));
                                 }
                                 crate::query::RelationProjectExpr::Column(reference) => {
                                     let (ty, value) = if reference.column == "id" {
@@ -667,11 +650,9 @@ pub(super) fn lowered_terminals(
                                             .find(|column| column.name == reference.column)
                                             .map(|column| column.column_type.clone())
                                             .ok_or_else(|| {
-                                                single_gap_report(UnsupportedReason::Operator(
-                                                    format!(
-                                                        "relation output column {:?} is absent from the source schema",
-                                                        reference.column
-                                                    ),
+                                                CapabilityReport::operator(format!(
+                                                    "relation output column {:?} is absent from the source schema",
+                                                    reference.column
                                                 ))
                                             })?;
                                         (
@@ -750,11 +731,8 @@ pub(super) fn lowered_terminals(
                 let (output_source_id, output_fields, _is_flat) = projected_output
                     .as_ref()
                     .expect("guarded projected multi-source output");
-                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(format!(
-                        "projected output source {output_source_id:?} was not resolved"
-                    )))
-                })?;
+                let output_source =
+                    ResolvedSource::lookup(resolved_sources, output_source_id, "projected output")?;
                 let hidden_fields = hidden_source_fields(&output_source.row_shape)
                     .into_iter()
                     .chain(
@@ -893,12 +871,8 @@ pub(super) fn lowered_terminals(
             // `__flat_join_row_N`, which only exists after the wide project.
             if flat_join_payload_fields(plan).is_empty() {
                 for (source_id, closure_graph) in &closure.result_members {
-                    let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(format!(
-                            "closure member source {:?} was not resolved",
-                            source_id
-                        )))
-                    })?;
+                    let resolved_source =
+                        ResolvedSource::lookup(resolved_sources, &source_id, "closure member")?;
                     let output = fact_output_with_terminal(
                         fact,
                         ProgramFactTerminal::Primary,
@@ -927,13 +901,11 @@ pub(super) fn lowered_terminals(
             }
             if has_explicit_closure_path(&request.input.shape) {
                 for contribution in &request.input.shape.join_contributions {
-                    let resolved_source =
-                        resolved_sources.get(&contribution.source).ok_or_else(|| {
-                            single_gap_report(UnsupportedReason::Runtime(format!(
-                                "join contribution source {:?} was not resolved",
-                                contribution.source
-                            )))
-                        })?;
+                    let resolved_source = ResolvedSource::lookup(
+                        resolved_sources,
+                        &contribution.source,
+                        "join contribution",
+                    )?;
                     let output = fact_output_with_terminal(
                         fact,
                         ProgramFactTerminal::Primary,
@@ -948,9 +920,9 @@ pub(super) fn lowered_terminals(
                         .get(&contribution.source)
                         .cloned()
                         .ok_or_else(|| {
-                            single_gap_report(UnsupportedReason::Runtime(
-                                "join contribution has no admitted source rows".to_owned(),
-                            ))
+                            CapabilityReport::runtime(
+                                "join contribution has no admitted source rows",
+                            )
                         })?;
                     let graph = fact_terminal_graph(
                         fact,
@@ -1005,9 +977,7 @@ pub(super) fn lowered_terminals(
             // from a partial or missing authority closure.
             for source_id in covered_source_members.keys() {
                 let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(
-                        "covered source has no resolved descriptor".to_owned(),
-                    ))
+                    CapabilityReport::runtime("covered source has no resolved descriptor")
                 })?;
                 let source_route_fields = terminal_route_fields_for_source(
                     source_id,
@@ -1094,12 +1064,8 @@ fn collect_correlated_covered_source_members(
     route_fields: &BTreeSet<String>,
     members: &mut BTreeMap<SourceId, GraphBuilder>,
 ) -> CapabilityResult<()> {
-    let child_source = resolved_sources.get(&path.path.child).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(format!(
-            "correlated covered source {:?} was not resolved",
-            path.path.child
-        )))
-    })?;
+    let child_source =
+        ResolvedSource::lookup(resolved_sources, &path.path.child, "correlated covered")?;
     let joined = lower_correlated_path_relation_graph_from_parent(
         path,
         parent_graph.clone(),
@@ -1390,10 +1356,10 @@ fn lower_collect_by_app_rows(
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(format!(
+            CapabilityReport::operator(format!(
                 "app projection path {:?} is not a correlated path in the query shape",
                 slot.path
-            )))
+            ))
         })?;
         association_graphs.extend(lower_collect_slot_graphs(
             slot,
@@ -1420,9 +1386,7 @@ fn lower_collect_by_app_rows(
         .iter()
         .find(|field| field.is_row_id)
         .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(
-                "collector root projection did not retain the row id".to_owned(),
-            ))
+            CapabilityReport::runtime("collector root projection did not retain the row id")
         })?
         .input
         .clone();
@@ -1472,31 +1436,21 @@ fn align_collect_join_key_types(
 ) -> CapabilityResult<()> {
     for slot in slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(format!(
+            CapabilityReport::operator(format!(
                 "app projection path {:?} is not a correlated path in the query shape",
                 slot.path
-            )))
-        })?;
-        let parent_id = path.parent.root.source().ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(
-                "collector path parent must be a source".to_owned(),
             ))
         })?;
-        let child_id = path.child.root.source().ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(
-                "collector path child must be a source".to_owned(),
-            ))
-        })?;
-        let parent = resolved_sources.get(parent_id).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "collector parent source {parent_id:?} was not resolved"
-            )))
-        })?;
-        let child = resolved_sources.get(child_id).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "collector child source {child_id:?} was not resolved"
-            )))
-        })?;
+        let parent_id =
+            path.parent.root.source().ok_or_else(|| {
+                CapabilityReport::operator("collector path parent must be a source")
+            })?;
+        let child_id =
+            path.child.root.source().ok_or_else(|| {
+                CapabilityReport::operator("collector path child must be a source")
+            })?;
+        let parent = ResolvedSource::lookup(resolved_sources, parent_id, "collector parent")?;
+        let child = ResolvedSource::lookup(resolved_sources, child_id, "collector child")?;
         let (parent_key, child_key) = lower_path_key_pair(
             &path.correlation,
             parent_id,
@@ -1729,10 +1683,10 @@ fn retain_collect_slot_value(
         .row_id_input
         .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
         .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
+            CapabilityReport::runtime(format!(
                 "collector child row-id input {:?} does not match source row-id field {:?}",
                 slot.row_id_input, source.row_shape.row_uuid_field
-            )))
+            ))
         })?;
     // Derive the unwrapped and input types exactly as selected slot fields do,
     // so the anchor and association arms agree on the outer wrapper.
@@ -1768,9 +1722,7 @@ fn collect_root_input_for_value(
             .find(|candidate| candidate.source_field.as_deref() == Some(field))
             .map(|candidate| candidate.input.clone())
             .ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Operator(
-                    "collector root union-arm tie-breaker is missing".to_owned(),
-                ))
+                CapabilityReport::operator("collector root union-arm tie-breaker is missing")
             });
     }
     match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
@@ -1787,9 +1739,9 @@ fn collect_root_input_for_value(
         _ => None,
     }
     .ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Operator(format!(
+        CapabilityReport::operator(format!(
             "collector root window key {value:?} is not present in the root projection"
-        )))
+        ))
     })
 }
 
@@ -1810,9 +1762,9 @@ fn collect_slot_input_for_value(
         _ => None,
     }
     .ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Operator(format!(
+        CapabilityReport::operator(format!(
             "collector window key {value:?} is not present in the child projection"
-        )))
+        ))
     })
 }
 
@@ -1901,11 +1853,7 @@ pub(super) fn root_join_occurrence_fields(
         let Some(source_id) = right.root_source() else {
             continue;
         };
-        let source = resolved_sources.get(source_id).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
-                "inner join occurrence source {source_id:?} was not resolved"
-            )))
-        })?;
+        let source = ResolvedSource::lookup(resolved_sources, source_id, "inner join occurrence")?;
         if !matches!(source_id.path.components.last(), Some(SourceRole::Alias(_))) {
             continue;
         }
@@ -2041,10 +1989,7 @@ fn lowered_aggregate_terminals(
                             "id".to_owned()
                         } else {
                             resolved_source_public_name(source, &carrier).ok_or_else(|| {
-                                single_gap_report(UnsupportedReason::Runtime(
-                                    "aggregate source field has no explicit application name"
-                                        .to_owned(),
-                                ))
+                                CapabilityReport::runtime("aggregate source field has no explicit application name")
                             })?
                         };
                         fields.insert(carrier, source_publication_field(source, name));
@@ -2102,9 +2047,7 @@ fn lowered_aggregate_terminals(
         } else if matches!(fact, ProgramFactKey::ProgramSourceCoverage(_)) {
             for source_id in aggregate_contributors.keys() {
                 let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(
-                        "aggregate contributor has no resolved descriptor".to_owned(),
-                    ))
+                    CapabilityReport::runtime("aggregate contributor has no resolved descriptor")
                 })?;
                 let output = fact_output_with_terminal(
                     fact,
@@ -2141,9 +2084,7 @@ fn lowered_aggregate_terminals(
             // aggregate result.
             for (source_id, contributor_graph) in &aggregate_contributors {
                 let resolved_source = resolved_sources.get(source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(
-                        "aggregate contributor has no resolved descriptor".to_owned(),
-                    ))
+                    CapabilityReport::runtime("aggregate contributor has no resolved descriptor")
                 })?;
                 push_witness_terminals(
                     &mut terminals,
@@ -2288,16 +2229,16 @@ fn aggregate_input_graph(
     request: &LoweringContext<'_>,
 ) -> CapabilityResult<GraphBuilder> {
     let AnalyzedQueryPlan::Linear(mut input_plan) = plan.clone() else {
-        return Err(single_gap_report(UnsupportedReason::Runtime(
-            "aggregate contributor input requires a linear root plan".to_owned(),
-        )));
+        return Err(CapabilityReport::runtime(
+            "aggregate contributor input requires a linear root plan",
+        ));
     };
     match input_plan.steps.pop() {
         Some(LinearStep::Aggregate { .. }) => {}
         _ => {
-            return Err(single_gap_report(UnsupportedReason::Runtime(
-                "aggregate contributor input is missing its terminal aggregate step".to_owned(),
-            )));
+            return Err(CapabilityReport::runtime(
+                "aggregate contributor input is missing its terminal aggregate step",
+            ));
         }
     }
     lower_plan_steps(
@@ -2330,16 +2271,10 @@ fn fact_input_graph(
             return lower_correlated_path_relation_graph(path, source, resolved_sources, request)
                 .map(|lowered| lowered.graph)
                 .map_err(|gap| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![gap],
-                        explain: ExplainPlan {
-                            capabilities: vec![
-                                "correlated path relation facts lower from the parent-child path graph"
-                                    .to_owned(),
-                            ],
-                            ..ExplainPlan::default()
-                        },
-                    })
+                    CapabilityReport::explained(
+                        gap,
+                        "correlated path relation facts lower from the parent-child path graph",
+                    )
                 });
         }
     }
@@ -2566,13 +2501,10 @@ fn fact_output_with_terminal(
             path_correlation_coverage_schema(plan, source, resolved_sources)?,
         ),
         _ => {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
-                explain: ExplainPlan {
-                    capabilities: vec!["requested fact is not lowered yet".to_owned()],
-                    ..ExplainPlan::default()
-                },
-            }));
+            return Err(CapabilityReport::explained(
+                UnsupportedReason::Output(Box::new(key.clone())),
+                "requested fact is not lowered yet",
+            ));
         }
     };
 
@@ -2861,23 +2793,14 @@ fn fact_terminal_graph(
             let _ = path_correlation_coverage_schema(plan, source, resolved_sources)?;
             Ok(graph)
         }
-        ProgramFactKey::ProgramSourceCoverage(_) => Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
-            explain: ExplainPlan {
-                capabilities: vec![
-                    "program source coverage is an independently seeded control-plane terminal"
-                        .to_owned(),
-                ],
-                ..ExplainPlan::default()
-            },
-        })),
-        _ => Err(Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
-            explain: ExplainPlan {
-                capabilities: vec!["requested fact graph is not lowered yet".to_owned()],
-                ..ExplainPlan::default()
-            },
-        })),
+        ProgramFactKey::ProgramSourceCoverage(_) => Err(CapabilityReport::explained(
+            UnsupportedReason::Output(Box::new(key.clone())),
+            "program source coverage is an independently seeded control-plane terminal",
+        )),
+        _ => Err(CapabilityReport::explained(
+            UnsupportedReason::Output(Box::new(key.clone())),
+            "requested fact graph is not lowered yet",
+        )),
     }
 }
 
@@ -2912,9 +2835,9 @@ fn program_source_coverage_graph(
     if routing_param_fields.is_empty() {
         let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
         return GraphBuilder::values(descriptor, [vec![Value::Bool(complete)]]).map_err(|error| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
+            CapabilityReport::runtime(format!(
                 "could not seed program-source coverage terminal: {error}"
-            )))
+            ))
         });
     }
     let graph = GraphBuilder::values(
@@ -2922,9 +2845,9 @@ fn program_source_coverage_graph(
         [vec![Value::Bool(complete)]],
     )
     .map_err(|error| {
-        single_gap_report(UnsupportedReason::Runtime(format!(
+        CapabilityReport::runtime(format!(
             "could not seed routed program-source coverage terminal: {error}"
-        )))
+        ))
     })?;
     let mut fields = vec![ProjectField::named("complete")];
     fields.extend(
@@ -3281,15 +3204,10 @@ fn relation_edge_graph(
         }
         AnalyzedQueryPlan::RecursiveRelation(_) => Ok(graph),
         AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
-            Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(key.clone()))],
-                explain: ExplainPlan {
-                    capabilities: vec![
-                        "relation edge facts require a path or recursive relation node".to_owned(),
-                    ],
-                    ..ExplainPlan::default()
-                },
-            }))
+            Err(CapabilityReport::explained(
+                UnsupportedReason::Output(Box::new(key.clone())),
+                "relation edge facts require a path or recursive relation node",
+            ))
         }
     }
 }
@@ -3301,12 +3219,7 @@ fn correlated_relation_edge_graphs(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<GraphBuilder>> {
-    let target = resolved_sources.get(&path.path.child).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(format!(
-            "path child source {:?} was not resolved",
-            path.path.child
-        )))
-    })?;
+    let target = ResolvedSource::lookup(resolved_sources, &path.path.child, "path child")?;
     let mut graphs = vec![
         graph
             .clone()
@@ -3316,16 +3229,10 @@ fn correlated_relation_edge_graphs(
         let sibling_graph =
             lower_correlated_path_relation_graph(sibling, source, resolved_sources, request)
                 .map_err(|gap| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![gap],
-                        explain: ExplainPlan {
-                            capabilities: vec![
-                        "sibling correlated path relation facts lower from the shared root graph"
-                            .to_owned(),
-                    ],
-                            ..ExplainPlan::default()
-                        },
-                    })
+                    CapabilityReport::explained(
+                        gap,
+                        "sibling correlated path relation facts lower from the shared root graph",
+                    )
                 })?
                 .graph;
         graphs.extend(correlated_relation_edge_graphs(
@@ -3349,16 +3256,10 @@ fn correlated_relation_edge_graphs(
             true,
         )
         .map_err(|gap| {
-            Box::new(CapabilityReport {
-                gaps: vec![gap],
-                explain: ExplainPlan {
-                    capabilities: vec![
-                        "nested correlated path relation facts lower from parent-child path graphs"
-                            .to_owned(),
-                    ],
-                    ..ExplainPlan::default()
-                },
-            })
+            CapabilityReport::explained(
+                gap,
+                "nested correlated path relation facts lower from parent-child path graphs",
+            )
         })?
         .graph;
         graphs.extend(correlated_relation_edge_graphs(
@@ -3453,14 +3354,14 @@ fn deletion_witness_graph_for_current_register(
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
     let Some(register) = &source.deletion_register else {
-        return Err(single_gap_report(UnsupportedReason::Runtime(
-            "resolved source did not provide deletion register source".to_owned(),
-        )));
+        return Err(CapabilityReport::runtime(
+            "resolved source did not provide deletion register source",
+        ));
     };
     let Some(authorized_preimage) = &source.authorized_deletion_preimage else {
-        return Err(single_gap_report(UnsupportedReason::Runtime(
-            "resolved source did not provide authorized deletion preimage".to_owned(),
-        )));
+        return Err(CapabilityReport::runtime(
+            "resolved source did not provide authorized deletion preimage",
+        ));
     };
     // The raw register owns the exact deletion transaction/branch/schema
     // witness. The sibling is the same source occurrence evaluated under its
@@ -3799,9 +3700,7 @@ fn aggregate_app_row_descriptor(
     source: &ResolvedSource,
 ) -> CapabilityResult<RecordDescriptor> {
     let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(
-            "aggregate app row descriptor requested for non-aggregate plan".to_owned(),
-        ))
+        CapabilityReport::runtime("aggregate app row descriptor requested for non-aggregate plan")
     })?;
     let mut fields = Vec::new();
     for value in group_by {
@@ -3815,9 +3714,9 @@ fn aggregate_app_row_descriptor(
             .find(|candidate| candidate.name.as_deref() == Some(field.as_str()))
             .cloned()
             .ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
+                CapabilityReport::runtime(format!(
                     "aggregate group field {field:?} is missing from resolved descriptor"
-                )))
+                ))
             })?;
         fields.push(DescriptorField {
             name: Some(field),
@@ -3850,9 +3749,7 @@ fn aggregate_result_schema(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<AggregateResultSchema> {
     let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(
-            "aggregate result schema requested for non-aggregate plan".to_owned(),
-        ))
+        CapabilityReport::runtime("aggregate result schema requested for non-aggregate plan")
     })?;
     // Use the same typed fields as the emitted app-row descriptor. Carrier
     // spellings are diagnostic/output metadata, never a lookup identity.
@@ -3874,9 +3771,7 @@ fn aggregate_result_schema(
                     Ok("id".to_owned())
                 } else {
                     resolved_source_public_name(source, &carrier).ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Runtime(
-                            "aggregate group has no declared logical name".to_owned(),
-                        ))
+                        CapabilityReport::runtime("aggregate group has no declared logical name")
                     })
                 }
             })
@@ -3896,14 +3791,12 @@ fn aggregate_result_membership_fields(
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(
-            "aggregate result fields requested for non-aggregate plan".to_owned(),
-        ))
+        CapabilityReport::runtime("aggregate result fields requested for non-aggregate plan")
     })?;
     if group_by.len() > 1 {
-        return Err(single_gap_report(UnsupportedReason::Operator(
-            "multi-column aggregate group result identity is not lowered yet".to_owned(),
-        )));
+        return Err(CapabilityReport::operator(
+            "multi-column aggregate group result identity is not lowered yet",
+        ));
     }
     // The synthetic table is only a protocol label. Aggregate identity is the
     // group-key value below (or the fixed global token), never a source-table
@@ -3969,17 +3862,15 @@ fn aggregate_output_value_type(
         AggregateFunction::Avg => Ok(ValueType::Nullable(Box::new(ValueType::F64))),
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
             let input = output.input.as_ref().ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Operator(
-                    "aggregate input is required for sum/min/max".to_owned(),
-                ))
+                CapabilityReport::operator("aggregate input is required for sum/min/max")
             })?;
             let field = aggregate_source_field_name(input, source)?;
             let value_type = aggregate_carrier_field_type(source, &field)
                 .cloned()
                 .ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(format!(
+                    CapabilityReport::runtime(format!(
                         "aggregate input field {field:?} is missing from resolved descriptor"
-                    )))
+                    ))
                 })?;
             Ok(match aggregate_unwrapped_input_type(value_type) {
                 ValueType::Nullable(inner) => ValueType::Nullable(inner),
@@ -4005,9 +3896,9 @@ fn aggregate_source_field_name(
         {
             Ok(source.row_shape.row_uuid_field.clone())
         }
-        _ => Err(single_gap_report(UnsupportedReason::Operator(
-            "aggregate group keys must be root source fields".to_owned(),
-        ))),
+        _ => Err(CapabilityReport::operator(
+            "aggregate group keys must be root source fields",
+        )),
     }
 }
 
@@ -4068,9 +3959,9 @@ fn prefixed_version_witness_fields_for_tagged_rows(
     prefix: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
     if source.content_version.is_none() {
-        return Err(single_gap_report(UnsupportedReason::Runtime(
-            "resolved source did not provide content version source".to_owned(),
-        )));
+        return Err(CapabilityReport::runtime(
+            "resolved source did not provide content version source",
+        ));
     };
     let mut fields = vec![
         ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
@@ -4200,12 +4091,7 @@ fn relation_edge_schema(
 ) -> CapabilityResult<RelationEdgeSchema> {
     let (source, target, depth_field) = match plan {
         AnalyzedQueryPlan::CorrelatedPath(path) => {
-            let child = resolved_sources.get(&path.path.child).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "path child source {:?} was not resolved",
-                    path.path.child
-                )))
-            })?;
+            let child = ResolvedSource::lookup(resolved_sources, &path.path.child, "path child")?;
             return Ok(RelationEdgeSchema {
                 source: prefixed_versioned_row_ref_schema(root_source, "source")?,
                 path_field: "path".to_owned(),
@@ -4227,30 +4113,16 @@ fn relation_edge_schema(
                 .cloned()
                 .or_else(|| first_step_source(&relation.step.steps).cloned())
                 .ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(
-                        "recursive step source was not resolved".to_owned(),
-                    ))
+                    CapabilityReport::runtime("recursive step source was not resolved")
                 })?;
-            let step = resolved_sources.get(&step_source).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "recursive step source {:?} was not resolved",
-                    step_source
-                )))
-            })?;
+            let step = ResolvedSource::lookup(resolved_sources, &step_source, "recursive step")?;
             (root_source, step, Some("depth".to_owned()))
         }
         AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(
-                    ProgramFactKey::RelationEdges,
-                ))],
-                explain: ExplainPlan {
-                    capabilities: vec![
-                        "relation edge facts require a path or recursive relation node".to_owned(),
-                    ],
-                    ..ExplainPlan::default()
-                },
-            }));
+            return Err(CapabilityReport::explained(
+                UnsupportedReason::Output(Box::new(ProgramFactKey::RelationEdges)),
+                "relation edge facts require a path or recursive relation node",
+            ));
         }
     };
 
@@ -4299,18 +4171,10 @@ fn path_correlation_coverage_schema(
             coverage_state_field: "coverage_state".to_owned(),
         }),
         AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::Union(_) => {
-            Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Output(Box::new(
-                    ProgramFactKey::PathCorrelationCoverage,
-                ))],
-                explain: ExplainPlan {
-                    capabilities: vec![
-                        "path correlation coverage facts require a path or recursive relation node"
-                            .to_owned(),
-                    ],
-                    ..ExplainPlan::default()
-                },
-            }))
+            Err(CapabilityReport::explained(
+                UnsupportedReason::Output(Box::new(ProgramFactKey::PathCorrelationCoverage)),
+                "path correlation coverage facts require a path or recursive relation node",
+            ))
         }
     }
 }
@@ -4426,9 +4290,9 @@ fn version_witness_fields(row_shape: &SourceRowShape) -> CapabilityResult<Versio
             tx_node_field: tx_node_field.clone(),
             branch_or_prefix_field: branch_or_prefix_field.clone(),
         }),
-        _ => Err(single_gap_report(UnsupportedReason::Runtime(
-            "resolved source did not provide version witness fields".to_owned(),
-        ))),
+        _ => Err(CapabilityReport::runtime(
+            "resolved source did not provide version witness fields",
+        )),
     }
 }
 
@@ -4449,9 +4313,9 @@ fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<CoverageField
         Some(SourceMetadataFields::Coverage { coverage_field }) => Ok(CoverageFieldRefs {
             coverage_field: coverage_field.clone(),
         }),
-        _ => Err(single_gap_report(UnsupportedReason::Runtime(
-            "resolved source did not provide coverage fields".to_owned(),
-        ))),
+        _ => Err(CapabilityReport::runtime(
+            "resolved source did not provide coverage fields",
+        )),
     }
 }
 
