@@ -48,6 +48,74 @@ mod support;
 // could not distinguish a coordinated encoder/decoder regression from a stable
 // persisted format. The fixtures below keep hard-coded epoch-1 bytes on both
 // sides of that boundary.
+// Internal codec assertion for the same reason as the epoch-1 fixtures below:
+// U48 key bytes sit beneath the public row API.
+#[test]
+fn u48_primary_and_index_key_parts_are_tagged_six_byte_big_endian() {
+    use super::encoding::{
+        decode_index_key_part, decode_primary_key_part, encode_index_prefix_part,
+        encode_primary_key_part,
+    };
+
+    let frozen = [0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+    let mut encoded = Vec::new();
+    encode_primary_key_part(&mut encoded, &Value::U48(0x0102_0304_0506)).unwrap();
+    assert_eq!(encoded, frozen);
+    let mut remaining = frozen.as_slice();
+    assert_eq!(
+        decode_primary_key_part(&mut remaining, &ValueType::U48).unwrap(),
+        Value::U48(0x0102_0304_0506)
+    );
+    assert!(remaining.is_empty());
+
+    let nullable = ColumnType::Nullable(Box::new(ColumnType::U48));
+    let frozen_index = [0x09, 0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+    let mut encoded_index = Vec::new();
+    encode_index_prefix_part(
+        &mut encoded_index,
+        &Value::Nullable(Some(Box::new(Value::U48(crate::records::U48_MAX)))),
+        &nullable,
+    )
+    .unwrap();
+    assert_eq!(encoded_index, frozen_index);
+    let mut remaining = frozen_index.as_slice();
+    assert_eq!(
+        decode_index_key_part(&mut remaining, &nullable, "fixture").unwrap(),
+        Value::Nullable(Some(Box::new(Value::U48(crate::records::U48_MAX))))
+    );
+    assert!(remaining.is_empty());
+
+    // Lexicographic key order matches numeric order across byte boundaries.
+    let mut previous: Option<Vec<u8>> = None;
+    for value in [
+        0,
+        1,
+        0xff,
+        0x100,
+        0xffff_ffff,
+        0x1_0000_0000,
+        crate::records::U48_MAX,
+    ] {
+        let mut key = Vec::new();
+        encode_index_prefix_part(&mut key, &Value::U48(value), &ColumnType::U48).unwrap();
+        assert_eq!(key.len(), 7);
+        if let Some(previous) = previous {
+            assert!(previous < key, "{value:#x} must sort after its predecessor");
+        }
+        previous = Some(key);
+    }
+
+    let mut out_of_range = Vec::new();
+    assert!(
+        encode_primary_key_part(&mut out_of_range, &Value::U48(crate::records::U48_MAX + 1))
+            .is_err()
+    );
+    let mut truncated = &[0x10, 0x01, 0x02, 0x03, 0x04, 0x05][..];
+    assert!(decode_primary_key_part(&mut truncated, &ValueType::U48).is_err());
+    let mut wrong_tag = &[0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06][..];
+    assert!(decode_primary_key_part(&mut wrong_tag, &ValueType::U48).is_err());
+}
+
 #[test]
 fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
     use super::encoding::{

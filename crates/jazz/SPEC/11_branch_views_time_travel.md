@@ -305,6 +305,12 @@ proportional to history depth within those selected branches. A future
 snapshot-current materialization or checkpoint index could make this bounded
 by current rows, but that optimization is not part of the initial contract.
 
+Branch layers and refs compose by one rule (SPEC 4 §4.7). Each branch layer
+is itself the `[local, origin]` stack of its key, so a live view reads
+`[head@local, head@origin, base@local, base@origin]`. Under an index path,
+the base is masked by the head's presence rather than by the head's index
+matches (`INV-REF-3`).
+
 Layer fallback is intentionally independent. Head content does not restore an
 inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,

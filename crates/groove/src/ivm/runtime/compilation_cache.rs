@@ -48,6 +48,7 @@ fn eligible(graph: &GraphBuilder) -> bool {
         GraphBuilder::Table { .. }
         | GraphBuilder::TemplateInput { .. }
         | GraphBuilder::Index { .. }
+        | GraphBuilder::Lookup { .. }
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::InputSource { .. }
         | GraphBuilder::BindingSource { .. }

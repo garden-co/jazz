@@ -310,7 +310,6 @@ pub struct VersionWitnessSchema {
     /// Updated-at HLC field.
     pub updated_at_field: String,
     /// Parent transaction set field.
-    pub parents_field: String,
     /// Nullable serialized set of explicitly authored user columns.
     pub authored_columns_field: String,
     /// Nullable deletion event field.

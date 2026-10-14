@@ -2932,3 +2932,144 @@ fn compact_large_value_preserves_native_and_serde_encodings() {
         serde_json::json!({"Large": reference})
     );
 }
+
+// U48 is a constant-width scalar: 6 bytes little-endian in the record's fixed
+// region (`INV-STORAGE-9`), 6 bytes big-endian as a fixed tuple member, and a
+// fixed-width nullable reserves its 6-byte payload (`INV-STORAGE-10`). The
+// literal bytes are the durable receipt; they are not derived from `create`.
+const U48_RECORD_FIXTURE: &[u8] = &[
+    0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // stamp: U48 little-endian
+    0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // maybe: Some(U48_MAX)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // none: null + 6 zero bytes
+    0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, // pair: Tuple(U48) big-endian
+    0x02, b'h', b'i', // name: String primitive StoredScalar arm tag + payload
+];
+
+fn u48_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("stamp", ValueType::U48),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::U48))),
+        ("none", ValueType::Nullable(Box::new(ValueType::U48))),
+        ("pair", ValueType::Tuple(vec![ValueType::U48])),
+    ])
+}
+
+#[test]
+fn u48_record_fixture_is_exact_constant_width_and_range_checked() {
+    let descriptor = u48_record_descriptor();
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::U48(0x0102_0304_0506),
+        Value::Nullable(Some(Box::new(Value::U48(U48_MAX)))),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U48(0x0a0b_0c0d_0e0f)]),
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), U48_RECORD_FIXTURE);
+    let bound = descriptor.bind(U48_RECORD_FIXTURE);
+    assert_eq!(bound.to_values().unwrap(), values);
+    assert_eq!(bound.get_u48(1).unwrap(), 0x0102_0304_0506);
+    assert_eq!(bound.get_nullable_u48(2).unwrap(), Some(U48_MAX));
+    assert_eq!(bound.get_nullable_u48(3).unwrap(), None);
+    bound.validate().unwrap();
+
+    // Width is constant: the extreme values occupy the same six bytes.
+    let only = RecordDescriptor::new([("stamp", ValueType::U48)]);
+    assert_eq!(only.create(&[Value::U48(0)]).unwrap(), [0u8; 6]);
+    assert_eq!(only.create(&[Value::U48(U48_MAX)]).unwrap(), [0xffu8; 6]);
+    assert!(only.bind(&[0u8; 5]).to_values().is_err());
+    assert!(only.bind(&[0u8; 7]).to_values().is_err());
+
+    // Values outside 0..=2^48-1 are rejected on encode, in every position.
+    let out_of_range = U48_MAX + 1;
+    assert!(matches!(
+        only.create(&[Value::U48(out_of_range)]),
+        Err(Error::U48OutOfRange(value)) if value == out_of_range
+    ));
+    assert!(matches!(
+        RecordDescriptor::new([("pair", ValueType::Tuple(vec![ValueType::U48]))])
+            .create(&[Value::Tuple(vec![Value::U48(u64::MAX)])]),
+        Err(Error::U48OutOfRange(_))
+    ));
+    assert!(matches!(
+        RecordDescriptor::new([("maybe", ValueType::Nullable(Box::new(ValueType::U48)))])
+            .create(&[Value::Nullable(Some(Box::new(Value::U48(out_of_range))))]),
+        Err(Error::U48OutOfRange(_))
+    ));
+    // A U48 is not interchangeable with the other unsigned widths.
+    assert!(only.create(&[Value::U64(1)]).is_err());
+
+    let mut noncanonical_null = U48_RECORD_FIXTURE.to_vec();
+    noncanonical_null[14] = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+}
+
+#[test]
+fn u48_typed_fields_and_descriptor_codec_round_trip() {
+    #[derive(Debug, PartialEq)]
+    struct Stamp(u64);
+    crate::impl_record_field_u48!(Stamp);
+
+    assert_eq!(U48::MAX, (1 << 48) - 1);
+    assert!(U48::new(U48::MAX).is_ok());
+    assert!(matches!(
+        U48::new(U48::MAX + 1),
+        Err(Error::U48OutOfRange(_))
+    ));
+
+    let descriptor = RecordDescriptor::new([("stamp", ValueType::U48)]);
+    assert_record_field_layout(&descriptor, 0, "stamp", <Stamp as RecordField>::COLUMN_KIND);
+    let raw = descriptor
+        .create(&[Stamp(0x0102_0304_0506).to_value()])
+        .unwrap();
+    let bound = descriptor.bind(&raw);
+    assert_eq!(Stamp::read(&bound, 0).unwrap(), Stamp(0x0102_0304_0506));
+    assert_eq!(U48::read(&bound, 0).unwrap().get(), 0x0102_0304_0506);
+    assert_eq!(
+        <U48 as RecordField>::read_raw(&[1, 0, 0, 0, 0, 0], &ValueType::U48)
+            .unwrap()
+            .get(),
+        1
+    );
+    assert_eq!(
+        <U48 as RecordField>::read_tuple_raw(&[0, 0, 0, 0, 0, 1], &ValueType::U48)
+            .unwrap()
+            .get(),
+        1
+    );
+    assert!(<U48 as RecordField>::read_raw(&[0; 6], &ValueType::U64).is_err());
+
+    // The persisted descriptor codec names U48 with its own permanent tag 25.
+    for (encode, decode) in [
+        (
+            encode_record_descriptor as fn(&RecordDescriptor) -> Result<Vec<u8>, Error>,
+            decode_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+        (
+            encode_persisted_record_descriptor,
+            decode_persisted_record_descriptor,
+        ),
+    ] {
+        let nested = RecordDescriptor::new([
+            ("stamp", ValueType::U48),
+            ("maybe", ValueType::Nullable(Box::new(ValueType::U48))),
+        ]);
+        let encoded = encode(&nested).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded, nested);
+        assert_eq!(decoded.fields()[0].value_type, ValueType::U48);
+    }
+    let u64_descriptor =
+        encode_persisted_record_descriptor(&RecordDescriptor::new([("stamp", ValueType::U64)]))
+            .unwrap();
+    let u48_descriptor =
+        encode_persisted_record_descriptor(&RecordDescriptor::new([("stamp", ValueType::U48)]))
+            .unwrap();
+    let differing = u64_descriptor
+        .iter()
+        .zip(&u48_descriptor)
+        .filter(|(left, right)| left != right)
+        .collect::<Vec<_>>();
+    assert_eq!(u64_descriptor.len(), u48_descriptor.len());
+    assert_eq!(differing, [(&5u8, &25u8)]);
+}

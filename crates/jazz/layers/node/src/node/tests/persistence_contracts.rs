@@ -9,7 +9,7 @@ struct TargetedWriteManyFailure {
     write_through: bool,
 }
 
-fn jazz_class_v1_history_physical_target(
+fn jazz_class_v2_history_physical_target(
     logical_cf: &str,
     logical_key: &[u8],
 ) -> (String, Vec<u8>) {

@@ -55,6 +55,8 @@ Invariant digest:
 - `INV-QUERY-26`: Per touched partition TopBy MUST emit the minimal consolidated weighted diff of retained windows; unchanged in-window copy counts MUST NOT emit, including rank-only moves, unless rank metadata is declared.
 - `INV-QUERY-27`: `CollectBy` MUST be an output-terminal-only operator: validation MUST reject it as an input to every graph node, including another collector.
 - `INV-QUERY-28`: For each touched `CollectBy` output occurrence, the terminal MUST suppress byte-equal output. A surviving changed collect group emits exactly one old-record retraction and one new-record addition; an appearing/disappearing group emits its one addition/retraction. Expand mode emits the corresponding minimal per-occurrence additions, removals, and replacements. Its descriptor and scalar key/order inputs MUST make this deterministic.
+- `INV-QUERY-37`: A keyed `Lookup` MUST output exactly the rows of its table, under its static prefix, whose primary-key columns after that prefix equal a key with positive multiplicity in its input, each row once however often its key occurs, and MUST keep that relation maintained as keys enter or leave and as matched rows are inserted, updated or deleted.
+- `INV-QUERY-38`: A keyed `Lookup` MUST read storage only by key: one prefix read per distinct live key at hydration and per entering key at a tick, never the rows of keys that are not live, so its work is bounded by its keys and the changes touching them, not by the table's size.
 
 ## Details
 
@@ -205,6 +207,23 @@ An anti-join (`AntiJoin`) preserves the left descriptor. It shows a left row iff
 the total right-side multiplicity for that row's key is zero (`INV-QUERY-12`),
 and it emits a change only when a left row changes or the right count crosses
 zero.
+
+A keyed lookup (`GraphBuilder::lookup(table, keys, keys_on)`, `LookupOp`) is
+the stored side of a join read by key. Its right side is a table source with an
+optional static point or prefix scan; the `keys_on` fields of its only input
+continue that table's primary key after the prefix, with the same value types.
+It outputs the table rows whose key a live input key names (`INV-QUERY-37`).
+Keys have set semantics: a key selects its rows while its multiplicity is
+positive, and a row is emitted once however often its key occurs. Hydration
+reads one storage prefix per distinct live key; a tick probes only keys that
+become live, retracts the rows of keys that stop being live, and applies the
+table's own changes to keys that stay live (`INV-QUERY-38`). The state is the
+key counts plus the matched rows; nothing is proportional to the table. A
+probe parked on a cold read may see a later write, so table changes apply per
+primary key and idempotently (a retraction only of the stored row, an
+insertion only of an absent one), which converges. The keyed semi- and
+anti-joins are plain compositions:
+`semi_join(left, lookup(t, left, on), on, pk)` and the `anti_join` analogue.
 
 _Further invariants._ `INV-QUERY-8` — an inner join requires equal-length
 left/right key vectors. `INV-QUERY-11` — shared join arrangements apply a given
@@ -495,6 +514,9 @@ Implementation status:
   the anti-join arrangement machinery and emits left rows whose join key has
   positive right-side multiplicity. Recursive seed/step placement remains
   unsupported.
+- `Lookup` is executable for ordinary, non-recursive graph execution. It reads
+  storage, so it is rejected inside a recursive step and under a durable node,
+  and its static scan must be a point or prefix.
 - `Aggregate` is executable for ordinary, non-recursive graph execution over the
   implemented aggregate subset: `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` over
   supported field/nullability shapes. Distinct aggregates are rejected. Integer

@@ -486,7 +486,6 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
     let (_alice_tx, alice_unit) = alice
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 20)
-                .parents(vec![base])
                 .cells(BTreeMap::from([(
                     "completed".to_owned(),
                     Value::Bool(true),
@@ -498,7 +497,6 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
     let bob_tx = bob
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 30)
-                .parents(vec![base])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("base".to_owned())),
                     ("completed".to_owned(), Value::Bool(false)),

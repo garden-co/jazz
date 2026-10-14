@@ -11,6 +11,7 @@ enum TopBySortKey {
     U16(u16),
     U32(u32),
     U64(u64),
+    U48(u64),
     I32(i32),
     I64(i64),
     F64(u64),
@@ -1258,6 +1259,7 @@ fn top_by_sort_value(
         (ValueType::U16, Value::U16(value)) => TopBySortKey::U16(value),
         (ValueType::U32, Value::U32(value)) => TopBySortKey::U32(value),
         (ValueType::U64, Value::U64(value)) => TopBySortKey::U64(value),
+        (ValueType::U48, Value::U48(value)) => TopBySortKey::U48(value),
         (ValueType::I32, Value::I32(value)) => TopBySortKey::I32(value),
         (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
         (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
@@ -1525,6 +1527,10 @@ fn encode_runtime_primary_key_part(
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::U48(value) => {
+            key.push(16);
+            key.extend(records::u48_be_bytes(*value)?);
         }
         Value::I32(value) => {
             key.push(14);
