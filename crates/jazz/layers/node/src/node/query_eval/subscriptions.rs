@@ -423,21 +423,7 @@ where
                 "admitted subscription referenced unregistered shape",
             ));
         };
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
+        let binding_view_key = subscribe_binding_view_key(&shape, &subscribe)?;
         self.apply_known_shape_subscribe_with_authority_result_key(
             &shape,
             subscribe,
@@ -555,21 +541,7 @@ where
         subscribe: Subscribe,
         policy_binding: Option<crate::protocol::PolicyBindingKey>,
     ) -> Result<(), Error> {
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
+        let binding_view_key = subscribe_binding_view_key(shape, &subscribe)?;
         let authority_result_key = policy_binding
             .map(|policy| AuthorityResultKey::policy_scoped(binding_view_key, policy))
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
@@ -586,21 +558,7 @@ where
         subscribe: Subscribe,
         authority_result_key: AuthorityResultKey,
     ) -> Result<(), Error> {
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
+        let binding_view_key = subscribe_binding_view_key(shape, &subscribe)?;
         let options = self
             .query
             .registered_shape_options
@@ -1287,6 +1245,29 @@ where
         }
         Ok(None)
     }
+}
+
+/// The binding view a subscribe names: its shape bound to its parameter
+/// values, read through its read view.
+fn subscribe_binding_view_key(
+    shape: &ValidatedQuery,
+    subscribe: &Subscribe,
+) -> Result<BindingViewKey, Error> {
+    if subscribe.values.len() != shape.params().len() {
+        return Err(Error::InvalidStoredValue("binding arity mismatch"));
+    }
+    let value_map = shape
+        .params()
+        .keys()
+        .cloned()
+        .zip(subscribe.values.iter().cloned())
+        .collect::<BTreeMap<_, _>>();
+    let binding = shape.bind(value_map)?;
+    Ok(BindingViewKey {
+        shape_id: subscribe.shape_id,
+        binding_id: binding.binding_id(),
+        read_view: subscribe.subscription.read_view,
+    })
 }
 
 fn registered_binding_usage_key(
