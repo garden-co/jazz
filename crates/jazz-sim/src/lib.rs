@@ -8,6 +8,7 @@ pub mod profiling;
 pub mod public_schema_fixture;
 pub mod view_accounting;
 
+use distributions::Lcg;
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst};
@@ -1070,27 +1071,6 @@ pub fn run_echo_threaded(seed: u64, rounds: u64, profile: PeerProfile) -> RunRep
 
 fn empty_schema() -> JazzSchema {
     JazzSchema::empty()
-}
-
-#[derive(Clone, Debug)]
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed ^ 0x9e37_79b9_7f4a_7c15,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
 }
 
 fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
