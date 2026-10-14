@@ -3797,7 +3797,7 @@ pub fn encode_node(node: &ChunkNode) -> Result<Vec<u8>, Error> {
 /// The frozen v1 node codec. Future codecs remain separate functions selected
 /// by [`LargeValueFormat`], even if they initially share record machinery.
 fn encode_node_v1(node: &ChunkNode) -> Result<Vec<u8>, Error> {
-    let schema = chunk_node_schema();
+    let schema = chunk_node_schema(node_kind(node));
     let value = match node {
         ChunkNode::Leaf {
             format,
@@ -3817,23 +3817,25 @@ fn encode_node_v1(node: &ChunkNode) -> Result<Vec<u8>, Error> {
             kind,
             children,
         } => {
-            let child_schema = chunk_node_child_schema();
+            let child_schema = chunk_node_child_schema(*kind);
             let children = children
                 .iter()
                 .map(|child| {
+                    let mut fields = vec![
+                        Value::Bytes(child.node_ref.object_hash.0.to_vec()),
+                        Value::Bytes(child.node_ref.locator.0.to_vec()),
+                        Value::U64(child.metrics.byte_length),
+                        Value::Bytes(child.logical_hash.0.to_vec()),
+                    ];
+                    match (kind, child.metrics.utf16_length) {
+                        (LargeValueKind::Bytes, None) => {}
+                        (LargeValueKind::String | LargeValueKind::Json, Some(length)) => {
+                            fields.push(Value::U64(length));
+                        }
+                        _ => return Err(Error::MalformedNode),
+                    }
                     child_schema
-                        .create(&[
-                            Value::Bytes(child.node_ref.object_hash.0.to_vec()),
-                            Value::Bytes(child.node_ref.locator.0.to_vec()),
-                            Value::U64(child.metrics.byte_length),
-                            Value::Nullable(
-                                child
-                                    .metrics
-                                    .utf16_length
-                                    .map(|value| Box::new(Value::U64(value))),
-                            ),
-                            Value::Bytes(child.logical_hash.0.to_vec()),
-                        ])
+                        .create(&fields)
                         .map(|bytes| {
                             Value::Record(crate::records::OwnedRecord::new(bytes, child_schema))
                         })
@@ -3859,20 +3861,20 @@ fn encode_node_v1(node: &ChunkNode) -> Result<Vec<u8>, Error> {
     .map_err(|_| Error::MalformedNode)
 }
 
-fn chunk_node_child_schema() -> RecordDescriptor {
-    RecordDescriptor::new([
+fn chunk_node_child_schema(kind: LargeValueKind) -> RecordDescriptor {
+    let mut fields = vec![
         ("object_hash", ValueType::raw_bytes()),
         ("locator", ValueType::raw_bytes()),
         ("byte_length", ValueType::U64),
-        (
-            "utf16_length",
-            ValueType::Nullable(Box::new(ValueType::U64)),
-        ),
         ("logical_hash", ValueType::raw_bytes()),
-    ])
+    ];
+    if kind != LargeValueKind::Bytes {
+        fields.push(("utf16_length", ValueType::U64));
+    }
+    RecordDescriptor::new(fields)
 }
 
-fn chunk_node_schema() -> EnumSchema {
+fn chunk_node_schema(kind: LargeValueKind) -> EnumSchema {
     EnumSchema::new(
         "groove.internal.large_value.chunk_node",
         [
@@ -3892,7 +3894,7 @@ fn chunk_node_schema() -> EnumSchema {
                     (
                         "children",
                         ValueType::Array(Box::new(ValueType::Record(Box::new(
-                            chunk_node_child_schema(),
+                            chunk_node_child_schema(kind),
                         )))),
                     ),
                 ]),
@@ -3936,7 +3938,10 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
         validate_untyped_node_structure(&node)?;
         return Ok(node);
     }
-    let schema = chunk_node_schema();
+    // The fixed kind byte selects the child layout before binding any children.
+    let kind = payload.get(1).copied().ok_or(Error::MalformedNode)?;
+    let kind = large_value_kind_from_tag(kind).map_err(|_| Error::MalformedNode)?;
+    let schema = chunk_node_schema(kind);
     preflight_node_bounds(encoded, &schema)?;
     let value =
         crate::records::decode_single_field_value(encoded, &ValueType::Enum(Box::new(schema)))
@@ -3954,7 +3959,7 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
             kind: large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?,
             bytes: bytes.clone(),
         },
-        (1, [Value::U8(format), Value::U8(kind), Value::Array(children)]) => {
+        (1, [Value::U8(format), Value::U8(_), Value::Array(children)]) => {
             let children = children
                 .iter()
                 .map(|child| {
@@ -3962,21 +3967,30 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
                         return Err(Error::MalformedNode);
                     };
                     let fields = child.to_values().map_err(|_| Error::MalformedNode)?;
-                    let [
-                        object_hash,
-                        locator,
-                        Value::U64(byte_length),
-                        Value::Nullable(utf16_length),
-                        logical_hash,
-                    ] = fields.as_slice()
-                    else {
-                        return Err(Error::MalformedNode);
-                    };
-                    let utf16_length = match utf16_length.as_deref() {
-                        None => None,
-                        Some(Value::U64(value)) => Some(*value),
-                        _ => return Err(Error::MalformedNode),
-                    };
+                    let (object_hash, locator, byte_length, logical_hash, utf16_length) =
+                        match (kind, fields.as_slice()) {
+                            (
+                                LargeValueKind::Bytes,
+                                [object_hash, locator, Value::U64(byte_length), logical_hash],
+                            ) => (object_hash, locator, byte_length, logical_hash, None),
+                            (
+                                LargeValueKind::String | LargeValueKind::Json,
+                                [
+                                    object_hash,
+                                    locator,
+                                    Value::U64(byte_length),
+                                    logical_hash,
+                                    Value::U64(utf16_length),
+                                ],
+                            ) => (
+                                object_hash,
+                                locator,
+                                byte_length,
+                                logical_hash,
+                                Some(*utf16_length),
+                            ),
+                            _ => return Err(Error::MalformedNode),
+                        };
                     Ok(BranchChild {
                         node_ref: NodeRef {
                             object_hash: ContentHash(
@@ -3996,7 +4010,7 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
                 .collect::<Result<Vec<_>, Error>>()?;
             ChunkNode::Branch {
                 format: *format,
-                kind: large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?,
+                kind,
                 children,
             }
         }
@@ -6327,7 +6341,7 @@ mod tests {
                         145537, 34950, 152569, 41743, 42982, 69329, 56603, 124288, 73969, 85750,
                         84406, 23086, 111851, 83424
                     ],
-                    "b720e518e7680a0d403e8dc78217d3414e15d39740279b0f42b99e0933685a04".to_owned(),
+                    "f01102f33f96b7d104d4a70b781964b97547793a63b026202fd1164ead4e2baa".to_owned(),
                     "c8b977ca28bab218dd195785eec03dc78706b126edae83a480772b517381a575".to_owned()
                 ),
                 (
@@ -6336,17 +6350,17 @@ mod tests {
                         84454, 160417, 126463, 84455, 79700, 38374, 46026, 71601, 69902, 35485,
                         44337, 19041, 139318, 50419
                     ],
-                    "0144a46b81a69c8e865d22c6a7d91da207e23c3689b3cf8ee78b7dc7443322dc".to_owned(),
+                    "a4b4c45db1bd95db0d20a36b02134994fac089d62e1d45a1916285ea8e3b7dc7".to_owned(),
                     "d274d2f7b43d8e4a774c8b52929567e6fd059a5fb035a76ba7d694c561536d1a".to_owned()
                 ),
                 (
                     vec![73665, 79319],
-                    "1e435f295806a39b9247255a85bfc64745f3cf2ca2033c0c1b720f249ba4ce3d".to_owned(),
+                    "fa7b255ba025c2614721e040750df4edc3782d4cc758b7d736bfc73b063e262a".to_owned(),
                     "64119616bbd532be38b6ae4e33fb1b9260cd022f322cc9225b3efe4607e27365".to_owned()
                 ),
                 (
                     vec![1130487, 1927793, 152984],
-                    "9d0c1498928003bbeaa8cb526252c3080cd819b83b99a0e01ad3cd79f63a2319".to_owned(),
+                    "c1f1610470bbc1cda6ad72676a0a0756805ac8117b6886cfed98b9547cb6ce53".to_owned(),
                     "2d9f7ec079e2ac62ff79eafb27784ad9dbe6651e91df5795fe3fe54807247e2e".to_owned()
                 ),
             ],
@@ -8131,6 +8145,83 @@ mod tests {
         );
     }
 
+    /// Alice stores each branch kind; Bob reads its exact child layout without
+    /// a descriptor. This codec-level fixture pins bytes and authenticated hashes.
+    #[test]
+    fn branch_child_lengths_have_kind_specific_golden_bytes() {
+        for (kind, kind_tag, utf16) in [
+            (LargeValueKind::Bytes, 0, None),
+            (LargeValueKind::String, 1, Some(3)),
+            (LargeValueKind::Json, 2, Some(3)),
+        ] {
+            let child = BranchChild {
+                node_ref: NodeRef {
+                    object_hash: ContentHash([0x11; 32]),
+                    locator: Locator([0x22; 32]),
+                },
+                metrics: NodeMetrics {
+                    byte_length: 7,
+                    utf16_length: utf16,
+                },
+                logical_hash: ContentHash([0x33; 32]),
+            };
+            let node = ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                kind,
+                children: vec![child.clone()],
+            };
+            let mut expected = vec![1, 1, kind_tag, 1, 0, 0, 0];
+            expected.extend_from_slice(&7_u64.to_le_bytes());
+            if utf16.is_some() {
+                expected.extend_from_slice(&3_u64.to_le_bytes());
+            }
+            let first_end = if utf16.is_some() { 56_u32 } else { 48 };
+            expected.extend_from_slice(&first_end.to_le_bytes());
+            expected.extend_from_slice(&(first_end + 32).to_le_bytes());
+            expected.extend_from_slice(&[0x11; 32]);
+            expected.extend_from_slice(&[0x22; 32]);
+            expected.extend_from_slice(&[0x33; 32]);
+            assert_eq!(encode_node(&node).unwrap(), expected);
+            assert_eq!(expected.len(), if utf16.is_some() { 127 } else { 119 });
+            let hash = object_hash(&expected);
+            let expected_hashes = [
+                [
+                    101, 222, 216, 150, 249, 12, 87, 174, 148, 12, 16, 76, 159, 145, 229, 65, 214,
+                    74, 93, 251, 46, 214, 76, 36, 219, 181, 161, 109, 76, 175, 84, 68,
+                ],
+                [
+                    215, 161, 47, 45, 75, 157, 78, 34, 138, 198, 224, 19, 219, 218, 5, 84, 156,
+                    208, 13, 197, 134, 12, 169, 223, 86, 206, 179, 64, 109, 201, 163, 174,
+                ],
+                [
+                    222, 62, 30, 188, 115, 158, 224, 140, 119, 173, 189, 88, 39, 129, 231, 193,
+                    174, 29, 42, 85, 171, 109, 92, 120, 34, 100, 92, 255, 43, 191, 137, 31,
+                ],
+            ];
+            assert_eq!(hash.0, expected_hashes[usize::from(kind_tag)]);
+            assert_eq!(decode_authenticated_node(hash, &expected).unwrap(), node);
+            for length in 0..expected.len() {
+                assert!(
+                    decode_authenticated_node(
+                        object_hash(&expected[..length]),
+                        &expected[..length]
+                    )
+                    .is_err()
+                );
+            }
+            let mut malformed = child;
+            malformed.metrics.utf16_length = if utf16.is_some() { None } else { Some(0) };
+            assert_eq!(
+                encode_node(&ChunkNode::Branch {
+                    format: FORMAT_VERSION,
+                    kind,
+                    children: vec![malformed]
+                }),
+                Err(Error::MalformedNode)
+            );
+        }
+    }
+
     #[test]
     fn oversized_branch_fanout_is_rejected_before_metadata_decode() {
         let child = BranchChild {
@@ -8152,7 +8243,7 @@ mod tests {
         .unwrap();
         assert!(encoded.len() <= MAX_ENCODED_NODE_BYTES);
         assert_eq!(
-            preflight_node_bounds(&encoded, &chunk_node_schema()),
+            preflight_node_bounds(&encoded, &chunk_node_schema(LargeValueKind::Bytes)),
             Err(Error::MalformedNode)
         );
         assert_eq!(

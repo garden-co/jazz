@@ -192,7 +192,7 @@ and exact aggregate metrics:
 ```text
 NodeRef { object_hash, locator }
 Leaf    { format, kind, bytes }
-Branch  { format, kind, children: [{ node_ref, byte_length, utf16_length? }] }
+Branch  { format, kind, children: [{ node_ref, byte_length, /* text only */ utf16_length }] }
 ```
 
 Leaves are selected by a versioned FastCDC-like content-defined chunker with
@@ -237,9 +237,16 @@ Leaf        = { 1: format:u8, 2: kind:u8, 3: bytes:bytes }
 Branch      = { 1: format:u8, 2: kind:u8, 3: children:[BranchChild] }
 BranchChild = {
   1: object_hash:bytes32, 2: locator:bytes32, 3: byte_length:u64,
-  4: utf16_length:u64?, 5: logical_hash:bytes32
+  4: logical_hash:bytes32
+  // string/JSON only: 5: utf16_length:u64
 }
 ```
+
+Branch nodes select their child layout from the fixed `kind` byte before
+binding children. Binary children omit UTF-16 length; string/JSON children
+store a required `u64`, with no nullable flag. In-memory metrics retain their
+optional representation. This saves nine bytes per binary child and one per
+text child. Branch bytes and object hashes change; leaf bytes are unchanged.
 
 These records use ordinary normative Groove enum/record/scalar encoding. V1
 has no serde/postcard envelope or private node tag. Exact v1 fixtures cover a

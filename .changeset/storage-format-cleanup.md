@@ -19,4 +19,6 @@
 
 - Omit UTF-16 length from binary large-value descriptors and store it as a required integer for text/JSON, saving nine bytes per binary descriptor and one byte per text descriptor.
 
+- Specialize chunk-tree branch children by value kind: omit UTF-16 length for bytes and require it for string/JSON, saving nine bytes per binary child and one per text child. Branch content hashes change with their encoding.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.
