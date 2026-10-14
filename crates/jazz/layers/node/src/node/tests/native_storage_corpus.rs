@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 /// of a settled historical fixture merely to inflate this corpus.
 const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_catalogue",
-    "jazz_catalogue_pointer",
     "jazz_nodes",
     "jazz_schema_versions",
     "jazz_transactions",
@@ -1467,40 +1466,11 @@ fn verify_historical_native_corpus<S>(
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
-        // Only selection metadata changes during the startup upgrade. Validate
-        // those records explicitly, then compare every other historical byte.
-        let active = reader.database.primary_key_get_raw("jazz_catalogue", &[
-            Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
-            Value::Uuid(uuid::Uuid::nil()),
-        ]).unwrap().expect("opening persists the active selection");
-        assert_eq!(codec::decode_active_schema(active.record().get_bytes(
-            CatalogueRowRecord::FIELD_PAYLOAD_IDX,
-        ).unwrap()).unwrap(), reader.catalogue.active_schema);
-        let mut upgraded_keys = vec![("jazz_catalogue", active.into_parts().0)];
-        for ready in reader.database.primary_key_scan_raw("jazz_catalogue", &[
-            Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
-        ]).unwrap() {
-            let marker = codec::decode_catalogue_bootstrap_ready(ready.record().get_bytes(
-                CatalogueRowRecord::FIELD_PAYLOAD_IDX,
-            ).unwrap()).unwrap();
-            assert_eq!(marker.current_write_schema, reader.current_write_schema().unwrap());
-            assert_eq!(marker.active_catalogue_seq, reader.active_catalogue_seq());
-            upgraded_keys.push(("jazz_catalogue", ready.into_parts().0));
-        }
-        if reader.catalogue.active_schema.revision == 0 {
-            let pointer = reader.database.primary_key_get_raw("jazz_catalogue_pointer", &[Value::U64(0)])
-                .unwrap().expect("upgraded revision-zero pointer");
-            assert_eq!(pointer.record().get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX).unwrap(),
-                reader.catalogue.active_schema.schema.0);
-            upgraded_keys.push(("jazz_catalogue_pointer", pointer.into_parts().0));
-        }
-        let prefixes = upgraded_keys.into_iter().map(|(store, key)|
-            format!("entry\t{store}\t{}\t", hex::encode(key))
-        ).collect::<Vec<_>>();
-        let historical = |pack: &str| pack.lines().filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
-            .collect::<Vec<_>>().join("\n");
-        assert_eq!(historical(&native_corpus_pack(&before_write)), historical(&expected_pack()),
-            "current Jazz preserves every historical byte outside upgraded selection metadata");
+        assert_eq!(
+            native_corpus_pack(&before_write),
+            expected_pack(),
+            "opening the corpus preserves every stored byte"
+        );
     }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
     reader

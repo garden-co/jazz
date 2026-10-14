@@ -408,20 +408,7 @@ where
                 mapping,
             )?;
         }
-        if plan.catalogue.active_schema.wire_pointer()
-            != previous_catalogue.active_schema.wire_pointer()
-        {
-            batch.update(
-                "jazz_catalogue_pointer",
-                vec![
-                    Value::U64(plan.catalogue.active_schema.revision),
-                    Value::Uuid(plan.catalogue.active_schema.schema.0),
-                ],
-            );
-        }
-        if plan.catalogue.active_schema.revision > 0 {
-            Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
-        }
+        Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
         // A catalogue-only batch writes no history rows, so it applies directly
         // rather than through `apply_node_batch`.
         let persistence = async {

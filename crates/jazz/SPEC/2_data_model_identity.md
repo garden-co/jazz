@@ -387,8 +387,8 @@ accepted/reopen/rebuild receipts for the same coordinate.
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
-  and branch mappings), `jazz_catalogue`, and
-  `jazz_catalogue_pointer`;
+  and branch mappings), and `jazz_catalogue` (including the required active
+  schema selection);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by

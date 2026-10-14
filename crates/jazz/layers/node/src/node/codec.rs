@@ -1350,13 +1350,6 @@ impl<'a> CataloguePayloadCursor<'a> {
     }
 }
 
-groove::define_record! {
-    pub(super) struct CataloguePointerRowRecord {
-        0 => revision: u64,
-        1 => schema: SchemaVersionId,
-    }
-}
-
 #[cfg(test)]
 mod catalogue_payload_tests {
     use super::*;

@@ -1145,10 +1145,6 @@ self.database.finish_persistence(persisted)?;
         active: &ActiveSchema,
     ) -> Result<(), Error> {
         batch.update(
-            "jazz_catalogue_pointer",
-            vec![Value::U64(active.revision), Value::Uuid(active.schema.0)],
-        );
-        batch.update(
             "jazz_catalogue",
             vec![
                 Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),

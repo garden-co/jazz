@@ -490,7 +490,6 @@ impl RuntimeSchema {
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
-            catalogue_pointer_table(),
             transactions_table(),
             tx_touched_rows_table(),
             rejected_transactions_table(),
@@ -499,12 +498,7 @@ impl RuntimeSchema {
 
     /// Return the version-independent metadata tables used by staged catalogue open.
     pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
-        vec![
-            nodes_table(),
-            schema_versions_table(),
-            catalogue_table(),
-            catalogue_pointer_table(),
-        ]
+        vec![nodes_table(), schema_versions_table(), catalogue_table()]
     }
 
     /// Return the canonical byte encoding used to address this schema version.
@@ -1248,17 +1242,6 @@ fn catalogue_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("kind", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("id"),
     ]))
-}
-
-fn catalogue_pointer_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_catalogue_pointer",
-        [
-            column("revision", GrooveColumnType::U64),
-            column("schema", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
 }
 
 /// Policy-shape constructors.

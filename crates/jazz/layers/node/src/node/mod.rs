@@ -3022,9 +3022,8 @@ struct CatalogueOpenState {
     active_catalogue_seq: u64,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
-    current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
-    recovered_active_schema: Option<ActiveSchema>,
+    active_schema: ActiveSchema,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
