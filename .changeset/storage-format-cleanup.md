@@ -33,4 +33,6 @@
 
 - Store transaction rejections as a payload enum shared by audit and retry records: cascade rejections require their root transaction ID, malformed commits require their message, and other reasons carry no payload. Remove the separate optional root/detail fields.
 
+React Native now requires native relay ABI 3 because foreground row payloads use the new scalar tags. Rebuild the native app alongside the JavaScript update; mismatched bundles and native builds are rejected during initialization.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.
