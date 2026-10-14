@@ -882,54 +882,45 @@ export function TableDataGrid() {
     return [];
   }, [searchParams]);
 
-  const setPageSize = (next: number) => {
+  // Replace the URL's search params in place. Unless `keepPage`, any change
+  // returns to the first page. An `undefined` value removes the param.
+  const patchSearchParams = (
+    patch: (current: URLSearchParams) => Record<string, string | undefined>,
+    { keepPage = false } = {},
+  ) => {
     setSearchParams(
       (prev) => {
         const p = new URLSearchParams(prev);
-        if (next !== DEFAULT_PAGE_SIZE) {
-          p.set("pageSize", String(next));
-        } else {
-          p.delete("pageSize");
+        if (!keepPage) p.delete("page");
+        for (const [key, value] of Object.entries(patch(p))) {
+          if (value === undefined) p.delete(key);
+          else p.set(key, value);
         }
-        p.delete("page");
         return p;
       },
       { replace: true },
     );
   };
 
-  const setPageIndex = (next: number | ((current: number) => number)) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
+  const setPageSize = (next: number) =>
+    patchSearchParams(() => ({
+      pageSize: next !== DEFAULT_PAGE_SIZE ? String(next) : undefined,
+    }));
+
+  const setPageIndex = (next: number | ((current: number) => number)) =>
+    patchSearchParams(
+      (p) => {
         const currentPage = Number(p.get("page") ?? 0);
         const resolved = typeof next === "function" ? next(currentPage) : next;
-        if (resolved > 0) {
-          p.set("page", String(resolved));
-        } else {
-          p.delete("page");
-        }
-        return p;
+        return { page: resolved > 0 ? String(resolved) : undefined };
       },
-      { replace: true },
+      { keepPage: true },
     );
-  };
 
-  const setFilters = (next: TableFilterClause[]) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next.length > 0) {
-          p.set("filters", serializeFilterClauses(next));
-        } else {
-          p.delete("filters");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
-  };
+  const setFilters = (next: TableFilterClause[]) =>
+    patchSearchParams(() => ({
+      filters: next.length > 0 ? serializeFilterClauses(next) : undefined,
+    }));
   const explorerContext = useOutletContext<{
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
@@ -1193,22 +1184,12 @@ export function TableDataGrid() {
         ? [{ columnKey: "id", direction: "ASC" as const }]
         : [nextSortColumns.at(-1)!];
 
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        const col = nextSort[0];
-        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
-          p.set("sort", col.columnKey);
-          p.set("dir", col.direction);
-        } else {
-          p.delete("sort");
-          p.delete("dir");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
+    const col = nextSort[0];
+    const isDefault = !col || (col.columnKey === "id" && col.direction === "ASC");
+    patchSearchParams(() => ({
+      sort: isDefault ? undefined : col.columnKey,
+      dir: isDefault ? undefined : col.direction,
+    }));
   };
   const handleDiscardQueuedEdits = (): void => {
     if (pendingSaveByTable.has(table)) return;
