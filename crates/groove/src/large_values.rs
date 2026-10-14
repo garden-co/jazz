@@ -1865,20 +1865,28 @@ impl PhysicalTraversalNodeBudget {
     }
 }
 
-#[derive(Clone, Copy)]
-struct LogicalTraversalBudget {
+/// Per-walk state of a logical (occurrence-counting) tree read: the step
+/// budget, and whether any node read is blocked on a later input round.
+struct LogicalTraversal {
     remaining: usize,
+    blocked: bool,
 }
 
-impl LogicalTraversalBudget {
+impl LogicalTraversal {
     fn new() -> Self {
         Self {
             remaining: MAX_LOGICAL_TRAVERSAL_STEPS,
+            blocked: false,
         }
     }
 
-    fn consume(&mut self) -> Result<(), Error> {
-        self.consume_many(1)
+    /// Charge the step for visiting a node at `depth`.
+    fn enter(&mut self, depth: usize) -> Result<(), Error> {
+        self.consume_many(1)?;
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree);
+        }
+        Ok(())
     }
 
     fn consume_many(&mut self, count: usize) -> Result<(), Error> {
@@ -1886,6 +1894,39 @@ impl LogicalTraversalBudget {
             .remaining
             .checked_sub(count)
             .ok_or(Error::TraversalWorkLimitExceeded)?;
+        Ok(())
+    }
+
+    /// Load one authenticated node of `value`, or record that the read is
+    /// blocked and return `None` so the walk can continue with other nodes.
+    fn load(
+        &mut self,
+        value: &LargeValueRef,
+        node_ref: &NodeRef,
+        expected_logical_hash: ContentHash,
+        inputs: &mut EvaluationInputs,
+    ) -> Result<Option<ChunkNode>, IvmRuntimeError> {
+        match load_authenticated_node_attempt(
+            value.format_version,
+            value.kind,
+            node_ref,
+            expected_logical_hash,
+            inputs,
+        ) {
+            Ok(node) => Ok(Some(node)),
+            Err(IvmRuntimeError::EvaluationBlocked) => {
+                self.blocked = true;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Fail with the blocked outcome if any node read was blocked.
+    fn finish(self) -> Result<(), IvmRuntimeError> {
+        if self.blocked {
+            return Err(IvmRuntimeError::EvaluationBlocked);
+        }
         Ok(())
     }
 }
@@ -4096,26 +4137,11 @@ pub(crate) fn materialize_attempt(
         value.logical_hash,
     )];
     let mut leaves = Vec::<(NodeRef, Vec<u8>)>::new();
-    let mut blocked = false;
-    let mut budget = LogicalTraversalBudget::new();
+    let mut walk = LogicalTraversal::new();
     while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        budget.consume()?;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
-        let node = match load_authenticated_node_attempt(
-            value.format_version,
-            value.kind,
-            &node_ref,
-            expected_logical_hash,
-            inputs,
-        ) {
-            Ok(node) => node,
-            Err(IvmRuntimeError::EvaluationBlocked) => {
-                blocked = true;
-                continue;
-            }
-            Err(error) => return Err(error),
+        walk.enter(depth)?;
+        let Some(node) = walk.load(value, &node_ref, expected_logical_hash, inputs)? else {
+            continue;
         };
         match node {
             ChunkNode::Leaf { bytes, .. } => {
@@ -4136,7 +4162,7 @@ pub(crate) fn materialize_attempt(
                         return Err(Error::DescriptorMismatch.into());
                     }
                 }
-                budget.consume_many(children.len())?;
+                walk.consume_many(children.len())?;
                 for child in children.into_iter().rev() {
                     pending.push((
                         child.node_ref,
@@ -4148,9 +4174,7 @@ pub(crate) fn materialize_attempt(
             }
         }
     }
-    if blocked {
-        return Err(IvmRuntimeError::EvaluationBlocked);
-    }
+    walk.finish()?;
     let mut bytes =
         Vec::with_capacity(usize::try_from(value.byte_length).map_err(|_| Error::MetricOverflow)?);
     for (_, leaf) in leaves {
@@ -4637,13 +4661,9 @@ fn base_utf16_length_for_byte_range_attempt(
         0_usize,
     )];
     let mut total = 0_u64;
-    let mut blocked = false;
-    let mut budget = LogicalTraversalBudget::new();
+    let mut walk = LogicalTraversal::new();
     while let Some((node_ref, expected_hash, start, bytes_len, utf16_len, depth)) = pending.pop() {
-        budget.consume()?;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+        walk.enter(depth)?;
         let end = start.checked_add(bytes_len).ok_or(Error::MetricOverflow)?;
         if range.start >= end || range.end <= start {
             continue;
@@ -4652,19 +4672,8 @@ fn base_utf16_length_for_byte_range_attempt(
             total = total.checked_add(utf16_len).ok_or(Error::MetricOverflow)?;
             continue;
         }
-        let node = match load_authenticated_node_attempt(
-            value.format_version,
-            value.kind,
-            &node_ref,
-            expected_hash,
-            inputs,
-        ) {
-            Ok(node) => node,
-            Err(IvmRuntimeError::EvaluationBlocked) => {
-                blocked = true;
-                continue;
-            }
-            Err(error) => return Err(error),
+        let Some(node) = walk.load(value, &node_ref, expected_hash, inputs)? else {
+            continue;
         };
         match node {
             ChunkNode::Leaf { bytes, .. } => {
@@ -4681,7 +4690,7 @@ fn base_utf16_length_for_byte_range_attempt(
                     .ok_or(Error::MetricOverflow)?;
             }
             ChunkNode::Branch { children, .. } => {
-                budget.consume_many(children.len())?;
+                walk.consume_many(children.len())?;
                 let mut child_start = start;
                 let mut next = Vec::with_capacity(children.len());
                 for child in children {
@@ -4705,11 +4714,8 @@ fn base_utf16_length_for_byte_range_attempt(
             }
         }
     }
-    if blocked {
-        Err(IvmRuntimeError::EvaluationBlocked)
-    } else {
-        Ok(total)
-    }
+    walk.finish()?;
+    Ok(total)
 }
 
 /// Compare an indirect logical scalar to inline source bytes, requesting one
@@ -4925,30 +4931,15 @@ fn base_range_attempt(
         0_usize,
     )];
     let mut slices = Vec::<(u64, Vec<u8>)>::new();
-    let mut blocked = false;
-    let mut budget = LogicalTraversalBudget::new();
+    let mut walk = LogicalTraversal::new();
     while let Some((node_ref, expected_hash, start, length, depth)) = pending.pop() {
-        budget.consume()?;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+        walk.enter(depth)?;
         let end = start.checked_add(length).ok_or(Error::MetricOverflow)?;
         if range.start >= end || range.end <= start {
             continue;
         }
-        let node = match load_authenticated_node_attempt(
-            value.format_version,
-            value.kind,
-            &node_ref,
-            expected_hash,
-            inputs,
-        ) {
-            Ok(node) => node,
-            Err(IvmRuntimeError::EvaluationBlocked) => {
-                blocked = true;
-                continue;
-            }
-            Err(error) => return Err(error),
+        let Some(node) = walk.load(value, &node_ref, expected_hash, inputs)? else {
+            continue;
         };
         match node {
             ChunkNode::Leaf { bytes, .. } => {
@@ -4965,7 +4956,7 @@ fn base_range_attempt(
                 slices.push((start, part));
             }
             ChunkNode::Branch { children, .. } => {
-                budget.consume_many(children.len())?;
+                walk.consume_many(children.len())?;
                 let mut child_start = start;
                 let mut next = Vec::with_capacity(children.len());
                 for child in children {
@@ -4988,9 +4979,7 @@ fn base_range_attempt(
             }
         }
     }
-    if blocked {
-        return Err(IvmRuntimeError::EvaluationBlocked);
-    }
+    walk.finish()?;
     slices.sort_by_key(|(start, _)| *start);
     Ok(slices.into_iter().flat_map(|(_, bytes)| bytes).collect())
 }
