@@ -726,19 +726,10 @@ where
         loop {
             let mut boundary = None;
             while self.leaf_scan < self.leaf.len().min(LEAF_MAX_BYTES) {
-                self.leaf_hash = self
-                    .leaf_hash
-                    .wrapping_shl(1)
-                    .wrapping_add(gear(self.leaf[self.leaf_scan]));
+                self.leaf_hash = roll(self.leaf_hash, self.leaf[self.leaf_scan]);
                 self.leaf_scan += 1;
                 let length = self.leaf_scan;
-                let cut = length >= LEAF_MIN_BYTES
-                    && if length < LEAF_TARGET_BYTES {
-                        self.leaf_hash & V1_FASTCDC_LEAF_SHORT_MASK == 0
-                    } else {
-                        self.leaf_hash & V1_FASTCDC_LEAF_LONG_MASK == 0
-                    };
-                if cut || length == LEAF_MAX_BYTES {
+                if leaf_cut(self.leaf_hash, length) || length == LEAF_MAX_BYTES {
                     boundary = Some(length);
                     break;
                 }
@@ -766,12 +757,7 @@ where
 
     fn emit_leaf(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
         let metrics = metrics(self.kind, &bytes)?;
-        let chunk_node = ChunkNode::Leaf {
-            format: FORMAT_VERSION,
-            kind: self.kind,
-            bytes,
-        };
-        let node = self.stage_node_to(chunk_node, metrics)?;
+        let node = self.stage_node_to(leaf_node(self.kind, bytes), metrics)?;
         self.add_node(0, node)
     }
 
@@ -808,21 +794,11 @@ where
             }
             let (count, boundary) = {
                 let state = &mut self.levels[level];
-                for byte in
-                    grouping_hash_from_logical(FORMAT_VERSION, self.kind, node.structural_hash).0
-                {
-                    state.hash = state.hash.wrapping_shl(1).wrapping_add(gear(byte));
-                }
+                state.hash = roll_child(state.hash, self.kind, &node);
                 state.pending.push(node);
                 state.total += 1;
                 let count = state.pending.len();
-                let boundary = count >= BRANCH_MIN_CHILDREN
-                    && if count < BRANCH_TARGET_CHILDREN {
-                        state.hash & V1_GROUPING_BRANCH_SHORT_MASK == 0
-                    } else {
-                        state.hash & V1_GROUPING_BRANCH_LONG_MASK == 0
-                    };
-                (count, boundary)
+                (count, branch_cut(state.hash, count))
             };
             self.stats.peak_frontier_nodes = self
                 .stats
@@ -1171,7 +1147,7 @@ fn replace_tail_with_bounds_attempt(
 pub(crate) fn consolidate_appends_attempt(
     value: &LargeValueRef,
     inputs: &mut EvaluationInputs,
-    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+    fresh_locator: impl FnMut(ContentHash) -> Locator,
 ) -> Result<PreparedLargeValue, IvmRuntimeError> {
     validate_descriptor_shape(value)?;
     let base_byte_length = base_length(value.byte_length, &value.edit_tail, RangeUnit::Bytes)?;
@@ -1208,37 +1184,17 @@ pub(crate) fn consolidate_appends_attempt(
 
     let mut logical_suffix = last_leaf.bytes;
     logical_suffix.extend_from_slice(&appended);
-    let mut staged_chunks = Vec::new();
-    let mut replacement = stage_leaves_reusing(
-        value.kind,
-        &logical_suffix,
-        &existing,
-        &mut fresh_locator,
-        &mut staged_chunks,
-    )?;
+    let mut stager = reusing_stager(value.kind, &existing, fresh_locator);
+    let mut replacement = stager.leaves(&logical_suffix)?;
 
     for frame in last_leaf.path.into_iter().rev() {
         let mut level = frame.children;
         level.pop();
         let mut rebuilt = level.into_iter().map(BuiltNode::from).collect::<Vec<_>>();
         rebuilt.append(&mut replacement);
-        replacement = stage_branch_level_reusing(
-            value.kind,
-            &rebuilt,
-            &existing,
-            &mut fresh_locator,
-            &mut staged_chunks,
-        )?;
+        replacement = stager.branches(&rebuilt)?;
     }
-
-    finish_rebuilt_tree(
-        value,
-        replacement,
-        depth,
-        &existing,
-        &mut fresh_locator,
-        staged_chunks,
-    )
+    finish_rebuilt_tree(value, replacement, depth, stager)
 }
 
 /// Consolidate one replacement against an otherwise tail-free base. The
@@ -1249,7 +1205,7 @@ pub(crate) fn consolidate_appends_attempt(
 pub(crate) fn consolidate_single_edit_attempt(
     value: &LargeValueRef,
     inputs: &mut EvaluationInputs,
-    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+    fresh_locator: impl FnMut(ContentHash) -> Locator,
 ) -> Result<PreparedLargeValue, IvmRuntimeError> {
     validate_descriptor_shape(value)?;
     let [edit] = value.edit_tail.as_slice() else {
@@ -1316,17 +1272,11 @@ pub(crate) fn consolidate_single_edit_attempt(
         return Ok(prepare_with_locator(value.kind, &segment, fresh_locator)?);
     }
 
-    let mut staged_chunks = Vec::new();
+    let mut stager = reusing_stager(value.kind, &existing, fresh_locator);
     let mut replacement = if segment.is_empty() {
         Vec::new()
     } else {
-        stage_leaves_reusing(
-            value.kind,
-            &segment,
-            &existing,
-            &mut fresh_locator,
-            &mut staged_chunks,
-        )?
+        stager.leaves(&segment)?
     };
 
     for depth in (0..left_path.len()).rev() {
@@ -1351,49 +1301,21 @@ pub(crate) fn consolidate_single_edit_attempt(
         replacement = if level.len() == 1 && !higher_path_has_siblings {
             level
         } else {
-            stage_branch_level_reusing(
-                value.kind,
-                &level,
-                &existing,
-                &mut fresh_locator,
-                &mut staged_chunks,
-            )?
+            stager.branches(&level)?
         };
     }
-    finish_rebuilt_tree(
-        value,
-        replacement,
-        left_path.len(),
-        &existing,
-        &mut fresh_locator,
-        staged_chunks,
-    )
+    finish_rebuilt_tree(value, replacement, left_path.len(), stager)
 }
 
 /// Stage parent levels over `level` (rebuilt at `depth`) until one root
 /// remains, then check that root still describes `value`'s final contents.
 fn finish_rebuilt_tree(
     value: &LargeValueRef,
-    mut level: Vec<BuiltNode>,
-    mut depth: usize,
-    existing: &std::collections::BTreeMap<ContentHash, Locator>,
-    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
-    mut staged_chunks: Vec<StagedChunk>,
+    level: Vec<BuiltNode>,
+    depth: usize,
+    mut stager: TreeStager<impl FnMut(ContentHash) -> (Locator, bool)>,
 ) -> Result<PreparedLargeValue, IvmRuntimeError> {
-    while level.len() > 1 {
-        depth += 1;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
-        level = stage_branch_level_reusing(
-            value.kind,
-            &level,
-            existing,
-            fresh_locator,
-            &mut staged_chunks,
-        )?;
-    }
-    let root = level.pop().ok_or(Error::MalformedNode)?;
+    let root = stager.root(level, depth, Error::InvalidTree)?;
     if root.metrics.byte_length != value.byte_length
         || root.metrics.utf16_length != value.utf16_length
     {
@@ -1401,7 +1323,7 @@ fn finish_rebuilt_tree(
     }
     Ok(PreparedLargeValue {
         value_ref: root.into_value_ref(value.kind),
-        staged_chunks,
+        staged_chunks: stager.staged,
     })
 }
 
@@ -2275,46 +2197,12 @@ fn prepare_with_locator(
     mut locator_for: impl FnMut(ContentHash) -> Locator,
 ) -> Result<PreparedLargeValue, Error> {
     validate_logical(kind, logical_bytes)?;
-    let mut staged_chunks = Vec::new();
-    let mut level = Vec::new();
-    for range in leaf_ranges(kind, logical_bytes)? {
-        let bytes = logical_bytes[range].to_vec();
-        let metrics = metrics(kind, &bytes)?;
-        let node = ChunkNode::Leaf {
-            format: FORMAT_VERSION,
-            kind,
-            bytes,
-        };
-        level.push(stage_node(
-            node,
-            metrics,
-            &mut locator_for,
-            &mut staged_chunks,
-        )?);
-    }
-
-    let mut depth = 0;
-    while level.len() > 1 {
-        depth += 1;
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::MalformedNode);
-        }
-        let mut next = Vec::new();
-        for range in branch_ranges(kind, &level) {
-            let (node, metrics) = branch_over(kind, &level[range])?;
-            next.push(stage_node(
-                node,
-                metrics,
-                &mut locator_for,
-                &mut staged_chunks,
-            )?);
-        }
-        level = next;
-    }
-    let root = level.pop().expect("empty values have one leaf");
+    let mut stager = TreeStager::new(kind, |hash| (locator_for(hash), true));
+    let leaves = stager.leaves(logical_bytes)?;
+    let root = stager.root(leaves, 0, Error::MalformedNode)?;
     Ok(PreparedLargeValue {
         value_ref: root.into_value_ref(kind),
-        staged_chunks,
+        staged_chunks: stager.staged,
     })
 }
 
@@ -3347,86 +3235,105 @@ pub(crate) fn validate_edit_tail_attempt(
     Ok(())
 }
 
+#[cfg(test)]
 fn stage_node(
     node: ChunkNode,
     metrics: NodeMetrics,
     locator_for: &mut impl FnMut(ContentHash) -> Locator,
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<BuiltNode, Error> {
-    validate_untyped_node_structure(&node)?;
-    if node_metrics(node_kind(&node), &node)? != metrics {
+    let mut stager = TreeStager::new(node_kind(&node), |hash| (locator_for(hash), true));
+    let built = stager.node(node)?;
+    if built.metrics != metrics {
         return Err(Error::DescriptorMismatch);
     }
-    let (built, chunk) = seal_node(&node, metrics, |hash| (locator_for(hash), true))?;
-    staged_chunks.extend(chunk);
+    staged_chunks.append(&mut stager.staged);
     Ok(built)
 }
 
-fn stage_node_reusing(
+/// Builds content-defined tree levels. `locate` names each sealed node and
+/// says whether its chunk is new (and staged) or already stored (reused).
+struct TreeStager<L> {
     kind: LargeValueKind,
-    node: ChunkNode,
-    existing: &std::collections::BTreeMap<ContentHash, Locator>,
-    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
-    staged_chunks: &mut Vec<StagedChunk>,
-) -> Result<BuiltNode, Error> {
-    validate_untyped_node_structure(&node)?;
-    let metrics = node_metrics(kind, &node)?;
-    let (built, chunk) = seal_node(&node, metrics, |hash| match existing.get(&hash) {
+    locate: L,
+    staged: Vec<StagedChunk>,
+}
+
+impl<L: FnMut(ContentHash) -> (Locator, bool)> TreeStager<L> {
+    fn new(kind: LargeValueKind, locate: L) -> Self {
+        Self {
+            kind,
+            locate,
+            staged: Vec::new(),
+        }
+    }
+
+    fn node(&mut self, node: ChunkNode) -> Result<BuiltNode, Error> {
+        validate_untyped_node_structure(&node)?;
+        let metrics = node_metrics(self.kind, &node)?;
+        let (built, chunk) = seal_node(&node, metrics, &mut self.locate)?;
+        self.staged.extend(chunk);
+        Ok(built)
+    }
+
+    fn leaves(&mut self, bytes: &[u8]) -> Result<Vec<BuiltNode>, Error> {
+        leaf_ranges(self.kind, bytes)?
+            .into_iter()
+            .map(|range| self.node(leaf_node(self.kind, bytes[range].to_vec())))
+            .collect()
+    }
+
+    fn branches(&mut self, level: &[BuiltNode]) -> Result<Vec<BuiltNode>, Error> {
+        branch_ranges(self.kind, level)?
+            .into_iter()
+            .map(|range| {
+                self.node(ChunkNode::Branch {
+                    format: FORMAT_VERSION,
+                    kind: self.kind,
+                    children: level[range].iter().map(BranchChild::from).collect(),
+                })
+            })
+            .collect()
+    }
+
+    /// Stage parent levels over `level`, built at `depth`, until one root
+    /// remains; a tree deeper than [`MAX_TREE_DEPTH`] fails with `too_deep`.
+    fn root(
+        &mut self,
+        mut level: Vec<BuiltNode>,
+        mut depth: usize,
+        too_deep: Error,
+    ) -> Result<BuiltNode, Error> {
+        while level.len() > 1 {
+            depth += 1;
+            if depth > MAX_TREE_DEPTH {
+                return Err(too_deep);
+            }
+            level = self.branches(&level)?;
+        }
+        level.pop().ok_or(Error::MalformedNode)
+    }
+}
+
+/// A stager that reuses the stored locator of every node already in
+/// `existing` and names only new nodes with `fresh_locator`.
+fn reusing_stager<'a>(
+    kind: LargeValueKind,
+    existing: &'a std::collections::BTreeMap<ContentHash, Locator>,
+    mut fresh_locator: impl FnMut(ContentHash) -> Locator + 'a,
+) -> TreeStager<impl FnMut(ContentHash) -> (Locator, bool) + 'a> {
+    TreeStager::new(kind, move |hash| match existing.get(&hash) {
         Some(locator) => (*locator, false),
         None => (fresh_locator(hash), true),
-    })?;
-    staged_chunks.extend(chunk);
-    Ok(built)
+    })
 }
 
-fn stage_leaves_reusing(
-    kind: LargeValueKind,
-    bytes: &[u8],
-    existing: &std::collections::BTreeMap<ContentHash, Locator>,
-    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
-    staged_chunks: &mut Vec<StagedChunk>,
-) -> Result<Vec<BuiltNode>, Error> {
-    leaf_ranges(kind, bytes)?
-        .into_iter()
-        .map(|range| {
-            stage_node_reusing(
-                kind,
-                ChunkNode::Leaf {
-                    format: FORMAT_VERSION,
-                    kind,
-                    bytes: bytes[range].to_vec(),
-                },
-                existing,
-                fresh_locator,
-                staged_chunks,
-            )
-        })
-        .collect()
-}
-
-fn stage_branch_level_reusing(
-    kind: LargeValueKind,
-    level: &[BuiltNode],
-    existing: &std::collections::BTreeMap<ContentHash, Locator>,
-    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
-    staged_chunks: &mut Vec<StagedChunk>,
-) -> Result<Vec<BuiltNode>, Error> {
-    let mut next = Vec::new();
-    for range in branch_ranges(kind, level) {
-        let children = level[range].iter().map(BranchChild::from).collect();
-        next.push(stage_node_reusing(
-            kind,
-            ChunkNode::Branch {
-                format: FORMAT_VERSION,
-                kind,
-                children,
-            },
-            existing,
-            fresh_locator,
-            staged_chunks,
-        )?);
+fn leaf_node(kind: LargeValueKind, bytes: Vec<u8>) -> ChunkNode {
+    ChunkNode::Leaf {
+        format: FORMAT_VERSION,
+        kind,
+        bytes,
     }
-    Ok(next)
 }
 
 fn load_authenticated_node_attempt(
@@ -4949,69 +4856,100 @@ fn leaf_ranges(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<std::ops::Range
             Some(std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?)
         }
     };
+    cdc_ranges(
+        bytes,
+        LEAF_MAX_BYTES,
+        |hash, byte| roll(hash, *byte),
+        leaf_cut,
+        |start, mut end| {
+            if let Some(text) = text {
+                while end > start && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == start {
+                    return Err(Error::MalformedNode);
+                }
+            }
+            Ok(end)
+        },
+    )
+}
+
+fn branch_ranges(
+    kind: LargeValueKind,
+    nodes: &[BuiltNode],
+) -> Result<Vec<std::ops::Range<usize>>, Error> {
+    let roll_node = |hash, node: &BuiltNode| roll_child(hash, kind, node);
+    cdc_ranges(
+        nodes,
+        BRANCH_MAX_CHILDREN,
+        roll_node,
+        branch_cut,
+        |_, end| Ok(end),
+    )
+}
+
+/// Split `items` into content-defined groups of at most `max`: a group ends
+/// at the first item after which `cut` accepts the rolling hash, and `settle`
+/// may pull that end back.
+fn cdc_ranges<T>(
+    items: &[T],
+    max: usize,
+    roll: impl Fn(u64, &T) -> u64,
+    cut: impl Fn(u64, usize) -> bool,
+    settle: impl Fn(usize, usize) -> Result<usize, Error>,
+) -> Result<Vec<std::ops::Range<usize>>, Error> {
     let mut ranges = Vec::new();
     let mut start = 0;
-    while start < bytes.len() {
-        let hard_end = (start + LEAF_MAX_BYTES).min(bytes.len());
+    while start < items.len() {
+        let hard_end = (start + max).min(items.len());
         let mut hash = 0_u64;
-        let mut end = hard_end;
-        for (offset, byte) in bytes[start..hard_end].iter().enumerate() {
-            hash = hash.wrapping_shl(1).wrapping_add(gear(*byte));
-            let length = offset + 1;
-            let boundary = if length < LEAF_MIN_BYTES {
-                false
-            } else if length < LEAF_TARGET_BYTES {
-                hash & V1_FASTCDC_LEAF_SHORT_MASK == 0
-            } else {
-                hash & V1_FASTCDC_LEAF_LONG_MASK == 0
-            };
-            if boundary {
-                end = start + length;
-                break;
-            }
-        }
-        if let Some(text) = text {
-            while end > start && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end == start {
-                return Err(Error::MalformedNode);
-            }
-        }
+        let end = items[start..hard_end]
+            .iter()
+            .enumerate()
+            .find_map(|(offset, item)| {
+                hash = roll(hash, item);
+                cut(hash, offset + 1).then_some(start + offset + 1)
+            })
+            .unwrap_or(hard_end);
+        let end = settle(start, end)?;
         ranges.push(start..end);
         start = end;
     }
     Ok(ranges)
 }
 
-fn branch_ranges(kind: LargeValueKind, nodes: &[BuiltNode]) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    while start < nodes.len() {
-        let hard_end = (start + BRANCH_MAX_CHILDREN).min(nodes.len());
-        let mut hash = 0_u64;
-        let mut end = hard_end;
-        for (offset, child) in nodes[start..hard_end].iter().enumerate() {
-            for byte in grouping_hash_from_logical(FORMAT_VERSION, kind, child.structural_hash).0 {
-                hash = hash.wrapping_shl(1).wrapping_add(gear(byte));
-            }
-            let length = offset + 1;
-            let boundary = if length < BRANCH_MIN_CHILDREN {
-                false
-            } else if length < BRANCH_TARGET_CHILDREN {
-                hash & V1_GROUPING_BRANCH_SHORT_MASK == 0
-            } else {
-                hash & V1_GROUPING_BRANCH_LONG_MASK == 0
-            };
-            if boundary {
-                end = start + length;
-                break;
-            }
-        }
-        ranges.push(start..end);
-        start = end;
-    }
-    ranges
+/// One step of the V1 gear rolling hash.
+fn roll(hash: u64, byte: u8) -> u64 {
+    hash.wrapping_shl(1).wrapping_add(gear(byte))
+}
+
+/// Roll one child's kind-bound grouping hash into a branch boundary hash.
+fn roll_child(hash: u64, kind: LargeValueKind, node: &BuiltNode) -> u64 {
+    grouping_hash_from_logical(FORMAT_VERSION, kind, node.structural_hash)
+        .0
+        .into_iter()
+        .fold(hash, roll)
+}
+
+/// Whether a leaf of `length` bytes may end where the rolling hash is `hash`.
+fn leaf_cut(hash: u64, length: usize) -> bool {
+    let mask = if length < LEAF_TARGET_BYTES {
+        V1_FASTCDC_LEAF_SHORT_MASK
+    } else {
+        V1_FASTCDC_LEAF_LONG_MASK
+    };
+    length >= LEAF_MIN_BYTES && hash & mask == 0
+}
+
+/// Whether a branch of `count` children may end where the rolling hash is `hash`.
+fn branch_cut(hash: u64, count: usize) -> bool {
+    let mask = if count < BRANCH_TARGET_CHILDREN {
+        V1_GROUPING_BRANCH_SHORT_MASK
+    } else {
+        V1_GROUPING_BRANCH_LONG_MASK
+    };
+    count >= BRANCH_MIN_CHILDREN && hash & mask == 0
 }
 
 fn gear(byte: u8) -> u64 {
