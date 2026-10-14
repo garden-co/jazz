@@ -2670,15 +2670,11 @@ mod tests {
             .run_async(move |shell| {
                 Box::pin(async move {
                     let state = shell.sessions[failed.transport].as_ref().unwrap();
-                    match &state.connection {
-                        super::super::ShellPeerConnection::Memory(connection)
-                        | super::super::ShellPeerConnection::Durable(connection) => {
-                            connection
-                                .lock()
-                                .await
-                                .set_incomplete_receive_timeout_for_test(20);
-                        }
-                    }
+                    state
+                        .connection
+                        .lock()
+                        .await
+                        .set_incomplete_receive_timeout_for_test(20);
                     Ok(())
                 })
             })
