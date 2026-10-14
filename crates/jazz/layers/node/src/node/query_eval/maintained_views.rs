@@ -569,61 +569,30 @@ where
         .map(|(update, _)| update)
     }
 
-    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
-    #[doc(hidden)]
-    pub async fn drain_local_maintained_view_subscription_preserving_rows(
-        &mut self,
-        local: &mut LocalMaintainedViewSubscription,
-        authoritative_result_key: Option<AuthorityResultKey>,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
-    ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
-        self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
-            local,
-            authoritative_result_key,
-            preserved_row_keys,
-            None,
-        )
-        .await
-    }
-
     #[doc(hidden)]
     pub async fn drain_local_maintained_view_subscription_preserving_rows_with_waker(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_result_key: Option<AuthorityResultKey>,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        _preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
-        let (transitions, suppressed_authoritative_change) = self
+        // The drain no longer preserves rows or suppresses authoritative
+        // changes; the parameter and the constant `false` keep the caller API.
+        let Some(transitions) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_result_key,
-                preserved_row_keys,
                 progress_waker,
             )
-            .await?;
-        let Some(transitions) = transitions else {
-            return Ok((None, suppressed_authoritative_change));
+            .await?
+        else {
+            return Ok((None, false));
         };
         let update = self
             .apply_local_maintained_view_transitions(local, transitions)
             .await?;
-        Ok((Some(update), suppressed_authoritative_change))
-    }
-
-    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
-    #[doc(hidden)]
-    pub async fn drain_local_maintained_view_subscription_state(
-        &mut self,
-        local: &mut LocalMaintainedViewSubscription,
-        authoritative_result_key: Option<AuthorityResultKey>,
-    ) -> Result<bool, Error> {
-        self.drain_local_maintained_view_subscription_state_with_waker(
-            local,
-            authoritative_result_key,
-            None,
-        )
-        .await
+        Ok((Some(update), false))
     }
 
     #[doc(hidden)]
@@ -633,11 +602,10 @@ where
         authoritative_result_key: Option<AuthorityResultKey>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
-        let (Some(transitions), _) = self
+        let Some(transitions) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_result_key,
-                &BTreeSet::new(),
                 progress_waker,
             )
             .await?
@@ -673,15 +641,14 @@ where
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
-        let (transitions, _) = self
+        let transitions = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 Some(authority_result_key.clone()),
-                &BTreeSet::new(),
                 progress_waker,
             )
-            .await?;
-        let transitions = transitions.unwrap_or_default();
+            .await?
+            .unwrap_or_default();
         // Keep the retained receiver snapshot in lockstep with the exact same
         // terminal batch the caller publishes.  `false` avoids a second
         // facade materialization; state still folds terminal ordering/moves.
@@ -1222,15 +1189,8 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_result_key: Option<AuthorityResultKey>,
-        _preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
-    ) -> Result<
-        (
-            Option<super::maintained_subscription_view::ResultTransitions>,
-            bool,
-        ),
-        Error,
-    > {
+    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
         if let Some(authority_result_key) = authoritative_result_key.as_ref()
             && self.local_maintained_authority_reconciliation_due(local, authority_result_key)
         {
@@ -1245,7 +1205,7 @@ where
                 // yet. Do not drain/publish the graph's opening state as a
                 // strict remote result; the runtime will retain the pending
                 // authority reset and try again once the manifest arrives.
-                return Ok((None, false));
+                return Ok(None);
             }
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
@@ -1254,7 +1214,7 @@ where
         // chunks. Its terminal is incomplete until that work finishes, so do
         // not drain (and let the caller publish) a partial authority state.
         if authoritative_result_key.is_some() && self.covered_receiver_evaluation_pending(local) {
-            return Ok((None, false));
+            return Ok(None);
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut payload_states = BTreeMap::<
@@ -1357,7 +1317,7 @@ where
             fact_states.is_empty(),
             &terminal_operations,
         ) {
-            return Ok((None, false));
+            return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed: false,
@@ -1414,7 +1374,7 @@ where
                 })
                 .collect();
         }
-        Ok((Some(transitions), false))
+        Ok(Some(transitions))
     }
 
     async fn apply_local_maintained_view_transitions(
