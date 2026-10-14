@@ -209,20 +209,24 @@ const defaultEnvFileOperations: EnvFileOperations = {
   fsync: fsyncSync,
 };
 
-function assertRegularEnvPath(envPath: string): void {
+/** lstat `envPath`, refusing anything but a regular file; undefined when it is absent. */
+function regularEnvPathMetadata(envPath: string): ReturnType<typeof lstatSync> | undefined {
+  let metadata;
   try {
-    const metadata = lstatSync(envPath);
-    if (metadata.isSymbolicLink()) {
-      throw new Error(
-        `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
-      );
-    }
-    if (!metadata.isFile()) {
-      throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
-    }
+    metadata = lstatSync(envPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
+  if (metadata.isSymbolicLink()) {
+    throw new Error(
+      `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
+    );
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
+  }
+  return metadata;
 }
 
 /**
@@ -231,23 +235,8 @@ function assertRegularEnvPath(envPath: string): void {
  * to an unlinked file while reporting success for the replacement at envPath.
  */
 function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): void {
-  let pathMetadata;
-  try {
-    pathMetadata = lstatSync(envPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new EnvPathReplacedError();
-    }
-    throw error;
-  }
-  if (pathMetadata.isSymbolicLink()) {
-    throw new Error(
-      `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
-    );
-  }
-  if (!pathMetadata.isFile()) {
-    throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
-  }
+  const pathMetadata = regularEnvPathMetadata(envPath);
+  if (!pathMetadata) throw new EnvPathReplacedError();
 
   const descriptorMetadata = fstatSync(descriptor);
   if (
@@ -260,7 +249,7 @@ function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): vo
 }
 
 function openEnvForAppend(envPath: string, afterOpen?: (descriptor: number) => void): number {
-  assertRegularEnvPath(envPath);
+  regularEnvPathMetadata(envPath);
   const descriptor = openSync(
     envPath,
     constants.O_CREAT | constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW,
