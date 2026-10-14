@@ -477,9 +477,19 @@ export function decodeNativeRow(
   raw: Uint8Array,
 ): WasmRow {
   const values = decodeNativeRowValues(columns, raw);
-  const row = { id, values };
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
+}
+
+/**
+ * Attach `valuesByColumn` to a decoded row as a hidden (non-enumerable)
+ * companion of its positional `values`.
+ */
+export function withValuesByColumn<Row extends { values: Value[] }>(
+  row: Row,
+  valuesByColumn: Map<string, Value>,
+): Row {
   Object.defineProperty(row, "valuesByColumn", {
-    value: namedValues(columns, values),
+    value: valuesByColumn,
     enumerable: false,
     configurable: true,
   });
@@ -491,7 +501,10 @@ export function decodeNativeRow(
  * object with the positional array, as terminal rows already do, instead of
  * decoding the record a second time.
  */
-function namedValues(columns: readonly ColumnDescriptor[], values: Value[]): Map<string, Value> {
+export function namedValues(
+  columns: readonly ColumnDescriptor[],
+  values: Value[],
+): Map<string, Value> {
   const valuesByColumn = new Map<string, Value>();
   for (let i = 0; i < columns.length; i++) {
     const column = columns[i];
@@ -522,14 +535,7 @@ export function decodeNativeTerminalRow(
     );
   }
   const values = decoded.slice(1);
-  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-  const row = { id, values };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
 }
 
 /**
@@ -557,14 +563,7 @@ export function decodeNativeTerminalRowWithDescriptor(
       ? ({ type: "Null" } satisfies Value)
       : decodeTerminalColumnBytes(column, bytes, descriptor[index + 1]?.valueType);
   });
-  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-  const row = { id, values };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
 }
 
 /**
@@ -1358,16 +1357,7 @@ function decodeRowValue(
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
   const values = decodeNativeRowValues(columns, raw);
-  const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
-    id,
-    values,
-  };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: namedValues(columns, values),
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {
