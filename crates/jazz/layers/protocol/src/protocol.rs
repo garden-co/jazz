@@ -3084,6 +3084,8 @@ pub enum SubscribeServerFailureCode {
     PolicyEvaluation,
     /// A server-side failure did not fit a more specific safe class.
     Internal,
+    /// A maintained result payload did not match the receiver's compiled result schema.
+    QueryResultProtocol,
 }
 
 /// Legacy-compatible table-qualified current content row entry:

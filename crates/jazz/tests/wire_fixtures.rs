@@ -473,6 +473,16 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "subscribe_rejected_query_result_protocol",
+            "SubscribeRejected",
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            },
+        ),
+        (
             "view_update_reset_with_covered_input",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
@@ -1180,6 +1190,44 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: payload suffix"
         );
     }
+}
+
+/// Alice and Bob exchange the bounded result-protocol rejection as a base v5
+/// message, even when no optional features are negotiated. This codec-level
+/// test pins its byte contract and ensures frozen v4 remains unchanged.
+#[test]
+fn query_result_protocol_rejection_has_frozen_v5_bytes_without_optional_features() {
+    let (_, _, message) = wire_fixture_messages()
+        .into_iter()
+        .find(|(name, _, _)| *name == "subscribe_rejected_query_result_protocol")
+        .expect("the query-result protocol rejection fixture exists");
+    let encoded = jazz::wire::encode_sync_message_for_features(&message, jazz::wire::FEATURE_NONE)
+        .expect("the base v5 rejection encodes without optional features");
+    let fixtures: Manifest =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v5.json"))
+            .expect("wire v5 fixture manifest deserializes");
+    let frozen = fixtures
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == "subscribe_rejected_query_result_protocol")
+        .expect("the query-result protocol byte fixture exists in v5");
+    assert_eq!(hex(&encoded), frozen.payload_hex);
+    assert_eq!(
+        jazz::wire::decode_sync_message_for_features(&encoded, jazz::wire::FEATURE_NONE)
+            .expect("the base v5 rejection decodes without optional features"),
+        message
+    );
+    let v4: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+            .expect("frozen v4 fixture manifest deserializes");
+    assert_eq!(v4["protocol_version"], 4);
+    assert!(
+        v4["fixtures"]
+            .as_array()
+            .expect("v4 fixture entries exist")
+            .iter()
+            .all(|fixture| fixture["name"] != "subscribe_rejected_query_result_protocol")
+    );
 }
 
 /// Untrusted admission rejects malformed references; the trusted encoder does not validate.

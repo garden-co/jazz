@@ -30,4 +30,6 @@ First-class Solid.js support is now available in `jazz-tools` (`createSolidJazzC
 - New `jazz.server.active_websockets` OpenTelemetry gauge (requires `otel` feature + `OTEL_EXPORTER_OTLP_ENDPOINT`).
 - The SharedWorker broker is now shipped as self-contained bundled ESM, fixing crashes under `next dev` / `next build` / `vite build`.
 - Fix `deleteClientStorage()` hanging when called on a persistent browser Db before any table or query has been used.
+- Fix low-level `Db::SubscriptionStream` recovery after a rejected authority source closure, preserving withheld row and occurrence movements relative to the last emitted result.
+- Make the heap-sampler lifecycle regression deterministic without changing production sampling or weakening its accuracy and deallocation checks.
 - Removed `TestingServer` and `pushSchemaCatalogue` — use `startLocalJazzServer` and `deploy` instead.

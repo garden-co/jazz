@@ -154,6 +154,94 @@ fn subscription_publication_coalesces_from_last_emitted_occurrences() {
     assert!(sender.publication.borrow().deferred.is_none());
 }
 
+/// Alice's low-level subscription retains its last emitted occurrence positions
+/// when Bob's authority sends a locally rejected closure between valid frames.
+/// The internal publication seam places rejection inside a withheld non-reset
+/// window deterministically; the public client harness cannot control that order.
+/// Alice: emitted [first, second] -> withheld [temporary, second]
+///        -> Bob's closure rejected -> settled [second, first].
+#[test]
+fn subscription_publication_closure_rejection_preserves_withheld_occurrences() {
+    let rows = fixture_rows();
+    let initial = snapshot(vec![rows[0].clone(), rows[1].clone()]);
+    let intermediate = snapshot(vec![rows[2].clone(), rows[1].clone()]);
+    let final_rows = snapshot(vec![rows[1].clone(), rows[0].clone()]);
+    let tier = DurabilityTier::Global;
+    let (sender, mut receiver) = sender(tier);
+    publish(
+        &sender,
+        &snapshot(Vec::new()),
+        &initial,
+        tier,
+        true,
+        true,
+        true,
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { reset, added, .. } = receiver.try_recv().unwrap() else {
+        panic!("expected opening");
+    };
+    assert!(reset);
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| (&output.row, output.index))
+            .collect::<Vec<_>>(),
+        vec![(&rows[0], 0), (&rows[1], 1)]
+    );
+    let first_occurrence = added[0].occurrence_id.clone();
+    let second_occurrence = added[1].occurrence_id.clone();
+
+    assert!(!publish(&sender, &initial, &intermediate, tier, false, false, true).unwrap());
+    assert!(receiver.try_recv().is_err());
+    sender
+        .unbounded_send(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: "incomplete supporting source set".to_owned(),
+            },
+        })
+        .unwrap();
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::InvalidAuthoritySourceClosure { .. },
+        }
+    ));
+    assert!(publish(&sender, &intermediate, &final_rows, tier, true, false, true).unwrap());
+    let SubscriptionEvent::Delta {
+        reset,
+        settled,
+        tier: emitted_tier,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = receiver.try_recv().unwrap()
+    else {
+        panic!("expected settled delta");
+    };
+    assert!(!reset && settled);
+    assert_eq!(emitted_tier, tier);
+    assert!(added.is_empty() && removed.is_empty() && terminal_operations.is_empty());
+    assert_eq!(
+        updated
+            .iter()
+            .map(|output| (
+                &output.occurrence_id,
+                &output.row,
+                output.previous_index,
+                output.index,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (&second_occurrence, &rows[1], Some(1), 0),
+            (&first_occurrence, &rows[0], Some(0), 1),
+        ]
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
 #[test]
 fn subscription_publication_resets_discard_withheld_history() {
     let rows = fixture_rows();

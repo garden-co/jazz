@@ -1,4 +1,9 @@
-import { NapiDb, type JsonValue, type UpsertOptions } from "jazz-napi";
+import {
+  NapiDb,
+  type JsonValue,
+  type SubscriptionServerFailureReason,
+  type UpsertOptions,
+} from "jazz-napi";
 
 const branch: JsonValue = {
   name: "draft",
@@ -16,6 +21,11 @@ const removedBranchUpsert: UpsertOptions = {
   branch,
 };
 const closeResult: Promise<undefined> = db.close();
+const typedProtocolFailure: SubscriptionServerFailureReason = {
+  type: "ServerFailure",
+  code: "QueryResultProtocol",
+};
 void closeResult;
 void canonicalBranchUpsert;
+void typedProtocolFailure;
 void removedBranchUpsert;

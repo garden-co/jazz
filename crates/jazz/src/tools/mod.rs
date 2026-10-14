@@ -201,6 +201,8 @@ pub enum SubscriptionServerFailureCode {
     PolicyEvaluation,
     /// Another server-side failure occurred.
     Internal,
+    /// A maintained result payload did not match the compiled result schema.
+    QueryResultProtocol,
 }
 
 /// Item yielded by a public subscription stream.
