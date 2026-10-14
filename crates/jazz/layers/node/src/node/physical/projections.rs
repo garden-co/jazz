@@ -61,7 +61,6 @@ where
         Ok(match class {
             PhysicalCurrentClass::Global => physical_global_current_table_name(table_id),
             PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(table_id),
-            PhysicalCurrentClass::AheadShadow => physical_ahead_shadow_table_name(table_id),
         })
     }
 
@@ -480,7 +479,6 @@ where
             let storage_tables = [
                 physical_global_current_table_name(target_mapping.table_id),
                 physical_ahead_current_table_name(target_mapping.table_id),
-                physical_ahead_shadow_table_name(target_mapping.table_id),
             ];
             for storage_table in &storage_tables {
                 let logical_output =
@@ -630,7 +628,6 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
-            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
             let logical_output = target_table.global_current_storage_table().record_schema();
@@ -734,7 +731,6 @@ where
         let storage_tables = [
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
-            physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
@@ -1591,11 +1587,10 @@ fn branch_scan(
 /// The table id of a per-table physical publication name, exactly the inverse
 /// of the `physical_*_table_name` spellings consulted by targeted refresh.
 fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
-    const SUFFIXES: [&str; 5] = [
+    const SUFFIXES: [&str; 4] = [
         "history",
         "global_current",
         "ahead_current",
-        "ahead_shadow",
         "rejected_versions",
     ];
     let (table_id, suffix) = split_physical_table_name(name)?;
@@ -1617,7 +1612,6 @@ mod publication_name_tests {
                 physical_history_table_name(table_id),
                 physical_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_ahead_shadow_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ] {
                 assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
@@ -1637,6 +1631,8 @@ mod publication_name_tests {
             "jazz_physical__history",
             "jazz_physical_1",
             "other_physical_1_history",
+            // Retired: the local delta masks origin by a keyed lookup.
+            "jazz_physical_1_ahead_shadow",
         ] {
             assert_eq!(physical_table_id_for_publication_name(name), None, "{name}");
         }
