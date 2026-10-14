@@ -1082,20 +1082,27 @@ mod rejection_storage_tests {
     #[test]
     fn rejection_storage_round_trips_all_cases_and_rejects_wrong_payloads() {
         let root = TxId::new(TxTime(42), NodeUuid::from_bytes([7; 16]));
-        for reason in [
-            RejectionReason::ClientClockTooFarAhead,
-            RejectionReason::AuthorizationDenied,
-            RejectionReason::ExclusiveConflict,
-            RejectionReason::CausalityViolation,
-            RejectionReason::Cascade { root },
-            RejectionReason::MalformedCommit("invalid parent".into()),
-            RejectionReason::MalformedCommit(String::new()),
+        for (reason, expected) in [
+            (RejectionReason::ClientClockTooFarAhead, vec![0]),
+            (RejectionReason::AuthorizationDenied, vec![1]),
+            (RejectionReason::ExclusiveConflict, vec![2]),
+            (RejectionReason::CausalityViolation, vec![3]),
+            (
+                RejectionReason::Cascade { root },
+                [vec![4, 0, 0, 0, 0, 0, 0, 0, 42], vec![7; 16]].concat(),
+            ),
+            (
+                RejectionReason::MalformedCommit("invalid parent".into()),
+                b"\x05\x00invalid parent".to_vec(),
+            ),
+            (RejectionReason::MalformedCommit(String::new()), vec![5, 0]),
         ] {
             let descriptor =
                 RecordDescriptor::new([("reason", RejectionReason::storage_value_type())]);
             let bytes = descriptor
                 .create(&[reason.to_storage_value().unwrap()])
                 .unwrap();
+            assert_eq!(bytes, expected);
             let stored = descriptor.bind(&bytes).get_idx(0).unwrap();
             assert_eq!(RejectionReason::from_storage_value(stored).unwrap(), reason);
             if !matches!(reason, RejectionReason::MalformedCommit(_)) {

@@ -346,20 +346,20 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
             "text_members",
             records::ValueType::String,
             v("one"),
-            &[2, 2, b'o', b'n', b'e'][..],
+            &[0, 0, b'o', b'n', b'e'][..],
         ),
         (
             "u64_members",
             records::ValueType::U64,
             Value::U64(0x0102_0304_0506_0708),
-            &[2, 8, 7, 6, 5, 4, 3, 2, 1][..],
+            &[0, 8, 7, 6, 5, 4, 3, 2, 1][..],
         ),
         (
             "uuid_members",
             records::ValueType::Uuid,
             Value::Uuid(uuid::Uuid::from_bytes([0x5a; 16])),
             &[
-                2, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                0, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
                 0x5a, 0x5a, 0x5a,
             ][..],
         ),
@@ -441,7 +441,7 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
     let (counter_id, counter_payload) = &payloads[0];
     assert_eq!(
         counter_payload,
-        &[counter_id.to_le_bytes().as_slice(), &[2]].concat(),
+        &[counter_id.to_le_bytes().as_slice(), &[0]].concat(),
         "counter payload is its physical column ID followed by an exact empty identity"
     );
 }

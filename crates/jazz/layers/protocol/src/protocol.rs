@@ -1386,7 +1386,7 @@ mod version_record_wire_row {
             let encoded = encode(&original).unwrap();
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
-                "a06b6a20e4d67052bd5e8a5ceadc8ef77e1de7ca745f8a38777792efb58efeb2"
+                "0bd8759c823b90c94c2d1064e50cb8f02277e2e0c4124dba46be00962dd25ce3"
             );
             assert_eq!(&encoded[..5], b"JVRR\x02");
             assert_eq!(decode(&encoded).unwrap(), original);

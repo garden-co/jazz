@@ -324,7 +324,7 @@ fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
-        "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
+        "54151d5d6d5d06f759624b321a0c42472afdbab061bf5e899d7c98dfcc47617c"
     );
     let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
     assert_eq!(

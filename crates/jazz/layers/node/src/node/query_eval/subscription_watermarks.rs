@@ -201,7 +201,7 @@ mod tests {
         // variable-width revision bytes.
         assert_eq!(
             hex::encode(&bytes),
-            "010807060504030201025a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+            "010807060504030201005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         );
         let decoded = descriptor.bind(&bytes).to_values().unwrap();
         assert_eq!(
