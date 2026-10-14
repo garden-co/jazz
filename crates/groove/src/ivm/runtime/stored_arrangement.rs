@@ -678,8 +678,10 @@ impl TickEvaluator<'_> {
             return Ok(Vec::new());
         }
         let inputs = graph_node.descriptor.inputs.clone();
-        // (arrangement, the arrangements whose changes it is probed by)
-        let mut reads = Vec::<(ArrangementKey, Vec<ArrangementKey>)>::new();
+        // (arrangement, the arrangements whose keys it is probed by, and
+        // whether by all their keys rather than their changed ones)
+        let mut reads = Vec::<(ArrangementKey, Vec<ArrangementKey>, bool)>::new();
+        let replace = self.context.arrangement_update_mode == ArrangementUpdateMode::Replace;
         match &graph_node.descriptor.operator {
             OpType::Join(join) | OpType::SemiJoin(join) | OpType::AntiJoin(join) => {
                 let threshold = !matches!(graph_node.descriptor.operator, OpType::Join(_));
@@ -699,12 +701,24 @@ impl TickEvaluator<'_> {
                     &right_on,
                     join.comparison,
                 )?;
-                for (stored, other) in [(&left, &right), (&right, &left)] {
-                    let mut by = vec![other.clone()];
-                    if threshold {
-                        by.push(stored.clone());
+                if replace {
+                    // A rebuild scans the driving side and probes the other
+                    // with every key it holds.
+                    let (driver, probed) =
+                        if self.replace_driver(&graph_node.descriptor) == Some(*right_input) {
+                            (right, left)
+                        } else {
+                            (left, right)
+                        };
+                    reads.push((probed, vec![driver], true));
+                } else {
+                    for (stored, other) in [(&left, &right), (&right, &left)] {
+                        let mut by = vec![other.clone()];
+                        if threshold {
+                            by.push(stored.clone());
+                        }
+                        reads.push((stored.clone(), by, false));
                     }
-                    reads.push((stored.clone(), by));
                 }
             }
             OpType::Aggregate(aggregate) => {
@@ -718,7 +732,7 @@ impl TickEvaluator<'_> {
                     &group_fields,
                     ValueComparison::Exact,
                 )?;
-                reads.push((key.clone(), vec![key]));
+                reads.push((key.clone(), vec![key], false));
             }
             OpType::CollectBy(collect_by) if collect_by.mode != CollectByMode::Root => {
                 let [input] = inputs.as_slice() else {
@@ -730,12 +744,12 @@ impl TickEvaluator<'_> {
                     &collect_by.group_fields,
                     ValueComparison::Exact,
                 )?;
-                reads.push((key.clone(), vec![key]));
+                reads.push((key.clone(), vec![key], false));
             }
             _ => {}
         }
         let mut requests = Vec::new();
-        for (stored, by) in reads {
+        for (stored, by, all) in reads {
             if self
                 .arrangement_states
                 .get(&stored)
@@ -747,6 +761,10 @@ impl TickEvaluator<'_> {
             for changed in by {
                 let stamp = self.arrangement_sub_tick(&changed);
                 if let Some(state) = self.arrangement_states.get(&changed) {
+                    if all {
+                        keys.extend(state.value().keys().cloned());
+                        continue;
+                    }
                     keys.extend(
                         ArrangementTransition::at(state, stamp)
                             .changed_keys()
@@ -757,6 +775,49 @@ impl TickEvaluator<'_> {
             requests.push((stored, keys));
         }
         Ok(requests)
+    }
+
+    /// Whether `node` arranges a stored table, so its arrangement may be
+    /// read from storage.
+    fn has_storage_plan(&self, node: NodeId) -> bool {
+        self.node_meta
+            .get(&node)
+            .is_some_and(|meta| meta.stored_arrangement.is_some())
+    }
+
+    /// The input a Replace evaluation of a join scans in full; the other is
+    /// probed by its keys. Semi- and anti-joins scan their left input; an
+    /// inner join scans its left input unless only the left is stored.
+    fn replace_driver(&self, join: &NodeDescriptor) -> Option<NodeId> {
+        match (&join.operator, join.inputs.as_slice()) {
+            (OpType::Join(_), [left, right])
+                if self.has_storage_plan(*left) && !self.has_storage_plan(*right) =>
+            {
+                Some(*right)
+            }
+            (OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_), [left, _]) => Some(*left),
+            _ => None,
+        }
+    }
+
+    /// Whether a Replace evaluation must hold the whole of the stored
+    /// arrangement of `arrange`: some consumer scans it rather than probing
+    /// it by another input's keys.
+    pub(super) fn stored_arrangement_is_scanned(&self, arrange: NodeId) -> bool {
+        self.graph.node(arrange).is_some_and(|node| {
+            node.children.iter().any(|child| {
+                self.graph
+                    .node(*child)
+                    .is_some_and(|child| match &child.descriptor.operator {
+                        OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_) => {
+                            self.replace_driver(&child.descriptor) == Some(arrange)
+                        }
+                        OpType::Aggregate(_) => true,
+                        OpType::CollectBy(collect) => collect.mode != CollectByMode::Root,
+                        _ => false,
+                    })
+            })
+        })
     }
 
     fn records_output(&self, node: NodeId) -> Result<RecordDescriptor, IvmRuntimeError> {

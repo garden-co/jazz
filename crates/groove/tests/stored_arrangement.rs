@@ -407,6 +407,34 @@ async fn stored_arrangements_hold_no_table_rows() {
     assert!(rows[1] >= 4_000, "held plan holds {rows:?}");
 }
 
+/// A new subscription sharing a stored arrangement probes it by its own
+/// keys rather than rebuilding it, and agrees with the held plan.
+#[futures_test::test]
+async fn new_subscribers_probe_a_shared_arrangement_by_key() {
+    let docs_in = |bucket: u64| {
+        GraphBuilder::table("docs").filter(PredicateExpr::eq("bucket", Value::U64(bucket)))
+    };
+    for stored in [true, false] {
+        let mut db = open_db(stored).await;
+        apply(&mut db, |b| {
+            for id in 1..=2_000 {
+                b.insert("projects", project(id, 1, "p"));
+            }
+            b.insert("docs", doc(1, 7, 1));
+            b.insert("docs", doc(2, 8, 2));
+        })
+        .await;
+        let first = GraphBuilder::join(docs_in(1), project_source(), ["project"], ["id"]);
+        let second = GraphBuilder::join(docs_in(2), project_source(), ["project"], ["id"]);
+        let _first = db.subscribe_one_sink(first).await.unwrap();
+        let sub = db.subscribe_one_sink(second.clone()).await.unwrap();
+        let mut live = Bag::new();
+        add(&mut live, sub.recv().unwrap().to_values().unwrap());
+        assert_eq!(live, snapshot(&mut db, second).await, "stored {stored}");
+        assert_eq!(live.len(), 1);
+    }
+}
+
 /// A recursive relation's step runs without an evaluation session; its
 /// arrangements stay held, and the root's still agree with the held plan.
 #[futures_test::test]

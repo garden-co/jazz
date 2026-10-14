@@ -358,7 +358,21 @@ impl JoinState {
             bytes: BytesMut::new(),
             deltas: Vec::new(),
         };
-        if mode == ArrangementUpdateMode::Replace {
+        if mode == ArrangementUpdateMode::Replace
+            && left.current.probe_plan().is_some()
+            && right.current.probe_plan().is_none()
+        {
+            // The left side is read from storage by key: scan the right side
+            // and probe the left with its keys.
+            append_join_index_deltas(
+                &mut output,
+                projection,
+                right.current.buckets(),
+                &JoinLookup::Arrangement(left.current),
+                JoinProbeSide::RightDelta,
+                1,
+            )?;
+        } else if mode == ArrangementUpdateMode::Replace {
             append_join_index_deltas(
                 &mut output,
                 projection,
@@ -751,10 +765,16 @@ impl ArrangementState {
         };
     }
 
+    /// Every key with a bucket. A Replace evaluation probes the stored side
+    /// of a join with these.
+    pub(super) fn keys(&self) -> impl Iterator<Item = &JoinKey> {
+        self.buckets().map(|(key, _)| key)
+    }
+
     fn buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
         if self.probe_plan().is_some() {
-            // Only a Replace evaluation scans whole arrangements, and it
-            // rebuilds a stored one in full first.
+            // A Replace evaluation scans only the side that drives it, which
+            // it rebuilds in full first when that side is stored.
             self.probe_missed.set(true);
         }
         self.index

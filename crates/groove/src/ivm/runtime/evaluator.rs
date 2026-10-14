@@ -1935,10 +1935,12 @@ impl TickEvaluator<'_> {
                 input: node,
             };
             // A stored arrangement holds no buckets between evaluations, so a
-            // rebuild that reads all of them must rebuild it too.
+            // rebuild that scans all of them must rebuild it too. One probed
+            // by another input's keys is read from storage instead.
             self.arrangement_states.get(&key).is_none_or(|state| {
                 self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
                     && state.value().probe_plan().is_some()
+                    && self.stored_arrangement_is_scanned(node)
             })
         } else if matches!(
             self.graph.node(node).map(|node| &node.descriptor.operator),
