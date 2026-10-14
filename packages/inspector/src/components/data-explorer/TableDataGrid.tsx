@@ -29,6 +29,7 @@ import {
   useState,
   type Dispatch,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -1853,7 +1854,8 @@ function CrossIcon({ className }: { className?: string }) {
   );
 }
 
-function PlusIcon({ className }: { className?: string }) {
+/** A 24px outline icon drawn with the current text color. */
+function StrokeIcon({ className, children }: { className?: string; children: ReactNode }) {
   return (
     <svg
       className={className}
@@ -1866,94 +1868,62 @@ function PlusIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       strokeWidth="2"
     >
+      {children}
+    </svg>
+  );
+}
+
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <StrokeIcon className={className}>
       <path d="M12 5v14" />
       <path d="M5 12h14" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function TrashIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M3 6h18" />
       <path d="M8 6V4h8v2" />
       <path d="m6 6 1 14h10l1-14" />
       <path d="M10 11v5" />
       <path d="M14 11v5" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function BackArrowIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="m9 14-4-4 4-4" />
       <path d="M5 10h9a5 5 0 0 1 0 10h-1" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function CatalogIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-1.5Z" />
       <path d="M8 7h6" />
       <path d="M8 11h8" />
       <path d="M8 15h5" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function ColumnsIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M4 6h16" />
       <path d="M4 12h16" />
       <path d="M4 18h16" />
       <path d="M8 4v4" />
       <path d="M15 10v4" />
       <path d="M11 16v4" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
