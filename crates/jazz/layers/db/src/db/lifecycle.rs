@@ -1587,6 +1587,16 @@ where
         self.node.node.borrow().runtime_stats_for_test()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only switch between keyed and whole-table join plans for
+    /// queries compiled from now on.
+    pub fn set_keyed_joins_enabled_for_test(&self, enabled: bool) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_keyed_joins_enabled_for_test(enabled);
+    }
+
     #[cfg(feature = "testing")]
     /// Test-only count of relay-owned upstream usage sites. This deliberately
     /// counts wire owners rather than coverage evaluators, so reconnect tests

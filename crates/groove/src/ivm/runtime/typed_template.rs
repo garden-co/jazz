@@ -430,6 +430,7 @@ impl IvmRuntime {
         graphs: &[Arc<GraphBuilder>],
         predicates: &[PredicateExpr],
         scalars: &[crate::ivm::TemplateScalarArgument],
+        keyed_joins: bool,
     ) -> Result<CompiledNode, IvmRuntimeError> {
         if inputs.len() != program.inputs.len()
             || program
@@ -462,11 +463,20 @@ impl IvmRuntime {
             TemplateNodeRef::Node(i) => installed[i],
         };
         for instruction in &program.nodes {
-            let inputs = instruction
+            let mut inputs: Vec<NodeId> = instruction
                 .inputs
                 .iter()
                 .map(|r| resolve(*r, &installed))
                 .collect();
+            // The program was compiled without the catalogue; key its joins
+            // against the instance's tables here, as ordinary installation
+            // does.
+            if keyed_joins
+                && let Some(kind) = Self::keyed_join_kind(&instruction.descriptor.operator)
+                && let [left, right] = inputs.as_mut_slice()
+            {
+                (*left, *right) = self.keyed_join_inputs(kind, *left, *right);
+            }
             // Only argument-consuming operators need an instance copy; every
             // other node is hashed and compared from the program itself.
             let binds_scalars = matches!(

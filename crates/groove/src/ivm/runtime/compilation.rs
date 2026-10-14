@@ -3,7 +3,7 @@
 use super::*;
 
 impl IvmRuntime {
-    fn add_arrangement_node(
+    pub(super) fn add_arrangement_node(
         &mut self,
         input: NodeId,
         records: RecordDescriptor,
@@ -278,6 +278,27 @@ impl IvmRuntime {
         graph: &GraphBuilder,
         template: bool,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        // A template program is compiled without the catalogue its tables
+        // live in; its instances key their joins when they are installed.
+        let scope = (self.keyed_joins_enabled && !template).then(|| recursive_builders(graph));
+        let outer = std::mem::replace(&mut self.keyed_join_scope, scope);
+        let compiled = self.add_dedup_graph_scoped(graph, template);
+        self.keyed_join_scope = outer;
+        compiled
+    }
+
+    /// Whether a join compiled from `graph` may read an input by key.
+    fn keys_joins_in(&self, graph: &GraphBuilder) -> bool {
+        self.keyed_join_scope
+            .as_ref()
+            .is_some_and(|excluded| !excluded.contains(&graph_builder_key(graph)))
+    }
+
+    fn add_dedup_graph_scoped(
+        &mut self,
+        graph: &GraphBuilder,
+        template: bool,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
         let mut compiled_memo = HashMap::default();
@@ -294,10 +315,18 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::UnsupportedOperator);
             }
             let key = graph_builder_key(builder);
-            if let Some((compiled, inferred, logical_nodes)) = owner.and_then(|owner| {
-                self.compilation_cache
-                    .get(owner, &compiled_memo, &output_memo, &self.graph)
-            }) {
+            // A cached compilation may have keyed joins that a recursive
+            // relation cannot evaluate.
+            let cacheable = self
+                .keyed_join_scope
+                .as_ref()
+                .is_none_or(|excluded| !excluded.contains(&key));
+            if let Some((compiled, inferred, logical_nodes)) =
+                owner.filter(|_| cacheable).and_then(|owner| {
+                    self.compilation_cache
+                        .get(owner, &compiled_memo, &output_memo, &self.graph)
+                })
+            {
                 self.logical_nodes_requested += logical_nodes;
                 output_memo.insert(key, inferred);
                 compiled_memo.insert(key, compiled);
@@ -353,7 +382,15 @@ impl IvmRuntime {
                             .ok_or(IvmRuntimeError::UnsupportedOperator)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                self.install_typed_template(program, &compiled, inputs, predicates, scalars)
+                let keyed_joins = self.keys_joins_in(graph);
+                self.install_typed_template(
+                    program,
+                    &compiled,
+                    inputs,
+                    predicates,
+                    scalars,
+                    keyed_joins,
+                )
             }
             GraphBuilder::TemplateInput { input, output, .. } => {
                 let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
@@ -1414,6 +1451,15 @@ impl IvmRuntime {
                     plan_expr_names(&right_key),
                     *comparison,
                 );
+                let (left_arrangement, right_arrangement) = if self.keys_joins_in(graph) {
+                    self.keyed_join_inputs(
+                        KeyedJoinKind::EitherSide,
+                        left_arrangement,
+                        right_arrangement,
+                    )
+                } else {
+                    (left_arrangement, right_arrangement)
+                };
                 let node_descriptor = NodeDescriptor::new(
                     OpType::Join(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -1475,6 +1521,15 @@ impl IvmRuntime {
                     plan_expr_names(&right_key),
                     *comparison,
                 );
+                let (left_arrangement, right_arrangement) = if self.keys_joins_in(graph) {
+                    self.keyed_join_inputs(
+                        KeyedJoinKind::EitherSide,
+                        left_arrangement,
+                        right_arrangement,
+                    )
+                } else {
+                    (left_arrangement, right_arrangement)
+                };
                 let node_descriptor = NodeDescriptor::new(
                     OpType::SemiJoin(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -1533,6 +1588,15 @@ impl IvmRuntime {
                     plan_expr_names(&right_key),
                     *comparison,
                 );
+                let (left_arrangement, right_arrangement) = if self.keys_joins_in(graph) {
+                    self.keyed_join_inputs(
+                        KeyedJoinKind::RightSideOnly,
+                        left_arrangement,
+                        right_arrangement,
+                    )
+                } else {
+                    (left_arrangement, right_arrangement)
+                };
                 let node_descriptor = NodeDescriptor::new(
                     OpType::AntiJoin(JoinOp {
                         kind: JoinOpKind::Inner,
@@ -2083,6 +2147,28 @@ impl IvmRuntime {
 
 fn graph_builder_key(graph: &GraphBuilder) -> usize {
     std::ptr::from_ref(graph).addr()
+}
+
+/// Every builder reachable from inside a recursive relation (its seed, step
+/// and step witness), by [`graph_builder_key`]. The recursive evaluator
+/// recomputes these without storage reads, so a keyed lookup cannot run
+/// there.
+fn recursive_builders(graph: &GraphBuilder) -> HashSet<usize> {
+    let mut inside = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut pending = vec![(graph, false)];
+    while let Some((node, in_recursive)) = pending.pop() {
+        let key = graph_builder_key(node);
+        if !visited.insert((key, in_recursive)) {
+            continue;
+        }
+        if in_recursive {
+            inside.insert(key);
+        }
+        let below = in_recursive || matches!(node, GraphBuilder::Recursive { .. });
+        node.visit_inputs(|input| pending.push((input.as_ref(), below)));
+    }
+    inside
 }
 
 fn arg_by_comparison_field_indices(

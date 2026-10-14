@@ -2110,6 +2110,13 @@ impl Database {
         self.ivm_runtime.set_tick_runtime_stats_enabled(enabled);
     }
 
+    /// Whether queries compiled from now on read a join's stored-table input
+    /// by the other input's keys instead of arranging the whole table. On by
+    /// default; already installed graphs keep their plan.
+    pub fn set_keyed_joins_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_keyed_joins_enabled(enabled);
+    }
+
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()

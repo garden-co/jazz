@@ -87,6 +87,14 @@ impl IvmRuntime {
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
         }
         for state in self.operator_states.values() {
+            if let OperatorState::Lookup(lookup) = state {
+                let (keys, rows, bytes) = lookup.value().footprint();
+                stats.lookup_count += 1;
+                stats.lookup_keys += keys;
+                stats.lookup_rows += rows;
+                stats.lookup_encoded_bytes += bytes;
+                continue;
+            }
             let OperatorState::Recursive(recursive) = state else {
                 continue;
             };
@@ -128,6 +136,7 @@ impl IvmRuntime {
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
             logical_nodes_requested: self.logical_nodes_requested,
             deduped_graph_nodes: self.graph.nodes().len(),
+            keyed_join_inputs: self.keyed_join_inputs_rewritten,
             ..RuntimeStats::default()
         }
     }
