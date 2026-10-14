@@ -218,8 +218,8 @@ where
                 "completed upload has no receipt reverse binding".to_owned(),
             )
         })?;
-    let reverse_completed = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
-    if reverse != encoded || reverse_completed != completed {
+    let reverse_upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
+    if reverse_upload_id != upload_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -302,8 +302,8 @@ where
     else {
         return Ok(Vec::new());
     };
-    let completed = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
-    let upload_key = completed_large_value_upload_key(completed.id);
+    let upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
+    let upload_key = completed_large_value_upload_key(upload_id);
     let forward = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
         .await?
@@ -311,7 +311,7 @@ where
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
     let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
-    if forward != encoded || forward_completed != completed {
+    if forward_completed.receipt_id != Some(receipt_id) {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -1467,12 +1467,12 @@ impl Database {
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_upload_key(upload_id),
-                value: completed.clone(),
+                value: completed,
             },
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_receipt_key(receipt_id),
-                value: completed,
+                value: upload_id.0.to_vec(),
             },
         ]);
         self.storage

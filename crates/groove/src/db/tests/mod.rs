@@ -947,13 +947,18 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
         .write_many(vec![
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_upload_key(source_upload),
+                value: completed.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: copied_upload_key.clone(),
                 value: completed.clone(),
             },
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: copied_receipt_key.clone(),
-                value: completed.clone(),
+                value: source_upload.0.to_vec(),
             },
         ])
         .await
@@ -974,7 +979,7 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
         super::facade::completed_large_value_cleanup_operations(&storage, copied_receipt_key_id)
             .await,
         Err(Error::InvalidLargeValueMetadata(message))
-            if message.contains("completed receipt key and receipt id differ")
+            if message.contains("completed upload bindings disagree")
     ));
     assert_eq!(
         storage
@@ -989,9 +994,36 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_receipt_key)
             .await
             .unwrap(),
-        Some(completed),
+        Some(source_upload.0.to_vec()),
         "rejected reverse copy must remain untouched"
     );
+    // Bob cannot use a malformed binding or the former duplicated journal.
+    for malformed in [vec![], vec![0x85; 15], vec![0x85; 17], completed] {
+        storage
+            .write_many(vec![crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_receipt_key(source_receipt),
+                value: malformed.clone(),
+            }])
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::facade::completed_large_value_cleanup_operations(&storage, source_receipt).await,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("exactly 16 upload-id bytes")
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    completed_large_value_receipt_key(source_receipt)
+                )
+                .await
+                .unwrap(),
+            Some(malformed),
+            "rejected reverse bindings remain untouched"
+        );
+    }
 }
 
 // A bidirectional completion journal is not itself a completed upload: its
@@ -1036,7 +1068,7 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: receipt_key.clone(),
-                value: completed.clone(),
+                value: upload_id.0.to_vec(),
             },
         ])
         .await
@@ -1066,7 +1098,7 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
             .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key)
             .await
             .unwrap(),
-        Some(completed),
+        Some(upload_id.0.to_vec()),
         "failed staging must not alter the reverse completion journal"
     );
 }

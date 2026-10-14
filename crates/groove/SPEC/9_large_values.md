@@ -739,13 +739,22 @@ whose key alone carries the identity.
 ID is duplicated in the canonical value and MUST match byte-for-byte before
 scan/recovery, acceptance, finalization, resume, or eviction. A valid value
 copied under a different or malformed key is corruption, not an alias or replay.
-The promotion journals apply the same rule in both directions:
-`completed-upload/<upload-id>` MUST contain that exact embedded upload ID, and
-`completed-receipt/<receipt-id>` MUST contain that exact embedded receipt ID.
-Every staging preflight, forward retry lookup, and reverse
-acceptance/eviction cleanup validates its selected key suffix before any
-metadata or refcount mutation; copying either canonical record under another
-key cannot create an alias.
+The promotion journals bind both directions without duplicating the upload
+record. `completed-upload/<upload-id>` contains the full canonical upload
+record and MUST contain that exact embedded upload ID.
+`completed-receipt/<receipt-id>` contains exactly the 16 raw upload-ID bytes:
+no record envelope, length prefix, descriptor, accounting, or chunk list.
+For example, upload ID `a6` repeated 16 times produces exactly sixteen `a6`
+bytes under its receipt key, independent of how many chunks were uploaded.
+
+Promotion writes the forward record, reverse binding and staged receipt in
+the same atomic batch. Forward retry lookup requires the reverse binding to
+name its upload ID. Reverse acceptance/eviction cleanup loads the referenced
+forward record, validates its upload key, and requires its receipt ID to equal
+the reverse key's receipt ID. Missing, malformed, or mismatched bindings fail
+before metadata or refcount mutation. Copying either entry to another key
+cannot create an alias. Both paths still perform two journal point reads.
+
 The descriptor field is canonical opaque `LargeValueRef` bytes at this metadata
 boundary, so its V1 dispatcher runs before nested descriptor fields are bound.
 Descriptor-keyed uploads derive their initial pending key with

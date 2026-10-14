@@ -943,21 +943,20 @@ fn decode_completed_large_value_upload_at_key(
     Ok(completed)
 }
 
-/// Decode the reverse completed-receipt journal only when its embedded receipt
-/// identity is the canonical fixed-width suffix of its metadata key.
+/// Decode the reverse binding's fixed-width upload ID after validating the
+/// receipt key. The caller must verify the forward record names this receipt
+/// before retrying or mutating lifecycle state.
 fn decode_completed_large_value_receipt_at_key(
     key: &[u8],
     encoded: &[u8],
-) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
-    let key_id =
-        staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
-    let completed = decode_pending_large_value_upload(encoded)?;
-    if completed.receipt_id != Some(key_id) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed receipt key and receipt id differ".to_owned(),
-        ));
-    }
-    Ok(completed)
+) -> Result<crate::large_values::StagedLargeValueId, Error> {
+    staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
+    let upload_id = encoded.try_into().map_err(|_| {
+        Error::InvalidLargeValueMetadata(
+            "completed receipt binding must contain exactly 16 upload-id bytes".to_owned(),
+        )
+    })?;
+    Ok(crate::large_values::StagedLargeValueId(upload_id))
 }
 
 /// Apply physical-node ownership transitions against one read-your-own-write
