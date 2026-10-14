@@ -21,8 +21,8 @@
 //! one probe per row and hold the matched rows twice, against one scan and
 //! one arrangement. The keys side therefore has to be narrow
 //! ([`IvmRuntime::narrow_relation`]): every row of it is reached through an
-//! index probe, a point or bounded read, a binding, inline rows or another
-//! keyed lookup. Without cardinality statistics this is the structural
+//! index probe, a point or bounded read, a binding, inline rows, a filter
+//! pinning a field to one UUID or another keyed lookup. Without cardinality statistics this is the structural
 //! stand-in for "the keys side is small".
 
 use super::*;
@@ -115,9 +115,10 @@ impl IvmRuntime {
         Some(self.add_arrangement_node(keyed, target_desc, target_op.fields, target_op.comparison))
     }
 
-    /// Whether every row of `node` is reached through a narrowing read: an
-    /// index probe, a point or bounded table read, a binding, inline rows, or
-    /// a keyed lookup by narrow keys. An inner join or semi-join is narrow
+    /// Whether `node` holds few rows: every row is reached through a
+    /// narrowing read (an index probe, a point or bounded table read, a
+    /// binding, inline rows, or a keyed lookup by narrow keys) or passed a
+    /// filter pinning a field to one UUID. An inner join or semi-join is narrow
     /// when either input is, since its rows are selected by that input's
     /// keys; an anti-join when its left input is; a union when every branch
     /// is. Table scans under at most a static prefix, and anything this does
@@ -156,6 +157,7 @@ impl IvmRuntime {
                         .iter()
                         .all(|input| self.narrow_relation(*input, memo))
             }
+            OpType::Filter(filter) if selective_predicate(&filter.predicate) => true,
             OpType::Arrange(_)
             | OpType::Filter(_)
             | OpType::MapProject(_)
@@ -350,4 +352,23 @@ struct KeySource {
     node: NodeId,
     descriptor: RecordDescriptor,
     fields: Vec<usize>,
+}
+
+/// Whether rows passing `predicate` are few whatever the input: it pins a
+/// field to one identifier. Only UUIDs count; an equality on a bool, enum,
+/// number or string may still select most of a table.
+fn selective_predicate(predicate: &PredicateExpr) -> bool {
+    match predicate {
+        PredicateExpr::Eq { value, .. } => identifier_literal(value),
+        PredicateExpr::And(predicates) => predicates.iter().any(selective_predicate),
+        _ => false,
+    }
+}
+
+fn identifier_literal(value: &LiteralValue) -> bool {
+    match value {
+        LiteralValue::Uuid(_) => true,
+        LiteralValue::Nullable(Some(value)) => identifier_literal(value),
+        _ => false,
+    }
 }

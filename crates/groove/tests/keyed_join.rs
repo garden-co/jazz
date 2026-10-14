@@ -17,7 +17,8 @@ use groove::schema::{
 };
 use groove::storage::MemoryStorage;
 
-/// `docs(id, project, bucket)` refer to projects. A project's current row is
+/// `docs(id, project, bucket, owner)` refer to projects; a doc's owner is
+/// the UUID of its bucket. A project's current row is
 /// either in `projects(branch, id, ..)` or the latest of its
 /// `versions(branch, id, version, ..)`, under a static branch prefix.
 /// `edges(src, dst)` feed a recursive relation.
@@ -29,6 +30,7 @@ fn schema() -> DatabaseSchema {
                 ColumnSchema::new("id", ColumnType::U64),
                 ColumnSchema::new("project", ColumnType::U64),
                 ColumnSchema::new("bucket", ColumnType::U64),
+                ColumnSchema::new("owner", ColumnType::Uuid),
             ],
         )
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64).user_supplied()),
@@ -114,7 +116,16 @@ fn bucket_docs() -> GraphBuilder {
 }
 
 fn doc(id: u64, project: u64, bucket: u64) -> Vec<Value> {
-    vec![Value::U64(id), Value::U64(project), Value::U64(bucket)]
+    vec![
+        Value::U64(id),
+        Value::U64(project),
+        Value::U64(bucket),
+        owner(bucket),
+    ]
+}
+
+fn owner(bucket: u64) -> Value {
+    Value::Uuid(uuid::Uuid::from_u128(u128::from(bucket)))
 }
 
 fn project(id: u64, visible: u64, name: &str) -> Vec<Value> {
@@ -318,6 +329,19 @@ async fn keys_from_a_whole_table_keep_the_whole_table() {
         ["id"],
     );
     assert_eq!(check_maintained(graph).await, 0);
+}
+
+/// A filter pinning a column to one UUID selects few rows of a whole
+/// table, so its rows key the join.
+#[futures_test::test]
+async fn uuid_equality_filters_are_narrow_keys() {
+    let owned = GraphBuilder::join(
+        GraphBuilder::table("docs").filter(PredicateExpr::eq("owner", owner(1))),
+        project_source(),
+        ["project"],
+        ["id"],
+    );
+    assert!(check_maintained(owned).await > 0);
 }
 
 /// The keyed plan holds the matched rows; the whole-table plan arranges

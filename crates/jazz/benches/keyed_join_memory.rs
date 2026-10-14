@@ -86,27 +86,24 @@ fn main() {
     let rss_after_hydration = proc_status_kib("VmRSS:");
     let stats = db.runtime_stats_for_test();
 
-    // An included project changes: every subscriber that includes it hears.
+    // Project writes change which rows the include brings along, not the
+    // documents a local stream delivers: neither reaches a root stream.
     let started = Instant::now();
     insert_project(&db, 0, "renamed");
     let included_write_us = micros(started.elapsed());
     let included_events = drain(&mut streams);
-    // A project nobody includes changes: nobody hears.
     let started = Instant::now();
     insert_project(&db, projects - 1, "renamed");
     let unrelated_write_us = micros(started.elapsed());
     let unrelated_events = drain(&mut streams);
-    // A new document joins an existing project.
+    // A new document joins an existing project: only its team hears.
     let started = Instant::now();
     insert_document(&db, 0, docs_per_route, docs_per_route);
     let new_doc_write_us = micros(started.elapsed());
     let new_doc_events = drain(&mut streams);
-    let expected_included = if shared { routes } else { 1 };
-    let expected_unrelated = usize::from(!shared && routes * docs_per_route == projects);
+    let stats_after_writes = db.runtime_stats_for_test();
 
-    let ok = included_events == expected_included
-        && unrelated_events == expected_unrelated
-        && new_doc_events == 1;
+    let ok = included_events == 0 && unrelated_events == 0 && new_doc_events == 1;
     println!(
         "{}",
         serde_json::json!({
@@ -132,6 +129,8 @@ fn main() {
             "lookup_rows": stats.lookup_rows,
             "lookup_encoded_bytes": stats.lookup_encoded_bytes,
             "graph_nodes": stats.graph_nodes,
+            "arrangement_rows_after_writes": stats_after_writes.arrangement_rows,
+            "lookup_keys_after_writes": stats_after_writes.lookup_keys,
             "rss_kib_after_seed": rss_after_seed,
             "rss_kib_after_hydration": rss_after_hydration,
             "peak_rss_kib": proc_status_kib("VmHWM:"),
