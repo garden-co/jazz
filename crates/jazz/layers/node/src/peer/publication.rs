@@ -92,6 +92,22 @@ struct MaintainedCanonicalUpdate {
     update: SyncMessage,
 }
 
+/// What one maintained publication sends to `subscription`. Rehydrate,
+/// incremental drain and cloned reset each plan these inputs; one bundler
+/// fills in the link-wide rest.
+struct PublicationPlan {
+    subscription: SubscriptionKey,
+    policy: (AuthorSubject, BTreeMap<String, Value>),
+    tier: DurabilityTier,
+    default_read_view: bool,
+    supporting_update: Option<crate::protocol::SupportingRowsUpdate>,
+    settled_through: GlobalTime,
+    known_state: Option<KnownStateDeclaration>,
+    leave_scan_after: Option<GlobalTime>,
+    adds: Vec<ResultMemberEntry>,
+    removes: Vec<ResultMemberEntry>,
+}
+
 #[cfg(any(test, feature = "testing"))]
 std::thread_local! {
     static FAIL_NEXT_CLONED_SUBSCRIPTION_RESET: std::cell::Cell<bool> =
@@ -247,6 +263,45 @@ impl PeerState {
         } else {
             node.committed_global_time()
         }
+    }
+
+    /// Bundle `plan` under its served policy binding from the facts of the
+    /// canonical maintained view `source`.
+    async fn bundle_publication<S>(
+        &self,
+        node: &mut NodeState<S>,
+        shape: &ValidatedQuery,
+        source: SubscriptionKey,
+        maintained_facts: &crate::node::maintained_subscription_view::MaintainedSubscriptionView,
+        plan: PublicationPlan,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        let (identity, claims) = plan.policy;
+        node.scoped_active_session_claims(identity, claims)
+            .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
+                supporting_update: plan.supporting_update,
+                shape,
+                has_default_read_view: plan.default_read_view,
+                allow_authoritative_scalar_exit_refresh: !self
+                    .subscription_awaits_selected_authority_source(source),
+                subscription: plan.subscription,
+                settled_through: plan.settled_through,
+                peer_complete_tx_payloads: self.acknowledged_complete_tx_payloads(),
+                known_state: plan.known_state,
+                leave_scan_after: plan.leave_scan_after,
+                complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                    && self.role == PeerRole::Relay,
+                previous_result_set: BTreeSet::new(),
+                result_member_adds: plan.adds,
+                result_member_removes: plan.removes,
+                identity,
+                tier: plan.tier,
+                maintained_facts,
+                allow_storage_witness_fallback: false,
+            })
+            .await
     }
 
     #[doc(hidden)]
@@ -1137,18 +1192,14 @@ impl PeerState {
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
-            authoritative_membership_changed: _,
-            authoritative_member_adds: _,
             adds: result_member_adds,
             removes: mut result_member_removes,
-            result_payload_adds: _,
-            result_payload_removes: _,
             program_fact_adds,
             program_fact_removes,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
-            terminal_operations: _,
             supporting_changed,
+            ..
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -1273,50 +1324,31 @@ impl PeerState {
             subscription,
             "maintained subscription view is missing prepared state",
         )?;
-        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let known_state = self.downstream_known_states.get(&subscription).cloned();
         let bundle_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let (policy_identity, policy_claims) =
-            self.served_subscription_policy_binding(subscription)?;
-        let settled_through = self.maintained_publication_cut(node, subscription);
-        let update = {
-            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
-            let maintained = &self
-                .maintained_view(subscription)
-                .ok_or(Error::InvalidStoredValue(
-                    "maintained subscription view subscription missing",
-                ))?
-                .maintained;
-            scoped
-                .view_update_for_maintained_result_members(
-                    crate::node::MaintainedViewBundleInputs {
-                        supporting_update: Some(supporting_rows.clone()),
-                        shape,
-                        has_default_read_view: read_view.is_default(),
-                        allow_authoritative_scalar_exit_refresh: !self
-                            .subscription_awaits_selected_authority_source(subscription),
-                        subscription,
-                        settled_through,
-                        peer_complete_tx_payloads,
-                        known_state,
-                        leave_scan_after: None,
-                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                            && self.role == PeerRole::Relay,
-                        previous_result_set: BTreeSet::new(),
-                        result_member_adds: result_member_adds.clone(),
-                        result_member_removes: result_member_removes.clone(),
-                        identity: policy_identity,
-                        tier,
-                        maintained_facts: maintained,
-                        allow_storage_witness_fallback: false,
-                    },
-                )
-                .await
+        let plan = PublicationPlan {
+            subscription,
+            policy: self.served_subscription_policy_binding(subscription)?,
+            tier,
+            default_read_view: read_view.is_default(),
+            supporting_update: Some(supporting_rows.clone()),
+            settled_through: self.maintained_publication_cut(node, subscription),
+            known_state: self.downstream_known_states.get(&subscription).cloned(),
+            leave_scan_after: None,
+            adds: result_member_adds.clone(),
+            removes: result_member_removes.clone(),
         };
-        let update = update?;
+        let maintained = &self
+            .maintained_view(subscription)
+            .ok_or(Error::InvalidStoredValue(
+                "maintained subscription view subscription missing",
+            ))?
+            .maintained;
+        let update = self
+            .bundle_publication(node, shape, subscription, maintained, plan)
+            .await?;
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -1938,7 +1970,6 @@ impl PeerState {
             known_state.clone()
         };
         let filter_elapsed = filter_start.elapsed();
-        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
         let trace_positioned_members = trace_rehydrate.then(|| {
@@ -1952,37 +1983,22 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let (policy_identity, policy_claims) =
-            self.served_subscription_policy_binding(subscription)?;
-        let update = {
-            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
-            scoped
-                .view_update_for_maintained_result_members(
-                    crate::node::MaintainedViewBundleInputs {
-                        supporting_update: catch_up,
-                        shape,
-                        has_default_read_view: read_view.is_default(),
-                        allow_authoritative_scalar_exit_refresh: !self
-                            .subscription_awaits_selected_authority_source(subscription),
-                        subscription,
-                        settled_through: watermark,
-                        peer_complete_tx_payloads,
-                        known_state: bundle_known_state,
-                        leave_scan_after: known_membership_position,
-                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                            && self.role == PeerRole::Relay,
-                        previous_result_set: BTreeSet::new(),
-                        result_member_adds,
-                        result_member_removes,
-                        identity: policy_identity,
-                        tier,
-                        maintained_facts: &maintained,
-                        allow_storage_witness_fallback: false,
-                    },
-                )
-                .await
+        let plan = PublicationPlan {
+            subscription,
+            policy: self.served_subscription_policy_binding(subscription)?,
+            tier,
+            default_read_view: read_view.is_default(),
+            supporting_update: catch_up,
+            settled_through: watermark,
+            known_state: bundle_known_state,
+            leave_scan_after: known_membership_position,
+            adds: result_member_adds,
+            removes: result_member_removes,
         };
-        let update = match update {
+        let update = match self
+            .bundle_publication(node, shape, subscription, &maintained, plan)
+            .await
+        {
             Ok(update) => update,
             Err(err) => {
                 node.unsubscribe_groove_subscription(receiver.id());
@@ -2451,18 +2467,12 @@ impl PeerState {
             return Ok(None);
         }
         let ResultTransitions {
-            authoritative_membership_changed: _,
-            authoritative_member_adds: _,
             adds: source_adds,
             removes: source_removes,
-            result_payload_adds: _,
-            result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
-            observed_result_delta_batches: _,
-            requires_authoritative_membership_reconcile: _,
-            terminal_operations: _,
             supporting_changed,
+            ..
         } = source_transitions;
         let source_had_program_fact_transitions = supporting_changed
             || !source_program_fact_adds.is_empty()
@@ -2688,7 +2698,6 @@ impl PeerState {
             maintained_subscription,
             "coverage group subscription is missing prepared state",
         )?;
-        let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let result_member_adds = if current_program_fact_set.is_empty()
             && !authorization_mismatch
             && let Some(position) = known_membership_position
@@ -2717,8 +2726,7 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
-        let (policy_identity, policy_claims) =
-            self.served_subscription_policy_binding(target_subscription)?;
+        let policy = self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let catch_up_authorization_matches =
             self.fast_cursor_authorization_matches(target_subscription, &known_state);
@@ -2758,47 +2766,32 @@ impl PeerState {
                 target_result_member_removes,
             )
         };
-        let target_reset = {
-            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
-            let maintained = &self
-                .maintained_view(maintained_subscription)
-                .ok_or(Error::InvalidStoredValue(
-                    "coverage group subscription is missing maintained state",
-                ))?
-                .maintained;
-            scoped
-                .view_update_for_maintained_result_members(
-                    crate::node::MaintainedViewBundleInputs {
-                        supporting_update: catch_up,
-                        shape,
-                        has_default_read_view: read_view.is_default(),
-                        allow_authoritative_scalar_exit_refresh: !self
-                            .subscription_awaits_selected_authority_source(maintained_subscription),
-                        subscription: target_subscription,
-                        settled_through,
-                        peer_complete_tx_payloads,
-                        known_state,
-                        leave_scan_after,
-                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                            && self.role == PeerRole::Relay,
-                        previous_result_set: BTreeSet::new(),
-                        result_member_adds,
-                        result_member_removes: target_result_member_removes,
-                        // A newly attached usage site starts with no
-                        // subscription-scoped facts even when it shares the
-                        // canonical evaluator. Rehydrate the evaluator's complete
-                        // current fact closure; forwarding only future deltas
-                        // leaves array/join dependencies absent after a one-shot
-                        // attachment races their first update.
-                        identity: policy_identity,
-                        tier,
-                        maintained_facts: maintained,
-                        allow_storage_witness_fallback: false,
-                    },
-                )
-                .await
+        // A newly attached usage site starts with no subscription-scoped
+        // facts even when it shares the canonical evaluator. Rehydrate the
+        // evaluator's complete current fact closure; forwarding only future
+        // deltas leaves array/join dependencies absent after a one-shot
+        // attachment races their first update.
+        let plan = PublicationPlan {
+            subscription: target_subscription,
+            policy,
+            tier,
+            default_read_view: read_view.is_default(),
+            supporting_update: catch_up,
+            settled_through,
+            known_state,
+            leave_scan_after,
+            adds: result_member_adds,
+            removes: target_result_member_removes,
         };
-        let mut target_reset = target_reset?;
+        let maintained = &self
+            .maintained_view(maintained_subscription)
+            .ok_or(Error::InvalidStoredValue(
+                "coverage group subscription is missing maintained state",
+            ))?
+            .maintained;
+        let mut target_reset = self
+            .bundle_publication(node, shape, maintained_subscription, maintained, plan)
+            .await?;
         if let SyncMessage::ViewUpdate(view) = &mut target_reset {
             self.bind_cloned_supporting_revision(maintained_subscription, view);
         }
