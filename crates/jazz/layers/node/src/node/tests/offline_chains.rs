@@ -1511,3 +1511,187 @@ fn enum_cells_apply_by_arrival_under_a_branched_registry() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(rows[&target], status(0));
 }
+
+/// Core's superseded-writes marker of `writer` for `target` in `todos`.
+fn superseded_marker(core: &NodeState, target: RowUuid, writer: NodeUuid) -> Option<TxTime> {
+    let key = [
+        Value::String("todos".to_owned()),
+        Value::Bytes(BranchKey::default().canonical_bytes()),
+        Value::Uuid(target.0),
+        Value::Uuid(writer.0),
+    ];
+    let store = core
+        .database
+        .direct_record_store(crate::schema::SUPERSEDED_WRITES_STORE)
+        .unwrap();
+    crate::local_executor::block_on(store.get(&key))
+        .unwrap()
+        .map(|record| match record.get_idx(0).unwrap() {
+            Value::U64(time) => TxTime(time),
+            other => panic!("marker is not a time: {other:?}"),
+        })
+}
+
+/// Run Core's late-write check for `unit`'s single version against the
+/// row's current image, and the history records it read.
+fn late_check_cost(
+    core: &mut NodeState,
+    unit: &SyncMessage,
+    current_seq: GlobalTime,
+    current_writer: TxId,
+) -> (bool, groove::db::StorageReadMetrics) {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected a commit unit");
+    };
+    let version = &versions[0];
+    let batch = core.database.open_batch();
+    core.reset_storage_read_metrics();
+    let refusal = core
+        .late_write_refusal(
+            &batch,
+            version.table(),
+            version.branch_key(),
+            version.row_uuid(),
+            version.base(),
+            tx.tx_id,
+            Some(current_seq),
+            Some(current_writer),
+        )
+        .resolve()
+        .unwrap();
+    (refusal.is_some(), core.take_storage_read_metrics())
+}
+
+/// INV-HIST-23, cost: the late-write check reads the writes Core accepted
+/// since the write's base, never the row's whole history. dave edits the
+/// row 60 times; carol syncs, edits twice offline, and her second edit
+/// arrives first; dave edits twice more. Checking carol's late first edit
+/// reads only the three records after her base, as does an on-time write
+/// over the same stale base; a write without a base reads no history record
+/// at all.
+///
+/// ```text
+/// dave  ──d1..d60──► core                 60 records
+/// carol (synced at d60) ═offline═ c1, c2
+/// carol ──c2──► core   accepted           marker: carol through c1
+/// dave  ──d61, d62──► core
+/// carol ──c1──► core   late: reads c2, d61, d62 only
+/// ```
+#[test]
+fn late_write_check_reads_only_the_writes_since_the_base() {
+    let target = row(0x9b);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    for index in 0..60 {
+        accept_edit(
+            &mut core,
+            &mut writers[1].1,
+            target,
+            200 + index,
+            &[("body", &format!("d{index}"))],
+        );
+    }
+    sync_table_rows_to(&mut core, &mut writers[0].1, "todos");
+    let carol = writers[0].1.node_uuid;
+    let (c1, c1_unit) = offline_edit(&mut writers[0].1, target, 300, &[("title", "c1")]);
+    let (c2, c2_unit) = offline_edit(&mut writers[0].1, target, 301, &[("title", "c2")]);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(c2_unit).unwrap(), c2), Some(&Fate::Accepted));
+    assert_eq!(
+        superseded_marker(&core, target, carol),
+        Some(c1.time),
+        "c2 passed over c1, which Core had not decided"
+    );
+    accept_edit(&mut core, &mut writers[1].1, target, 302, &[("body", "d61")]);
+    let d62 = accept_edit(&mut core, &mut writers[1].1, target, 303, &[("body", "d62")]);
+    let current = core.transaction_state_settled(d62).unwrap().1.unwrap();
+    assert!(row_conflicts(&mut core, target).len() > 60);
+
+    let (late, metrics) = late_check_cost(&mut core, &c1_unit, current, d62);
+    assert!(late, "c1 arrived after carol's c2");
+    assert_eq!(metrics.history_rows.ranges, 1, "{metrics:?}");
+    assert_eq!(metrics.history_rows.reads, 3, "c2, d61 and d62: {metrics:?}");
+
+    // A write of dave's over the same stale base (d60) is not late, and
+    // reads the same three records.
+    let (_, on_time) = offline_edit(&mut writers[1].1, target, 304, &[("title", "d")]);
+    let c1_base = match &c1_unit {
+        SyncMessage::CommitUnit { versions, .. } => versions[0].base(),
+        _ => unreachable!(),
+    };
+    let stale = with_base(
+        on_time,
+        crate::protocol::RowBase {
+            seq: c1_base.seq,
+            pending: None,
+        },
+    );
+    let (late, metrics) = late_check_cost(&mut core, &stale, current, c2);
+    assert!(!late);
+    assert_eq!(metrics.history_rows.reads, 3, "{metrics:?}");
+
+    // A write without a base seq reads the writer's marker, not history.
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x31), two_column_schema());
+    let (_, blind) = offline_edit(&mut frank, target, 305, &[("title", "frank")]);
+    let (late, metrics) = late_check_cost(&mut core, &blind, current, d62);
+    assert!(!late);
+    assert_eq!(metrics.history_rows.reads, 0, "{metrics:?}");
+    assert_eq!(metrics.history_rows.ranges, 0, "{metrics:?}");
+
+    let answer = core.apply_sync_message_settled(c1_unit).unwrap();
+    assert!(refused_as_late(&answer, c1), "{answer:?}");
+}
+
+/// INV-HIST-23: a write without a base (frank never loaded the row) that
+/// reaches Core after its chained successor, with another writer's write
+/// in between, is refused as late through the marker Core recorded when it
+/// applied the successor over it.
+///
+/// ```text
+/// frank (never loaded the row) ═offline═ f1 title="f1", f2 body="f2" (chained on f1)
+/// frank ──f2──► core   accepted   marker: frank through f1
+/// dave  ──d───► core   accepted   (the row's current image)
+/// frank ──f1──► core   rejected (late)
+/// ```
+#[test]
+fn late_write_without_a_base_is_refused_through_its_writers_marker() {
+    let target = row(0x9c);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x32), two_column_schema());
+    let (f1, f1_unit) = offline_edit(&mut frank, target, 100, &[("title", "f1")]);
+    let (f2, f2_unit) = offline_edit(&mut frank, target, 101, &[("body", "f2")]);
+    let SyncMessage::CommitUnit { versions, .. } = &f1_unit else {
+        unreachable!()
+    };
+    assert!(versions[0].base().is_empty(), "f1 has no base");
+    let SyncMessage::CommitUnit { versions, .. } = &f2_unit else {
+        unreachable!()
+    };
+    assert_eq!(versions[0].base().pending, Some(f1));
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted));
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    accept_edit(&mut core, &mut writers[0].1, target, 102, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(f1_unit).unwrap();
+    assert!(refused_as_late(&late, f1), "{late:?}");
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target].get("title"),
+        Some(&v("dave"))
+    );
+}
+
+/// The ordinary chain, each write over a predecessor Core accepted, records
+/// no marker: only a write that passes over a predecessor Core never
+/// decided does.
+#[test]
+fn chain_over_accepted_predecessors_records_no_marker() {
+    let target = row(0x9d);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let carol = writers[0].1.node_uuid;
+    let (_, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
+    let (_, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "c2")]);
+    assert_accepted(&core_fate(&mut core, e1_unit));
+    // Another writer's write makes carol's chain stale, so the check looks
+    // the predecessor up rather than reading it off the row's image.
+    accept_edit(&mut core, &mut writers[1].1, target, 102, &[("title", "dave")]);
+    assert_accepted(&core_fate(&mut core, e2_unit));
+    assert_eq!(superseded_marker(&core, target, carol), None);
+}

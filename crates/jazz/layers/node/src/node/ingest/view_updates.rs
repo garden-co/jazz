@@ -275,6 +275,9 @@ where
         versions: &[VersionRecord],
     ) -> Result<Option<RejectionReason>, Error> {
         let batch = self.database.open_batch();
+        // Writes of the unit's node that applying it passes over, recorded
+        // once the unit passes every check here (`passed_over_predecessor`).
+        let mut passed_over = Vec::new();
         for version in versions {
             let schema_version = version.schema_version();
             let (current_seq, current_writer) = self
@@ -318,6 +321,12 @@ where
                 {
                     return Ok(Some(RejectionReason::MalformedCommit(reason)));
                 }
+            }
+            if let Some(through) = self
+                .passed_over_predecessor(version.base(), tx_id, current_writer)
+                .await?
+            {
+                passed_over.push((version, through));
             }
             let table_schema = self.table_in_schema(version.table(), schema_version)?;
             let authored = version.authored_columns();
@@ -418,6 +427,17 @@ where
                     ))));
                 }
             }
+        }
+        drop(batch);
+        for (version, through) in passed_over {
+            self.record_superseded_writes(
+                version.table(),
+                version.branch_key(),
+                version.row_uuid(),
+                tx_id.node,
+                through,
+            )
+            .await?;
         }
         Ok(None)
     }

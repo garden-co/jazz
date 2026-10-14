@@ -57,7 +57,7 @@ use crate::query::{
 };
 use crate::schema::{
     AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE,
-    SETTLED_PROGRAM_FACTS_STORE, TableSchema, registered_column_transform,
+    SETTLED_PROGRAM_FACTS_STORE, SUPERSEDED_WRITES_STORE, TableSchema, registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{

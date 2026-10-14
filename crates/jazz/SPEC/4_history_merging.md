@@ -316,9 +316,27 @@ reached Core already or never will:
   row, the order was violated. Core rejects `P` with a `MalformedCommit`
   reason saying it arrived after a later write of its writer, and does not
   apply it, so the row never goes back to an older image (`INV-HIST-23`).
-  The check reads nothing more when the row's current image was written by
-  `N` (compare its transaction time) or is `P`'s base; otherwise it scans
-  the row's accepted records after `P`'s base seq.
+  The check costs at most the writes accepted since `P`'s base, never the
+  row's whole history:
+  - It reads nothing more when the row's current image was written by `N`
+    (compare its transaction time) or is `P`'s base.
+  - When `P` has a base seq `B` and the row's current seq is `C`, it reads
+    the key fields of the row's history records at seqs `B+1..=C`: one range
+    read per history table, since history is keyed
+    `(branch, row, seq, tx_time, node)`. `N` had seen `B` when it wrote `P`,
+    so a later write of `N` lies there if anywhere.
+  - When `P` has no base seq (an insert, upsert or restore made over no
+    image of the row), it reads one per-row marker of `N`. When Core applies
+    a write `W` of `N` chained on a predecessor `X` it holds no accepted fate
+    for, it first records in the marker (the node-local direct record store
+    `jazz_superseded_writes_v1`, keyed by table, branch, row and node) that
+    `N`'s writes to the row through `X`'s transaction time were passed over;
+    a write of `N` at or before that time arriving later is late. The marker
+    is exact for `P`: the first write of `N` Core accepted after `P` was
+    written while `P` was still pending at `N`, so it was chained on `P` or
+    on a later write Core had not accepted either, and recorded a marker at
+    or after `P`. A chain over predecessors Core accepted records nothing
+    and reads at most the predecessor's transaction.
 
 A `P` rejected locally before it reached Core (for example its large value
 was not staged) therefore ends like a `P` rejected at Core: `W` applies over
