@@ -100,12 +100,21 @@ In a browser, Jazz reopens the last signed-in account at once after a reload, be
 function Restore() {
   const { needsLogin, sessionActions } = useJazzAuth();
   const { data: providerSession } = authClient.useSession();
+  const userId = providerSession?.user.id;
+  // Keyed on the user, not the provider session object: providers refetch it
+  // (on window focus, for example), and a second call while a login is in
+  // flight rejects as already pending.
   useEffect(() => {
-    if (needsLogin && providerSession) void sessionActions.loginOrRegisterJWT({ getToken });
-  }, [needsLogin, providerSession]);
+    if (!userId || !needsLogin) return;
+    sessionActions.loginOrRegisterJWT({ getToken }).catch(() => {
+      // The failure is reported in useJazzAuth().error; retry() repeats it.
+    });
+  }, [userId]);
   return null;
 }
 ```
+
+`needsLogin` is already settled when `useJazzAuth()` first renders the app, so keying the effect on the user id is enough.
 
 Managed `auth` does this for you. In development builds, Jazz warns in the console when an app without managed `auth` keeps writing to an account whose `needsLogin` is still `true` and starts no login within a few seconds.
 
