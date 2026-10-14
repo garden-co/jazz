@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::middleware::auth::validate_admin_secret;
+use crate::server::catalogue::MigrationGraph;
 use crate::server::{ServerState, ShutdownPhase};
 use jazz::tools::public_schema::{ColumnType, Schema, TableName, TablePolicies, Value};
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
@@ -36,12 +37,26 @@ fn require_admin(state: &ServerState, headers: &HeaderMap) -> Result<(), Respons
         .map_err(|(status, msg)| (status, Json(ErrorResponse::unauthorized(msg))).into_response())
 }
 
+fn error_response(status: StatusCode, body: ErrorResponse) -> Response {
+    (status, Json(body)).into_response()
+}
+
 fn bad_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse::bad_request(message)),
-    )
-        .into_response()
+    error_response(StatusCode::BAD_REQUEST, ErrorResponse::bad_request(message))
+}
+
+fn not_found(message: impl Into<String>) -> Response {
+    error_response(StatusCode::NOT_FOUND, ErrorResponse::not_found(message))
+}
+
+/// Map a catalogue read failure to a 500 naming what could not be read.
+fn read_failed<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Response {
+    move |err| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorResponse::internal(format!("failed to read {what}: {err}")),
+        )
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -146,66 +161,30 @@ pub(super) async fn schema_handler(
     State(state): State<Arc<ServerState>>,
     Path(params): Path<HashMap<String, String>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
-    let Some(hash_text) = params.get("hash") else {
-        return bad_request("missing schema hash");
-    };
+) -> Result<Json<StoredSchemaResponse>, Response> {
+    let hash_text = params
+        .get("hash")
+        .ok_or_else(|| bad_request("missing schema hash"))?;
+    require_admin(&state, &headers)?;
+    let schema_hash = parse_schema_hash_param(hash_text).map_err(bad_request)?;
 
-    if let Err(response) = require_admin(&state, &headers) {
-        return response;
-    }
-
-    let schema_hash = match parse_schema_hash_param(hash_text) {
-        Ok(hash) => hash,
-        Err(message) => return bad_request(message),
-    };
-
-    match state
+    let schema = state
         .catalogue
         .known_schema(&state.catalogue_store, &schema_hash)
-    {
-        Ok(Some(schema)) => {
-            let published_at = match state
-                .catalogue
-                .schema_published_at(&state.catalogue_store, &schema_hash)
-            {
-                Ok(timestamp) => timestamp,
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::internal(format!(
-                            "failed to read schema publish timestamp: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-            };
-            tracing::info!(
-                requested_hash = %schema_hash.short(),
-                "schema request: returning requested hash"
-            );
-            let body = StoredSchemaResponse {
-                schema: schema.clone(),
-                published_at,
-            };
-            Json(body).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::not_found(format!(
-                "schema catalogue not found for hash {}",
-                schema_hash
-            ))),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read schema catalogue: {err}"
-            ))),
-        )
-            .into_response(),
-    }
+        .map_err(read_failed("schema catalogue"))?
+        .ok_or_else(|| not_found(format!("schema catalogue not found for hash {schema_hash}")))?;
+    let published_at = state
+        .catalogue
+        .schema_published_at(&state.catalogue_store, &schema_hash)
+        .map_err(read_failed("schema publish timestamp"))?;
+    tracing::info!(
+        requested_hash = %schema_hash.short(),
+        "schema request: returning requested hash"
+    );
+    Ok(Json(StoredSchemaResponse {
+        schema,
+        published_at,
+    }))
 }
 
 /// Return all known schema hashes from catalogue state.
@@ -217,45 +196,27 @@ pub(super) async fn schema_hashes_handler(
 ) -> Result<Json<SchemaSummaryResponse>, Response> {
     require_admin(&state, &headers)?;
 
-    match state.catalogue.known_schema_hashes(&state.catalogue_store) {
-        Ok(hashes) => {
-            let mut schemas = Vec::with_capacity(hashes.len());
-            for hash in &hashes {
-                let published_at = match state
-                    .catalogue
-                    .schema_published_at(&state.catalogue_store, hash)
-                {
-                    Ok(timestamp) => timestamp,
-                    Err(err) => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::internal(format!(
-                                "failed to read schema publish timestamp: {err}"
-                            ))),
-                        )
-                            .into_response());
-                    }
-                };
-                schemas.push(SchemaSummary {
-                    hash: hash.to_string(),
-                    published_at,
-                });
-            }
-            #[allow(deprecated)]
-            let body = SchemaSummaryResponse {
-                hashes: hashes.iter().map(ToString::to_string).collect(),
-                schemas,
-            };
-            Ok(Json(body))
-        }
-        Err(err) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read schema hashes: {err}"
-            ))),
-        )
-            .into_response()),
+    let hashes = state
+        .catalogue
+        .known_schema_hashes(&state.catalogue_store)
+        .map_err(read_failed("schema hashes"))?;
+    let mut schemas = Vec::with_capacity(hashes.len());
+    for hash in &hashes {
+        let published_at = state
+            .catalogue
+            .schema_published_at(&state.catalogue_store, hash)
+            .map_err(read_failed("schema publish timestamp"))?;
+        schemas.push(SchemaSummary {
+            hash: hash.to_string(),
+            published_at,
+        });
     }
+    #[allow(deprecated)]
+    let body = SchemaSummaryResponse {
+        hashes: hashes.iter().map(ToString::to_string).collect(),
+        schemas,
+    };
+    Ok(Json(body))
 }
 
 /// Return whether two known schema hashes are connected by non-draft uploaded migrations.
@@ -264,54 +225,34 @@ pub(super) async fn schema_hashes_handler(
 pub(super) async fn migration_graph_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(response) = require_admin(&state, &headers) {
-        return response;
-    }
-
-    match state.catalogue.migration_graph(&state.catalogue_store) {
-        Ok(graph) => (StatusCode::OK, Json(graph)).into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read migration graph: {err}"
-            ))),
-        )
-            .into_response(),
-    }
+) -> Result<Json<MigrationGraph>, Response> {
+    require_admin(&state, &headers)?;
+    let graph = state
+        .catalogue
+        .migration_graph(&state.catalogue_store)
+        .map_err(read_failed("migration graph"))?;
+    Ok(Json(graph))
 }
 
 pub(super) async fn permissions_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(response) = require_admin(&state, &headers) {
-        return response;
-    }
-
-    match state.catalogue.active_schema(&state.catalogue_store) {
-        Ok(current) => (
-            StatusCode::OK,
-            Json(match current {
-                Some(current) => StoredPermissionsResponse {
-                    head: Some(permissions_head_view(current.summary)),
-                    permissions: Some(permissions_map_view(current.permissions)),
-                },
-                None => StoredPermissionsResponse {
-                    head: None,
-                    permissions: None,
-                },
-            }),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read current permissions: {err}"
-            ))),
-        )
-            .into_response(),
-    }
+) -> Result<Json<StoredPermissionsResponse>, Response> {
+    require_admin(&state, &headers)?;
+    let current = state
+        .catalogue
+        .active_schema(&state.catalogue_store)
+        .map_err(read_failed("current permissions"))?;
+    Ok(Json(match current {
+        Some(current) => StoredPermissionsResponse {
+            head: Some(permissions_head_view(current.summary)),
+            permissions: Some(permissions_map_view(current.permissions)),
+        },
+        None => StoredPermissionsResponse {
+            head: None,
+            permissions: None,
+        },
+    }))
 }
 
 /// Lower a deployment migration against its resolved source and target schemas.
@@ -445,14 +386,7 @@ pub(super) async fn admin_subscription_introspection_handler(
     };
 
     if requested_app_id != state.app_id {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::not_found(format!(
-                "app not found: {}",
-                app_id_text.trim()
-            ))),
-        )
-            .into_response();
+        return not_found(format!("app not found: {}", app_id_text.trim()));
     }
 
     Json(AdminSubscriptionIntrospectionResponse {
