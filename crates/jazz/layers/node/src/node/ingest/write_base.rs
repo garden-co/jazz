@@ -191,6 +191,7 @@ where
     pub(in crate::node) async fn late_write_refusal(
         &mut self,
         batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
@@ -235,7 +236,12 @@ where
                 .await?
             }
             None => self
-                .superseded_through(table, branch_key, row_uuid, writer.node)
+                .superseded_through(
+                    self.physical_table_id_for_schema(schema_version, table)?,
+                    branch_key,
+                    row_uuid,
+                    writer.node,
+                )
                 .await?
                 .is_some_and(|through| writer.time <= through),
         };
@@ -289,15 +295,18 @@ where
         Ok(false)
     }
 
-    /// The superseded-writes marker key of `node` for a row.
+    /// The superseded-writes marker key of `node` for a row. It names the
+    /// row's table by its physical id, which a table rename keeps, so a
+    /// marker recorded under one schema version guards writes made under
+    /// another.
     fn superseded_writes_key(
-        table: &str,
+        table: PhysicalTableId,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
         node: NodeUuid,
     ) -> [Value; 4] {
         [
-            Value::String(table.to_owned()),
+            Value::U64(table.0),
             Value::Bytes(branch_key.canonical_bytes()),
             Value::Uuid(row_uuid.0),
             Value::Uuid(node.0),
@@ -308,7 +317,7 @@ where
     /// passed over (see [`Self::passed_over_predecessor`]): one point read.
     async fn superseded_through(
         &self,
-        table: &str,
+        table: PhysicalTableId,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
         node: NodeUuid,
@@ -375,7 +384,7 @@ where
     /// `through` (see [`Self::passed_over_predecessor`]). Markers only grow.
     pub(super) async fn record_superseded_writes(
         &mut self,
-        table: &str,
+        table: PhysicalTableId,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
         node: NodeUuid,

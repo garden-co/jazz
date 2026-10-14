@@ -293,6 +293,7 @@ where
             if let Some(reason) = self
                 .late_write_refusal(
                     &batch,
+                    schema_version,
                     version.table(),
                     version.branch_key(),
                     version.row_uuid(),
@@ -431,7 +432,7 @@ where
         drop(batch);
         for (version, through) in passed_over {
             self.record_superseded_writes(
-                version.table(),
+                self.physical_table_id_for_schema(version.schema_version(), version.table())?,
                 version.branch_key(),
                 version.row_uuid(),
                 tx_id.node,

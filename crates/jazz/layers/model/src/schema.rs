@@ -47,8 +47,8 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row and
-/// writer node, the newest transaction time of that node's writes to the row
+/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row
+/// (keyed by physical table id, which a table rename keeps) and writer node, the newest transaction time of that node's writes to the row
 /// that Core passed over when it applied a later write of the node chained on
 /// a predecessor it holds no accepted fate for. A write of that node at or
 /// before the time arriving afterwards is late (`INV-HIST-23`).
@@ -603,7 +603,7 @@ impl RuntimeSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SUPERSEDED_WRITES_STORE,
                 RecordDescriptor::new([
-                    ("table", ValueType::String),
+                    ("physical_table_id", ValueType::U64),
                     ("branch_key", ValueType::Bytes),
                     ("row", ValueType::Uuid),
                     ("node", ValueType::Uuid),

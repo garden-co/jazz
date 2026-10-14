@@ -1514,8 +1514,11 @@ fn enum_cells_apply_by_arrival_under_a_branched_registry() {
 
 /// Core's superseded-writes marker of `writer` for `target` in `todos`.
 fn superseded_marker(core: &NodeState, target: RowUuid, writer: NodeUuid) -> Option<TxTime> {
+    let todos = core
+        .physical_table_id_for_schema(two_column_schema().version_id(), "todos")
+        .unwrap();
     let key = [
-        Value::String("todos".to_owned()),
+        Value::U64(todos.0),
         Value::Bytes(BranchKey::default().canonical_bytes()),
         Value::Uuid(target.0),
         Value::Uuid(writer.0),
@@ -1549,6 +1552,7 @@ fn late_check_cost(
     let refusal = core
         .late_write_refusal(
             &batch,
+            version.schema_version(),
             version.table(),
             version.branch_key(),
             version.row_uuid(),
@@ -1694,4 +1698,94 @@ fn chain_over_accepted_predecessors_records_no_marker() {
     accept_edit(&mut core, &mut writers[1].1, target, 102, &[("title", "dave")]);
     assert_accepted(&core_fate(&mut core, e2_unit));
     assert_eq!(superseded_marker(&core, target, carol), None);
+}
+
+/// `todos` renamed to `tasks` (and `title` to `name`) by a later schema.
+fn renamed_two_column_tasks_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("name", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .allow_all(),
+    )
+}
+
+/// INV-HIST-23 across a table rename: the marker names the row's table by
+/// its physical id, which the rename keeps, so a write made under the old
+/// schema is refused as late through the marker its successor recorded
+/// under the new one.
+///
+/// ```text
+/// frank (v1, todos) ═offline═ f1 title="f1"
+/// frank (v2, tasks) ═offline═ f2 name="f2" (chained on f1)
+/// frank ──f2──► core   accepted   marker: frank through f1
+/// dave  ──d───► core   accepted   (the row's current image)
+/// frank ──f1──► core   rejected (late)
+/// ```
+#[test]
+fn superseded_marker_survives_a_table_rename() {
+    let target = row(0x9e);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let base = two_column_schema();
+    let renamed = SchemaVersion::new(renamed_two_column_tasks_schema());
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        core.physical_table_id_for_schema(renamed.id, "tasks").unwrap(),
+        core.physical_table_id_for_schema(base.version_id(), "todos").unwrap(),
+        "a rename keeps the physical table"
+    );
+
+    let frank = node(0x34);
+    let (_v1_dir, mut frank_v1) = open_node_with_schema(frank, base);
+    let (f1, f1_unit) = offline_edit(&mut frank_v1, target, 100, &[("title", "f1")]);
+    let (_v2_dir, mut frank_v2) = open_node_with_schema(frank, renamed_two_column_tasks_schema());
+    let (f2, f2_unit) = frank_v2
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("tasks", target, 101)
+                .cells(BTreeMap::from([("name".to_owned(), v("f2"))])),
+        )
+        .unwrap();
+    assert!(f1 < f2);
+    let f2_unit = with_base(
+        f2_unit,
+        crate::protocol::RowBase {
+            seq: None,
+            pending: Some(f1),
+        },
+    );
+
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    accept_edit(&mut core, &mut writers[0].1, target, 102, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(f1_unit).unwrap();
+    assert!(refused_as_late(&late, f1), "{late:?}");
 }
