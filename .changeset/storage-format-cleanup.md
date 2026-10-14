@@ -21,4 +21,6 @@
 
 - Specialize chunk-tree branch children by value kind: omit UTF-16 length for bytes and require it for string/JSON, saving nine bytes per binary child and one per text child. Branch content hashes change with their encoding.
 
+- Use one storage encoding for every catalogue schema and one counted v2 lineage-publication encoding for every predecessor set. Remove the retired v1 decoders; schema IDs stay unchanged, while affected publication IDs change with their canonical bytes.
+
 Databases using the preceding formats are rejected at open. There is no automatic migration; create a fresh database and restore or resync its data. Current-format databases continue to retain native rows and pending writes across restarts.

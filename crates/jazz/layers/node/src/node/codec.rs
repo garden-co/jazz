@@ -459,12 +459,11 @@ impl records::RecordField for CatalogueRecordKind {
 // durable bytes depend on Rust field layout and accept trailing data in some
 // configurations.  Every payload below starts with its own permanent format
 // version and consumes exactly its input.
-use crate::protocol::{CATALOGUE_SCHEMA_V1, CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES};
+use crate::protocol::CATALOGUE_SCHEMA_VERSION;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
-const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
-const CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION: u8 = 2;
+const CATALOGUE_PUBLICATION_VERSION: u8 = 2;
 const CATALOGUE_STAGED_LINEAGE_VERSION: u8 = 1;
 const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
 // This is deliberately independent of the catalogue-record payload versions:
@@ -981,16 +980,11 @@ pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>,
 }
 
 pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
-    let version = match payload.first().copied() {
-        Some(version @ (CATALOGUE_SCHEMA_V1 | CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES)) => version,
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "invalid catalogue schema payload",
-            ));
-        }
-    };
-    let mut cursor =
-        CataloguePayloadCursor::new(payload, version, "invalid catalogue schema payload")?;
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_SCHEMA_VERSION,
+        "invalid catalogue schema payload",
+    )?;
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
@@ -1006,11 +1000,6 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     if schema.version_id() != id {
         return Err(Error::InvalidStoredValue(
             "catalogue schema content id mismatch",
-        ));
-    }
-    if crate::protocol::catalogue_schema_payload_version(&schema) != version {
-        return Err(Error::InvalidStoredValue(
-            "catalogue schema payload version does not match its composite indexes",
         ));
     }
     Ok(SchemaVersion { id, schema })
@@ -1112,12 +1101,7 @@ pub(super) fn decode_catalogue_lens(payload: &[u8]) -> Result<MigrationLens, Err
 
 fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Result<Vec<u8>, Error> {
     let schema = encode_catalogue_schema(&publication.schema)?;
-    let version = if publication.predecessors.len() == 1 {
-        CATALOGUE_PROTOCOL_PUBLICATION_VERSION
-    } else {
-        CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION
-    };
-    let mut payload = vec![version];
+    let mut payload = vec![CATALOGUE_PUBLICATION_VERSION];
     payload.extend_from_slice(publication.id.0.as_bytes());
     put_len(
         &mut payload,
@@ -1134,13 +1118,11 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
     {
         return Err(Error::InvalidStoredValue("invalid schema predecessors"));
     }
-    if version == 2 {
-        put_len(
-            &mut payload,
-            predecessors.len(),
-            "catalogue predecessor count",
-        )?;
-    }
+    put_len(
+        &mut payload,
+        predecessors.len(),
+        "catalogue predecessor count",
+    )?;
     for predecessor in predecessors {
         let lens = encode_catalogue_lens(&predecessor.lens);
         put_len(
@@ -1186,15 +1168,11 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
 
 fn decode_catalogue_publication(payload: &[u8]) -> Result<SchemaLineagePublication, Error> {
     const CONTEXT: &str = "invalid catalogue protocol publication";
-    let version = *payload.first().ok_or(Error::InvalidStoredValue(CONTEXT))?;
-    if version != 1 && version != 2 {
-        return Err(Error::InvalidStoredValue(CONTEXT));
-    }
-    let mut cursor = CataloguePayloadCursor::new(payload, version, CONTEXT)?;
+    let mut cursor = CataloguePayloadCursor::new(payload, CATALOGUE_PUBLICATION_VERSION, CONTEXT)?;
     let id = SchemaLineagePublicationId(cursor.uuid()?);
     let schema = decode_catalogue_schema(cursor.sized_bytes()?)?;
-    let count = if version == 1 { 1 } else { cursor.u32()? };
-    if count == 0 || (version == 2 && count == 1) {
+    let count = cursor.u32()?;
+    if count == 0 {
         return Err(Error::InvalidStoredValue(CONTEXT));
     }
     let mut predecessors = Vec::new();
@@ -1539,7 +1517,7 @@ mod catalogue_payload_tests {
 
     /// Internal byte corpus: public queries cannot pin recovery record encodings.
     #[test]
-    fn predecessor_publication_encodings_preserve_v1_and_pin_v2() {
+    fn predecessor_publications_use_one_counted_encoding() {
         let mut publication = staged_fixture().publication;
         let mut records = Vec::new();
         for count in [1, 2] {
@@ -1553,7 +1531,7 @@ mod catalogue_payload_tests {
                 .collect();
             publication.id = publication.content_id();
             let bytes = encode_catalogue_publication(&publication).unwrap();
-            assert_eq!(bytes[0], count as u8);
+            assert_eq!(bytes[0], CATALOGUE_PUBLICATION_VERSION);
             assert_eq!(decode_catalogue_publication(&bytes).unwrap(), publication);
             let mut reversed = publication.clone();
             reversed.predecessors.reverse();
@@ -1562,6 +1540,7 @@ mod catalogue_payload_tests {
                 bytes[..bytes.len() - 1].to_vec(),
                 [bytes.clone(), vec![0]].concat(),
                 [vec![3], bytes[1..].to_vec()].concat(),
+                [vec![1], bytes[1..].to_vec()].concat(),
             ] {
                 assert!(decode_catalogue_publication(&bad).is_err());
             }
@@ -1577,7 +1556,7 @@ mod catalogue_payload_tests {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/fixtures/catalogue-predecessors.hex"
+                    "/../../fixtures/catalogue-predecessors.hex"
                 ),
                 actual,
             )
@@ -1856,13 +1835,13 @@ mod catalogue_payload_tests {
     fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
         // Internal format receipt: publication content addressing consumes this
-        // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
+        // exact catalogue schema bytes rather than a serde SchemaVersion layout.
         assert_eq!(
             hex::encode(&encoded),
-            "0117e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
+            "0217e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
         );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
     }
@@ -1880,13 +1859,12 @@ mod catalogue_payload_tests {
     }
 
     #[test]
-    fn catalogue_schema_payload_uses_v2_envelope_for_composite_indexes() {
+    fn catalogue_schema_payload_uses_same_envelope_for_composite_indexes() {
         let schema = composite_index_schema(&[["updated", "owner"], ["owner", "updated"]]);
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
-        // Internal format receipt: the CATS v2 envelope is byte-identical to
-        // v1 apart from its version, and the embedded public schema lists
+        // Internal format receipt: the shared catalogue schema encoding lists
         // composite indexes in canonical (UTF-8 lexicographic) order
         // regardless of declaration order. Bytes 1..17 are the schema id,
         // which includes composite indexes under the
@@ -1908,19 +1886,18 @@ mod catalogue_payload_tests {
         assert_eq!(decoded, schema);
         assert_eq!(encode_catalogue_schema(&decoded).unwrap(), encoded);
 
-        // A v1 label on a composite schema is not an alias: a reader that
-        // predates composite indexes must never be handed this schema as v1.
+        // The retired v1 envelope is rejected for every schema.
         let mut mislabelled = encoded.clone();
-        mislabelled[0] = CATALOGUE_SCHEMA_V1;
+        mislabelled[0] = 1;
         assert!(decode_catalogue_schema(&mislabelled).is_err());
     }
 
     #[test]
-    fn catalogue_schema_payload_rejects_v2_label_without_composite_indexes() {
+    fn catalogue_schema_payload_rejects_retired_and_unknown_versions() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let mut encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
-        encoded[0] = CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES;
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        encoded[0] = 1;
         assert!(decode_catalogue_schema(&encoded).is_err());
         encoded[0] = 3;
         assert!(decode_catalogue_schema(&encoded).is_err());
@@ -4834,7 +4811,7 @@ mod authority_storage_codec_tests {
 }
 
 // Active-schema record v1: version byte, revision u64 LE,
-// CATS v1 payload length u32 LE,
+// catalogue schema payload length u32 LE,
 // then the existing canonical public-schema envelope. This stores the selected
 // permissions separately from structural catalogue entries; no serde layout
 // is part of this envelope's durable contract.
@@ -4954,7 +4931,7 @@ mod active_schema_tests {
         )
         .unwrap();
         let golden = vec![
-            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 1, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
+            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 2, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
             138, 61, 188, 160, 144, 152, 13, 0, 0, 0, 123, 34, 116, 97, 98, 108, 101, 115, 34, 58,
             123, 125, 125,
         ];
