@@ -4729,7 +4729,7 @@ impl IvmRuntime {
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
-    pub(super) fn infer_builder_output_cached(
+    pub(crate) fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
