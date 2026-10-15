@@ -1330,36 +1330,6 @@ fn unsupported_marker_message(keys: &[NormalizedValueRef]) -> Option<String> {
     String::from_utf8(bytes.clone()).ok()
 }
 
-fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
-    match predicate {
-        PredicateExpr::True | PredicateExpr::False => false,
-        PredicateExpr::Compare { left, right, .. } => {
-            value_contains_param(left) || value_contains_param(right)
-        }
-        PredicateExpr::In { value, options } => {
-            value_contains_param(value) || options.iter().any(value_contains_param)
-        }
-        PredicateExpr::ArrayContains { value, needle }
-        | PredicateExpr::TextContains { value, needle } => {
-            value_contains_param(value) || value_contains_param(needle)
-        }
-        PredicateExpr::IsNull(value) | PredicateExpr::IsNotNull(value) => {
-            value_contains_param(value)
-        }
-        PredicateExpr::And(predicates) | PredicateExpr::Or(predicates) => {
-            predicates.iter().any(predicate_contains_param)
-        }
-        PredicateExpr::Not(predicate) => predicate_contains_param(predicate),
-        PredicateExpr::EnumMatch { value, payload, .. } => {
-            value_contains_param(value) || predicate_contains_param(payload)
-        }
-    }
-}
-
-fn value_contains_param(value: &NormalizedValueRef) -> bool {
-    matches!(value, NormalizedValueRef::Param(_))
-}
-
 fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) {
     let mut seen_order = false;
     let mut seen_slice = false;

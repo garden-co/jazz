@@ -314,11 +314,6 @@ pub struct CapabilityReport {
 pub type CapabilityResult<T> = Result<T, Box<CapabilityReport>>;
 
 impl CapabilityReport {
-    /// Whether the requested program can run on the unified lowering path.
-    pub fn is_supported(&self) -> bool {
-        self.gaps.is_empty()
-    }
-
     /// A report with one runtime-contract gap and no explanation.
     pub(crate) fn runtime(message: impl Into<String>) -> Box<Self> {
         Self::single(UnsupportedReason::Runtime(message.into()))

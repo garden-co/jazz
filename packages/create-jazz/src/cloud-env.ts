@@ -18,16 +18,14 @@ const DEFAULT_HOSTED_KEYS = [
 
 const TODO_COMMENT = "# TODO: provision at https://v2.dashboard.jazz.tools";
 
-function parseEnv(content: string): Map<string, string> {
-  const map = new Map<string, string>();
+/** Yield `[key, value]` for each `KEY=value` line, skipping blanks and comments. */
+export function* envEntries(content: string): Generator<[string, string]> {
   for (let line of content.split("\n")) {
     if (line.endsWith("\r")) line = line.slice(0, -1);
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    map.set(line.slice(0, eq), line.slice(eq + 1));
+    if (eq !== -1) yield [line.slice(0, eq), line.slice(eq + 1)];
   }
-  return map;
 }
 
 /** Write a complete replacement beside .env, then atomically install it. */
@@ -61,14 +59,7 @@ function restrictEnvPermissions(envPath: string): void {
 
 type HostedEnvOptions = {
   dir: string;
-  values:
-    | {
-        NEXT_PUBLIC_JAZZ_APP_ID?: string;
-        NEXT_PUBLIC_JAZZ_SERVER_URL?: string;
-        JAZZ_ADMIN_SECRET?: string;
-        BACKEND_SECRET?: string;
-      }
-    | Record<string, string | undefined>;
+  values: Record<string, string | undefined>;
   keys?: string[];
 };
 
@@ -115,21 +106,20 @@ function writeHostedEnvInternal({
   const existing = existsSync(envPath)
     ? readFileSync(envPath, "utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n")
     : "";
-  const parsed = parseEnv(existing);
-  const vals = values as Record<string, string | undefined>;
+  const parsed = new Map(envEntries(existing));
 
   // Empty hosted values are placeholders. Provisioning uses replacement mode so
   // every managed value comes from its one successful response; placeholder
   // writes retain non-empty entries that may be user-owned.
   const replacements: Record<string, string> = {};
   for (const key of keys) {
-    const supplied = vals[key];
+    const supplied = values[key];
     if (supplied && (replaceManagedValues || parsed.get(key) === "")) replacements[key] = supplied;
   }
   const skippedWithDifferentValue = replaceManagedValues
     ? []
     : keys.filter((key) => {
-        const supplied = vals[key];
+        const supplied = values[key];
         const existingValue = parsed.get(key);
         return parsed.has(key) && existingValue !== "" && supplied && supplied !== existingValue;
       });
@@ -154,7 +144,8 @@ function writeHostedEnvInternal({
 
   // Remove the managed placeholder note once every hosted placeholder is filled.
   const needsTodo = keys.some(
-    (key) => (replacements[key] ?? (parsed.has(key) ? parsed.get(key) : (vals[key] ?? ""))) === "",
+    (key) =>
+      (replacements[key] ?? (parsed.has(key) ? parsed.get(key) : (values[key] ?? ""))) === "",
   );
   if (Object.keys(replacements).length > 0 && !needsTodo) {
     base = base
@@ -170,7 +161,7 @@ function writeHostedEnvInternal({
     return;
   }
 
-  const additions = missing.map((key) => `${key}=${vals[key] ?? ""}`);
+  const additions = missing.map((key) => `${key}=${values[key] ?? ""}`);
   if (base && !base.endsWith("\n")) base += "\n";
   const additionBlock = additions.join("\n") + "\n";
   const content =
