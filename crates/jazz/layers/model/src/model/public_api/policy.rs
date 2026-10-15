@@ -21,12 +21,12 @@ pub enum CmpOp {
 
 /// A value in a policy expression - either a literal or a session reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "PolicyValueSerde", into = "PolicyValueSerde")]
+#[serde(tag = "type")]
 pub enum PolicyValue {
     /// A literal value.
-    Literal(Value),
+    Literal(#[serde(with = "value_payload")] Value),
     /// Reference to a session variable, e.g., ["user_id"] or ["claims", "teams"].
-    SessionRef(Vec<String>),
+    SessionRef(#[serde(with = "path_payload")] Vec<String>),
 }
 
 /// Database operation type for policy evaluation.
@@ -54,7 +54,7 @@ impl std::fmt::Display for Operation {
 /// Policies are boolean expressions evaluated against rows and session context.
 /// They can reference row columns, session variables, and related rows via INHERITS.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(from = "PolicyExprSerde", into = "PolicyExprSerde")]
+#[serde(tag = "type")]
 pub enum PolicyExpr {
     /// Compare a column value against a policy value.
     Cmp {
@@ -155,13 +155,13 @@ pub enum PolicyExpr {
     },
 
     /// Logical AND of multiple expressions.
-    And(Vec<PolicyExpr>),
+    And(#[serde(with = "exprs_payload")] Vec<PolicyExpr>),
 
     /// Logical OR of multiple expressions.
-    Or(Vec<PolicyExpr>),
+    Or(#[serde(with = "exprs_payload")] Vec<PolicyExpr>),
 
     /// Logical NOT of an expression.
-    Not(Box<PolicyExpr>),
+    Not(#[serde(with = "expr_payload")] Box<PolicyExpr>),
 
     /// Always true - allows all rows.
     True,
@@ -170,236 +170,44 @@ pub enum PolicyExpr {
     False,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum PolicyValueSerde {
-    Literal { value: Value },
-    SessionRef { path: Vec<String> },
-}
+/// Serde adapter for an internally tagged newtype variant: its payload is
+/// written as a one-field struct, so the variant reads
+/// `{"type": <variant>, <field>: <payload>}`.
+macro_rules! one_field_payload {
+    ($module:ident, $field:ident: $ty:ty) => {
+        mod $module {
+            use super::*;
 
-impl From<PolicyValueSerde> for PolicyValue {
-    fn from(value: PolicyValueSerde) -> Self {
-        match value {
-            PolicyValueSerde::Literal { value } => PolicyValue::Literal(value),
-            PolicyValueSerde::SessionRef { path } => PolicyValue::SessionRef(path),
+            #[derive(Serialize)]
+            struct Out<'a> {
+                $field: &'a $ty,
+            }
+
+            #[derive(Deserialize)]
+            struct In {
+                $field: $ty,
+            }
+
+            pub(super) fn serialize<S: serde::Serializer>(
+                $field: &$ty,
+                serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                Out { $field }.serialize(serializer)
+            }
+
+            pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<$ty, D::Error> {
+                Ok(In::deserialize(deserializer)?.$field)
+            }
         }
-    }
+    };
 }
 
-impl From<PolicyValue> for PolicyValueSerde {
-    fn from(value: PolicyValue) -> Self {
-        match value {
-            PolicyValue::Literal(value) => PolicyValueSerde::Literal { value },
-            PolicyValue::SessionRef(path) => PolicyValueSerde::SessionRef { path },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum PolicyExprSerde {
-    Cmp {
-        column: String,
-        op: CmpOp,
-        value: PolicyValue,
-    },
-    SessionCmp {
-        path: Vec<String>,
-        op: CmpOp,
-        value: Value,
-    },
-    IsNull {
-        column: String,
-    },
-    SessionIsNull {
-        path: Vec<String>,
-    },
-    IsNotNull {
-        column: String,
-    },
-    SessionIsNotNull {
-        path: Vec<String>,
-    },
-    Contains {
-        column: String,
-        value: PolicyValue,
-    },
-    SessionContains {
-        path: Vec<String>,
-        value: Value,
-    },
-    In {
-        column: String,
-        session_path: Vec<String>,
-    },
-    InList {
-        column: String,
-        values: Vec<PolicyValue>,
-    },
-    SessionInList {
-        path: Vec<String>,
-        values: Vec<Value>,
-    },
-    Exists {
-        table: String,
-        condition: Box<PolicyExprSerde>,
-    },
-    ExistsRel {
-        rel: RelExpr,
-    },
-    Inherits {
-        operation: Operation,
-        via_column: String,
-        max_depth: Option<usize>,
-    },
-    InheritsReferencing {
-        operation: Operation,
-        source_table: String,
-        via_column: String,
-        max_depth: Option<usize>,
-    },
-    And {
-        exprs: Vec<PolicyExprSerde>,
-    },
-    Or {
-        exprs: Vec<PolicyExprSerde>,
-    },
-    Not {
-        expr: Box<PolicyExprSerde>,
-    },
-    True {},
-    False {},
-}
-
-impl From<PolicyExprSerde> for PolicyExpr {
-    fn from(value: PolicyExprSerde) -> Self {
-        match value {
-            PolicyExprSerde::Cmp { column, op, value } => PolicyExpr::Cmp { column, op, value },
-            PolicyExprSerde::SessionCmp { path, op, value } => {
-                PolicyExpr::SessionCmp { path, op, value }
-            }
-            PolicyExprSerde::IsNull { column } => PolicyExpr::IsNull { column },
-            PolicyExprSerde::SessionIsNull { path } => PolicyExpr::SessionIsNull { path },
-            PolicyExprSerde::IsNotNull { column } => PolicyExpr::IsNotNull { column },
-            PolicyExprSerde::SessionIsNotNull { path } => PolicyExpr::SessionIsNotNull { path },
-            PolicyExprSerde::Contains { column, value } => PolicyExpr::Contains { column, value },
-            PolicyExprSerde::SessionContains { path, value } => {
-                PolicyExpr::SessionContains { path, value }
-            }
-            PolicyExprSerde::In {
-                column,
-                session_path,
-            } => PolicyExpr::In {
-                column,
-                session_path,
-            },
-            PolicyExprSerde::InList { column, values } => PolicyExpr::InList { column, values },
-            PolicyExprSerde::SessionInList { path, values } => {
-                PolicyExpr::SessionInList { path, values }
-            }
-            PolicyExprSerde::Exists { table, condition } => PolicyExpr::Exists {
-                table,
-                condition: Box::new((*condition).into()),
-            },
-            PolicyExprSerde::ExistsRel { rel } => PolicyExpr::ExistsRel { rel },
-            PolicyExprSerde::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            } => PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            },
-            PolicyExprSerde::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            } => PolicyExpr::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            },
-            PolicyExprSerde::And { exprs } => {
-                PolicyExpr::And(exprs.into_iter().map(PolicyExpr::from).collect())
-            }
-            PolicyExprSerde::Or { exprs } => {
-                PolicyExpr::Or(exprs.into_iter().map(PolicyExpr::from).collect())
-            }
-            PolicyExprSerde::Not { expr } => PolicyExpr::Not(Box::new((*expr).into())),
-            PolicyExprSerde::True {} => PolicyExpr::True,
-            PolicyExprSerde::False {} => PolicyExpr::False,
-        }
-    }
-}
-
-impl From<PolicyExpr> for PolicyExprSerde {
-    fn from(value: PolicyExpr) -> Self {
-        match value {
-            PolicyExpr::Cmp { column, op, value } => PolicyExprSerde::Cmp { column, op, value },
-            PolicyExpr::SessionCmp { path, op, value } => {
-                PolicyExprSerde::SessionCmp { path, op, value }
-            }
-            PolicyExpr::IsNull { column } => PolicyExprSerde::IsNull { column },
-            PolicyExpr::SessionIsNull { path } => PolicyExprSerde::SessionIsNull { path },
-            PolicyExpr::IsNotNull { column } => PolicyExprSerde::IsNotNull { column },
-            PolicyExpr::SessionIsNotNull { path } => PolicyExprSerde::SessionIsNotNull { path },
-            PolicyExpr::Contains { column, value } => PolicyExprSerde::Contains { column, value },
-            PolicyExpr::SessionContains { path, value } => {
-                PolicyExprSerde::SessionContains { path, value }
-            }
-            PolicyExpr::In {
-                column,
-                session_path,
-            } => PolicyExprSerde::In {
-                column,
-                session_path,
-            },
-            PolicyExpr::InList { column, values } => PolicyExprSerde::InList { column, values },
-            PolicyExpr::SessionInList { path, values } => {
-                PolicyExprSerde::SessionInList { path, values }
-            }
-            PolicyExpr::Exists { table, condition } => PolicyExprSerde::Exists {
-                table,
-                condition: Box::new((*condition).into()),
-            },
-            PolicyExpr::ExistsRel { rel } => PolicyExprSerde::ExistsRel { rel },
-            PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            } => PolicyExprSerde::Inherits {
-                operation,
-                via_column,
-                max_depth,
-            },
-            PolicyExpr::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            } => PolicyExprSerde::InheritsReferencing {
-                operation,
-                source_table,
-                via_column,
-                max_depth,
-            },
-            PolicyExpr::And(exprs) => PolicyExprSerde::And {
-                exprs: exprs.into_iter().map(PolicyExprSerde::from).collect(),
-            },
-            PolicyExpr::Or(exprs) => PolicyExprSerde::Or {
-                exprs: exprs.into_iter().map(PolicyExprSerde::from).collect(),
-            },
-            PolicyExpr::Not(expr) => PolicyExprSerde::Not {
-                expr: Box::new((*expr).into()),
-            },
-            PolicyExpr::True => PolicyExprSerde::True {},
-            PolicyExpr::False => PolicyExprSerde::False {},
-        }
-    }
-}
+one_field_payload!(value_payload, value: Value);
+one_field_payload!(path_payload, path: Vec<String>);
+one_field_payload!(exprs_payload, exprs: Vec<PolicyExpr>);
+one_field_payload!(expr_payload, expr: Box<PolicyExpr>);
 
 impl PolicyExpr {
     /// Create a comparison expression: column = @session.path
