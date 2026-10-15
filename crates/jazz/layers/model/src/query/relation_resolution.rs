@@ -502,21 +502,39 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         return Ok(None);
     };
 
-    if !matches!(
-        frontier_key,
-        RelationKeyRef::RowId(RelationRowIdRef::Current)
-    ) || !dedupe_key
-        .as_slice()
-        .eq(&[RelationKeyRef::RowId(RelationRowIdRef::Current)])
+    let shape = recognize_relation_gather(seed, step, frontier_key, bound, dedupe_key)
+        .map_err(|message| {
+            relation_unification_error(
+                message.replace("not supported yet", "not supported in queries yet"),
+            )
+        })?;
+    // A query returns rows of the table the walk visits: the seed hop's
+    // target, or else the seed table itself.
+    let (seed_table, seed_team_column) = match shape.seed.hop_table {
+        Some(hop_table) => (hop_table.to_owned(), shape.seed.team_column.clone()),
+        None if shape.seed.team_column == "id" => (shape.seed.table.to_owned(), "id".to_owned()),
+        None => {
+            return Err(relation_unification_error(
+                "Gather seeds projecting an FK without a hop are not supported in queries yet",
+            ));
+        }
+    };
+    if shape
+        .step
+        .output_table
+        .is_some_and(|output_table| output_table != seed_table)
     {
         return Err(relation_unification_error(
-            "gather requires current-row frontier and dedupe keys",
+            "Gather steps returning rows of another table are not supported in queries yet",
         ));
     }
-
-    let (seed_table, seed_filters) = relation_gather_seed(seed)?;
-    let (edge_table, edge_member_column, edge_parent_column, edge_filters) =
-        relation_gather_step(step, &seed_table)?;
+    let seed_filters = relation_gather_predicates_to_query(&shape.seed.filters)?;
+    let edge_filters = relation_gather_predicates_to_query(&shape.step.filters)?;
+    let (edge_table, edge_member_column, edge_parent_column) = (
+        shape.step.edge_table.to_owned(),
+        shape.step.member_column.clone(),
+        shape.step.parent_column.clone(),
+    );
 
     let mut query = Query::from(seed_table.clone());
     for filter in filters {
@@ -544,12 +562,12 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         edge_member_column,
         edge_parent_column,
         edge_filters,
-        bound: bound.clone(),
+        bound: shape.bound.clone(),
         seed: Some(ReachableSeed {
-            table: seed_table.clone(),
+            table: shape.seed.table.to_owned(),
             user_column: None,
             user_claim: None,
-            team_column: "id".to_owned(),
+            team_column: seed_team_column,
             filters: seed_filters,
         }),
     });
@@ -637,217 +655,17 @@ fn peel_relation_output_steps(
     Ok((current, filters, order_by, offset, limit))
 }
 
-fn relation_gather_seed(seed: &RelationExpr) -> Result<(String, Vec<Predicate>), QueryError> {
-    let mut filters = Vec::new();
-    let mut current = seed;
-    while let RelationExpr::Filter { input, predicate } = current {
-        let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
-            current = input;
-            continue;
-        };
-        let RelationExpr::TableScan { table, alias } = input.as_ref() else {
-            return Err(relation_unification_error(
-                "gather seed filters must be directly over one table scan",
-            ));
-        };
-        let expected_scope = alias.as_deref().unwrap_or(table);
-        if scope != expected_scope {
-            return Err(relation_unification_error(
-                "gather seed filters must be scoped to the seed table",
-            ));
-        }
-        filters.push(predicate);
-        current = input;
-    }
-    let RelationExpr::TableScan { table, alias } = current else {
-        return Err(relation_unification_error(
-            "gather seed must be a table scan with optional filters",
-        ));
-    };
-    if alias.is_some() {
-        return Err(relation_unification_error(
-            "gather seed aliases are not unified yet",
-        ));
-    }
-    Ok((table.clone(), filters))
-}
-
-fn relation_gather_step(
-    step: &RelationExpr,
-    seed_table: &str,
-) -> Result<(String, String, String, Vec<Predicate>), QueryError> {
-    let RelationExpr::Project { input, columns } = step else {
-        return Err(relation_unification_error(
-            "gather step must project its forward-hop target",
-        ));
-    };
-    let RelationExpr::Join {
-        left,
-        right,
-        on,
-        join_kind: RelationJoinKind::Inner,
-    } = input.as_ref()
-    else {
-        return Err(relation_unification_error(
-            "gather step must be an inner forward-hop join",
-        ));
-    };
-    let RelationExpr::TableScan {
-        table: edge_table,
-        alias: edge_alias,
-    } = relation_gather_step_scan(left)?
-    else {
-        unreachable!("relation_gather_step_scan only returns table scans")
-    };
-    let edge_scope = edge_alias.as_deref().unwrap_or(edge_table);
-    let RelationExpr::TableScan {
-        table: target_table,
-        alias: Some(target_alias),
-    } = right.as_ref()
-    else {
-        return Err(relation_unification_error(
-            "gather step target must use a scoped table scan",
-        ));
-    };
-    if target_table != seed_table {
-        return Err(relation_unification_error(
-            "gather step must return rows from the seed table",
-        ));
-    }
-    if on.len() != 1 {
-        return Err(relation_unification_error(
-            "gather step requires exactly one forward-hop join condition",
-        ));
-    }
-    let condition = &on[0];
-    if condition.left.scope.as_deref() != Some(edge_scope)
-        || condition.right.scope.as_deref() != Some(target_alias)
-        || condition.right.column != "id"
-    {
-        return Err(relation_unification_error(
-            "gather step join must connect its table FK to the target row id",
-        ));
-    }
-    if columns.iter().any(|column| match &column.expr {
-        RelationProjectExpr::Column(column) => column.scope.as_deref() != Some(target_alias),
-        RelationProjectExpr::RowId(RelationRowIdRef::Current) => true,
-        RelationProjectExpr::RowId(_) => true,
-    }) {
-        return Err(relation_unification_error(
-            "gather step must project only its forward-hop target",
-        ));
-    }
-    // The next frontier is the hop target's row id. An `id` alias must still
-    // be that row's id; relabeling another target column would walk elsewhere.
-    if columns.iter().any(|column| {
-        column.alias == "id"
-            && !matches!(&column.expr, RelationProjectExpr::Column(column) if column.column == "id")
-    }) {
-        return Err(relation_unification_error(
-            "gather step must not project another target column as id",
-        ));
-    }
-
-    let filters = relation_gather_step_filters(left)?;
-    let frontier_filter = filters.iter().find_map(|predicate| match predicate {
-        RelationPredicate::Cmp {
-            left,
-            op: RelationCmpOp::Eq,
-            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
-        } if left.scope.as_deref() == Some(edge_scope) => Some(left.column.clone()),
-        _ => None,
-    });
-    let Some(edge_member_column) = frontier_filter else {
-        return Err(relation_unification_error(
-            "gather step must compare one edge column to the frontier row id",
-        ));
-    };
-    let edge_filters = filters
-        .into_iter()
-        .filter(|predicate| {
-            !matches!(
-                predicate,
-                RelationPredicate::Cmp {
-                    left: RelationColumnRef { scope: Some(scope), .. },
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
-                } if scope == edge_scope
-            )
-        })
-        .filter_map(|predicate| relation_predicate_to_query_predicate(&predicate).transpose())
-        .map(|result| {
-            result.and_then(|(scope, predicate)| {
-                if scope != edge_scope {
-                    return Err(relation_unification_error(
-                        "gather step filters must be scoped to the edge table",
-                    ));
-                }
-                Ok(predicate)
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        edge_table.clone(),
-        edge_member_column,
-        condition.left.column.clone(),
-        edge_filters,
-    ))
-}
-
-fn relation_gather_step_scan(input: &RelationExpr) -> Result<&RelationExpr, QueryError> {
-    let mut current = input;
-    while let RelationExpr::Filter { input, .. } = current {
-        current = input;
-    }
-    if matches!(current, RelationExpr::TableScan { .. }) {
-        Ok(current)
-    } else {
-        Err(relation_unification_error(
-            "gather step filters must be directly over one table scan",
-        ))
-    }
-}
-
-fn relation_gather_step_filters(
-    input: &RelationExpr,
-) -> Result<Vec<RelationPredicate>, QueryError> {
-    let mut filters = Vec::new();
-    let mut current = input;
-    while let RelationExpr::Filter { input, predicate } = current {
-        relation_gather_step_predicates(predicate, &mut filters)?;
-        current = input;
-    }
-    Ok(filters)
-}
-
-fn relation_gather_step_predicates(
-    predicate: &RelationPredicate,
-    filters: &mut Vec<RelationPredicate>,
-) -> Result<(), QueryError> {
-    match predicate {
-        RelationPredicate::And(predicates) => {
-            for predicate in predicates {
-                relation_gather_step_predicates(predicate, filters)?;
-            }
-            Ok(())
-        }
-        RelationPredicate::Cmp { .. }
-        | RelationPredicate::IsNull { .. }
-        | RelationPredicate::IsNotNull { .. }
-        | RelationPredicate::In { .. }
-        | RelationPredicate::Contains { .. }
-        | RelationPredicate::EnumMatch { .. }
-        | RelationPredicate::Or(_)
-        | RelationPredicate::Not(_) => {
-            filters.push(predicate.clone());
-            Ok(())
-        }
-        RelationPredicate::True => Ok(()),
-        RelationPredicate::False => {
-            filters.push(predicate.clone());
-            Ok(())
+/// Scope was already checked by the gather recognizer.
+fn relation_gather_predicates_to_query(
+    predicates: &[&RelationPredicate],
+) -> Result<Vec<Predicate>, QueryError> {
+    let mut lowered = Vec::new();
+    for predicate in predicates {
+        if let Some((_, predicate)) = relation_predicate_to_query_predicate(predicate)? {
+            lowered.push(predicate);
         }
     }
+    Ok(lowered)
 }
 
 fn relation_unification_error(message: impl Into<String>) -> QueryError {

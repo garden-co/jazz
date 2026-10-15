@@ -271,6 +271,23 @@ fn joined_parent_step_lowers_identically() {
 }
 
 #[test]
+fn scalar_parent_step_lowers_identically() {
+    let edge = assert_both_accept(&gather(scalar_parent_step()));
+    assert_eq!(edge, expected_edge(RecursionBound::MaxDepth(4)));
+}
+
+#[test]
+fn fixpoint_bound_lowers_identically() {
+    for step in [joined_parent_step("id"), scalar_parent_step()] {
+        let rel = with_gather_fields(gather(step), |_, bound, _| {
+            *bound = RecursionBound::Fixpoint;
+        });
+        let edge = assert_both_accept(&rel);
+        assert_eq!(edge, expected_edge(RecursionBound::Fixpoint));
+    }
+}
+
+#[test]
 fn joined_step_without_an_id_projection_keeps_the_target_row_id() {
     // An empty projection passes the hop target row through, so its row id is
     // still the next frontier.
@@ -355,30 +372,29 @@ fn hopped_seed(target_column: &str, join_kind: RelationJoinKind) -> RelationExpr
 }
 
 #[test]
-fn policy_seed_hop_onto_the_target_id_starts_from_the_hop() {
-    let edge = policy_lowering(&gather_from_seed(hopped_seed(
+fn seed_hop_onto_the_target_id_lowers_identically() {
+    let edge = assert_both_accept(&gather_from_seed(hopped_seed(
         "id",
         RelationJoinKind::Inner,
-    )))
-    .expect("an inner seed hop onto the target id lowers");
+    )));
     assert_eq!(edge, expected_edge(RecursionBound::MaxDepth(4)));
 }
 
 #[test]
-fn policy_seed_hop_onto_a_non_id_target_column_is_rejected() {
-    let lowered = policy_lowering(&gather_from_seed(hopped_seed(
+fn seed_hop_onto_a_non_id_target_column_is_rejected() {
+    assert_both_reject(&gather_from_seed(hopped_seed(
         "owner_id",
         RelationJoinKind::Inner,
     )));
-    assert!(lowered.is_err(), "{lowered:#?}");
 }
 
 #[test]
-fn policy_left_seed_hop_is_rejected() {
-    let lowered = policy_lowering(&gather_from_seed(hopped_seed("id", RelationJoinKind::Left)));
-    assert!(lowered.is_err(), "{lowered:#?}");
+fn left_seed_hop_is_rejected() {
+    assert_both_reject(&gather_from_seed(hopped_seed("id", RelationJoinKind::Left)));
 }
 
+/// Only policies key their seed by a session claim; a query keeps every seed
+/// filter, so this one is policy-specific.
 #[test]
 fn policy_seed_claim_inequality_does_not_key_the_seed() {
     // `owner_id != me` must not become the claim-keyed seed `owner_id = me`.

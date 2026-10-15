@@ -20,10 +20,11 @@ use crate::model::public_schema::{
     TableSchema, Value,
 };
 use crate::query::{
-    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
-    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectExpr, RelationRowIdRef,
-    RelationValueRef,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind,
+    RelationPredicate, RelationRowIdRef, RelationValueRef,
 };
+#[cfg(test)]
+use crate::query::{RelationJoinCondition, RelationKeyRef, RelationProjectExpr};
 
 const DIRECT_USER_CLAIM: &str = "user";
 #[cfg(test)]
@@ -1562,7 +1563,7 @@ struct PendingReachable {
     edge_member_column: String,
     edge_parent_column: String,
     edge_filters: Vec<Predicate>,
-    max_depth: usize,
+    bound: RecursionBound,
 }
 
 struct LoweredRel {
@@ -1906,7 +1907,7 @@ fn append_exists_rel_policy_clause(
             edge_member_column: pending.edge_member_column,
             edge_parent_column: pending.edge_parent_column,
             edge_filters: pending.edge_filters,
-            bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
+            bound: pending.bound,
             seed: pending.seed,
         });
     }
@@ -2134,16 +2135,20 @@ fn lower_exists_rel(
             bound,
             dedupe_key,
         } => {
-            // Reachability walks row ids. A gather keyed on anything else
-            // cannot be lowered to it, so it must not be silently treated as one.
-            let current_row = RelationKeyRef::RowId(RelationRowIdRef::Current);
-            if *frontier_key != current_row || dedupe_key.as_slice() != [current_row] {
-                return Err(err(
+            let shape = crate::query::recognize_relation_gather(
+                seed,
+                step,
+                frontier_key,
+                bound,
+                dedupe_key,
+            )
+            .map_err(|message| {
+                err(
                     policy_path(table, path),
-                    "Gather keyed on anything but the current row id is not supported in policies yet",
-                ));
-            }
-            lower_gather_rel(schema, table, path, seed, step, bound)
+                    message.replace("not supported yet", "not supported in policies yet"),
+                )
+            })?;
+            lower_gather_rel(schema, table, path, &shape)
         }
         RelationExpr::Join {
             left,
@@ -2214,7 +2219,7 @@ fn lower_exists_rel(
                     edge_member_column: pending.edge_member_column,
                     edge_parent_column: pending.edge_parent_column,
                     edge_filters: pending.edge_filters,
-                    bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
+                    bound: pending.bound,
                     seed: pending.seed,
                 };
                 reachable
@@ -2331,24 +2336,26 @@ fn lower_gather_rel(
     schema: &Schema,
     table: &TableName,
     path: &str,
-    seed: &RelationExpr,
-    step: &RelationExpr,
-    bound: &RecursionBound,
+    shape: &crate::query::RelationGatherShape<'_>,
 ) -> Result<LoweredRel, SchemaConversionError> {
-    let (from, seed) = lower_gather_seed(table, path, seed)?;
-    let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
-        lower_gather_step(table, path, step)?;
+    let (from, seed) = lower_gather_seed(table, path, &shape.seed)?;
+    let step = &shape.step;
+    let edge_filters = rel_predicates_to_policy(table, path, &step.filters)?
+        .into_iter()
+        .map(|filter| filter.predicate)
+        .collect();
+    let output_table = step.output_table.map(str::to_owned);
     // A scalar frontier has no materialized output table, but its projected
     // FK still identifies the logical source used by scoped joins from Gather.
     // Keep this separate from `table`: setting that would turn the key-only
     // frontier into a row-producing relation and change reachability semantics.
     let output_scope = output_table.clone().or_else(|| {
         schema
-            .get(&TableName::new(edge_table.clone()))?
+            .get(&TableName::new(step.edge_table))?
             .columns
             .columns
             .iter()
-            .find(|column| column.name.as_str() == edge_parent_column)?
+            .find(|column| column.name.as_str() == step.parent_column)?
             .references
             .as_ref()
             .map(|table| table.as_str().to_owned())
@@ -2361,15 +2368,6 @@ fn lower_gather_rel(
         None
     } else {
         Some(seed)
-    };
-    let max_depth = match bound {
-        RecursionBound::MaxDepth(depth) => *depth,
-        RecursionBound::Fixpoint => {
-            return Err(err(
-                policy_path(table, path),
-                "server shell public schema conversion does not support Gather Fixpoint yet",
-            ));
-        }
     };
     Ok(LoweredRel {
         scope_paths: output_scope
@@ -2384,37 +2382,23 @@ fn lower_gather_rel(
         pending_reachable: Some(PendingReachable {
             from,
             seed,
-            edge_table,
-            edge_member_column,
-            edge_parent_column,
+            edge_table: step.edge_table.to_owned(),
+            edge_member_column: step.member_column.clone(),
+            edge_parent_column: step.parent_column.clone(),
             edge_filters,
-            max_depth,
+            bound: shape.bound.clone(),
         }),
     })
 }
 
+/// Policy seeds start from the session: one seed filter compares a seed
+/// column to a claim, and that claim keys the walk.
 fn lower_gather_seed(
     table: &TableName,
     path: &str,
-    seed: &RelationExpr,
+    seed: &crate::query::RelationGatherSeed<'_>,
 ) -> Result<(Operand, crate::query::ReachableSeed), SchemaConversionError> {
-    let (input, projected_team_column, projected_filters) =
-        unwrap_seed_projection(table, path, seed)?;
-    let (input, filters) = unwrap_rel_filter(input);
-    let filters = filters
-        .into_iter()
-        .chain(projected_filters)
-        .collect::<Vec<_>>();
-    let RelationExpr::TableScan {
-        table: seed_table, ..
-    } = input
-    else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather seeded reachability requires a filtered seed table scan",
-        ));
-    };
-    let lowered_filters = rel_predicates_to_policy(table, path, &filters)?;
+    let lowered_filters = rel_predicates_to_policy(table, path, &seed.filters)?;
     let seed_index = lowered_filters
         .iter()
         .position(|filter| {
@@ -2452,290 +2436,13 @@ fn lower_gather_seed(
     Ok((
         Operand::Claim(user_claim.clone()),
         crate::query::ReachableSeed {
-            table: seed_table.as_str().to_owned(),
+            table: seed.table.to_owned(),
             user_column: Some(user_column),
             user_claim: Some(user_claim),
-            team_column: projected_team_column.unwrap_or_else(|| "id".to_owned()),
+            team_column: seed.team_column.clone(),
             filters,
         },
     ))
-}
-
-fn unwrap_seed_projection<'a>(
-    table: &TableName,
-    path: &str,
-    seed: &'a RelationExpr,
-) -> Result<(&'a RelationExpr, Option<String>, Vec<&'a RelationPredicate>), SchemaConversionError> {
-    let RelationExpr::Project { input, columns } = seed else {
-        return Ok((seed, None, Vec::new()));
-    };
-    let Some(column) = columns.iter().find(|column| column.alias == "id") else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather projected seed must expose an id column",
-        ));
-    };
-    let RelationProjectExpr::Column(projected) = &column.expr else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather projected seed id must be a column projection",
-        ));
-    };
-    let (project_input, filters) = unwrap_rel_filter(input);
-    if let RelationExpr::Join {
-        left,
-        right,
-        on,
-        join_kind,
-    } = project_input
-    {
-        let (left, team_column, seed_scope) =
-            unwrap_joined_seed_projection(table, path, left, right, on, join_kind, projected)?;
-        // These filters are applied to the seed table, so they must name it.
-        let mut columns = Vec::new();
-        for filter in &filters {
-            collect_rel_predicate_columns(filter, &mut columns);
-        }
-        if columns.iter().any(|column| {
-            column
-                .scope
-                .as_deref()
-                .is_some_and(|scope| scope != seed_scope)
-        }) {
-            return Err(err(
-                policy_path(table, path),
-                "Gather seed filters on the hop target are not supported in policies yet",
-            ));
-        }
-        return Ok((left, team_column, filters));
-    }
-    Ok((input.as_ref(), Some(projected.column.clone()), Vec::new()))
-}
-
-fn unwrap_joined_seed_projection<'a>(
-    table: &TableName,
-    path: &str,
-    left: &'a RelationExpr,
-    right: &RelationExpr,
-    on: &[RelationJoinCondition],
-    join_kind: &RelationJoinKind,
-    projected: &RelationColumnRef,
-) -> Result<(&'a RelationExpr, Option<String>, &'a str), SchemaConversionError> {
-    let RelationExpr::TableScan {
-        table: right_table,
-        alias: right_alias,
-    } = right
-    else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather projected seed hop must join to a table scan",
-        ));
-    };
-    let RelationExpr::TableScan {
-        table: seed_table,
-        alias: seed_alias,
-    } = unwrap_rel_filter(left).0
-    else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather projected seed hop must start from a filtered table scan",
-        ));
-    };
-    let seed_scope = seed_alias.as_deref().unwrap_or(seed_table.as_str());
-    let target_scope = right_alias.as_deref().unwrap_or(right_table.as_str());
-    // Like a recursive hop, the seed hop names the target row only when it
-    // is one inner equality from a seed-table FK to that row's id.
-    let [join] = on else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather seed hops without exactly one join equality are not supported in policies yet",
-        ));
-    };
-    if *join_kind != RelationJoinKind::Inner
-        || join.right.column != "id"
-        || join
-            .right
-            .scope
-            .as_deref()
-            .is_some_and(|scope| scope != target_scope)
-        || join
-            .left
-            .scope
-            .as_deref()
-            .is_some_and(|scope| scope != seed_scope)
-    {
-        return Err(err(
-            policy_path(table, path),
-            "Gather seed hops other than an inner join from a seed FK to the target id are not supported in policies yet",
-        ));
-    }
-    if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
-        return Err(err(
-            policy_path(table, path),
-            "Gather projected seed id must come from the hop target row id",
-        ));
-    }
-    Ok((left, Some(join.left.column.clone()), seed_scope))
-}
-
-fn lower_gather_step(
-    table: &TableName,
-    path: &str,
-    step: &RelationExpr,
-) -> Result<(String, Option<String>, String, String, Vec<Predicate>), SchemaConversionError> {
-    let RelationExpr::Project { input, columns } = step else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather policies require projected recursive hops",
-        ));
-    };
-
-    // General relation gathers return rows by joining the edge parent to an
-    // output table. Policy reachability instead carries only the projected
-    // parent key; accepting that canonical scalar form avoids requiring every
-    // reachable parent to have another row in the seed-membership table.
-    let (edge_rel, output_table, edge_parent_column, projected_scope) =
-        if let RelationExpr::Join {
-            left,
-            right,
-            on,
-            join_kind,
-        } = input.as_ref()
-        {
-            let RelationExpr::TableScan {
-                table: output_table,
-                alias: output_alias,
-            } = right.as_ref()
-            else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hop must join to the output table",
-                ));
-            };
-            let [on] = on.as_slice() else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hops without exactly one join equality are not supported in policies yet",
-                ));
-            };
-            // The hop names the parent row only when it joins that row's id.
-            let output_scope = output_alias.as_deref().unwrap_or(output_table.as_str());
-            if *join_kind != RelationJoinKind::Inner
-                || on.right.column != "id"
-                || on
-                    .right
-                    .scope
-                    .as_deref()
-                    .is_some_and(|scope| scope != output_scope)
-            {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hops other than an inner join from an edge FK to the output id are not supported in policies yet",
-                ));
-            }
-            // The next frontier is the hop target's row id. A projection may
-            // carry target columns, but an `id` alias must still be that row's
-            // id or the step walks somewhere else.
-            let relabels_id = columns.iter().any(|column| {
-                column.alias == "id"
-                    && !matches!(
-                        &column.expr,
-                        RelationProjectExpr::Column(RelationColumnRef { scope, column })
-                            if column == "id"
-                                && scope.as_deref().is_none_or(|scope| scope == output_scope)
-                    )
-            });
-            if relabels_id {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hops projecting anything but the output row id as id are not supported in policies yet",
-                ));
-            }
-            (
-                left.as_ref(),
-                Some(output_table.as_str().to_owned()),
-                on.left.column.clone(),
-                on.left.scope.clone(),
-            )
-        } else {
-            let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather scalar recursive hop must project its parent key as id",
-                ));
-            };
-            let RelationProjectExpr::Column(projected) = &projected.expr else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather scalar recursive hop id must be a column projection",
-                ));
-            };
-            (
-                input.as_ref(),
-                None,
-                projected.column.clone(),
-                projected.scope.clone(),
-            )
-        };
-
-    let (edge_input, filters) = unwrap_rel_filter(edge_rel);
-    let RelationExpr::TableScan {
-        table: edge_table,
-        alias: edge_alias,
-    } = edge_input
-    else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather recursive hop must start from an edge table scan",
-        ));
-    };
-    let edge_scope = edge_alias.as_deref().unwrap_or(edge_table.as_str());
-    if projected_scope
-        .as_deref()
-        .is_some_and(|scope| scope != edge_scope)
-    {
-        return Err(err(
-            policy_path(table, path),
-            "Gather recursive hop keys from outside the edge table are not supported in policies yet",
-        ));
-    }
-
-    let lowered_filters = rel_predicates_to_policy(table, path, &filters)?;
-    let frontier_index = lowered_filters
-        .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::FrontierRow)))
-        .ok_or_else(|| {
-            err(
-                policy_path(table, path),
-                "Gather recursive hop requires a frontier equality",
-            )
-        })?;
-    let frontier = &lowered_filters[frontier_index];
-    let Some(edge_member_column) = frontier.column.clone() else {
-        return Err(err(
-            policy_path(table, path),
-            "Gather frontier equality must name an edge column",
-        ));
-    };
-    let edge_filters = lowered_filters
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, filter)| (index != frontier_index).then_some(filter.predicate))
-        .collect();
-    Ok((
-        edge_table.as_str().to_owned(),
-        output_table,
-        edge_member_column,
-        edge_parent_column,
-        edge_filters,
-    ))
-}
-
-fn unwrap_rel_filter(rel: &RelationExpr) -> (&RelationExpr, Vec<&RelationPredicate>) {
-    match rel {
-        RelationExpr::Filter { input, predicate } => (input.as_ref(), vec![predicate]),
-        other => (other, Vec::new()),
-    }
 }
 
 fn rel_predicate_to_policy(
@@ -5649,8 +5356,35 @@ mod tests {
             }],
         };
 
+        let step = RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef::unscoped("id"),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                },
+            }),
+            columns: vec![RelationProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef::unscoped("parent")),
+            }],
+        };
+        let current_row = RelationKeyRef::RowId(RelationRowIdRef::Current);
+        let bound = RecursionBound::MaxDepth(4);
+        let shape = crate::query::recognize_relation_gather(
+            &seed,
+            &step,
+            &current_row,
+            &bound,
+            std::slice::from_ref(&current_row),
+        )
+        .unwrap();
         let (_from, lowered) =
-            lower_gather_seed(&TableName::new("resources"), "policy", &seed).unwrap();
+            lower_gather_seed(&TableName::new("resources"), "policy", &shape.seed).unwrap();
         assert_eq!(lowered.table, "team_entry");
         assert_eq!(lowered.user_column.as_deref(), Some("team_id"));
         assert_eq!(lowered.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
