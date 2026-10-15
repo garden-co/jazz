@@ -483,7 +483,7 @@ where
                 }
             }
             use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
-            match (stored.view_scoped_cardinality, bundle.scope) {
+            match (stored.is_partial, bundle.scope) {
                 (false, CompleteTransaction) => {
                     if stored.tx.n_total_writes != bundle.tx.n_total_writes
                         || stored_by_key.len() != incoming_by_key.len()
@@ -2675,9 +2675,7 @@ where
             // so a relay can serve it onward. Further authorized siblings from
             // that same view-scoped transaction must extend that projection;
             // fragments first learned outside such a reset remain history-only.
-            let extend_current_view = stored_tx
-                .as_ref()
-                .is_some_and(|stored| stored.view_scoped_cardinality);
+            let extend_current_view = stored_tx.as_ref().is_some_and(|stored| stored.is_partial);
             let mut known_keys = if stored_tx.is_some() {
                 self.query_versions_for_tx(tx_id)
                     .await?
@@ -3006,7 +3004,7 @@ where
         // view-scoped bundle. Its stored cardinality then describes that
         // fragment, so matching it to the selected versions does not prove
         // that the complete transaction is known.
-        let scope = if !stored_tx.view_scoped_cardinality
+        let scope = if !stored_tx.is_partial
             && usize::try_from(n_total_writes).ok() == Some(versions.len())
         {
             crate::protocol::VersionBundleScope::CompleteTransaction

@@ -106,7 +106,7 @@ parses that JSON with serde defaults, silently dropping `composite_indexes`.
 It is still rejected loudly, because composite indexes are part of the schema
 id (ch. 2, §2.4): the peer recomputes the id from the schema it parsed, gets
 the plain schema's id, and refuses the payload at catalogue admission as a
-content-id mismatch (the lineage-publication id, which hashes the CATS bytes,
+content-id mismatch (the lineage-publication id, which hashes the encoded catalogue schema,
 mismatches likewise). So once any schema that declares a composite index is
 published, a pre-composite peer rejects the catalogue rather than serving a
 schema without the index. The HTTP admin route is different: a
@@ -168,20 +168,17 @@ target may inherit a column from any predecessor; only identities preserved by
 an incoming lens may be reused from catalogue history. Activation and snapshots
 install the schema, every incoming lens, and its identity manifest together.
 
-The existing `jazz.catalogue.lineage.v1` staged/pending envelopes remain unchanged;
-their length-prefixed publication body has its own version byte. A one-predecessor
-body retains **exactly** its v1 bytes and `jazz-schema-lineage-publication-v1`
-content ID. A multiple-predecessor body is `v2:u8 | id:uuid[16] |
-schema_len:u32-le | schema | predecessor_count:u32-le | predecessors |
-physical_identity_manifest`. Each predecessor is `lens_len:u32-le | lens |
-new_table_count:u32-le | new_table_strings | dropped_table_count:u32-le |
-dropped_table_strings`, using existing length-prefixed UTF-8 strings and lens
-encoding. Predecessors are sorted by source UUID bytes, declarations by name;
-duplicates are rejected. V2 requires at least two predecessors. Its content ID
-uses the `jazz-schema-lineage-publication-v2` domain with the same canonical
-schema, predecessor count, ordered predecessor bodies, and manifest primitives
-as v1. `catalogue-predecessors.hex` pins both publication versions. Old readers
-reject the unknown nested version; new readers recover v1 without changing IDs.
+The staged/pending envelopes retain their layout; their length-prefixed
+publication body always uses `v2:u8 | id:uuid[16] | schema_len:u32-le |
+schema | predecessor_count:u32-le | predecessors | physical_identity_manifest`.
+The predecessor count must be nonzero, including for a singleton. Each
+predecessor is `lens_len:u32-le | lens | new_table_count:u32-le |
+new_table_strings | dropped_table_count:u32-le | dropped_table_strings`,
+using length-prefixed UTF-8 strings and the existing lens encoding.
+Predecessors are sorted by source UUID bytes, declarations by name; duplicates
+are rejected. Content identity always uses the
+`jazz-schema-lineage-publication-v2` domain and the counted canonical list.
+`catalogue-predecessors.hex` pins singleton and multiple-predecessor bodies.
 
 The protocol `MigrationLens` is intentionally distinct from the server schema
 editor's `LensTransform`. A protocol lens describes a published source/target

@@ -101,11 +101,13 @@ pub enum NativeTransportTerminal {
 }
 
 /// Error at the target/socket boundary, before a core peer has been attached.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NativeTransportError {
     /// The peer is unavailable; local work may continue while connection retries.
+    #[error("{0}")]
     Retryable(String),
     /// Admission, protocol, or an unclassified adapter failure must fail closed.
+    #[error("{0}")]
     Terminal(String),
 }
 
@@ -114,16 +116,6 @@ impl NativeTransportError {
         matches!(self, Self::Retryable(_))
     }
 }
-
-impl std::fmt::Display for NativeTransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Retryable(message) | Self::Terminal(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for NativeTransportError {}
 
 /// Factory implemented by `jazz-native-transport` (or another native shell).
 ///

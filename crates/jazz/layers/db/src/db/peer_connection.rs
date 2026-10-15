@@ -636,30 +636,15 @@ pub(super) struct UpstreamConnectionState {
     pub(super) large_value_uploads: LargeValueUploadQueues,
     pub(super) awaiting_large_value_uploads: BTreeMap<TxId, groove::large_values::LargeValueRef>,
     pub(super) failed_large_value_uploads: BTreeSet<TxId>,
-    /// Where each writer's uploads on this link stop after the authority
-    /// answered `RetryLater` (SPEC 8), keyed by the writer node. A relay's
-    /// outbox carries many writers' writes; one writer's deferral holds
-    /// back only that writer's later writes. It belongs to this link: a new
-    /// link starts with none and uploads the whole outbox in order.
-    pub(super) deferred_uploads: BTreeMap<NodeUuid, DeferredUpload>,
-    /// `RetryLater` answers each write got on this link, for its backoff.
-    pub(super) retry_later_attempts: BTreeMap<TxId, u32>,
     /// Views reopened without known state because an update named a row
     /// this receiver no longer holds. A second such update for the same view
     /// before it settles is a protocol error rather than a resend loop.
     pub(super) missing_body_resends: BTreeSet<SubscriptionKey>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
     pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
-}
-
-/// One writer's uploads deferred on one link by a `RetryLater` answer:
-/// none of that writer's writes at or after `from` (in outbox order) goes
-/// up before `not_before_ms`, so a chained write never overtakes the write
-/// it waits for. Other writers' writes are not held back.
-pub(super) struct DeferredUpload {
-    /// The earliest outbox entry to send again.
-    from: TxId,
-    not_before_ms: u64,
+    /// Commit units sent on this link, named by the read barrier ahead of
+    /// later requests (SPEC 8 §8.2.1).
+    pub(super) read_barrier: super::read_barrier::ReadBarrierSender,
 }
 
 pub(super) struct PendingLargeValueUpload {
@@ -725,27 +710,6 @@ pub(super) fn merge_reconnectable_large_value_uploads(
 }
 
 const RATE_LIMITED_UPLOAD_RETRY_DELAY_MS: u64 = 1_000;
-/// First delay before re-uploading a write the authority asked to retry
-/// later; it doubles with each further answer for the same write.
-const RETRY_LATER_UPLOAD_INITIAL_DELAY_MS: u64 = 1_000;
-/// Longest delay between re-uploads of a write asked to retry later.
-const RETRY_LATER_UPLOAD_MAX_DELAY_MS: u64 = 30_000;
-
-/// Backoff before the `attempt`-th re-upload (from 1) of `tx_id` after a
-/// `RetryLater` answer: exponential, capped, and jittered into the upper
-/// half of the step so writers asked together do not all return together.
-/// The jitter is a hash of the write and attempt, so it differs between
-/// writers and attempts without a random source.
-fn retry_later_upload_delay_ms(tx_id: TxId, attempt: u32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let step = RETRY_LATER_UPLOAD_INITIAL_DELAY_MS
-        .saturating_mul(1_u64 << attempt.saturating_sub(1).min(16))
-        .min(RETRY_LATER_UPLOAD_MAX_DELAY_MS);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (tx_id, attempt).hash(&mut hasher);
-    let half = step / 2;
-    half + hasher.finish() % (step - half + 1)
-}
 
 fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::LargeValueRef>) {
     match value {
@@ -808,6 +772,9 @@ pub(super) struct SubscriberConnectionState {
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
     pub(super) serve_dirty: bool,
+    /// Requests held until this link has answered the writes their read
+    /// barrier names (SPEC 8 §8.2.1).
+    pub(super) read_barrier: super::read_barrier::ReadBarrierReceiver,
 }
 
 /// A valid request awaiting activation of its schema, not a rejected query.
@@ -869,17 +836,12 @@ where
     }
 
     pub(super) fn forget_released_outbox_tx_ids(&mut self, released: &HashSet<TxId>) {
-        let ConnectionLink::Upstream(UpstreamConnectionState {
-            uploaded,
-            retry_later_attempts,
-            ..
-        }) = &mut self.link
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &mut self.link
         else {
             return;
         };
         for tx_id in released {
             uploaded.remove(tx_id);
-            retry_later_attempts.remove(tx_id);
         }
     }
 
@@ -1815,11 +1777,10 @@ where
                 large_value_uploads,
                 awaiting_large_value_uploads,
                 failed_large_value_uploads,
-                deferred_uploads,
-                retry_later_attempts,
                 missing_body_resends,
                 expected_scope_authority,
                 scope_lease_manager,
+                read_barrier,
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
@@ -1862,6 +1823,226 @@ where
                                 }
                                 sent_session_claim_revisions.insert(identity, revision);
                             }
+                        }
+                        // Upload locally-authored commits not yet shipped on this
+                        // link before sending any request, so a request names
+                        // every write ahead of it in its read barrier. On a new
+                        // link this resends the outbox before reissuing opens
+                        // (SPEC 8 §8.2.1).
+                        let to_upload: Vec<(TxId, Option<SyncMessage>)> = {
+                            let outbox = outbox.borrow();
+                            let expected_missing = outbox.len().checked_sub(uploaded.len());
+                            let mut suffix = outbox
+                                .iter()
+                                .rev()
+                                .take_while(|pending| !uploaded.contains(&pending.tx_id))
+                                .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                .collect::<Vec<_>>();
+                            if expected_missing == Some(suffix.len()) {
+                                suffix.reverse();
+                                suffix
+                            } else {
+                                // Fate cleanup and authority handoff can leave
+                                // holes in this link's uploaded set. Preserve
+                                // the general set-difference behavior there.
+                                outbox
+                                    .iter()
+                                    .filter(|pending| !uploaded.contains(&pending.tx_id))
+                                    .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                    .collect()
+                            }
+                        };
+                        // A writer's writes go up in outbox order (SPEC 14):
+                        // once one of them is held back on this pass, none of
+                        // that writer's later writes overtakes it. Other
+                        // writers' uploads go on.
+                        let mut blocked_writers = BTreeSet::new();
+                        'uploads: for (tx_id, staged) in to_upload {
+                            if blocked_writers.contains(&tx_id.node) {
+                                continue;
+                            }
+                            if failed_large_value_uploads.contains(&tx_id)
+                                || awaiting_large_value_uploads.contains_key(&tx_id)
+                                || !awaiting_large_value_uploads.is_empty()
+                            {
+                                blocked_writers.insert(tx_id.node);
+                                continue;
+                            }
+                            let now_ms = self.upload_retry_clock.borrow().now_ms();
+                            if let Some(deadline) = self
+                                .large_value_upload_retry_deadlines
+                                .borrow()
+                                .get(&tx_id)
+                                .copied()
+                                && now_ms < deadline
+                            {
+                                // A rate-limited large value holds back its
+                                // writer's later writes until it goes up.
+                                blocked_writers.insert(tx_id.node);
+                                continue;
+                            }
+                            self.large_value_upload_retry_deadlines
+                                .borrow_mut()
+                                .remove(&tx_id);
+                            let unit = if let Some(unit) = staged {
+                                unit
+                            } else {
+                                self.node.lock().await.commit_unit_for(tx_id).await?
+                            };
+                            if let std::collections::btree_map::Entry::Vacant(entry) =
+                                large_value_uploads.entry(tx_id)
+                            {
+                                let refs = commit_unit_large_value_refs(&unit);
+                                let mut uploads = VecDeque::new();
+                                for value_ref in refs {
+                                    uploads.push_back(PendingLargeValueUpload {
+                                        value_ref,
+                                        requested: VecDeque::new(),
+                                        in_flight: VecDeque::new(),
+                                        retry_not_before_ms: None,
+                                        started: false,
+                                    });
+                                }
+                                entry.insert(uploads);
+                            }
+                            let uploads = large_value_uploads
+                                .get_mut(&tx_id)
+                                .expect("initialized above");
+                            if let Some(upload) = uploads.front_mut() {
+                                let now_ms = self.upload_retry_clock.borrow().now_ms();
+                                if upload.retry_not_before_ms.is_some_and(|deadline| now_ms < deadline) {
+                                    blocked_writers.insert(tx_id.node);
+                                    continue;
+                                }
+                                upload.retry_not_before_ms = None;
+                                let supplying_nodes = upload.started;
+                                let mut supplied_count = 0_usize;
+                                let message = if !upload.started {
+                                    SyncMessage::ChunkUploadStart(
+                                        crate::protocol::ChunkUploadStart {
+                                            value_ref: upload.value_ref.clone(),
+                                        },
+                                    )
+                                } else {
+                                    let requested = upload
+                                        .requested
+                                        .iter()
+                                        .take(64)
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    if requested.is_empty() {
+                                        blocked_writers.insert(tx_id.node);
+                                        continue;
+                                    }
+                                    let mut chunks = Vec::with_capacity(requested.len());
+                                    for node_ref in requested {
+                                        let (replica_role, source_node, result) = {
+                                            let node = self.node.lock().await;
+                                            let replica_role = if node.authored_commit_durability()
+                                                == DurabilityTier::None
+                                            {
+                                                "non-durable-client"
+                                            } else {
+                                                "durable-relay"
+                                            };
+                                            let source_node = node.node_uuid();
+                                            let result = node
+                                                .local_chunk(
+                                                    node_ref.locator,
+                                                    node_ref.object_hash,
+                                                )
+                                                .await;
+                                            (replica_role, source_node, result)
+                                        };
+                                        let encoded = result.map_err(|source| {
+                                                crate::node::Error::LargeValueUploadChunkUnavailable {
+                                                    context: large_value_upload_chunk_context(
+                                                        tx_id,
+                                                        &upload.value_ref,
+                                                        &node_ref,
+                                                        replica_role,
+                                                        source_node,
+                                                    ),
+                                                    source,
+                                                }
+                                            })?;
+                                        chunks.push(groove::large_values::StagedChunk {
+                                            node_ref,
+                                            encoded: encoded.to_vec(),
+                                        });
+                                    }
+                                    supplied_count = chunks.len();
+                                    SyncMessage::ChunkUploadNodes(
+                                        crate::protocol::ChunkUploadNodes {
+                                            value_ref: upload.value_ref.clone(),
+                                            chunks,
+                                        },
+                                    )
+                                };
+                                if let Err(error) = self.transport.send(message) {
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) {
+                                        // A full large-value channel holds
+                                        // back this commit and every later
+                                        // one, but not requests: none of
+                                        // those commits is counted yet.
+                                        break 'uploads;
+                                    }
+                                    return Err(transport_error(error));
+                                }
+                                if supplying_nodes {
+                                    for _ in 0..supplied_count {
+                                        upload.in_flight.push_back(
+                                            upload
+                                                .requested
+                                                .pop_front()
+                                                .expect("sent nodes came from requested frontier"),
+                                        );
+                                    }
+                                }
+                                upload.started = true;
+                                outbox.borrow_mut().note_upload_progress();
+                                awaiting_large_value_uploads
+                                    .insert(tx_id, upload.value_ref.clone());
+                            }
+                            if awaiting_large_value_uploads.contains_key(&tx_id)
+                                || !uploads.is_empty()
+                            {
+                                blocked_writers.insert(tx_id.node);
+                                continue;
+                            }
+                            if let Err(error) = send_with_local_sync_context(
+                                &self.node,
+                                self.transport.as_mut(),
+                                unit,
+                            ) {
+                                if handle_db_backpressure(&self.node, &self.scheduler, &error) {
+                                    return Ok(true);
+                                }
+                                return Err(error);
+                            }
+                            large_value_uploads.remove(&tx_id);
+                            uploaded.insert(tx_id);
+                            outbox.borrow_mut().mark_on_wire(tx_id);
+                            read_barrier.commit_unit_sent();
+                        }
+                        if !pending.is_empty()
+                            && let Some(barrier) = read_barrier.pending_barrier()
+                        {
+                            if let Err(error) = self.transport.send(barrier) {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(true);
+                                }
+                                return Err(transport_error(error));
+                            }
+                            read_barrier.barrier_accepted();
                         }
                         let pending_index = 0;
                         while pending_index < pending.len() {
@@ -2209,220 +2390,6 @@ where
                                 }
                             }
                             pending.remove(pending_index);
-                        }
-                        // Upload locally-authored commits not yet shipped on this link.
-                        let to_upload: Vec<(TxId, Option<SyncMessage>)> = {
-                            let outbox = outbox.borrow();
-                            let expected_missing = outbox.len().checked_sub(uploaded.len());
-                            let mut suffix = outbox
-                                .iter()
-                                .rev()
-                                .take_while(|pending| !uploaded.contains(&pending.tx_id))
-                                .map(|pending| (pending.tx_id, pending.unit.clone()))
-                                .collect::<Vec<_>>();
-                            if expected_missing == Some(suffix.len()) {
-                                suffix.reverse();
-                                suffix
-                            } else {
-                                // Fate cleanup and authority handoff can leave
-                                // holes in this link's uploaded set. Preserve
-                                // the general set-difference behavior there.
-                                outbox
-                                    .iter()
-                                    .filter(|pending| !uploaded.contains(&pending.tx_id))
-                                    .map(|pending| (pending.tx_id, pending.unit.clone()))
-                                    .collect()
-                            }
-                        };
-                        // A `RetryLater` answer stops one writer's uploads on
-                        // this link at the write to send again; once its
-                        // backoff passes, they resume from it in outbox
-                        // order. Other writers' uploads go on meanwhile.
-                        let now_ms = self.upload_retry_clock.borrow().now_ms();
-                        deferred_uploads.retain(|_, deferred| {
-                            outbox.borrow().contains(deferred.from)
-                                && now_ms < deferred.not_before_ms
-                        });
-                        if let Some(next) = deferred_uploads
-                            .values()
-                            .map(|deferred| deferred.not_before_ms)
-                            .min()
-                            && let Some(scheduler) = self.scheduler.borrow().as_ref()
-                        {
-                            scheduler.schedule_tick_after(next - now_ms);
-                        }
-                        let deferred_from = deferred_uploads
-                            .iter()
-                            .map(|(writer, deferred)| {
-                                // A write's pending predecessor is its own
-                                // writer's (SPEC 4 §4.6).
-                                debug_assert_eq!(deferred.from.node, *writer);
-                                (deferred.from, *writer)
-                            })
-                            .collect::<BTreeMap<_, _>>();
-                        let mut deferred_writers = BTreeSet::new();
-                        for (tx_id, staged) in to_upload {
-                            if let Some(writer) = deferred_from.get(&tx_id) {
-                                deferred_writers.insert(*writer);
-                            }
-                            if deferred_writers.contains(&tx_id.node) {
-                                continue;
-                            }
-                            if failed_large_value_uploads.contains(&tx_id)
-                                || awaiting_large_value_uploads.contains_key(&tx_id)
-                                || !awaiting_large_value_uploads.is_empty()
-                            {
-                                continue;
-                            }
-                            let now_ms = self.upload_retry_clock.borrow().now_ms();
-                            if let Some(deadline) = self
-                                .large_value_upload_retry_deadlines
-                                .borrow()
-                                .get(&tx_id)
-                                .copied()
-                                && now_ms < deadline
-                            {
-                                continue;
-                            }
-                            self.large_value_upload_retry_deadlines
-                                .borrow_mut()
-                                .remove(&tx_id);
-                            let unit = if let Some(unit) = staged {
-                                unit
-                            } else {
-                                self.node.lock().await.commit_unit_for(tx_id).await?
-                            };
-                            if let std::collections::btree_map::Entry::Vacant(entry) =
-                                large_value_uploads.entry(tx_id)
-                            {
-                                let refs = commit_unit_large_value_refs(&unit);
-                                let mut uploads = VecDeque::new();
-                                for value_ref in refs {
-                                    uploads.push_back(PendingLargeValueUpload {
-                                        value_ref,
-                                        requested: VecDeque::new(),
-                                        in_flight: VecDeque::new(),
-                                        retry_not_before_ms: None,
-                                        started: false,
-                                    });
-                                }
-                                entry.insert(uploads);
-                            }
-                            let uploads = large_value_uploads
-                                .get_mut(&tx_id)
-                                .expect("initialized above");
-                            if let Some(upload) = uploads.front_mut() {
-                                let now_ms = self.upload_retry_clock.borrow().now_ms();
-                                if upload.retry_not_before_ms.is_some_and(|deadline| now_ms < deadline) {
-                                    continue;
-                                }
-                                upload.retry_not_before_ms = None;
-                                let supplying_nodes = upload.started;
-                                let mut supplied_count = 0_usize;
-                                let message = if !upload.started {
-                                    SyncMessage::ChunkUploadStart(
-                                        crate::protocol::ChunkUploadStart {
-                                            value_ref: upload.value_ref.clone(),
-                                        },
-                                    )
-                                } else {
-                                    let requested = upload
-                                        .requested
-                                        .iter()
-                                        .take(64)
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    if requested.is_empty() {
-                                        continue;
-                                    }
-                                    let mut chunks = Vec::with_capacity(requested.len());
-                                    for node_ref in requested {
-                                        let (replica_role, source_node, result) = {
-                                            let node = self.node.lock().await;
-                                            let replica_role = if node.authored_commit_durability()
-                                                == DurabilityTier::None
-                                            {
-                                                "non-durable-client"
-                                            } else {
-                                                "durable-relay"
-                                            };
-                                            let source_node = node.node_uuid();
-                                            let result = node
-                                                .local_chunk(
-                                                    node_ref.locator,
-                                                    node_ref.object_hash,
-                                                )
-                                                .await;
-                                            (replica_role, source_node, result)
-                                        };
-                                        let encoded = result.map_err(|source| {
-                                                crate::node::Error::LargeValueUploadChunkUnavailable {
-                                                    context: large_value_upload_chunk_context(
-                                                        tx_id,
-                                                        &upload.value_ref,
-                                                        &node_ref,
-                                                        replica_role,
-                                                        source_node,
-                                                    ),
-                                                    source,
-                                                }
-                                            })?;
-                                        chunks.push(groove::large_values::StagedChunk {
-                                            node_ref,
-                                            encoded: encoded.to_vec(),
-                                        });
-                                    }
-                                    supplied_count = chunks.len();
-                                    SyncMessage::ChunkUploadNodes(
-                                        crate::protocol::ChunkUploadNodes {
-                                            value_ref: upload.value_ref.clone(),
-                                            chunks,
-                                        },
-                                    )
-                                };
-                                if let Err(error) = self.transport.send(message) {
-                                    if handle_transport_backpressure(
-                                        &self.node,
-                                        &self.scheduler,
-                                        &error,
-                                    ) {
-                                        return Ok(true);
-                                    }
-                                    return Err(transport_error(error));
-                                }
-                                if supplying_nodes {
-                                    for _ in 0..supplied_count {
-                                        upload.in_flight.push_back(
-                                            upload
-                                                .requested
-                                                .pop_front()
-                                                .expect("sent nodes came from requested frontier"),
-                                        );
-                                    }
-                                }
-                                upload.started = true;
-                                outbox.borrow_mut().note_upload_progress();
-                                awaiting_large_value_uploads
-                                    .insert(tx_id, upload.value_ref.clone());
-                            }
-                            if awaiting_large_value_uploads.contains_key(&tx_id)
-                                || !uploads.is_empty()
-                            {
-                                continue;
-                            }
-                            if let Err(error) = send_with_local_sync_context(
-                                &self.node,
-                                self.transport.as_mut(),
-                                unit,
-                            ) {
-                                if handle_db_backpressure(&self.node, &self.scheduler, &error) {
-                                    return Ok(true);
-                                }
-                                return Err(error);
-                            }
-                            large_value_uploads.remove(&tx_id);
-                            uploaded.insert(tx_id);
-                            outbox.borrow_mut().mark_on_wire(tx_id);
                         }
                         Ok::<bool, Error>(false)
                     })
@@ -3259,164 +3226,6 @@ where
                                     }
                                 }
                             }
-                            SyncMessage::RetryLater { tx_id, awaiting } => {
-                                // The authority stored nothing for this write
-                                // and waits for its pending predecessor
-                                // (SPEC 8). It is not a fate: the write stays
-                                // pending here and keeps its local visibility.
-                                // Like a fate, it changes this link's uploads
-                                // only when the admitted authority sent it.
-                                let admitted = *self.admitted_upstream_authority.borrow();
-                                if !upload_answer_receipt_eligible(
-                                    authority_receipt_eligible,
-                                    *expected_scope_authority,
-                                    admitted,
-                                ) || !outbox.borrow().contains(tx_id)
-                                    // Core names only an older write of the
-                                    // same writer (SPEC 4 §4.6); anything else
-                                    // is ignored.
-                                    || awaiting.node != tx_id.node
-                                    || awaiting.time >= tx_id.time
-                                {
-                                    continue;
-                                }
-                                let (authored_here, predecessor) = {
-                                    let mut node = self.node.lock().await;
-                                    (
-                                        node.node_uuid() == tx_id.node,
-                                        node.transaction_state(awaiting).await,
-                                    )
-                                };
-                                if !authored_here {
-                                    // A relay forwards the answer towards the
-                                    // write's author: only the author knows
-                                    // whether its predecessor is lost, and its
-                                    // retry sends the predecessor again. It
-                                    // forwards even when it holds the
-                                    // predecessor queued itself; the author's
-                                    // duplicate resend is by design (SPEC 4
-                                    // §4.6) and the relay deduplicates it.
-                                    route_local_fate(
-                                        &self.local_fate_routes,
-                                        tx_id,
-                                        &SyncMessage::RetryLater { tx_id, awaiting },
-                                    );
-                                }
-                                // A predecessor whose upload already failed here
-                                // (its rejection may still be staged) never
-                                // goes up again.
-                                let predecessor_failed = failed_large_value_uploads
-                                    .contains(&awaiting)
-                                    || outbox.borrow().upload_failure(awaiting).is_some();
-                                let queued = !predecessor_failed && {
-                                    let mut outbox = outbox.borrow_mut();
-                                    if outbox.contains(awaiting) {
-                                        // Queued behind its successor: move it
-                                        // ahead so the retry sends it first.
-                                        outbox.move_before(awaiting, tx_id);
-                                        true
-                                    } else if authored_here
-                                        && matches!(predecessor, Some((Fate::Pending, ..)))
-                                    {
-                                        // Its author's own write, pending but
-                                        // not queued: queue it ahead of its
-                                        // successor. A relay does not revive a
-                                        // copy it dropped; the author resends.
-                                        outbox.insert_before(awaiting, tx_id)
-                                    } else {
-                                        false
-                                    }
-                                };
-                                let resend_from = if queued {
-                                    awaiting
-                                } else if authored_here {
-                                    // The predecessor is unknown here, failed
-                                    // or already settled, so the authority
-                                    // will never get it: retrying would never
-                                    // end. The write fails with a surfaced
-                                    // error. Only its author may decide this.
-                                    uploaded.remove(&tx_id);
-                                    retry_later_attempts.remove(&tx_id);
-                                    {
-                                        let mut outbox = outbox.borrow_mut();
-                                        outbox.retain(|pending| pending.tx_id != tx_id);
-                                        outbox.mark_upload_failed(
-                                            tx_id,
-                                            "its pending predecessor was lost",
-                                        );
-                                    }
-                                    self.staged_inbound.push_front(StagedInboundMessage {
-                                        message: SyncMessage::FateUpdate {
-                                            tx_id,
-                                            fate: Fate::Rejected(RejectionReason::MalformedCommit(
-                                                format!(
-                                                    "predecessor lost: pending predecessor {awaiting:?} \
-                                                     is unknown here or already settled"
-                                                ),
-                                            )),
-                                            global_time: None,
-                                            durability: None,
-                                        },
-                                        authority_receipt_eligible: false,
-                                        lease: None,
-                                        receipts_validated: false,
-                                    });
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    continue;
-                                } else {
-                                    // A relay without the predecessor cannot
-                                    // recover the write and must not fate it.
-                                    // It drops its copy from the outbox; the
-                                    // author's retry, sent on the answer
-                                    // forwarded above (or on its reconnect),
-                                    // brings the predecessor and the write
-                                    // here again, in order.
-                                    uploaded.remove(&tx_id);
-                                    retry_later_attempts.remove(&tx_id);
-                                    outbox
-                                        .borrow_mut()
-                                        .retain(|pending| pending.tx_id != tx_id);
-                                    continue;
-                                };
-                                // Send the predecessor (when queued here) and
-                                // this write again, in outbox order, after a
-                                // backoff; none of this writer's later writes
-                                // overtakes them.
-                                uploaded.remove(&resend_from);
-                                uploaded.remove(&tx_id);
-                                let attempt = retry_later_attempts.entry(tx_id).or_default();
-                                *attempt = attempt.saturating_add(1);
-                                let delay = retry_later_upload_delay_ms(tx_id, *attempt);
-                                let not_before_ms =
-                                    self.upload_retry_clock.borrow().now_ms().saturating_add(delay);
-                                let outbox = outbox.borrow();
-                                deferred_uploads
-                                    .entry(tx_id.node)
-                                    .and_modify(|deferred| {
-                                        let earlier = match (
-                                            outbox.position(resend_from),
-                                            outbox.position(deferred.from),
-                                        ) {
-                                            (Some(new), Some(old)) => new < old,
-                                            (_, None) => true,
-                                            (None, Some(_)) => false,
-                                        };
-                                        if earlier {
-                                            deferred.from = resend_from;
-                                        }
-                                        deferred.not_before_ms =
-                                            deferred.not_before_ms.max(not_before_ms);
-                                    })
-                                    .or_insert(DeferredUpload {
-                                        from: resend_from,
-                                        not_before_ms,
-                                    });
-                                drop(outbox);
-                                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                                    scheduler.schedule_tick_after(delay);
-                                }
-                                continue;
-                            }
                             message => {
                                 let admitted = *self.admitted_upstream_authority.borrow();
                                 let outbox_release_receipt_eligible =
@@ -3600,6 +3409,7 @@ where
                 authority_scope_hydrations,
                 authority_scope_hydration_count,
                 serve_dirty,
+                read_barrier,
             }) => {
                 let stop = Box::pin(async {
                 // These links have a host-admitted app identity (or an existing
@@ -3705,6 +3515,7 @@ where
                     peer,
                     self.transport.as_mut(),
                     &self.downstream_fates,
+                    read_barrier,
                     &self.scheduler,
                 )? {
                     return Ok(true);
@@ -3743,8 +3554,12 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
+                    let released = read_barrier.pop_released();
+                    let barrier_passed = released.is_some();
                     let (message, parked_policy_binding, lease, receipts_validated) =
-                        if let Some(staged) = self.staged_inbound.pop_front() {
+                        if let Some(released) = released {
+                            (Box::new(released.message), None, released.lease, released.receipts_validated)
+                        } else if let Some(staged) = self.staged_inbound.pop_front() {
                             (Box::new(staged.message), None, staged.lease, staged.receipts_validated)
                         } else {
                             match self.transport.try_recv_owned_result() {
@@ -3765,6 +3580,30 @@ where
                                 }
                                 Err(error) => return Err(transport_error(error)),
                                 Ok(None) => {
+                                    // Input ran out with requests held: answer
+                                    // the writes ingested so far now, so the
+                                    // requests behind them are served in this
+                                    // same turn (SPEC 8 §8.2.1).
+                                    if read_barrier.is_holding() {
+                                        queue_local_acknowledgements(
+                                            &self.local_fate_routes,
+                                            &self.node,
+                                        )
+                                        .await;
+                                        if !flush_downstream_fates(
+                                            &self.node,
+                                            peer,
+                                            self.transport.as_mut(),
+                                            &self.downstream_fates,
+                                            read_barrier,
+                                            &self.scheduler,
+                                        )? {
+                                            return Ok(true);
+                                        }
+                                        if read_barrier.has_released() {
+                                            continue;
+                                        }
+                                    }
                                     let ready = pending_catalogue_subscriptions.iter().find_map(
                                         |(key, pending)| {
                                             self.node
@@ -3789,6 +3628,27 @@ where
                                 }
                             }
                         };
+                    // Hold requests behind an unanswered read barrier
+                    // (SPEC 8 §8.2.1). A request already released, or one
+                    // parked for its catalogue, passed its barrier before.
+                    let (message, lease, receipts_validated) = if !barrier_passed
+                        && parked_policy_binding.is_none()
+                    {
+                        match read_barrier.admit(super::read_barrier::HeldRequest {
+                            message: *message,
+                            lease,
+                            receipts_validated,
+                        }) {
+                            Some(admitted) => (
+                                Box::new(admitted.message),
+                                admitted.lease,
+                                admitted.receipts_validated,
+                            ),
+                            None => continue,
+                        }
+                    } else {
+                        (message, lease, receipts_validated)
+                    };
                     if let Some(lease)=&lease { received_leases.push(lease.clone()); }
                     if subscriber_inbound_message_is_authority_only(
                         &message,
@@ -4859,6 +4719,9 @@ where
                             // the subscriber owner-loop does not retain those
                             // compiler states while serving unrelated control
                             // messages or maintained-view updates.
+                            if let SyncMessage::CommitUnit { tx, .. } = &other {
+                                read_barrier.commit_unit_received(tx.tx_id);
+                            }
                             let mut catalogue_deferred = false;
                             let should_continue = Box::pin(async {
                             if matches!(other, SyncMessage::SessionClaims { .. })
@@ -4963,26 +4826,8 @@ where
                                     .iter()
                                     .any(|response| fate_update_settles_upload(response, *tx_id))
                             });
-                            // Core stored nothing for a write it asked to
-                            // retry: its writer sends it again, so nothing is
-                            // held for it here.
-                            let retry_later = local_upload.as_ref().is_some_and(|(tx_id, _)| {
-                                responses.iter().any(|response| {
-                                    matches!(
-                                        response,
-                                        SyncMessage::RetryLater { tx_id: retried, .. }
-                                            if retried == tx_id
-                                    )
-                                })
-                            });
                             for response in responses {
-                                // A retry-later answer is queued like a fate,
-                                // so back-pressure delays it instead of
-                                // losing it.
-                                if matches!(
-                                    response,
-                                    SyncMessage::FateUpdate { .. } | SyncMessage::RetryLater { .. }
-                                ) {
+                                if matches!(response, SyncMessage::FateUpdate { .. }) {
                                     self.downstream_fates.borrow_mut().push(response);
                                 } else {
                                     send_with_sync_context(
@@ -4993,7 +4838,7 @@ where
                                     )?;
                                 }
                             }
-                            if let Some((tx_id, unit)) = local_upload.filter(|_| !retry_later) {
+                            if let Some((tx_id, unit)) = local_upload {
                                 if settled_here {
                                     // A reconnect may have reconstructed this
                                     // upload before the unit arrived here.
@@ -5029,6 +4874,7 @@ where
                     peer,
                     self.transport.as_mut(),
                     &self.downstream_fates,
+                    read_barrier,
                     &self.scheduler,
                 )? {
                     return Ok(true);
@@ -6792,8 +6638,8 @@ fn pending_view_update_tx_ids(message: &SyncMessage) -> Result<BTreeSet<TxId>, E
     Ok(pending_tx_ids)
 }
 
-/// Whether an authority answer about this link's uploads (a fate or a
-/// `RetryLater`) may change its outbox: it arrived as an authority receipt
+/// Whether an authority answer about this link's uploads (a fate) may
+/// change its outbox: it arrived as an authority receipt
 /// and, when the link expects a particular authority, from the one admitted
 /// on it now.
 fn upload_answer_receipt_eligible(
@@ -6843,6 +6689,7 @@ fn flush_downstream_fates<S>(
     peer: &mut PeerState,
     transport: &mut dyn Transport,
     fates: &PendingDownstreamFates,
+    read_barrier: &mut super::read_barrier::ReadBarrierReceiver,
     scheduler: &SharedTickScheduler,
 ) -> Result<bool, Error>
 where
@@ -6858,7 +6705,14 @@ where
             break Ok(true);
         };
         match send_with_sync_context(node, peer, transport, fate) {
-            Ok(()) => sent += 1,
+            Ok(()) => {
+                // Requests a now-answered write released are served on the
+                // next turn of this link.
+                if read_barrier.answer_sent(&pending[sent]) {
+                    schedule_tick_in(scheduler, TickUrgency::Immediate);
+                }
+                sent += 1;
+            }
             Err(error) if error.code == ErrorCode::Backpressure => {
                 schedule_tick_in(scheduler, TickUrgency::Deferred);
                 break Ok(false);

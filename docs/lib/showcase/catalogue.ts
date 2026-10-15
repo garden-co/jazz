@@ -666,6 +666,8 @@ export const moreBenchmarkSections: BenchmarkSection[] = [
   },
 ];
 
+const loadTimeScenarios = "dev/benchmarks/example-load-times/scenarios/";
+
 /**
  * Where the examples page lists a benchmark with metadata: the id of the hero
  * example whose suite holds its metadata source, the id of a "More benchmarks"
@@ -675,6 +677,12 @@ export const moreBenchmarkSections: BenchmarkSection[] = [
  */
 export function placeBenchmark(source: string | undefined): string | null {
   if (!source) return null;
+  // Browser load times live in one suite with a scenario module per example,
+  // named by the example's id; each is listed with its example.
+  if (source.startsWith(loadTimeScenarios)) {
+    const id = source.slice(loadTimeScenarios.length).replace(/\.mjs$/, "");
+    return heroExamples.some((example) => example.id === id) ? id : null;
+  }
   const hero = heroExamples.find(
     (example) => example.benchmarks && source.startsWith(`${example.benchmarks}/`),
   );

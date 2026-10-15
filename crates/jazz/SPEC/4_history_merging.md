@@ -23,8 +23,9 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. A write whose pending predecessor has no fate at Core yet MUST NOT be held or stored by Core: after its cheap admission checks pass, Core MUST answer `RetryLater` naming that predecessor and store nothing for the write. Its writer MUST keep it pending, MUST NOT let a later upload of the same writer node on that link overtake it (other writers' uploads are not held back), MUST send it again from the predecessor (when it still holds the predecessor pending) after a backoff, and only its author MUST fail it with a surfaced "predecessor lost" error when the predecessor can no longer reach Core; a relay never fates it and forwards the `RetryLater` towards its author.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST apply the write as written over the row's current image, as it does after rejecting the predecessor. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives.
 - `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and an accepted record of the row that is not of the writer's own chain (the accepted writes of its pending predecessor's node with a transaction time at most the predecessor's) lies after its seen seq and before it. The seen seq is the larger of its base seq and its chain root's settled base seq (followed through accepted predecessors, and through a rejected predecessor to that one's own predecessor), never a predecessor's later accepted seq. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the seen seq and before the write, outside its own chain, whose authored columns overlap the write's.
+- `INV-HIST-23`: One writer node's commit units MUST reach the fate authority in the order they were written, on every link, and Core MUST decide them in arrival order. The order a writer's writes were written in is their `TxId` order: a writer MUST mint a write's `TxId` when the write takes its place in the writer's order (its owner's mutation queue, which publishes one write at a time in that order), never later, so `TxId` order, local commit order, upload order and recovery's `TxId`-sorted replay agree. A writer's link MUST NOT upload a write ahead of an earlier write of the same node that it holds back (for example while a large value waits out a rate limit); other writers' uploads are not held back. A write that reaches Core after Core accepted a newer write of the same node to the same row is a protocol violation: Core MUST reject it with a `MalformedCommit` reason and MUST NOT apply it.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
@@ -143,25 +144,25 @@ Core sequences keeps it.
 
 ### Durable codec profile
 
-Every persistent Jazz root supplies one closed epoch-one codec profile when it
-opens its ordered-KV adapter. It contains Groove's mandatory base codecs:
-generic ordered-KV, V1 large-value descriptor/immutable-node envelopes, and
-the ordered-chunk-storage install-receipt wrapper; plus the Jazz-owned byte
-families for branch keys; catalogue schemas, mappings, lineages, bootstrap
-receipts, lenses, activations, and write pointers; and persisted
-result-member, result-row-source, and program-fact keys. The profile is sorted, pinned by the adapter manifest,
-and checked before any ordinary record is decoded or mutated. Groove carries
-these identifiers as opaque metadata: it does not import or interpret Jazz
-schemas. A missing, duplicate, substituted, or future ID therefore fails open
-admission rather than leaving a `Bytes` field to a codec-specific fallback.
+Each persistent Jazz root declares one complete Jazz storage format:
+`jazz.node-storage.v1` for clients, relays and Core; `jazz.catalogue-storage.v1`
+for the independent server catalogue; `jazz.account-storage.v1` for the account
+journal. All compose Groove's mandatory base codecs; node roots additionally
+require `groove.durable-index.v2`. Auxiliary roots do not inherit node formats.
 
-This inventory names encoding families, not user tables or individual values.
-Ordinary scalar/record representation remains Groove's one typed record codec;
-a distinct durable root composes this base with its own root-local codec family
-before opening. Adding a new Jazz-owned durable byte family requires a new
-storage epoch, golden fixtures, and an explicit decoder/migration decision.
+The manifest requires an exact inventory match before any ordinary record is
+decoded or mutated. Groove treats Jazz identifiers as opaque metadata. Each
+individual encoding still has a named byte contract, golden fixtures, and
+rejection/reopen receipts in the encoding registry, but no separate persisted
+Jazz marker. A change incompatible with a released root layout versions that
+root's marker; changes within this unreleased storage-breaking batch are
+consolidated into the same v1 contract. There is no physical epoch change.
+Earlier per-family profiles are refused without migration. Some of these
+encodings also change wire bytes; the wire version bump for them ships with
+the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
-`server-catalogue-entry.v1` is an existing member of this profile. Its outer
+`jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
+`jazz.catalogue-storage.v1`. Its outer
 `JCAT` entry and all catalogue payload outer version bytes remain v1. Within
 the existing nested relation-tree grammar, a public `UNION ALL` is the
 explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in
@@ -255,8 +256,8 @@ plain cell the **last write Core accepts wins** (`INV-HIST-8`,
 `INV-HIST-15`).
 
 A write still names the image it was made over (its base, below). Core uses
-the base only to validate the write and to keep one writer's chain in order
-(`INV-HIST-20`); history uses it to derive whether the write was made over
+the base only to validate the write (`INV-HIST-20`); history uses it to
+derive whether the write was made over
 the row's latest accepted image, i.e. whether it **maybe conflicts** with
 writes it never saw (`INV-HIST-21`).
 
@@ -294,40 +295,84 @@ with a `MalformedCommit` reason saying the base is not supported yet
 row (for example a seq above the row's current seq, or a seq of another
 row's write; one exact point read of the row's history at `S`), when `P`'s
 node is not `N`, and when `P` is not older than `W`. Core never substitutes
-another base. A predecessor Core holds no fate for yet (it has not arrived,
-or Core holds it as a relayed or recovered Pending unit) is an ordering race,
-not a refusal. Core does not hold `W` for it:
+another base.
 
-- `W` first passes its cheap admission checks (the session is `W`'s author
-  and not anonymous, the clock is within tolerance, and the provenance is
-  well formed); a failing `W` gets its refusal at once.
-- Core then stores nothing for `W`, decides nothing, and answers its link
-  with `RetryLater { tx_id: W, awaiting: P }` (SPEC 8). Core keeps no copy,
-  queue or timer for `W`, so a Core restart changes nothing.
-- The writer keeps `W` pending, with its local visibility, and stops
-  uploading `N`'s writes on that link at the first one it must send again,
-  so nothing chained after it overtakes it; other writers' uploads on the
-  link go on. After a jittered backoff it uploads again from there, in
-  outbox order, sending `P` first when it still holds `P` pending (moving
-  `P` ahead of `W` when it was queued behind it). Once `P` has a fate at
-  Core (acceptance or any rejection, a refusal before admission included),
-  Core applies `W`.
-- Only `W`'s author decides that `P` is lost. When the author no longer
-  holds `P` pending (it does not know `P`, `P`'s upload already failed
-  there, or `P` is settled there without having reached Core), `P` can
-  never reach Core, and `W` fails at the author with a surfaced "predecessor
-  lost" rejection instead of being retried forever.
-- A relay that uploaded `W` for another node never fates it. It forwards the
-  `RetryLater` towards `W`'s author. When it holds `P` queued it retries
-  both as above; otherwise it drops its copy of `W` from its outbox, and the
-  author's retry (or its reconnect) brings `P` and `W` to it again in order.
+Core never waits for `P`. A writer's commit units reach Core in the order
+they were written (SPEC 14: the Writes channel is one FIFO and every link
+uploads the shared outbox in order), so when `W` arrives, `P` has either
+reached Core already or never will:
 
-So one writer's chain always applies in its own order, and the two ways `P`
-can be rejected end differently for `W`. A `P` rejected at Core has a fate
-there: Core applies `W` over the settled row (the rejected `P`'s cells are
-not in the image). A `P` rejected locally, before it reached Core, never gets
-a fate there: Core keeps answering `RetryLater`, and `W` fails at its author
-as "predecessor lost".
+- When Core holds no fate for `P` (it does not know `P`, or holds it only as
+  a relayed or recovered Pending unit), `P` never arrives for a decision.
+  Core treats it like a `P` it rejected: `W` applies as written over the
+  row's current image, which `P` never reached. The base is not guessed or
+  rewritten; it only feeds the "maybe conflicting" derivation (`INV-HIST-21`),
+  which already resolves an absent `P` to the newest accepted write of `N`
+  before it.
+- When `P` is parked at Core because its schema is not known yet, `W` parks
+  behind it (an in-memory lookup) and is decided after it once the schema
+  arrives (`INV-HIST-20`). The wait is bounded: once `P` has been parked for
+  `PARKED_PREDECESSOR_WAIT_MS` (60 s) on Core's ingest clock, the next commit
+  ingest decides `W` as written, as if `P` never arrived. If `P`'s schema
+  arrives after that, `P` is late and refused (below), so a write whose
+  schema never arrives costs only itself, not its writer's later writes.
+  The ingest clock is the newest wall time any commit ingest has seen, held
+  in memory with the parked units, and no timer drives it: on an idle Core
+  `W` stays parked past the wait until the next commit ingest (or `P`'s
+  schema) arrives, and a forward jump of Core's clock runs out every
+  parked wait at once. A restart drops the parked units and the clock
+  together; writers resend their pending writes in order and the waits
+  start again.
+- When `P` reaches Core after Core accepted a newer write of `N` to the same
+  row, the order was violated. Core rejects `P` with a `MalformedCommit`
+  reason saying it arrived after a later write of its writer, and does not
+  apply it, so the row never goes back to an older image (`INV-HIST-23`).
+  The check costs at most the writes accepted since `P`'s base, never the
+  row's whole history:
+  - It reads nothing more when the row's current image was written by `N`
+    (compare its transaction time) or is `P`'s base.
+  - When `P` has a base seq `B` and the row's current seq is `C`, it reads
+    the key fields of the row's history records at seqs `B+1..=C`: one range
+    read per history table, since history is keyed
+    `(branch, row, seq, tx_time, node)`. `N` had seen `B` when it wrote `P`,
+    so a later write of `N` lies there if anywhere.
+  - When `P` has no base seq (an insert, upsert or restore made over no
+    image of the row), it reads one per-row marker of `N`. When Core decides
+    a write `W` of `N` chained on a predecessor `X` it holds no decision for
+    (unknown, or stored Pending), it first records in the marker (the
+    node-local direct record store `jazz_superseded_writes_v1`, keyed by
+    physical table id, branch, row and node) that `N`'s writes to the row
+    through `X`'s transaction time were passed over; a write of `N` at or
+    before that time arriving later is late. Core records it before it
+    applies `W`, and also when it refuses `W`. The physical table id is kept
+    across table renames, so a marker recorded under one schema version
+    guards writes made under another. The marker is exact for `P`: the
+    first write of `N` Core accepted after `P` was written while `P` was
+    still pending at `N`, so it was chained on `P` or on a later write `X`
+    Core had not accepted either. If Core held no decision for `X`,
+    applying the write recorded a marker at or after `P`; if Core had
+    refused `X`, refusing `X` did, or one link further down the chain, down
+    to the write chained directly on `P`. A chain over predecessors Core
+    already decided (accepted or refused) records nothing and reads at most
+    the predecessor's transaction.
+  - Markers are not history. A Core rebuilt from history alone
+    (`INV-HIST-17`) starts with none, so until a writer passes over a
+    predecessor again, a write without a base seq that arrives after a
+    later write of its node accepted before the rebuild is no longer
+    refused as late; writes with a base seq keep the exact range check.
+  - Markers are never collected. Row deletion leaves a restorable tombstone
+    and keeps the row's history, so a late write to a deleted row must
+    still be refused, and nothing removes a branch's rows. A marker is
+    written only when a write passes over a predecessor Core never saw (a
+    transport fault, or a parked predecessor), so their number is bounded by
+    those events, not by write volume.
+
+A `P` rejected locally before it reached Core (for example its large value
+was not staged) therefore ends like a `P` rejected at Core: `W` applies over
+the settled row. A writer's link keeps the order on its side too: while one
+of its writes waits (a large value rate-limited or still uploading), none of
+that writer's later writes goes up ahead of it; other writers' writes on the
+same link go on.
 
 **Patch rule (Core only).** For each plain cell `c` the write authored, and
 for `_deletion` when authored, the post-image takes the write's value. A cell
@@ -575,9 +620,12 @@ by a relation that stays exact under that narrowing (`INV-REF-3`):
     many candidates (read whole); a local-only node, a long-offline one or
     a draft branch that exists only on this node holds a delta that is the
     whole table and few or no candidates (looked up). The node knows the
-    pending count per table in memory and counts the candidates from
-    origin's index keys under the prefix, stopping at the pending count, so
-    choosing never reads more than the cheaper mask does.
+    pending count per table and branch key in memory, summed over the
+    read's branch keys (pending rows on another branch are not read whole),
+    and counts the candidates from origin's index keys under the prefix
+    (an upper bound: tombstoned rows' entries and rows a further predicate
+    drops still count), stopping at the pending count, so choosing never
+    reads more than the cheaper mask does.
   - A branch view masks its base by the head's presence read by the base
     candidates' row ids: a keyed lookup of the head's refs
     ([#4005](https://github.com/garden-co/jazz/issues/4005)). A head can be

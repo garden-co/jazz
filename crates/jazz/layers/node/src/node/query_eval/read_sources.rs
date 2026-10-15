@@ -1599,8 +1599,11 @@ where
             let base = self
                 .projected_include_deleted_current_source_graph(request, &table, tier)
                 .await?;
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base.clone(),
+            // The policy proof carries the binding routes it depends on; they
+            // must reach the deletion witness, or a shared graph would hand
+            // one binding's authorized deletions to every binding.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base.clone(), BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1637,27 +1640,33 @@ where
                     });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base.clone(),
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
             (
                 graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
-                BTreeSet::new(),
+                routing_fields,
             )
         } else if request.visibility == RowVisibility::IncludeDeleted {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = include_deleted_current_graph(&table, tier);
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
+            // The policy proof carries the binding routes it depends on; they
+            // must reach the deletion witness, or a shared graph would hand
+            // one binding's authorized deletions to every binding.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1692,21 +1701,24 @@ where
                     });
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
             (
                 graph,
                 include_deleted_current_row_descriptor(&table),
                 BTreeMap::new(),
-                BTreeSet::new(),
+                routing_fields,
             )
         } else {
             let tier = graph_tier.expect("visible current source has a tier");
@@ -3143,10 +3155,14 @@ where
     ///   much is pending (a local-only or long-offline node, whose delta is
     ///   the whole table and whose origin is empty).
     ///
-    /// `P` is known exactly in memory. `C` is counted from origin's index
-    /// keys under the prefix (before intersections, so an upper bound), and
-    /// only up to `P`: deciding never reads more than the cheaper mask
-    /// would. Ties and failures read the delta whole.
+    /// `P` is known exactly in memory, per branch key, and summed over the
+    /// read's stored keys: `Whole` reads only those, so pending rows on
+    /// other branch keys (a large local draft branch) do not count. `C` is
+    /// counted from origin's index keys under the prefix, before
+    /// intersections and including entries of tombstoned rows, so it is an
+    /// upper bound; and only up to `P`: deciding never reads more than the
+    /// cheaper mask would. Ties and failures read the delta whole; a failure
+    /// counts `QueryEngineReadMetrics::local_mask_count_fallbacks`.
     ///
     /// The choice is made when the graph is built. A maintained read keeps
     /// it as sizes later change; either stays exact, only the cost of a
@@ -3170,9 +3186,20 @@ where
             .node
             .physical_table_id_for_schema(read_schema, &table.name)
         else {
+            self.node
+                .query_engine_read_metrics
+                .local_mask_count_fallbacks += 1;
             return PresenceRead::Whole;
         };
-        let pending = self.node.ahead_current_keys.table_rows(table_id);
+        // `Whole` reads the delta under the read's own branch keys only.
+        let pending = stored_keys
+            .iter()
+            .map(|branch_key| {
+                self.node
+                    .ahead_current_keys
+                    .branch_rows(table_id, branch_key)
+            })
+            .sum::<usize>();
         let mut settled = 0;
         for branch_key in stored_keys {
             if settled >= pending {
@@ -3193,7 +3220,14 @@ where
                 .await
             {
                 Ok(rows) => settled += rows,
-                Err(_) => return PresenceRead::Whole,
+                Err(_) => {
+                    // Exact either way, but a mapping or index-name mismatch
+                    // here would silently cost every read the whole delta.
+                    self.node
+                        .query_engine_read_metrics
+                        .local_mask_count_fallbacks += 1;
+                    return PresenceRead::Whole;
+                }
             }
         }
         if settled < pending {
@@ -3311,7 +3345,8 @@ where
             BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
             BranchLayerAccess::Index { intersections, .. } => {
                 // Each ref under the prefix; the local delta's mask over
-                // origin is a keyed lookup, not an index probe.
+                // origin is its presence (read whole or looked up by
+                // origin's candidates), not an index probe.
                 metrics.source_index_probes += refs * keys * (1 + intersections.len() as u64);
             }
         });

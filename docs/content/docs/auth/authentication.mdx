@@ -92,6 +92,32 @@ An exact identity can belong to only one account, permanently. Revocation preven
 
 For a hybrid app, omit managed `auth` and use the framework hook’s `sessionActions`, or own a low-level session directly. Signup calls the provider and then `jazz.linkJWT(auth)` on the retained guest account; ordinary login calls `loginOrRegisterJWT`. This ensures the fresh identity is linked before any automatic account creation.
 
+### Logging in again after a reload
+
+In a browser, Jazz reopens the last signed-in account at once after a reload, before your provider answers. That account has no credential yet: it reads and writes local data, but nothing syncs until the app logs in again. Its identity already matches the signed-in user, so don't use the identity to decide whether to log in. Check `needsLogin` instead. It is `true` while the open account is waiting for a credential, and it turns `false` once `loginJWT` or `loginOrRegisterJWT` re-admits it. Logging in again as the same identity keeps the open client and its data, and writes made in the meantime then sync.
+
+```tsx
+function Restore() {
+  const { needsLogin, sessionActions } = useJazzAuth();
+  const { data: providerSession } = authClient.useSession();
+  const userId = providerSession?.user.id;
+  // Keyed on the user, not the provider session object: providers refetch it
+  // (on window focus, for example), and a second call while a login is in
+  // flight rejects as already pending.
+  useEffect(() => {
+    if (!userId || !needsLogin) return;
+    sessionActions.loginOrRegisterJWT({ getToken }).catch(() => {
+      // The failure is reported in useJazzAuth().error; retry() repeats it.
+    });
+  }, [userId]);
+  return null;
+}
+```
+
+`needsLogin` is already settled when `useJazzAuth()` first renders the app, so keying the effect on the user id is enough.
+
+Managed `auth` does this for you. In development builds, Jazz warns in the console when an app without managed `auth` keeps writing to an account whose `needsLogin` is still `true` and starts no login within a few seconds.
+
 `jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
 
 The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.

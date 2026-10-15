@@ -367,7 +367,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedRow[]): void {
       encoded.bytes(row.rowId);
       encoded.bool(false);
       encoded.bytes(
-        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(row.title)])]),
+        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(row.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);

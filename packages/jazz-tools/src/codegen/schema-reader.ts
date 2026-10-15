@@ -23,6 +23,7 @@ import type {
   Value,
 } from "../drivers/types.js";
 import { analyzeRelations } from "./relation-analyzer.js";
+import { mapPolicyExpr, type PolicyLeafMappers } from "../policy-expr-map.js";
 import { toValue } from "../runtime/value-converter.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
 
@@ -134,96 +135,18 @@ function clonePolicyLiteralValue(value: DslPolicyLiteralValue): PolicyLiteralVal
   return literalToWasmValue(value.value);
 }
 
+const clonePolicyLeaves: PolicyLeafMappers = {
+  value: clonePolicyValue,
+  literal: clonePolicyLiteralValue,
+  rel: () => {
+    throw new Error(
+      "Policy ExistsRel is not supported in schemaToWasm(). Use definePermissions() relation IR path instead.",
+    );
+  },
+};
+
 function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
-  switch (expr.type) {
-    case "Cmp":
-      return {
-        type: "Cmp",
-        column: expr.column,
-        op: expr.op,
-        value: clonePolicyValue(expr.value),
-      };
-    case "SessionCmp":
-      return {
-        type: "SessionCmp",
-        path: [...expr.path],
-        op: expr.op,
-        value: clonePolicyLiteralValue(expr.value),
-      };
-    case "IsNull":
-      return { type: "IsNull", column: expr.column };
-    case "SessionIsNull":
-      return { type: "SessionIsNull", path: [...expr.path] };
-    case "IsNotNull":
-      return { type: "IsNotNull", column: expr.column };
-    case "SessionIsNotNull":
-      return { type: "SessionIsNotNull", path: [...expr.path] };
-    case "Contains":
-      return {
-        type: "Contains",
-        column: expr.column,
-        value: clonePolicyValue(expr.value),
-      };
-    case "SessionContains":
-      return {
-        type: "SessionContains",
-        path: [...expr.path],
-        value: clonePolicyLiteralValue(expr.value),
-      };
-    case "In":
-      return {
-        type: "In",
-        column: expr.column,
-        session_path: [...expr.session_path],
-      };
-    case "InList":
-      return {
-        type: "InList",
-        column: expr.column,
-        values: expr.values.map(clonePolicyValue),
-      };
-    case "SessionInList":
-      return {
-        type: "SessionInList",
-        path: [...expr.path],
-        values: expr.values.map(clonePolicyLiteralValue),
-      };
-    case "Exists":
-      return {
-        type: "Exists",
-        table: expr.table,
-        condition: clonePolicyExpr(expr.condition),
-      };
-    case "ExistsRel":
-      throw new Error(
-        "Policy ExistsRel is not supported in schemaToWasm(). Use definePermissions() relation IR path instead.",
-      );
-    case "Inherits":
-      return {
-        type: "Inherits",
-        operation: expr.operation,
-        via_column: expr.via_column,
-        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
-      };
-    case "InheritsReferencing":
-      return {
-        type: "InheritsReferencing",
-        operation: expr.operation,
-        source_table: expr.source_table,
-        via_column: expr.via_column,
-        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
-      };
-    case "And":
-      return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
-    case "Or":
-      return { type: "Or", exprs: expr.exprs.map(clonePolicyExpr) };
-    case "Not":
-      return { type: "Not", expr: clonePolicyExpr(expr.expr) };
-    case "True":
-      return { type: "True" };
-    case "False":
-      return { type: "False" };
-  }
+  return mapPolicyExpr(expr, clonePolicyLeaves);
 }
 
 function cloneOperationPolicy(

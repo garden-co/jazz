@@ -1,16 +1,14 @@
 import { Utf8Decoder } from "../utf8.js";
+import { parseUuidBytes } from "../hex.js";
 import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
   type NativeRemovedRow,
-  type NativeSubscriptionDelta,
   type DescriptorField,
-  createRecord,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
-  writeDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
@@ -21,9 +19,7 @@ const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export {
   createRecord,
-  decodeRecordBool,
   decodeRecordBytes,
-  decodeRecordString,
   fieldIndex,
   nativeRowDescriptorPublicName,
   readNativeRowBatch,
@@ -48,30 +44,6 @@ export type {
   ValueType,
 } from "./native-row-codec.js";
 
-export type SubscriptionDeltaChunk = {
-  type: "delta";
-  delta: NativeSubscriptionDelta;
-  settled?: boolean;
-  tier?: string;
-};
-export type SubscriptionRejectedChunk = {
-  type: "rejected";
-  reason:
-    | {
-        type: "UnsupportedShapeCapability";
-        detail: string;
-      }
-    | {
-        type: "ServerFailure";
-        code: string;
-      }
-    | {
-        type: "InvalidAuthoritySourceClosure";
-        transition: string;
-      };
-};
-export type SubscriptionStreamChunk = SubscriptionDeltaChunk | SubscriptionRejectedChunk;
-
 /** A self-signed proof may derive a Jazz-owned client author only at DB open. */
 export type NativeSelfSignedClientProof = {
   token: string;
@@ -94,16 +66,6 @@ export function authorForNativeOpenConfig(
   selfSignedClientProof?: NativeSelfSignedClientProof,
 ): Uint8Array {
   return selfSignedClientProof ? SELF_SIGNED_OPEN_CONFIG_AUTHOR : author;
-}
-
-export async function readSubscriptionDelta(
-  reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,
-): Promise<SubscriptionDeltaChunk> {
-  const next = await reader.read();
-  if (next.done || next.value.type !== "delta") {
-    throw new Error("expected subscription delta chunk");
-  }
-  return next.value;
 }
 
 export function tableSchema(tableName: string, descriptor: DescriptorField[]): Uint8Array {
@@ -172,23 +134,6 @@ function canonicalOpenAuthor(author: Uint8Array): string {
 
 export function queryFromTable(table: string): Uint8Array {
   return queryWithPredicates(table, []);
-}
-
-export function queryWhereBool(table: string, column: string, value: boolean): Uint8Array {
-  return queryWithEqFilters(table, [{ column, value: { type: "Boolean", value } }]);
-}
-
-export function queryWhereStringContains(
-  table: string,
-  column: string,
-  value: string,
-  limit?: number,
-): Uint8Array {
-  return queryWithPredicates(
-    table,
-    [{ column, op: "Contains", value: { type: "Text", value } }],
-    limit,
-  );
 }
 
 export type QueryLiteral =
@@ -274,18 +219,6 @@ export type QueryOptions = {
   /** Relation expression carried in Query.relation by the public IR adapter. */
   relation?: unknown;
 };
-
-export function queryWithEqFilters(
-  table: string,
-  filters: Array<{ column: string; value: QueryLiteral }>,
-  limit?: number,
-): Uint8Array {
-  return queryWithPredicates(
-    table,
-    filters.map((filter) => ({ ...filter, op: "Eq" })),
-    limit,
-  );
-}
 
 export function queryWithPredicates(
   table: string,
@@ -560,7 +493,9 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   }
   if (value.type === "Uuid") {
     writer.u64(9); // groove::records::Value::Uuid
-    writer.bytes(parseUuidBytes(value.value));
+    const bytes = parseUuidBytes(value.value);
+    if (!bytes) throw new Error(`invalid uuid ${value.value}`);
+    writer.bytes(bytes);
     return;
   }
   if (value.type === "Bytea") {
@@ -575,23 +510,6 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   }
   writer.u64(6); // groove::records::Value::String
   writer.string(value.value);
-}
-
-function parseUuidBytes(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-export function encodedCells(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
-  const writer = new PostcardWriter();
-  writeDescriptor(writer, descriptor);
-  writer.bytes(createRecord(descriptor, values));
-  return writer.finish();
 }
 
 export function rowCount(batches: NativeRowBatch[]): number {
@@ -828,14 +746,6 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
-}
-
-export function normalizePayloadBytes(value: unknown, label = "payload"): Uint8Array {
-  return assertBytes(value, label);
-}
-
-export function optionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
 }
 
 export function utf8(value: string): Uint8Array {

@@ -657,71 +657,30 @@ impl Backend {
         StackSafeFuture::new(self.0.tick()).await
     }
 
+    /// Insert one row. `None` writes as the database identity; a row id of
+    /// `None` lets the core generate one.
     fn insert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write =
-            crate::local_executor::block_on(self.0.insert(table, cells, Default::default()))?;
-        Ok((write.row_uuid(), write.mergeable_tx_id()))
-    }
-
-    fn insert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
+        row_id: Option<CoreRowUuid>,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
         let write = crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
-                identity,
+                row_id,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
-    fn insert_with_id(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn insert_with_id_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                identity,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
     fn upsert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -732,27 +691,7 @@ impl Backend {
             row_id,
             cells,
             crate::db::UpsertOptions {
-                updated_at_ms,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn upsert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.upsert(
-            table,
-            row_id,
-            cells,
-            crate::db::UpsertOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 updated_at_ms,
                 ..Default::default()
             },
@@ -779,9 +718,9 @@ impl Backend {
         .mergeable_tx_id())
     }
 
-    fn delete_for_identity(
+    fn delete(
         &self,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -789,22 +728,11 @@ impl Backend {
             table,
             row_id,
             crate::db::DeleteOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?
         .mergeable_tx_id())
-    }
-
-    fn delete(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::local_executor::block_on(self.0.delete(table, row_id, Default::default()))?
-                .mergeable_tx_id(),
-        )
     }
 
     async fn prepare_query(
@@ -872,16 +800,15 @@ impl Backend {
         StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.begin_exclusive(id))
-    }
-
-    fn begin_exclusive_for_identity(
+    fn begin_exclusive(
         &self,
         id: OpenTransactionId,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.begin_exclusive_with_identity(id, identity))
+        crate::local_executor::block_on(
+            self.0
+                .begin_exclusive_with_identity(id, identity.unwrap_or_default()),
+        )
     }
 
     fn exclusive_write(
@@ -1292,32 +1219,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
-        let (row_uuid, tx_id) = match row_id {
-            Some(uuid) => {
-                let row_uuid = CoreRowUuid(uuid);
-                let tx_id = match identity {
-                    Some(identity) => inner
-                        .backend()?
-                        .insert_with_id_for_identity(identity, &table, row_uuid, cells),
-                    None => inner.backend()?.insert_with_id(&table, row_uuid, cells),
-                }
-                .map_err(|error| JazzError::Write(error.to_string()))?;
-                (row_uuid, tx_id)
-            }
-            None => {
-                if let Some(identity) = identity {
-                    inner
-                        .backend()?
-                        .insert_for_identity(identity, &table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                } else {
-                    inner
-                        .backend()?
-                        .insert(&table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                }
-            }
-        };
+        let (row_uuid, tx_id) = inner
+            .backend()?
+            .insert(identity, &table, row_id.map(CoreRowUuid), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
         inner.remember_write(tx_id);
@@ -1356,19 +1261,10 @@ impl ClientDb {
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
-                &table,
-                CoreRowUuid(row_id),
-                cells,
-                updated_at_ms,
-            ),
-            None => inner
-                .backend()?
-                .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .upsert(identity, &table, CoreRowUuid(row_id), cells, updated_at_ms)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1407,8 +1303,9 @@ impl ClientDb {
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
+            // An identity-bound update is applied as an upsert for that identity.
+            Some(identity) => inner.backend()?.upsert(
+                Some(identity),
                 table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
@@ -1456,15 +1353,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => {
-                inner
-                    .backend()?
-                    .delete_for_identity(identity, table, CoreRowUuid(*row_id.uuid()))
-            }
-            None => inner.backend()?.delete(table, CoreRowUuid(*row_id.uuid())),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .delete(identity, table, CoreRowUuid(*row_id.uuid()))
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1500,13 +1392,10 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        match identity {
-            Some(identity) => inner
-                .backend()?
-                .begin_exclusive_for_identity(transaction_id, identity),
-            None => inner.backend()?.begin_exclusive(transaction_id),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        inner
+            .backend()?
+            .begin_exclusive(transaction_id, identity)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         // Explicit sessions bind commit identity; attributed transactions use
         // the core's bound commit path to retain their separate provenance.
         let author = identity.and_then(|identity| match identity {

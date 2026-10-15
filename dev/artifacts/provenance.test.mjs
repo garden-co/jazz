@@ -251,6 +251,7 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "stage-napi-loader.mjs",
       "stage-native-fingerprints.mjs",
       "stage-napi-manifests.mjs",
+      "wasm-names.mjs",
       "provenance.test.mjs",
       "correctness-artifact-producer.mjs",
     ])
@@ -268,6 +269,10 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "// changed producer receipt helper\n",
     );
     assert.equal(nativeArtifactFingerprint(root, "napi", "release"), before);
+
+    const wasmBefore = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(artifacts, "wasm-names.mjs"), "// changed WASM post-processor\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), wasmBefore);
 
     writeFileSync(join(artifacts, "build.mjs"), "// changed authoritative builder\n");
     assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), before);
