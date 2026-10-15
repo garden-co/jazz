@@ -2526,6 +2526,7 @@ where
                     missing_body_resends: BTreeSet::new(),
                     expected_scope_authority,
                     scope_lease_manager: AuthorizationScopeLeaseManager::default(),
+                    read_barrier: Default::default(),
                 }),
                 last_resume_bytes: None,
                 auxiliary_pump: PeerIoPump::new(
@@ -2919,6 +2920,7 @@ where
                 authority_scope_hydrations: BTreeMap::new(),
                 authority_scope_hydration_count: 0,
                 serve_dirty: true,
+                read_barrier: Default::default(),
             }),
             last_resume_bytes: None,
             auxiliary_pump: PeerIoPump::new(
