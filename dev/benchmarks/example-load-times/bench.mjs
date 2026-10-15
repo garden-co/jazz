@@ -8,7 +8,15 @@
 // the awaited content is visible. `finish` runs untimed after each iteration.
 import assert from "node:assert/strict";
 import { afterAll, beforeAll, bench } from "vitest";
-import { killStale, launchBrowser, startApp } from "./harness.mjs";
+import {
+  cpuByGroup,
+  eventsSince,
+  killStale,
+  launchBrowser,
+  now,
+  startApp,
+  tracing,
+} from "./harness.mjs";
 import { benchmarkName, loadTimeCases } from "./metadata.ts";
 
 const rounds = Number(process.env.BENCH_ROUNDS || 3);
@@ -20,10 +28,20 @@ export function defineLoadTimeBenchmarks(appId, load) {
   assert.ok(cases.length, `${appId} has no cases in metadata.ts`);
   let server, browser, app;
 
+  const trace = (line) => tracing && console.log(`[trace ${new Date().toISOString()}] ${line}`);
+  const timed = async (label, fn) => {
+    const t0 = now();
+    try {
+      return await fn();
+    } finally {
+      trace(`${appId} ${label}: ${Math.round(now() - t0)} ms`);
+    }
+  };
+
   beforeAll(async () => {
     killStale();
-    server = await startApp(appId);
-    browser = await launchBrowser();
+    server = await timed("start servers", () => startApp(appId));
+    browser = await timed("launch browser", () => launchBrowser());
     const { default: create } = await load();
     app = create({ server, browser });
     const keys = Object.keys(app.scenarios).sort();
@@ -33,7 +51,7 @@ export function defineLoadTimeBenchmarks(appId, load) {
       `${appId}: scenarios match metadata.ts`,
     );
     try {
-      await app.setup?.();
+      await timed("setup", async () => app.setup?.());
     } catch (e) {
       console.log(server.log());
       throw e;
@@ -49,11 +67,25 @@ export function defineLoadTimeBenchmarks(appId, load) {
   for (const c of cases) {
     const name = benchmarkName(c);
     if (!name.includes(filter)) continue;
-    let ctx;
+    let ctx,
+      round = 0,
+      phase;
     bench(
       name,
       async () => {
+        if (!tracing) return app.scenarios[c.scenario].run(ctx);
+        const t0 = now();
+        const cpu0 = cpuByGroup();
         await app.scenarios[c.scenario].run(ctx);
+        const ms = now() - t0;
+        const cpu1 = cpuByGroup();
+        const used = Object.keys(cpu1)
+          .map((k) => [k, cpu1[k] - (cpu0[k] ?? 0)])
+          .filter(([, v]) => v >= 0.05)
+          .map(([k, v]) => `${k}=${v.toFixed(2)}s`)
+          .join(" ");
+        phase.push(`run ${Math.round(ms)} ms (cpu ${used})`);
+        for (const e of eventsSince(t0)) phase.push(`  +${Math.round(e.t - t0)} ms ${e.what}`);
       },
       {
         iterations: rounds,
@@ -64,11 +96,17 @@ export function defineLoadTimeBenchmarks(appId, load) {
           // Vitest passes options to Bench, so install per-sample hooks on its Task.
           const scenario = () => app.scenarios[c.scenario];
           task.opts.beforeEach = async () => {
+            phase = [];
+            const t0 = now();
             ctx = (await scenario().prepare?.()) ?? {};
+            phase.push(`prepare ${Math.round(now() - t0)} ms`);
           };
           task.opts.afterEach = async () => {
+            const t0 = now();
             await scenario().finish?.(ctx);
             ctx = undefined;
+            phase.push(`finish ${Math.round(now() - t0)} ms`);
+            trace(`${name} #${++round}\n    ${phase.join("\n    ")}`);
           };
         },
       },

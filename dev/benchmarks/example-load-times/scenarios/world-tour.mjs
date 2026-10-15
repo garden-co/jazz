@@ -1,7 +1,7 @@
 // World Tour (Vue + Vite, local-first account): the first visitor of a fresh
 // sync server claims the demo band. First visit, reload, public link, invite
 // link and join, invitee reload, live rename.
-import { device, poll, random, visible } from "../harness.mjs";
+import { device, mark, poll, random, visible } from "../harness.mjs";
 
 const pins = (page) => page.locator(".stop-pin");
 const stop = (page, n) => pins(page).nth(n - 1);
@@ -105,7 +105,9 @@ export default function worldTour({ server, browser }) {
         },
         async run({ d }) {
           await d.page.getByRole("button", { name: "Join band" }).click();
+          mark("clicked Join band");
           await visible(d.page.getByText("You're in this band."));
+          mark("member view");
           await allStops(d.page);
         },
         // The last member to join is the invitee of the cases below.
@@ -118,6 +120,7 @@ export default function worldTour({ server, browser }) {
         async run() {
           await invitee.page.reload();
           await visible(invitee.page.getByText("You're in this band."));
+          mark("member view");
           await allStops(invitee.page);
         },
       },

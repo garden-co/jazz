@@ -2,12 +2,75 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { chromium } from "@playwright/test";
 import { appConfig, generated, here } from "./apps.mjs";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const now = () => performance.now();
 export const random = () => Math.random().toString(36).slice(2, 8);
+
+// ---------------------------------------------------------------------------
+// Opt-in tracing (BENCH_TRACE=1): per-iteration phase times, CPU time per
+// process group, and what the pages logged and sent while a case ran.
+
+export const tracing = !!process.env.BENCH_TRACE;
+const traceEvents = [];
+
+/** Records a labelled point in time (only while tracing). */
+export function mark(label) {
+  if (tracing) traceEvents.push({ t: now(), what: label });
+}
+
+/** The trace events recorded since `from` (a `now()` value). */
+export function eventsSince(from) {
+  return traceEvents.filter((e) => e.t >= from);
+}
+
+const ticksPerSecond = 100;
+
+/** CPU seconds used so far by each process group under this process. */
+export function cpuByGroup() {
+  const names = new Map();
+  try {
+    for (const f of readdirSync(pidDir)) {
+      names.set(Number(readFileSync(join(pidDir, f), "utf8")), f.replace(/\.pgid$/, ""));
+    }
+  } catch {}
+  const procs = new Map();
+  for (const d of readdirSync("/proc")) {
+    if (!/^\d+$/.test(d)) continue;
+    try {
+      const stat = readFileSync(`/proc/${d}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      const comm = stat.slice(stat.indexOf("(") + 1, close);
+      const f = stat.slice(close + 2).split(" ");
+      // Fields after the name: state ppid pgrp ... utime(12) stime(13).
+      procs.set(Number(d), {
+        comm,
+        ppid: Number(f[1]),
+        pgrp: Number(f[2]),
+        cpu: (Number(f[11]) + Number(f[12])) / ticksPerSecond,
+      });
+    } catch {}
+  }
+  const mine = (pid) => {
+    for (let p = pid, n = 0; p > 1 && n < 64; p = procs.get(p)?.ppid ?? 0, n++) {
+      if (p === process.pid) return true;
+    }
+    return false;
+  };
+  const out = {};
+  for (const [pid, p] of procs) {
+    if (pid !== process.pid && !mine(pid)) continue;
+    const name =
+      pid === process.pid
+        ? "runner"
+        : (names.get(p.pgrp) ?? (/chrom|headless/i.test(p.comm) ? "browser" : p.comm));
+    out[name] = (out[name] ?? 0) + p.cpu;
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Servers: each runs in its own process group with a pidfile, so a crashed
@@ -63,7 +126,7 @@ async function startProcess(name, { command, args, cwd, env = {}, ready, timeout
       );
       const poll = setInterval(() => {
         // CI forces colour, which splits e.g. Vite's "Local:" with escape codes.
-        if (ready.test(output.replace(/\x1b\[[0-9;]*m/g, ""))) {
+        if (ready.test(stripVTControlCharacters(output))) {
           clearInterval(poll);
           clearTimeout(timer);
           resolve();
@@ -182,11 +245,10 @@ export function launchBrowser() {
       "--disable-background-networking",
       "--disable-component-update",
       "--disable-features=AutofillServerCommunication,OptimizationHints,MediaRouter",
-      // World Tour draws its globe with WebGL; headless Chromium needs a
-      // software GL for it.
-      "--use-gl=angle",
-      "--use-angle=swiftshader",
-      "--enable-unsafe-swiftshader",
+      // TEMPORARY diagnostic switch, removed before review.
+      ...(process.env.BENCH_SWIFTSHADER
+        ? ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+        : []),
     ],
   });
 }
@@ -201,6 +263,24 @@ export async function device(browser, { viewport = { width: 1280, height: 800 } 
   const page = await context.newPage();
   page.setDefaultTimeout(60_000);
   page.on("pageerror", (e) => errors.push(e.stack || String(e)));
+  if (tracing) {
+    const id = random().slice(0, 4);
+    const push = (what) => traceEvents.push({ t: now(), what: `[${id}] ${what}` });
+    page.on("pageerror", (e) => push(`pageerror ${String(e).slice(0, 300)}`));
+    page.on("console", (m) => push(`console.${m.type()} ${m.text().slice(0, 300)}`));
+    page.on("requestfailed", (r) => push(`requestfailed ${r.url()} ${r.failure()?.errorText}`));
+    page.on("framenavigated", (f) => f === page.mainFrame() && push(`navigated ${f.url()}`));
+    page.on("load", () => push("load"));
+    page.on("websocket", (ws) => {
+      let sent = 0;
+      let received = 0;
+      push(`ws open ${ws.url()}`);
+      ws.on("framesent", () => sent++ === 0 && push("ws first frame sent"));
+      ws.on("framereceived", () => received++ === 0 && push("ws first frame received"));
+      ws.on("close", () => push(`ws close (${sent} sent, ${received} received)`));
+      ws.on("socketerror", (e) => push(`ws error ${e}`));
+    });
+  }
   return {
     page,
     context,
