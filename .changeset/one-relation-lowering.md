@@ -3,6 +3,7 @@
 ---
 
 Relation queries and relation-backed policies now share one relation IR and one lowering, so a hand-written relation means the same thing in both:
+
 - Policies accept unbounded (`Fixpoint`) gathers.
 - Queries accept the scalar recursive step and seed hops that policies already accepted.
 - In queries, `= null` and `!= null` now test nullness, as the `jazz-tools` builders already emit them.
