@@ -518,6 +518,15 @@ fn convert_table(
     name: &TableName,
     table: &TableSchema,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
+    if name
+        .as_str()
+        .starts_with(crate::schema::history::HISTORY_PREFIX)
+    {
+        return Err(err(
+            format!("$.{}", name.as_str()),
+            "table names starting with \"history.\" are reserved for virtual history relations",
+        ));
+    }
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
