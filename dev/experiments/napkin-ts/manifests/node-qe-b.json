@@ -1,0 +1,79 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval.rs",
+    "rust_loc": 4647,
+    "ts": ["src/node/node/query_eval.ts"],
+    "status": "full",
+    "note": "NodeState methods installed via installNodeMethods; cold-settle/test hooks skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/authorization.rs",
+    "rust_loc": 1484,
+    "ts": ["src/node/node/query_eval/authorization.ts"],
+    "status": "full",
+    "note": "cfg(test) pause hooks and tests skipped; postcard serialization of policies via extern encoder"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/bindings.rs",
+    "rust_loc": 1015,
+    "ts": ["src/node/node/query_eval/bindings.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/lowering.rs",
+    "rust_loc": 1468,
+    "ts": ["src/node/node/query_eval/lowering.ts"],
+    "status": "full",
+    "note": "HydrationSubscription Drop guard -> explicit release()"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/maintained_views.rs",
+    "rust_loc": 1329,
+    "ts": ["src/node/node/query_eval/maintained_views.ts"],
+    "status": "full",
+    "note": "poll-based drains collapsed to async/await"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/materialization.rs",
+    "rust_loc": 1333,
+    "ts": ["src/node/node/query_eval/materialization.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/prepared_bindings.rs",
+    "rust_loc": 171,
+    "ts": ["src/node/node/query_eval/prepared_bindings.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/query_read_sets.rs",
+    "rust_loc": 176,
+    "ts": ["src/node/node/query_eval/query_read_sets.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/query_result_rows.rs",
+    "rust_loc": 216,
+    "ts": ["src/node/node/query_eval/query_result_rows.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/subscription_watermarks.rs",
+    "rust_loc": 161,
+    "ts": ["src/node/node/query_eval/subscription_watermarks.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/subscriptions.rs",
+    "rust_loc": 1031,
+    "ts": ["src/node/node/query_eval/subscriptions.ts"],
+    "status": "full",
+    "note": "test-only counters skipped; struct-keyed maps compared via extern eqKey"
+  }
+]

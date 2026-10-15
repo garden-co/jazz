@@ -1,0 +1,100 @@
+[
+  {
+    "rust": "crates/groove/src/db/batch.rs",
+    "rust_loc": 339,
+    "ts": ["src/groove/db/batch.ts"],
+    "status": "full",
+    "note": "Owned/borrowed record inputs merged; StagedDatabaseBatch is cfg(test) and skipped"
+  },
+  {
+    "rust": "crates/groove/src/db/commit.rs",
+    "rust_loc": 771,
+    "ts": ["src/groove/db/commit.ts"],
+    "status": "full",
+    "note": "Owned and borrowed pending-write paths merged; Error conversions collapsed into dbTry/dbSync"
+  },
+  {
+    "rust": "crates/groove/src/db/encoding.rs",
+    "rust_loc": 845,
+    "ts": ["src/groove/db/encoding.ts"],
+    "status": "full",
+    "note": "Primary-key and index-key part decoders share one scalar decoder"
+  },
+  {
+    "rust": "crates/groove/src/db/facade.rs",
+    "rust_loc": 1811,
+    "ts": ["src/groove/db/facade.ts"],
+    "status": "full",
+    "note": "Database::new and new_with_storage_layout become free openDatabase* functions. The crate::large_values and crate::chunks module surfaces are externs. cooperative_yield_once becomes setTimeout(0). The large_value_metadata_entries_for_compatibility helper (feature=test) is skipped, as are live_attaches and open_staged_batch (cfg(test))"
+  },
+  {
+    "rust": "crates/groove/src/db/mod.rs",
+    "rust_loc": 1753,
+    "ts": ["src/groove/db/index.ts"],
+    "status": "full",
+    "note": "Drop impls (AppliedBatch, HostApplicationGuard, PersistenceReceipt) become dispose(). Error enum is a message table. impl blocks across files are merged into Database through prototype mixins"
+  },
+  {
+    "rust": "crates/groove/src/db/primary_storage.rs",
+    "rust_loc": 581,
+    "ts": ["src/groove/db/primary_storage.ts"],
+    "status": "full",
+    "note": "Generic S: OrderedKvStorage readers collapsed onto the abstract base class"
+  },
+  {
+    "rust": "crates/groove/src/db/query.rs",
+    "rust_loc": 712,
+    "ts": ["src/groove/db/query.ts"],
+    "status": "full",
+    "note": "poll_fn/Context are approximated by pollFn over PENDING and a () => void waker"
+  },
+  {
+    "rust": "crates/groove/src/db/schema_admission.rs",
+    "rust_loc": 511,
+    "ts": ["src/groove/db/schema_admission.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/db/storage_helpers.rs",
+    "rust_loc": 945,
+    "ts": ["src/groove/db/storage_helpers.ts"],
+    "status": "full",
+    "note": "futures::lock::Mutex is replaced by a small AsyncLock. Read and write metric buckets use one class"
+  },
+  {
+    "rust": "crates/groove/src/storage/idb.rs",
+    "rust_loc": 485,
+    "ts": ["src/groove/storage/idb.ts"],
+    "status": "full",
+    "note": "The resident-on-first-poll read is modelled as a MaybePromise; idb_tree is an extern"
+  },
+  {
+    "rust": "crates/groove/src/storage/key_codec.rs",
+    "rust_loc": 43,
+    "ts": ["src/groove/storage/key_codec.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/storage/manifest.rs",
+    "rust_loc": 317,
+    "ts": ["src/groove/storage/manifest.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/storage/memory.rs",
+    "rust_loc": 479,
+    "ts": ["src/groove/storage/memory.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/storage/mod.rs",
+    "rust_loc": 2153,
+    "ts": ["src/groove/storage/index.ts"],
+    "status": "full",
+    "note": "Forwarding impls for Rc<S>, &S, Box<dyn> and BoxedStorage are dropped. Owned and Borrowed WriteOperation are one type. The conformance module is test-only and skipped"
+  }
+]

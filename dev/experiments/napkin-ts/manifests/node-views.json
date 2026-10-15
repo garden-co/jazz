@@ -1,0 +1,51 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/node/currency.rs",
+    "rust_loc": 1257,
+    "ts": ["src/node/node/currency.ts"],
+    "status": "full",
+    "note": "NodeState impl methods ported as free functions taking the state first; storage/codec/schema helpers externed."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/maintained_subscription_view.rs",
+    "rust_loc": 3280,
+    "ts": ["src/node/node/maintained_subscription_view.ts"],
+    "status": "full",
+    "note": "All non-test logic: retained result maps + byte model, version/replacement indexes, witness-gated reconcile, structured terminal tree, layout rebinding, terminal schema lowering + layout hash, all terminal decoders, flat-join digest (blake3 derive_key approximated with keyed blake3). Net-event BTreeMap ordering approximated by (variant, key) sort."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/oracle.rs",
+    "rust_loc": 957,
+    "ts": [],
+    "status": "full",
+    "note": "Intentionally not ported: module is #[cfg(any(test, feature = \"testing\"))] (test oracle), not in the browser WASM."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/supporting_frontier.rs",
+    "rust_loc": 100,
+    "ts": ["src/node/node/supporting_frontier.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/terminal_record.rs",
+    "rust_loc": 263,
+    "ts": ["src/node/node/terminal_record.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/terminal_root.rs",
+    "rust_loc": 177,
+    "ts": ["src/node/node/terminal_root.ts"],
+    "status": "full",
+    "note": "testing-only terminal_root_binding_fields / binding_field_names skipped."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/views.rs",
+    "rust_loc": 2755,
+    "ts": ["src/node/node/views.ts"],
+    "status": "full",
+    "note": "NodeState methods as free functions; #[cfg(test)] view_update_for_* builders skipped. Groove/ingest/policy/query-eval collaborators externed via NodeState (any)."
+  }
+]

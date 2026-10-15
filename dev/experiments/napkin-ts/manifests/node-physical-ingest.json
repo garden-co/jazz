@@ -1,0 +1,114 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/node/codec.rs",
+    "rust_loc": 1201,
+    "ts": ["src/node/node/codec.ts"],
+    "status": "full",
+    "note": "define_record! layouts become index-constant tables; test oracles and golden-byte tests excluded"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest.rs",
+    "rust_loc": 73,
+    "ts": ["src/node/node/ingest.ts"],
+    "status": "full",
+    "note": "include! of ingest/* becomes re-exports"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/catalogue.rs",
+    "rust_loc": 972,
+    "ts": ["src/node/node/ingest/catalogue.ts"],
+    "status": "full",
+    "note": "testing failpoints skipped; NodeState methods become free functions; Box::pin dispatch collapses into one async switch"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/commit_bundles.rs",
+    "rust_loc": 978,
+    "ts": ["src/node/node/ingest/commit_bundles.ts"],
+    "status": "full",
+    "note": "testing-only benchmark entry and cfg(test) asserts skipped; repeated rejected-fate arms collapse into rejectWith helper"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/fates.rs",
+    "rust_loc": 963,
+    "ts": ["src/node/node/ingest/fates.ts"],
+    "status": "full",
+    "note": "cfg(test) helpers (transaction_ids, shape_predicate_changed_after, commit_unit_satisfies_write_policies) skipped; commit_unit_admission_subject ported here"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/validation.rs",
+    "rust_loc": 666,
+    "ts": ["src/node/node/ingest/validation.ts"],
+    "status": "full",
+    "note": "author-schema override arg of from_wire_with_schema_version folded into VersionRow.fromWire"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/view_updates.rs",
+    "rust_loc": 1075,
+    "ts": ["src/node/node/ingest/view_updates.ts"],
+    "status": "full",
+    "note": "cfg(test) recompute/assert helpers and public_current_values skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/ingest/write_base.rs",
+    "rust_loc": 487,
+    "ts": ["src/node/node/ingest/write_base.ts"],
+    "status": "full",
+    "note": "WriteConflict/write_conflict/row_write_conflicts/authored_overlap/in_writers_chain are dead outside tests (allow(dead_code)) and skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical.rs",
+    "rust_loc": 51,
+    "ts": ["src/node/node/physical.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/bindings.rs",
+    "rust_loc": 629,
+    "ts": ["src/node/node/physical/bindings.ts"],
+    "status": "full",
+    "note": "&mut u64 id counters become one mutable counter object; scalar/payload provenance validators share one generic"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/catalogue.rs",
+    "rust_loc": 509,
+    "ts": ["src/node/node/physical/catalogue.ts", "src/node/node/physical/names.ts"],
+    "status": "full",
+    "note": "physical table/index/projection name constructors at the end of catalogue.rs moved to names.ts"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/descriptors.rs",
+    "rust_loc": 1237,
+    "ts": ["src/node/node/physical/descriptors.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/enum_lookup.rs",
+    "rust_loc": 330,
+    "ts": ["src/node/node/physical/enum_lookup.ts"],
+    "status": "full",
+    "note": "EnumCase trait generics collapse into two kind descriptor objects"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/names.rs",
+    "rust_loc": 57,
+    "ts": ["src/node/node/physical/names.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/projections.rs",
+    "rust_loc": 1466,
+    "ts": ["src/node/node/physical/projections.ts"],
+    "status": "full",
+    "note": "cfg(test) name-inversion test skipped; lens op application shared between winner and content projections"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/physical/storage.rs",
+    "rust_loc": 899,
+    "ts": ["src/node/node/physical/storage.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

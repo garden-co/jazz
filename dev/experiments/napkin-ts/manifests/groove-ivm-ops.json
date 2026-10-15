@@ -1,0 +1,107 @@
+[
+  {
+    "rust": "crates/groove/src/ivm/runtime/aggregate.rs",
+    "rust_loc": 327,
+    "ts": ["src/groove/ivm/runtime/aggregate.ts"],
+    "status": "full",
+    "note": "SUM range checks kept via bigint."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/counted_map.rs",
+    "rust_loc": 238,
+    "ts": ["src/groove/ivm/runtime/counted_map.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/evaluation_memo.rs",
+    "rust_loc": 169,
+    "ts": ["src/groove/ivm/runtime/evaluation_memo.ts"],
+    "status": "full",
+    "note": "Overflow map is a KeyedMap over the extern evalMemoKeyHash."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/evaluation_session.rs",
+    "rust_loc": 712,
+    "ts": ["src/groove/ivm/runtime/evaluation_session.ts"],
+    "status": "full",
+    "note": "Request registry polls promises in place of StorageFuture wakers."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/evaluator.rs",
+    "rust_loc": 150,
+    "ts": ["src/groove/ivm/runtime/evaluator.ts", "src/_extern/groove-ivm-ops.ts"],
+    "status": "full",
+    "note": "partitions.json undercounts this file: the non-test body is about 3,700 lines (the count stopped at the first inline cfg(test) mod). All of it is ported. GraphRuntimeView borrows became an env object spread."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/evaluator/kernels.rs",
+    "rust_loc": 383,
+    "ts": ["src/groove/ivm/runtime/evaluator/kernels.ts"],
+    "status": "full",
+    "note": "impl TickEvaluator became a free function computeBatch(ev, ...)."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/evaluator/lookup.rs",
+    "rust_loc": 272,
+    "ts": ["src/groove/ivm/runtime/evaluator/lookup.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/graph_lifecycle.rs",
+    "rust_loc": 315,
+    "ts": ["src/groove/ivm/runtime/graph_lifecycle.ts"],
+    "status": "full",
+    "note": "impl IvmRuntime methods became free functions over rt:any."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/join.rs",
+    "rust_loc": 978,
+    "ts": ["src/groove/ivm/runtime/join.ts"],
+    "status": "full",
+    "note": "Rc copy-on-write overlays and the One/Many bucket enum became plain Maps."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/operator_updates.rs",
+    "rust_loc": 940,
+    "ts": ["src/groove/ivm/runtime/operator_updates.ts"],
+    "status": "full",
+    "note": "update_persist is cfg(any()) (dead) and was skipped."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/pipeline.rs",
+    "rust_loc": 410,
+    "ts": ["src/groove/ivm/runtime/pipeline.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/pipeline/fields.rs",
+    "rust_loc": 182,
+    "ts": ["src/groove/ivm/runtime/pipeline/fields.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/rank_index.rs",
+    "rust_loc": 201,
+    "ts": ["src/groove/ivm/runtime/rank_index.ts"],
+    "status": "full",
+    "note": "Persistent AVL tree."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/recursion.rs",
+    "rust_loc": 1786,
+    "ts": ["src/groove/ivm/runtime/recursion.ts"],
+    "status": "full",
+    "note": "The three copies of by-variant snapshot grouping reuse NodeState.groupSourceRows. cold-settle-attribution feature code was skipped."
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/windows.rs",
+    "rust_loc": 1394,
+    "ts": ["src/groove/ivm/runtime/windows.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

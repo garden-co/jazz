@@ -1,0 +1,47 @@
+[
+  {
+    "rust": "crates/groove/src/ivm/runtime/mod.rs",
+    "rust_loc": 642,
+    "ts": ["src/groove/ivm/runtime/index.ts"],
+    "status": "full",
+    "note": "IvmRuntime class (fields + mod.rs methods), IvmRuntimeError as one MESSAGES table; methods from sibling files are free functions taking rt"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/persist.rs",
+    "rust_loc": 237,
+    "ts": ["src/groove/ivm/runtime/persist.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/runtime_tick.rs",
+    "rust_loc": 3653,
+    "ts": ["src/groove/ivm/runtime/runtime_tick.ts"],
+    "status": "full",
+    "note": "Poll/Context/Waker modelled as PENDING sentinel + () => void wakers; errors thrown; cold-settle-attribution spans and test-only evict_eval_memo_for_tests skipped"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/state.rs",
+    "rust_loc": 298,
+    "ts": ["src/groove/ivm/runtime/state.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/subscriptions.rs",
+    "rust_loc": 4932,
+    "ts": [
+      "src/groove/ivm/runtime/subscriptions.ts",
+      "src/groove/ivm/runtime/subscriptions_builder.ts"
+    ],
+    "status": "full",
+    "note": "GraphBuilder fingerprint/equality/rewrite helpers split into subscriptions_builder.ts and made generic over child keys; dead propagate_binding_through_frontier omitted; Drop guards become try/finally"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/terminal.rs",
+    "rust_loc": 294,
+    "ts": ["src/groove/ivm/runtime/terminal.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

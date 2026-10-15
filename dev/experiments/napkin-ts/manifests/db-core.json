@@ -1,0 +1,107 @@
+[
+  {
+    "rust": "crates/jazz/layers/db/src/binding_args.rs",
+    "rust_loc": 67,
+    "ts": ["src/db/binding_args.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/binding_codec.rs",
+    "rust_loc": 252,
+    "ts": ["src/db/binding_codec.ts"],
+    "status": "full",
+    "note": "include_str! golden fixture skipped (test-oriented)"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/binding_codec/publication_type.rs",
+    "rust_loc": 173,
+    "ts": ["src/db/binding_codec/publication_type.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db.rs",
+    "rust_loc": 5806,
+    "ts": ["src/db/db.ts", "src/db/db_peer_io.ts", "src/db/db_subscription_output.ts"],
+    "status": "full",
+    "note": "split into facade, peer I/O pump/chunk resolver, and subscription output; sync-autopsy is a no-op object; Db methods from other partitions called through an index signature"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/catalogue.rs",
+    "rust_loc": 168,
+    "ts": ["src/db/db/catalogue.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/config.rs",
+    "rust_loc": 72,
+    "ts": ["src/db/db/config.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/mutation_errors.rs",
+    "rust_loc": 151,
+    "ts": ["src/db/db/mutation_errors.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/mutations.rs",
+    "rust_loc": 3406,
+    "ts": ["src/db/db/mutations.ts"],
+    "status": "full",
+    "note": "non-wasm insert_streaming_value*/write_streaming_value_with_id and cfg(test) authorize_* helpers skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/read_barrier.rs",
+    "rust_loc": 142,
+    "ts": ["src/db/db/read_barrier.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/reads.rs",
+    "rust_loc": 1117,
+    "ts": ["src/db/db/reads.ts"],
+    "status": "full",
+    "note": "cfg(test) groove subscription counter skipped; poll_fn waits become yield-loop polling"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/transactions.rs",
+    "rust_loc": 1436,
+    "ts": ["src/db/db/transactions.ts"],
+    "status": "full",
+    "note": "guard lifetimes become withTx(lock/unlock) helpers"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/foreground_node_lease.rs",
+    "rust_loc": 74,
+    "ts": ["src/db/foreground_node_lease.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/lib.rs",
+    "rust_loc": 33,
+    "ts": ["src/db/lib.ts"],
+    "status": "full",
+    "note": "module glue only; cold_settle_attribution skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/positional_order.rs",
+    "rust_loc": 281,
+    "ts": ["src/db/positional_order.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/result_tree.rs",
+    "rust_loc": 45,
+    "ts": ["src/db/result_tree.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

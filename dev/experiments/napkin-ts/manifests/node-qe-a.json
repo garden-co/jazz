@@ -1,0 +1,58 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/local_authority_reconciliation.rs",
+    "rust_loc": 22,
+    "ts": ["src/node/node/query_eval/local_authority_reconciliation.ts"],
+    "status": "full",
+    "note": "Due/replace bookkeeping class."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/local_availability_receipts.rs",
+    "rust_loc": 306,
+    "ts": ["src/node/node/query_eval/local_availability_receipts.ts"],
+    "status": "full",
+    "note": "Watermark records, decode, activation/apply/recover as free functions over NodeState."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/narrowed_reads.rs",
+    "rust_loc": 572,
+    "ts": ["src/node/node/query_eval/narrowed_reads.ts"],
+    "status": "full",
+    "note": "Exclusive source reads for joins/array subqueries; source-id helpers imported from normalization.ts."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/normalization.rs",
+    "rust_loc": 3440,
+    "ts": ["src/node/node/query_eval/normalization.ts"],
+    "status": "full",
+    "note": "&mut accumulator parameter lists folded into one NormalizeAcc object; branch normalization deduplicated via branchUnionInput; Debug-format labels approximated via extern debugFmt."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/policy_factoring.rs",
+    "rust_loc": 134,
+    "ts": ["src/node/node/query_eval/policy_factoring.ts"],
+    "status": "full",
+    "note": "Union-find factoring; atom keys are postcard bytes (extern encoders) as hex."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/read_sources.rs",
+    "rust_loc": 5794,
+    "ts": ["src/node/node/query_eval/read_sources.ts"],
+    "status": "full",
+    "note": "Repeated policy-filter / selected-global-or-policy blocks factored into helpers; NodeState methods (access paths, physical index scans) are free functions taking st; Groove GraphBuilder externed with camelCase methods."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/route_discipline.rs",
+    "rust_loc": 834,
+    "ts": ["src/node/node/query_eval/route_discipline.ts"],
+    "status": "full",
+    "note": "RouteViolation thrown instead of Result; node rewrite via childSlots table."
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/query_eval/unavailable_inputs.rs",
+    "rust_loc": 293,
+    "ts": ["src/node/node/query_eval/unavailable_inputs.ts"],
+    "status": "full",
+    "note": "Local unavailable-row inputs and policy-binding exclusion graph."
+  }
+]

@@ -1,0 +1,176 @@
+[
+  {
+    "rust": "crates/jazz-compression/src/lib.rs",
+    "rust_loc": 78,
+    "ts": ["src/compression/lib.ts"],
+    "status": "full",
+    "note": "Browser build has only ruzstd: lz4/zstd compress paths throw the verbatim 'not compiled in' errors; zstd decode via fzstd."
+  },
+  {
+    "rust": "crates/jazz-compression/src/stream.rs",
+    "rust_loc": 460,
+    "ts": ["src/compression/stream.ts"],
+    "status": "full",
+    "note": "Encoder is not compiled into the browser build; decoder uses fzstd Decompress with ruzstd-style header/block parsing."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/authorization_scope.rs",
+    "rust_loc": 341,
+    "ts": ["src/protocol/authorization_scope.ts"],
+    "status": "full",
+    "note": "Rc<RefCell<State>> shared state; lease Drop becomes explicit release(); scopes keyed by authorizationScopeKeyString."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/lib.rs",
+    "rust_loc": 24,
+    "ts": ["src/protocol/lib.ts"],
+    "status": "full",
+    "note": "Namespace re-exports."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/protocol.rs",
+    "rust_loc": 2246,
+    "ts": [
+      "src/protocol/protocol.ts",
+      "src/protocol/protocol/versions.ts",
+      "src/protocol/protocol/keys.ts",
+      "src/protocol/protocol/entries.ts",
+      "src/protocol/protocol/catalogue.ts"
+    ],
+    "status": "full",
+    "note": "Split into five files; serde derives became explicit postcard codecs; in-memory-only entry types get interfaces plus a structural ordering key instead of codecs."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/protocol_limits.rs",
+    "rust_loc": 54,
+    "ts": ["src/protocol/protocol_limits.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+    "rust_loc": 19,
+    "ts": ["src/protocol/storage_codec_profile.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/wire.rs",
+    "rust_loc": 638,
+    "ts": ["src/protocol/wire.ts"],
+    "status": "full",
+    "note": "WIRE_FRAME_ARTIFACT_CORPUS include_str fixture omitted (test data); runtime compression features fixed to ZSTD for the browser."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/wire/channel_credit.rs",
+    "rust_loc": 362,
+    "ts": ["src/protocol/wire/channel_credit.ts"],
+    "status": "full",
+    "note": "Arc<Mutex> + Waker plumbing became a plain object, callbacks and a Promise."
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/wire/channels.rs",
+    "rust_loc": 336,
+    "ts": ["src/protocol/wire/channels.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/protocol/src/wire/stream_backend.rs",
+    "rust_loc": 517,
+    "ts": ["src/protocol/wire/stream_backend.ts"],
+    "status": "full",
+    "note": "Instant -> monotonicMs; reassembly buffer is a parts list; Drop becomes close()."
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/account_registry.rs",
+    "rust_loc": 301,
+    "ts": ["src/types/account_registry.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/account_registry/codec.rs",
+    "rust_loc": 174,
+    "ts": ["src/types/account_registry/codec.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/account_registry/storage.rs",
+    "rust_loc": 150,
+    "ts": ["src/types/account_registry/storage.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/app_id.rs",
+    "rust_loc": 33,
+    "ts": ["src/types/app_id.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/debug_env.rs",
+    "rust_loc": 21,
+    "ts": ["src/types/debug_env.ts"],
+    "status": "full",
+    "note": "Env vars read from globalThis.__JAZZ_ENV__."
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/delivery_diagnostics.rs",
+    "rust_loc": 44,
+    "ts": [],
+    "status": "full",
+    "note": "Entirely cfg(test/testing); nothing ships in the browser build."
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/identity.rs",
+    "rust_loc": 298,
+    "ts": ["src/types/identity.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/ids.rs",
+    "rust_loc": 730,
+    "ts": ["src/types/ids.ts"],
+    "status": "full",
+    "note": "Interning and borrowed/owned variants collapse to strings."
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/lib.rs",
+    "rust_loc": 34,
+    "ts": ["src/types/lib.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/local_executor.rs",
+    "rust_loc": 14,
+    "ts": ["src/types/local_executor.ts"],
+    "status": "full",
+    "note": "blockOn is a passthrough promise."
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/object.rs",
+    "rust_loc": 314,
+    "ts": ["src/types/object.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/postcard_exact.rs",
+    "rust_loc": 38,
+    "ts": ["src/types/postcard_exact.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/types/src/time.rs",
+    "rust_loc": 145,
+    "ts": ["src/types/time.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

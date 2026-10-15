@@ -1,0 +1,128 @@
+[
+  {
+    "rust": "crates/jazz/layers/db/src/db/channel_endpoint.rs",
+    "rust_loc": 418,
+    "ts": ["src/db/db/channel_endpoint.ts"],
+    "status": "full",
+    "note": "Waker-based poll_outbound_ready became a callback."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/first_load.rs",
+    "rust_loc": 502,
+    "ts": ["src/db/db/first_load.ts"],
+    "status": "full",
+    "note": "RemoteLinkTracker uses WeakRef lists in place of Weak<..> registrations."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/lifecycle.rs",
+    "rust_loc": 1349,
+    "ts": ["src/db/db/lifecycle.ts"],
+    "status": "full",
+    "note": "impl Db methods became free functions over db:any; testing-feature helpers skipped; most methods are one-line forwarders to NodeRuntime."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/routed_messages.rs",
+    "rust_loc": 233,
+    "ts": ["src/db/db/routed_messages.ts"],
+    "status": "full",
+    "note": "Envelope codec written by hand with support/postcard."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/row_availability.rs",
+    "rust_loc": 457,
+    "ts": ["src/db/db/row_availability.ts"],
+    "status": "full",
+    "note": "PeerConnection impl methods take conn:any."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/subscriptions.rs",
+    "rust_loc": 1347,
+    "ts": ["src/db/db/subscriptions.ts"],
+    "status": "full",
+    "note": "Stream/guard machinery became async iterators over support Channel."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/view_update_parts.rs",
+    "rust_loc": 310,
+    "ts": ["src/db/db/view_update_parts.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/wire_transport.rs",
+    "rust_loc": 672,
+    "ts": ["src/db/db/wire_transport.ts"],
+    "status": "full",
+    "note": "Poll-based flush became plain status returns."
+  },
+  {
+    "rust": "crates/idb-tree/src/lib.rs",
+    "rust_loc": 1310,
+    "ts": ["src/idb_tree/lib.ts", "src/idb_tree/xxh3.ts"],
+    "status": "full",
+    "note": "Includes a compact bigint XXH3-64 (seed 0, default secret) ported from xxhash-rust since no support dep exists (117 lines)."
+  },
+  {
+    "rust": "crates/idb-tree/src/page.rs",
+    "rust_loc": 332,
+    "ts": ["src/idb_tree/page.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/idb-tree/src/store.rs",
+    "rust_loc": 139,
+    "ts": ["src/idb_tree/store.ts"],
+    "status": "full",
+    "note": "Test-only MemoryPageStore skipped."
+  },
+  {
+    "rust": "crates/idb-tree/src/web.rs",
+    "rust_loc": 220,
+    "ts": ["src/idb_tree/web.ts"],
+    "status": "full",
+    "note": "wasm_bindgen extern block replaced by a JS handle with duck-typed methods."
+  },
+  {
+    "rust": "crates/jazz-wasm/src/identity.rs",
+    "rust_loc": 77,
+    "ts": ["src/wasm/identity.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz-wasm/src/lib.rs",
+    "rust_loc": 2999,
+    "ts": ["src/wasm/lib.ts"],
+    "status": "full",
+    "note": "Every exported class/method/fn kept with its validation and error strings. Dropped as pure marshalling (~40% of the file): serde_wasm_bindgen conversions, Reflect/Object building, PendingNativeRead/WasmPendingSubscription poll+waker plumbing, ArcWake/unbounded-channel wakers, Closure-based ReadableStream source and the Drop-guarded SubscriptionRetryTimer (now a Promise+AbortSignal). bench-probes and __testBindingCodecGoldenFixture skipped. Db methods are called as methods on the extern Db."
+  },
+  {
+    "rust": "crates/wasm-tracing/src/config.rs",
+    "rust_loc": 54,
+    "ts": ["src/wasm_tracing/config.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/wasm-tracing/src/layer.rs",
+    "rust_loc": 402,
+    "ts": ["src/wasm_tracing/layer.ts"],
+    "status": "full",
+    "note": "tracing Layer trait/visitor boilerplate collapses into a TraceSink object."
+  },
+  {
+    "rust": "crates/wasm-tracing/src/lib.rs",
+    "rust_loc": 36,
+    "ts": ["src/wasm_tracing/lib.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/wasm-tracing/src/recorder.rs",
+    "rust_loc": 59,
+    "ts": ["src/wasm_tracing/recorder.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

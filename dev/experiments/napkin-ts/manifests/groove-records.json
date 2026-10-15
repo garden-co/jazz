@@ -1,0 +1,65 @@
+[
+  {
+    "rust": "crates/groove/src/chunks.rs",
+    "rust_loc": 1327,
+    "ts": ["src/groove/chunks.ts"],
+    "status": "full",
+    "note": "Future/Waker in-flight coalescing becomes shared promises; Drop-based lease/guard accounting becomes explicit release()."
+  },
+  {
+    "rust": "crates/groove/src/large_values.rs",
+    "rust_loc": 4613,
+    "ts": ["src/groove/large_values.ts"],
+    "status": "full",
+    "note": "All non-test logic: streaming CDC builder, tail edits/consolidation, physical+logical traversals, upload validation, node/descriptor/stored-scalar codecs, materialization, range reads, JSON pointer prefix. serde_json parsing -> JSON.parse; io::Read -> Iterable<Bytes>; metrics as number, CDC hashes as bigint."
+  },
+  {
+    "rust": "crates/groove/src/large_values/json_syntax.rs",
+    "rust_loc": 449,
+    "ts": ["src/groove/large_values/json_syntax.ts"],
+    "status": "full",
+    "note": "Result<(),()> -> boolean returns; adds rootEnd() to stand in for serde_json StreamDeserializer byte_offset used by json_pointer_prefix."
+  },
+  {
+    "rust": "crates/groove/src/lib.rs",
+    "rust_loc": 11,
+    "ts": ["src/groove/lib.ts"],
+    "status": "full",
+    "note": "Module re-exports."
+  },
+  {
+    "rust": "crates/groove/src/queries.rs",
+    "rust_loc": 432,
+    "ts": ["src/groove/queries.ts"],
+    "status": "full",
+    "note": "AST types + builder helpers; derives dropped."
+  },
+  {
+    "rust": "crates/groove/src/records/macros.rs",
+    "rust_loc": 849,
+    "ts": ["src/groove/records/macros.ts"],
+    "status": "full",
+    "note": "RecordField trait impls -> field codec objects; define_record! -> one defineRecord() class factory instead of per-invocation expansion."
+  },
+  {
+    "rust": "crates/groove/src/records/mod.rs",
+    "rust_loc": 1854,
+    "ts": ["src/groove/records/index.ts"],
+    "status": "full",
+    "note": "Interned RecordDescriptor (Interner), projections, borrowed/owned/variant records."
+  },
+  {
+    "rust": "crates/groove/src/records/values.rs",
+    "rust_loc": 2476,
+    "ts": ["src/groove/records/values.ts"],
+    "status": "full",
+    "note": "Value/ValueType unions, registries, descriptor codecs (node tags + persisted v2), value encode/decode/validate, order-preserving tuple codec."
+  },
+  {
+    "rust": "crates/groove/src/schema.rs",
+    "rust_loc": 453,
+    "ts": ["src/groove/schema.ts"],
+    "status": "full",
+    "note": "Schema metadata and builders."
+  }
+]

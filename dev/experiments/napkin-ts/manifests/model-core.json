@@ -1,0 +1,181 @@
+[
+  {
+    "rust": "crates/jazz/layers/model/src/lib.rs",
+    "rust_loc": 26,
+    "ts": ["src/model/index.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/admin_catalogue_row_format.rs",
+    "rust_loc": 0,
+    "ts": [],
+    "status": "full",
+    "note": "empty retired module; no TS file"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/branch.rs",
+    "rust_loc": 269,
+    "ts": ["src/model/model/branch.ts"],
+    "status": "full",
+    "note": "groove RecordDescriptor via extern"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/json_schema.rs",
+    "rust_loc": 92,
+    "ts": ["src/model/model/json_schema.ts"],
+    "status": "full",
+    "note": "wasm host-validator path only (native jsonschema path is cfg(not wasm))"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/metadata.rs",
+    "rust_loc": 168,
+    "ts": ["src/model/model/metadata.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/mod.rs",
+    "rust_loc": 17,
+    "ts": ["src/model/model/index.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/policy_claims.rs",
+    "rust_loc": 165,
+    "ts": ["src/model/model/policy_claims.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/policy_directory.rs",
+    "rust_loc": 302,
+    "ts": ["src/model/model/policy_directory.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/mod.rs",
+    "rust_loc": 4,
+    "ts": ["src/model/model/public_api/index.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/policy.rs",
+    "rust_loc": 205,
+    "ts": ["src/model/model/public_api/policy.ts"],
+    "status": "full",
+    "note": "TS shape == serde JSON shape, so serde adapters vanish"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/relation_ir.rs",
+    "rust_loc": 146,
+    "ts": ["src/model/model/public_api/relation_ir.ts"],
+    "status": "full",
+    "note": "types only"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/session.rs",
+    "rust_loc": 200,
+    "ts": ["src/model/model/public_api/session.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/branch.rs",
+    "rust_loc": 296,
+    "ts": ["src/model/model/public_api/types/branch.ts"],
+    "status": "full",
+    "note": "SchemaHash + structural hashing"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/mod.rs",
+    "rust_loc": 13,
+    "ts": ["src/model/model/public_api/types/index.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/policy.rs",
+    "rust_loc": 731,
+    "ts": ["src/model/model/public_api/types/policy.ts"],
+    "status": "full",
+    "note": "builder DSL; Drop impl -> explicit finish()"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/row.rs",
+    "rust_loc": 175,
+    "ts": ["src/model/model/public_api/types/row.ts"],
+    "status": "full",
+    "note": "testing-only fields skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/schema.rs",
+    "rust_loc": 580,
+    "ts": ["src/model/model/public_api/types/schema.ts"],
+    "status": "full",
+    "note": "interned names -> string; structural equality fns"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_api/types/value.rs",
+    "rust_loc": 376,
+    "ts": ["src/model/model/public_api/types/value.ts"],
+    "status": "full",
+    "note": "JSON {type,value} validation kept; non-human codec is an error-only path"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_schema.rs",
+    "rust_loc": 98,
+    "ts": ["src/model/model/public_schema.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/public_schema_convert.rs",
+    "rust_loc": 3182,
+    "ts": [
+      "src/model/model/public_schema_convert.ts",
+      "src/model/model/public_schema_convert_rel.ts",
+      "src/model/model/public_schema_convert_predicate.ts"
+    ],
+    "status": "full",
+    "note": "split into 3 files (core/tables, ExistsRel lowering, predicates+inherits)"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/schema_lens/lens.rs",
+    "rust_loc": 177,
+    "ts": ["src/model/model/schema_lens/lens.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/schema_lens/mod.rs",
+    "rust_loc": 2,
+    "ts": ["src/model/model/schema_lens/index.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/model/transaction.rs",
+    "rust_loc": 93,
+    "ts": ["src/model/model/transaction.ts"],
+    "status": "full",
+    "note": "macro-generated id types -> one base class"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/schema.rs",
+    "rust_loc": 1500,
+    "ts": ["src/model/schema.ts"],
+    "status": "full",
+    "note": "testing-only RuntimeSchema::validated skipped; groove schema builders via extern"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/tx.rs",
+    "rust_loc": 779,
+    "ts": ["src/model/tx.ts"],
+    "status": "full",
+    "note": "derived Ord on dots/coordinates -> canonical string keys; define_record! -> index constants"
+  }
+]

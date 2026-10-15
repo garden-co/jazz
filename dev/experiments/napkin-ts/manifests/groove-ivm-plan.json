@@ -1,0 +1,135 @@
+[
+  {
+    "rust": "crates/groove/src/ivm/activation.rs",
+    "rust_loc": 160,
+    "ts": ["src/groove/ivm/activation.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/execution_layout.rs",
+    "rust_loc": 166,
+    "ts": ["src/groove/ivm/execution_layout.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/graph.rs",
+    "rust_loc": 2347,
+    "ts": ["src/groove/ivm/graph.ts"],
+    "status": "full",
+    "note": "Arc pointer memos -> Map keyed by object; NodeId = FNV-1a bigint over structKey"
+  },
+  {
+    "rust": "crates/groove/src/ivm/graph/join_chains.rs",
+    "rust_loc": 196,
+    "ts": ["src/groove/ivm/graph/join_chains.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/mod.rs",
+    "rust_loc": 17,
+    "ts": ["src/groove/ivm/index.ts"],
+    "status": "full",
+    "note": "re-exports"
+  },
+  {
+    "rust": "crates/groove/src/ivm/op_types.rs",
+    "rust_loc": 659,
+    "ts": ["src/groove/ivm/op_types.ts"],
+    "status": "full",
+    "note": "derived Eq/Hash/Ord -> structKey/structEq/structCmp; predicate referenced_fields is extern (subscriptions.rs)"
+  },
+  {
+    "rust": "crates/groove/src/ivm/planner.rs",
+    "rust_loc": 1505,
+    "ts": ["src/groove/ivm/planner.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/routes.rs",
+    "rust_loc": 134,
+    "ts": ["src/groove/ivm/routes.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/compilation.rs",
+    "rust_loc": 2060,
+    "ts": ["src/groove/ivm/runtime/compilation.ts"],
+    "status": "full",
+    "note": "impl IvmRuntime methods -> free functions over extern runtime"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/compilation_cache.rs",
+    "rust_loc": 129,
+    "ts": ["src/groove/ivm/runtime/compilation_cache.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/index_ids.rs",
+    "rust_loc": 280,
+    "ts": ["src/groove/ivm/runtime/index_ids.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/key_encoding.rs",
+    "rust_loc": 702,
+    "ts": ["src/groove/ivm/runtime/key_encoding.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/record_projection.rs",
+    "rust_loc": 2083,
+    "ts": ["src/groove/ivm/runtime/record_projection.ts"],
+    "status": "full",
+    "note": "Rust test-only counters omitted; PreparedProjection owned elsewhere (extern)"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/schema.rs",
+    "rust_loc": 903,
+    "ts": ["src/groove/ivm/runtime/schema.ts"],
+    "status": "full",
+    "note": "impl IvmRuntime methods -> free functions over extern runtime; VariantProjectionKey -> string key"
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/typed_projection.rs",
+    "rust_loc": 105,
+    "ts": ["src/groove/ivm/runtime/typed_projection.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/runtime/typed_template.rs",
+    "rust_loc": 475,
+    "ts": ["src/groove/ivm/runtime/typed_template.ts"],
+    "status": "full",
+    "note": "TypedGraphTemplateCache defined here (struct lives in template.rs); DefaultHasher -> FNV combine"
+  },
+  {
+    "rust": "crates/groove/src/ivm/template.rs",
+    "rust_loc": 241,
+    "ts": ["src/groove/ivm/template.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/template/arguments.rs",
+    "rust_loc": 125,
+    "ts": ["src/groove/ivm/template/arguments.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/groove/src/ivm/template/sources.rs",
+    "rust_loc": 132,
+    "ts": ["src/groove/ivm/template/sources.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

@@ -1,0 +1,72 @@
+[
+  {
+    "rust": "crates/jazz/layers/model/src/query.rs",
+    "rust_loc": 17,
+    "ts": ["src/model/query.ts"],
+    "status": "full",
+    "note": "module root; include!s become re-exports"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/ast.rs",
+    "rust_loc": 266,
+    "ts": ["src/model/query/ast.ts"],
+    "status": "full",
+    "note": "AST as discriminated unions; Query postcard codec + structEq/clone helpers (derive equivalents); relation_query_wire serde shim folded into codec"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/builders.rs",
+    "rust_loc": 520,
+    "ts": ["src/model/query/builders.ts"],
+    "status": "full",
+    "note": "fluent builders as free functions over plain Query objects; seven join_via* variants collapsed into one options form"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/canonical_request.rs",
+    "rust_loc": 862,
+    "ts": ["src/model/query/canonical_request.ts"],
+    "status": "full",
+    "note": "normalization, canonical keys, value/column-type identity encoding; relation identity built from the serde-JSON tree shape"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/combinators.rs",
+    "rust_loc": 48,
+    "ts": ["src/model/query/combinators.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/policy_and_request_contracts.rs",
+    "rust_loc": 612,
+    "ts": ["src/model/query/policy_and_request_contracts.ts"],
+    "status": "full",
+    "note": "types, claim-key helpers, operand visitors, bounded Predicate decode; added explicit postcard codecs for all contract structs (serde-derive equivalents). Trivial setter builders (Include/ArraySubquery/Aggregate::alias) replaced by plain object fields"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/policy_limits.rs",
+    "rust_loc": 53,
+    "ts": ["src/model/query/policy_limits.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/relation_codec.rs",
+    "rust_loc": 1197,
+    "ts": ["src/model/query/relation_codec.ts"],
+    "status": "full",
+    "note": "Wire* mirror types and wire<->relation converters dropped: encode/decode RelationExpr directly with a budgeted reader; validator kept"
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/relation_resolution.rs",
+    "rust_loc": 1336,
+    "ts": ["src/model/query/relation_resolution.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/model/src/query/validation.rs",
+    "rust_loc": 2353,
+    "ts": ["src/model/query/validation.ts"],
+    "status": "full",
+    "note": "ParameterDomain inference ported 1:1; QueryError as one class with typed data union; ValidatedQuery/Binding postcard codecs"
+  }
+]

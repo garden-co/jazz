@@ -1,0 +1,107 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/lib.rs",
+    "rust_loc": 28,
+    "ts": ["src/node/lib.ts"],
+    "status": "full",
+    "note": "re-exports only"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/catalogue_ingest.rs",
+    "rust_loc": 796,
+    "ts": ["src/node/node/catalogue_ingest.ts"],
+    "status": "full",
+    "note": "NodeState methods as free functions taking node; catalogue structs/codecs extern"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/descriptor_roles.rs",
+    "rust_loc": 551,
+    "ts": ["src/node/node/descriptor_roles.ts"],
+    "status": "full",
+    "note": "groove record/descriptor primitives extern"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+    "rust_loc": 369,
+    "ts": ["src/node/node/exclusive_read_evidence.ts"],
+    "status": "full",
+    "note": "typed-record encode/decode explicit; query postcard + binding codecs extern"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/migration_validation.rs",
+    "rust_loc": 244,
+    "ts": ["src/node/node/migration_validation.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/policy.rs",
+    "rust_loc": 1330,
+    "ts": ["src/node/node/policy.ts"],
+    "status": "full",
+    "note": "write-policy fixpoint, monotonicity, projections; query evaluation calls extern via node"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/relay_scope.rs",
+    "rust_loc": 58,
+    "ts": ["src/node/node/relay_scope.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/row_availability.rs",
+    "rust_loc": 190,
+    "ts": ["src/node/node/row_availability.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/source_resolution.rs",
+    "rust_loc": 695,
+    "ts": ["src/node/node/source_resolution.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer.rs",
+    "rust_loc": 128,
+    "ts": ["src/node/peer.ts"],
+    "status": "full",
+    "note": "PeerState class; also hosts known_state.rs, repair.rs and the sync accessors/constructors of publication.rs (include!d into one module in Rust)"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer/delivery.rs",
+    "rust_loc": 15,
+    "ts": ["src/node/peer/delivery.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer/known_state.rs",
+    "rust_loc": 166,
+    "ts": ["src/node/peer.ts"],
+    "status": "full",
+    "note": "merged into PeerState class"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer/publication.rs",
+    "rust_loc": 2530,
+    "ts": ["src/node/peer/publication.ts", "src/node/peer.ts"],
+    "status": "full",
+    "note": "async publication paths as free functions over PeerState; Drop scope guard -> try/finally; testing-only items skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer/repair.rs",
+    "rust_loc": 100,
+    "ts": ["src/node/peer.ts"],
+    "status": "full",
+    "note": "merged into PeerState class"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/peer/subscription_state.rs",
+    "rust_loc": 235,
+    "ts": ["src/node/peer/subscription_state.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

@@ -1,0 +1,142 @@
+[
+  {
+    "rust": "crates/jazz/layers/engine/src/lib.rs",
+    "rust_loc": 21,
+    "ts": ["src/engine/lib.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/binding_values.rs",
+    "rust_loc": 70,
+    "ts": ["src/engine/query_engine/binding_values.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/fields.rs",
+    "rust_loc": 150,
+    "ts": ["src/engine/query_engine/fields.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/input.rs",
+    "rust_loc": 438,
+    "ts": ["src/engine/query_engine/input.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering.rs",
+    "rust_loc": 989,
+    "ts": ["src/engine/query_engine/lowering.ts"],
+    "status": "full",
+    "note": "public_root_field_name moved to terminals.ts (its only user)"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/arguments.rs",
+    "rust_loc": 241,
+    "ts": ["src/engine/query_engine/lowering/arguments.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/closure.rs",
+    "rust_loc": 691,
+    "ts": ["src/engine/query_engine/lowering/closure.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/collect_layout.rs",
+    "rust_loc": 633,
+    "ts": ["src/engine/query_engine/lowering/collect_layout.ts"],
+    "status": "full",
+    "note": "also hosts CollectFlatField/CollectSlotLayout/CollectLayout types (moved from terminals.rs); collect_root_output_fields shared as collectByFieldFor"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/graph_lowering.rs",
+    "rust_loc": 3852,
+    "ts": ["src/engine/query_engine/lowering/graph_lowering.ts"],
+    "status": "full",
+    "note": "groove GraphBuilder/ProjectField/predicate builders are externs; LiteralValue ordering via extern LiteralValue.cmp"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/planning.rs",
+    "rust_loc": 1291,
+    "ts": ["src/engine/query_engine/lowering/planning.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/requirements.rs",
+    "rust_loc": 437,
+    "ts": ["src/engine/query_engine/lowering/requirements.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/templates.rs",
+    "rust_loc": 280,
+    "ts": ["src/engine/query_engine/lowering/templates.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/lowering/terminals.rs",
+    "rust_loc": 2614,
+    "ts": ["src/engine/query_engine/lowering/terminals.ts"],
+    "status": "full",
+    "note": "Collect* layout types live in collect_layout.ts; public_root_field_name (lowering.rs) lives here; binding_route_tests and publication_schema_tests skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/mod.rs",
+    "rust_loc": 39,
+    "ts": ["src/engine/query_engine/index.ts"],
+    "status": "full",
+    "note": "module re-exports -> index.ts"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/output.rs",
+    "rust_loc": 87,
+    "ts": ["src/engine/query_engine/output.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/policy.rs",
+    "rust_loc": 24,
+    "ts": ["src/engine/query_engine/policy.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/publication.rs",
+    "rust_loc": 76,
+    "ts": ["src/engine/query_engine/publication.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/read.rs",
+    "rust_loc": 240,
+    "ts": ["src/engine/query_engine/read.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/resolver.rs",
+    "rust_loc": 210,
+    "ts": ["src/engine/query_engine/resolver.ts"],
+    "status": "full",
+    "note": "Result<_,UnsupportedReason>/CapabilityResult mapped to UnsupportedError/CapabilityError throws"
+  },
+  {
+    "rust": "crates/jazz/layers/engine/src/query_engine/schemas.rs",
+    "rust_loc": 309,
+    "ts": ["src/engine/query_engine/schemas.ts"],
+    "status": "full",
+    "note": ""
+  }
+]

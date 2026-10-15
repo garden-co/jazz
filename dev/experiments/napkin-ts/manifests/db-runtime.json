@@ -1,0 +1,21 @@
+[
+  {
+    "rust": "crates/jazz/layers/db/src/db/node_runtime.rs",
+    "rust_loc": 5481,
+    "ts": ["src/db/db/node_runtime.ts"],
+    "status": "full",
+    "note": "Rc<RefCell<..>> runtime fields collapsed onto the Node class; futures::lock::Mutex -> LocalMutex, poll/waker futures -> Promise + small Polled helper. Test/testing/bench hooks skipped."
+  },
+  {
+    "rust": "crates/jazz/layers/db/src/db/peer_connection.rs",
+    "rust_loc": 6154,
+    "ts": [
+      "src/db/db/peer_connection.ts",
+      "src/db/db/peer_connection_upstream.ts",
+      "src/db/db/peer_connection_subscriber.ts",
+      "src/db/db/peer_connection_support.ts"
+    ],
+    "status": "full",
+    "note": "Split: core types + PeerConnection methods (peer_connection.ts), upstream half of tick (peer_connection_upstream.ts), subscriber half of tick incl. RegisterShape/Subscribe admission and coverage-group serving (peer_connection_subscriber.ts), free send/flush/authority-batch/scope-serving helpers (peer_connection_support.ts). schedule_tick_in lives in support. sync-autopsy summaries, delivery_diagnostics, #[cfg(test)] hooks skipped. pump_current_rows (row_availability.rs, other partition) is externed."
+  }
+]

@@ -1,0 +1,128 @@
+[
+  {
+    "rust": "crates/jazz/layers/node/src/node/api_error.rs",
+    "rust_loc": 76,
+    "ts": ["src/node/node/api_error.ts"],
+    "status": "full",
+    "note": "ErrorCode string enum + ApiError.fromNode/fromQuery"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/database_slot.rs",
+    "rust_loc": 35,
+    "ts": ["src/node/node/database_slot.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/eviction.rs",
+    "rust_loc": 200,
+    "ts": ["src/node/node/eviction.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/global_state.rs",
+    "rust_loc": 266,
+    "ts": ["src/node/node/global_state.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/layer_stack.rs",
+    "rust_loc": 93,
+    "ts": ["src/node/node/layer_stack.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/merge_ops.rs",
+    "rust_loc": 262,
+    "ts": ["src/node/node/merge_ops.ts"],
+    "status": "full",
+    "note": "counters use bigint"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/mod.rs",
+    "rust_loc": 2512,
+    "ts": ["src/node/node/index.ts"],
+    "status": "full",
+    "note": "Error enum -> NodeError(kind); state/*.rs include!s become method objects mixed into NodeState.prototype"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/node_aliases.rs",
+    "rust_loc": 86,
+    "ts": ["src/node/node/node_aliases.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/open_tx.rs",
+    "rust_loc": 2323,
+    "ts": ["src/node/node/open_tx.ts"],
+    "status": "full",
+    "note": "open_tx(id) accessor renamed openTxGet"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/recovery.rs",
+    "rust_loc": 269,
+    "ts": ["src/node/node/recovery.ts"],
+    "status": "full",
+    "note": "testing receipt variants skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/refs.rs",
+    "rust_loc": 26,
+    "ts": ["src/node/node/refs.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/catalogue.rs",
+    "rust_loc": 1312,
+    "ts": ["src/node/node/state/catalogue.ts"],
+    "status": "full",
+    "note": "test-only activate_schema_for_test skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/commit.rs",
+    "rust_loc": 1389,
+    "ts": ["src/node/node/state/commit.ts"],
+    "status": "full",
+    "note": "testing receipt variants skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/contribution_merge.rs",
+    "rust_loc": 78,
+    "ts": ["src/node/node/state/contribution_merge.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/durable.rs",
+    "rust_loc": 672,
+    "ts": ["src/node/node/state/durable.ts"],
+    "status": "full",
+    "note": "*_for_test helpers and failpoint setter skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/lifecycle.rs",
+    "rust_loc": 2357,
+    "ts": ["src/node/node/state/lifecycle.ts"],
+    "status": "full",
+    "note": "static constructors are module functions (newNode, newClient, ...); NodeOpenReceipt/testing paths and shared test catalogue skipped"
+  },
+  {
+    "rust": "crates/jazz/layers/node/src/node/state/read_payload.rs",
+    "rust_loc": 510,
+    "ts": ["src/node/node/state/read_payload.ts"],
+    "status": "full",
+    "note": ""
+  },
+  {
+    "rust": "(extern)",
+    "rust_loc": 0,
+    "ts": ["src/_extern/node-state.ts"],
+    "status": "full",
+    "note": "150 loose extern symbols (type+value) for other partitions"
+  }
+]
