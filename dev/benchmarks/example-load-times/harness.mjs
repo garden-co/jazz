@@ -237,8 +237,6 @@ export async function startApp(id) {
 // ---------------------------------------------------------------------------
 // Browser and devices.
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
 export function launchBrowser() {
   return chromium.launch({
     // Local runs can point at an already-installed Chromium.
@@ -247,6 +245,12 @@ export function launchBrowser() {
       "--disable-background-networking",
       "--disable-component-update",
       "--disable-features=AutofillServerCommunication,OptimizationHints,MediaRouter",
+      // Everything the apps need is served from loopback. Any other host (a
+      // font, analytics, a CDN script added later) would put the internet's
+      // latency into the numbers and read as an app regression, so it fails
+      // to resolve. Not page.route(): Playwright's routing turns off the HTTP
+      // cache, which the reload and return-visit cases measure.
+      "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
       // No SwiftShader GL flags: none of the apps uses WebGL (World Tour's
       // globe is canvas 2D), and with them Chromium rasterises through a
       // software GPU. World Tour redraws its globe every frame, so its open
@@ -262,13 +266,6 @@ export function launchBrowser() {
  */
 export async function device(browser, { viewport = { width: 1280, height: 800 } } = {}) {
   const context = await browser.newContext({ viewport, colorScheme: "dark" });
-  // Everything the apps need is served from loopback. Anything else (a font,
-  // analytics, a CDN script added later) would put the internet's latency
-  // into the numbers and read as an app regression, so it is aborted.
-  await context.route(
-    (url) => !LOOPBACK_HOSTS.has(url.hostname),
-    (route) => route.abort("blockedbyclient"),
-  );
   const errors = [];
   const page = await context.newPage();
   page.setDefaultTimeout(60_000);
