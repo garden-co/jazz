@@ -12,7 +12,9 @@
 //! fails the check still runs, but on a binding source of its own: it shares
 //! nothing with another binding, exactly as before graphs were shared.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use groove::ivm::{FieldRef, GraphBuilder, ProjectExpr, TopByLimit};
 
@@ -106,7 +108,7 @@ fn slot_aliases<'g, E>(
         }
         let kids = children(node);
         if !matches!(node, GraphBuilder::BindingSource { .. })
-            && (kids.is_empty() || matches!(node, GraphBuilder::Lookup { .. }))
+            && (kids.len() == 0 || matches!(node, GraphBuilder::Lookup { .. }))
         {
             match infer(node) {
                 Ok(output) => stored.extend(
@@ -165,7 +167,6 @@ where
                 })
                 .collect(),
             _ => children(node)
-                .into_iter()
                 .flat_map(|child| self.depends(child))
                 .collect(),
         };
@@ -392,13 +393,19 @@ where
                     ("right", &right_depends, &right_carried),
                 ] {
                     if !depends.is_subset(carried) {
-                        return Err(RouteViolation(format!(
-                            "{} {side} input depends on binding routes {depends:?} but carries {carried:?} (sketch {}; left names {:?}, right names {:?})",
+                        let mut reason = format!(
+                            "{} {side} input depends on binding routes {depends:?} but carries {carried:?}",
                             operator_name(node),
-                            sketch(node, 12),
-                            self.output_names(left)?,
-                            self.output_names(right)?,
-                        )));
+                        );
+                        if crate::debug_env::covered_input_trace() {
+                            reason.push_str(&format!(
+                                " (sketch {}; left names {:?}, right names {:?})",
+                                sketch(node, 12),
+                                self.output_names(left)?,
+                                self.output_names(right)?,
+                            ));
+                        }
+                        return Err(RouteViolation(reason));
                     }
                 }
                 let mut keyed = BTreeSet::new();
@@ -420,18 +427,24 @@ where
                     right_depends
                 };
                 if let Some(route) = required.difference(&keyed).next() {
-                    let keys = left_on
-                        .iter()
-                        .zip(right_on)
-                        .map(|(l, r)| Ok((self.field_name(left, l)?, self.field_name(right, r)?)))
-                        .collect::<Result<Vec<_>, RouteViolation>>()?;
-                    let left_equivalents = self.equivalents(left)?;
-                    return Err(RouteViolation(format!(
-                        "join does not key on binding route {route} (keys {keys:?}, left carries {left_carried:?}, right carries {right_carried:?}, left equivalents {left_equivalents:?}, sketch {}; left names {:?}, right names {:?})",
-                        sketch(node, 12),
-                        self.output_names(left)?,
-                        self.output_names(right)?,
-                    )));
+                    let mut reason = format!("join does not key on binding route {route}");
+                    if crate::debug_env::covered_input_trace() {
+                        let keys = left_on
+                            .iter()
+                            .zip(right_on)
+                            .map(|(l, r)| {
+                                Ok((self.field_name(left, l)?, self.field_name(right, r)?))
+                            })
+                            .collect::<Result<Vec<_>, RouteViolation>>()?;
+                        let left_equivalents = self.equivalents(left)?;
+                        reason.push_str(&format!(
+                            " (keys {keys:?}, left carries {left_carried:?}, right carries {right_carried:?}, left equivalents {left_equivalents:?}, sketch {}; left names {:?}, right names {:?})",
+                            sketch(node, 12),
+                            self.output_names(left)?,
+                            self.output_names(right)?,
+                        ));
+                    }
+                    return Err(RouteViolation(reason));
                 }
                 Ok(())
             }
@@ -533,7 +546,6 @@ fn sketch(node: &GraphBuilder, depth: usize) -> String {
         return name;
     }
     let kids = children(node)
-        .into_iter()
         .map(|child| sketch(child, depth - 1))
         .collect::<Vec<_>>();
     if kids.is_empty() {
@@ -557,12 +569,16 @@ fn operator_name(node: &GraphBuilder) -> &'static str {
     }
 }
 
-fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
+fn children(node: &GraphBuilder) -> impl ExactSizeIterator<Item = &GraphBuilder> {
+    child_arcs(node).into_iter().map(AsRef::as_ref)
+}
+
+fn child_arcs(node: &GraphBuilder) -> Vec<&Arc<GraphBuilder>> {
     match node {
         GraphBuilder::TypedTemplate { inputs, .. } | GraphBuilder::Union { inputs } => {
-            inputs.iter().map(AsRef::as_ref).collect()
+            inputs.iter().collect()
         }
-        GraphBuilder::TemplateInput { input, .. } => input.iter().map(AsRef::as_ref).collect(),
+        GraphBuilder::TemplateInput { input, .. } => input.iter().collect(),
         GraphBuilder::Recursive {
             seed,
             step,
@@ -571,9 +587,8 @@ fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
         } => [Some(seed), Some(step), step_witness.as_ref()]
             .into_iter()
             .flatten()
-            .map(AsRef::as_ref)
             .collect(),
-        GraphBuilder::RecursiveStepWitness { recursive } => vec![recursive.as_ref()],
+        GraphBuilder::RecursiveStepWitness { recursive } => vec![recursive],
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
@@ -585,10 +600,10 @@ fn children(node: &GraphBuilder) -> Vec<&GraphBuilder> {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
-        | GraphBuilder::Lookup { keys: input, .. } => vec![input.as_ref()],
+        | GraphBuilder::Lookup { keys: input, .. } => vec![input],
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+        | GraphBuilder::AntiJoin { left, right, .. } => vec![left, right],
         GraphBuilder::Table { .. }
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::InputSource { .. }
@@ -628,30 +643,36 @@ pub(crate) fn take_scoped_binding_sources_for_test() -> Vec<String> {
 /// The names of the binding sources `program`'s graphs read.
 fn program_binding_source_names(program: &QueryProgram) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    let graphs = program
+    let mut seen = BTreeSet::new();
+    let mut pending = program
         .lowered
         .terminals
         .iter()
         .map(|terminal| &terminal.graph)
-        .chain(program.lowered.internal_app_rows_graph.as_ref());
-    for graph in graphs {
-        rewrite_graph(graph, &mut |node| {
-            if let GraphBuilder::BindingSource { shape, .. } = &node {
-                names.insert(shape.clone());
-            }
-            node
-        });
+        .chain(program.lowered.internal_app_rows_graph.as_ref())
+        .collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(std::ptr::from_ref(node)) {
+            continue;
+        }
+        if let GraphBuilder::BindingSource { shape, .. } = node {
+            names.insert(shape.clone());
+        }
+        pending.extend(children(node));
     }
     names
 }
 
 /// Renames every binding source `graph` reads by appending `suffix`.
 pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> GraphBuilder {
-    rewrite_graph(graph, &mut |mut node| {
-        if let GraphBuilder::BindingSource { shape, .. } = &mut node {
-            shape.push_str(suffix);
-        }
-        node
+    rewrite_graph(graph, &mut |node| {
+        let GraphBuilder::BindingSource { shape, output } = node else {
+            return None;
+        };
+        Some(GraphBuilder::BindingSource {
+            shape: format!("{shape}{suffix}"),
+            output: *output,
+        })
     })
 }
 
@@ -667,47 +688,64 @@ fn expand_templates(graph: &GraphBuilder) -> GraphBuilder {
             predicates,
             scalars,
         } => program
-            .bind_declarative_with_arguments(&inputs, &predicates, &scalars)
-            .map(|expanded| expand_templates(&expanded))
-            .unwrap_or(GraphBuilder::TypedTemplate {
-                program,
-                inputs,
-                predicates,
-                scalars,
-            }),
+            .bind_declarative_with_arguments(inputs, predicates, scalars)
+            .ok()
+            .map(|expanded| expand_templates(&expanded)),
         GraphBuilder::TemplateInput {
             input: Some(input), ..
-        } => std::sync::Arc::unwrap_or_clone(input),
-        node => node,
+        } => Some(input.as_ref().clone()),
+        _ => None,
     })
 }
 
-/// Rebuilds `graph` bottom-up, applying `map` to each node once its inputs
-/// are rebuilt. A node shared within `graph` stays shared.
+/// Applies `map` bottom-up, copying only changed nodes and their ancestors.
+/// Shared inputs stay shared; unchanged inputs keep their original Arc.
 fn rewrite_graph(
     graph: &GraphBuilder,
-    map: &mut impl FnMut(GraphBuilder) -> GraphBuilder,
+    map: &mut impl FnMut(&GraphBuilder) -> Option<GraphBuilder>,
 ) -> GraphBuilder {
     let mut rewritten = HashMap::new();
-    rewrite_node(graph, map, &mut rewritten)
+    rewrite_node(graph, map, &mut rewritten).into_owned()
 }
 
-fn rewrite_node(
-    node: &GraphBuilder,
-    map: &mut impl FnMut(GraphBuilder) -> GraphBuilder,
-    rewritten: &mut HashMap<*const GraphBuilder, std::sync::Arc<GraphBuilder>>,
-) -> GraphBuilder {
-    let mut arc = |child: &std::sync::Arc<GraphBuilder>| {
-        let key = std::sync::Arc::as_ptr(child);
-        if let Some(done) = rewritten.get(&key) {
-            return std::sync::Arc::clone(done);
+fn rewrite_node<'g>(
+    node: &'g GraphBuilder,
+    map: &mut impl FnMut(&GraphBuilder) -> Option<GraphBuilder>,
+    rewritten: &mut HashMap<*const GraphBuilder, Arc<GraphBuilder>>,
+) -> Cow<'g, GraphBuilder> {
+    let mut mapped = None;
+    let mut changed_inputs = false;
+    for child in child_arcs(node) {
+        let key = Arc::as_ptr(child);
+        if !rewritten.contains_key(&key) {
+            let done = match rewrite_node(child, map, rewritten) {
+                Cow::Borrowed(_) => Arc::clone(child),
+                Cow::Owned(done) => Arc::new(done),
+            };
+            rewritten.insert(key, done);
         }
-        let done = std::sync::Arc::new(rewrite_node(child, map, rewritten));
-        rewritten.insert(key, std::sync::Arc::clone(&done));
-        done
-    };
-    let mut node = node.clone();
-    match &mut node {
+        changed_inputs |= !Arc::ptr_eq(child, &rewritten[&key]);
+    }
+    if changed_inputs {
+        let updated = mapped.get_or_insert_with(|| node.clone());
+        rewrite_inputs(updated, &mut |child| {
+            Arc::clone(&rewritten[&Arc::as_ptr(child)])
+        });
+    }
+    if let Some(replacement) = map(mapped.as_ref().unwrap_or(node)) {
+        mapped = Some(replacement);
+    }
+    match mapped {
+        Some(mapped) => Cow::Owned(mapped),
+        None => Cow::Borrowed(node),
+    }
+}
+
+fn rewrite_inputs(
+    node: &mut GraphBuilder,
+    arc: &mut impl FnMut(&Arc<GraphBuilder>) -> Arc<GraphBuilder>,
+) {
+    match node {
         GraphBuilder::TypedTemplate { inputs, .. } | GraphBuilder::Union { inputs } => {
             for input in inputs {
                 *input = arc(input);
@@ -756,7 +794,6 @@ fn rewrite_node(
         | GraphBuilder::FrontierSource { .. }
         | GraphBuilder::BindingSource { .. } => {}
     }
-    map(node)
 }
 
 impl<S> NodeState<S>
