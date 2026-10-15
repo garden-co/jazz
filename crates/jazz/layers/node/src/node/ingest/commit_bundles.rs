@@ -684,7 +684,7 @@ where
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.view_scoped_cardinality
+                || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -731,7 +731,7 @@ where
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
-            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
+            if version_bundles.is_empty() && !existing.is_partial {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
                     .await?;
                 return Ok(());
@@ -950,7 +950,7 @@ where
                 // exclusive transaction. Preserve that scope marker even when
                 // the redacted write count equals this fragment's length, so a
                 // later sibling view can extend the same local projection.
-                transaction_values_with_cardinality_scope(
+                transaction_values_with_partial_flag(
                     tx_node_alias,
                     tx,
                     (*first.fate).clone(),

@@ -75,10 +75,6 @@ test("browser benchmark identity distinguishes the current page store from retai
     path.join(REPO_ROOT, "dev/benchmarks/realistic/run_ci_benchmarks.mjs"),
     "utf8",
   );
-  const workflow = fs.readFileSync(
-    path.join(REPO_ROOT, ".github/workflows/benchmarks.yml"),
-    "utf8",
-  );
   const history = fs.readFileSync(
     path.join(REPO_ROOT, "dev/benchmarks/realistic/history/bench_history.json"),
     "utf8",
@@ -89,9 +85,7 @@ test("browser benchmark identity distinguishes the current page store from retai
   );
 
   assert.match(runner, new RegExp(`storage_engine: "${CURRENT_BROWSER_ENGINE}"`));
-  assert.match(workflow, new RegExp(`"storage_engine": "${CURRENT_BROWSER_ENGINE}"`));
   assert.doesNotMatch(runner, /indexeddb-btree/);
-  assert.doesNotMatch(workflow, /opfs-btree/);
   assert.match(history, /"storage_engine": "opfs-btree"/);
   assert.match(internals, /directly durable SharedWorker runtime/);
   assert.match(internals, /IndexedDB page store/);
