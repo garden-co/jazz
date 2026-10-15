@@ -167,11 +167,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let node = NodeState::new_client(
             config.identity.node,
             config.schema.clone(),
@@ -179,6 +174,24 @@ impl Db {
             false,
         )
         .await?;
+        let db = Self::from_opened_node(node, config.schema, config.identity, config.id_source);
+        db.node.restore_pending_uploads(db.identity).await?;
+        Ok(db)
+    }
+
+    /// Wrap an opened node as a `Db` over `schema`, leaving a schema the
+    /// node's catalogue does not know yet pending open-time admission.
+    fn from_opened_node(
+        node: NodeState,
+        schema: JazzSchema,
+        identity: DbIdentity,
+        id_source: Option<Box<dyn RowIdSource>>,
+    ) -> Self {
+        let schema_version_id = schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&schema),
+            schema.clone(),
+        )])));
         let requires_open_schema_admission =
             !node.catalogue_schemas().contains_key(&schema_version_id);
         let node = Node::new(node);
@@ -186,20 +199,17 @@ impl Db {
             *node.open_schema_admission.borrow_mut() =
                 Some(PendingOpenSchema::new(schema_version_id));
         }
-        node.restore_pending_uploads(config.identity).await?;
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: config.schema,
+        let row_id_source_guarantees_fresh = id_source.is_none();
+        Self {
+            schema,
             schema_version_id,
             schema_view_is_fixed: false,
             requires_open_schema_admission,
             schema_views,
-            identity: config.identity,
+            identity,
             node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+                id_source.unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(WriteClock::default()),
@@ -210,7 +220,7 @@ impl Db {
             fail_next_subscription_refresh: Rc::new(Cell::new(false)),
             #[cfg(test)]
             stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
+        }
     }
 
     /// Open the durable, scope-admitted half of a client relay.
@@ -295,11 +305,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let (node, receipt) = NodeState::new_with_open_receipt_for_test(
             config.identity.node,
             config.schema.clone(),
@@ -307,37 +312,7 @@ impl Db {
             history_complete,
         )
         .await?;
-        let requires_open_schema_admission =
-            !node.catalogue_schemas().contains_key(&schema_version_id);
-        let node = Node::new(node);
-        if requires_open_schema_admission {
-            *node.open_schema_admission.borrow_mut() =
-                Some(PendingOpenSchema::new(schema_version_id));
-        }
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        let db = Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(WriteClock::default()),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        };
+        let db = Self::from_opened_node(node, config.schema, config.identity, config.id_source);
         Ok((db, receipt))
     }
 
@@ -359,11 +334,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let node = if recover_client {
             NodeState::new_client(
                 config.identity.node,
@@ -380,37 +350,12 @@ impl Db {
             )
             .await?
         };
-        let requires_open_schema_admission =
-            !node.catalogue_schemas().contains_key(&schema_version_id);
-        let node = Node::new(node);
-        if requires_open_schema_admission {
-            *node.open_schema_admission.borrow_mut() =
-                Some(PendingOpenSchema::new(schema_version_id));
-        }
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(WriteClock::default()),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
+        Ok(Self::from_opened_node(
+            node,
+            config.schema,
+            config.identity,
+            config.id_source,
+        ))
     }
 
     /// History-complete counterpart to [`Db::open_with_backend_attribution`].

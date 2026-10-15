@@ -167,6 +167,28 @@ impl PeerSubscriptionState {
         self.physical_identity_generation = None;
     }
 
+    /// Whether this state's runtime handles belong to a replaced Groove
+    /// runtime or a superseded physical identity generation.
+    pub(super) fn runtime_is_stale<S>(&self, node: &super::NodeState<S>) -> bool
+    where
+        S: super::OrderedKvStorage,
+    {
+        self.groove_runtime_token
+            .is_some_and(|token| token != node.groove_runtime_token())
+            || self
+                .physical_identity_generation
+                .is_some_and(|generation| generation != node.physical_identity_generation())
+    }
+
+    /// Record that the subscription's supporting rows at `revision` were
+    /// shipped, acknowledging the maintained view's source closure.
+    pub(super) fn acknowledge_published(&mut self, revision: [u8; 16]) {
+        self.supporting_revision = Some(revision);
+        if let Some(view) = &mut self.maintained_subscription_view {
+            view.maintained.acknowledge_peer_source_closure();
+        }
+    }
+
     pub(super) fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {
         self.result_member_set.clone()
     }

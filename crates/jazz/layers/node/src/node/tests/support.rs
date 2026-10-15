@@ -1476,7 +1476,7 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let bundles_before = peer.metrics.version_bundles_out;
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
-    let update = peer.reset_current_rows(core, "todos").unwrap();
+    let update = peer.rehydrate_current_rows(core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = &update else {
         panic!("expected view update");
     };
@@ -1995,7 +1995,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_a.len() as u64;
                     views_a.clear();
                     link_a = PeerState::client_link(author_a);
-                    views_a.push_back(link_a.reset_current_rows(&mut core, "todos").unwrap());
+                    views_a.push_back(link_a.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 } else {
                     drop(reader_b);
@@ -2004,7 +2004,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_b.len() as u64;
                     views_b.clear();
                     link_b = PeerState::client_link(author_b);
-                    views_b.push_back(link_b.reset_current_rows(&mut core, "todos").unwrap());
+                    views_b.push_back(link_b.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 }
             }

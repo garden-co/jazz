@@ -11,6 +11,8 @@ import {
   getMigrationGraph,
   deploy as deployCatalogue,
   compileSchema as compileCatalogueSchema,
+  requireAppId,
+  requireServerValue,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -264,33 +266,6 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function requireSchemaExportServerValue(
-  value: string | undefined,
-  kind: "serverUrl" | "adminSecret",
-): string {
-  if (value) {
-    return value;
-  }
-
-  if (kind === "serverUrl") {
-    throw new Error(
-      "Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL (or a framework-prefixed form such as VITE_JAZZ_SERVER_URL).",
-    );
-  }
-
-  throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
-}
-
-function requireAppId(appId: string | undefined): string {
-  if (appId) {
-    return appId;
-  }
-
-  throw new Error(
-    "Missing app ID. Pass an <appId> positional argument or set JAZZ_APP_ID (or a framework-prefixed form such as VITE_JAZZ_APP_ID).",
-  );
-}
-
 function requireMigrationServerOptions(options: MigrationCommandOptions): {
   appId: string;
   serverUrl: string;
@@ -298,8 +273,8 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 } {
   return {
     appId: requireAppId(options.appId),
-    serverUrl: requireSchemaExportServerValue(options.serverUrl, "serverUrl"),
-    adminSecret: requireSchemaExportServerValue(options.adminSecret, "adminSecret"),
+    serverUrl: requireServerValue(options.serverUrl, "serverUrl"),
+    adminSecret: requireServerValue(options.adminSecret, "adminSecret"),
   };
 }
 

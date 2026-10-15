@@ -1,9 +1,5 @@
-//! Authentication middleware for the Jazz server.
-//!
-//! Provides Axum extractors for:
-//! - JWT authentication (frontend clients)
-//! - Backend session impersonation (backend clients with secret)
-//! - Admin authentication (for schema/policy sync)
+//! Authentication for the Jazz server: JWT, backend-secret impersonation and
+//! admin-secret validation.
 
 pub mod auth;
 

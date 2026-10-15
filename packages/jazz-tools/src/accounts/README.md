@@ -88,7 +88,11 @@ provider JWT arrives the context does not connect upstream (the server would
 reject a connection without a credential and end its subscriptions), and local
 policies see an empty `session.claims`: rules that depend on provider claims
 deny until revalidation. The app must still log in: nothing else gives the
-retained account a credential. In a shared browser worker, another tab's credential
+retained account a credential. Session and app snapshots (and `useJazzAuth()`)
+report this as `needsLogin: true`; apps without managed auth should log in again
+whenever it is set, rather than inferring sign-in from the account's identity.
+In development builds, a write to such an account that is not followed by a
+login within a few seconds logs a console warning. In a shared browser worker, another tab's credential
 for the same account may sync this tab's writes sooner. Logging in again as the
 same identity (`loginJWT`, `loginOrRegisterJWT`, or the auth provider
 connection) revalidates that account in place, without closing the context:
