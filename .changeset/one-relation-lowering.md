@@ -12,5 +12,6 @@ Relation queries and relation-backed policies now share one relation IR and one 
 - A policy row correlation (`= RowId(Outer)`) under `Or`, `Not` or an enum payload is now rejected instead of being treated as always true.
 - A policy gather whose seed or edge filters correlate with the protected row, or that reads the frontier row outside its step, is now rejected instead of ignoring that filter.
 - A gather seed hop must name the hop target's `id` by scope.
+- A policy gather whose access rows carry a second correlation with the protected row, or join further tables, is now rejected instead of dropping that restriction.
 
 Relations built with the `jazz-tools` builders are unaffected.

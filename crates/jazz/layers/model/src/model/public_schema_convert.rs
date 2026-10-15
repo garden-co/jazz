@@ -1870,6 +1870,17 @@ fn append_exists_rel_policy_clause(
         }
     }
 
+    // A walk's access rows join the protected row through one key column;
+    // `ReachableVia` has nowhere to carry a second correlation or an access-side
+    // join, and dropping either would widen the policy.
+    if (!lowered.reachable.is_empty() || lowered.pending_reachable.is_some())
+        && (!correlated_filters.is_empty() || !lowered.joins.is_empty())
+    {
+        return Err(err(
+            policy_path(table, path),
+            "Gather access rows correlated with the protected row more than once, or joined to further tables, are not supported in policies yet",
+        ));
+    }
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
             reachable.access_row_column = correlation_column.clone();
@@ -2185,6 +2196,26 @@ fn lower_exists_rel(
                         "core schema ExistsRel reachable access must be a row-producing relation",
                     )
                 })?;
+                // The protected row is correlated above this join, where the
+                // access rows are keyed; a correlation here would be lowered as
+                // its placeholder `true`, and an access-side join would be lost.
+                if left
+                    .filters
+                    .iter()
+                    .chain(&right.filters)
+                    .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+                {
+                    return Err(err(
+                        policy_path(table, path),
+                        "Gather access rows correlated with the protected row below their join are not supported in policies yet",
+                    ));
+                }
+                if !right.joins.is_empty() || !left.joins.is_empty() {
+                    return Err(err(
+                        policy_path(table, path),
+                        "Gather access rows joined to further tables are not supported in policies yet",
+                    ));
+                }
                 let mut reachable = crate::query::ReachableVia {
                     access_table: right_table,
                     access_row_column: "__pending_outer_row".to_owned(),

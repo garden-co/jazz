@@ -187,10 +187,28 @@ fn policy_lowering(rel: &RelationExpr) -> Result<GatherEdge, String> {
             ),
         ),
     };
+    let read_policy = docs_read_policy(policy)?;
+    let [reachable] = read_policy.reachable.as_slice() else {
+        return Err(format!("expected one reachable, got {read_policy:?}"));
+    };
+    Ok(GatherEdge {
+        edge_table: reachable.edge_table.clone(),
+        edge_member_column: reachable.edge_member_column.clone(),
+        edge_parent_column: reachable.edge_parent_column.clone(),
+        edge_filters: reachable.edge_filters.clone(),
+        bound: reachable.bound.clone(),
+    })
+}
+
+/// Compile `policy` as the docs read policy and return its core query.
+fn docs_read_policy(policy: PolicyExpr) -> Result<crate::query::Query, String> {
     let schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("docs")
                 .column("title", ColumnType::Text)
+                .column("workspace", ColumnType::Uuid)
+                .fk_column("team", "teams")
+                .fk_column("team2", "teams")
                 .policies(TablePolicies::new().with_select(policy)),
         )
         .table(
@@ -203,7 +221,8 @@ fn policy_lowering(rel: &RelationExpr) -> Result<GatherEdge, String> {
         .table(
             TableSchemaBuilder::new("doc_access")
                 .fk_column("doc", "docs")
-                .fk_column("team", "teams"),
+                .fk_column("team", "teams")
+                .column("workspace", ColumnType::Uuid),
         )
         .build();
     let converted = convert_public_schema(&schema).map_err(|err| err.to_string())?;
@@ -212,17 +231,7 @@ fn policy_lowering(rel: &RelationExpr) -> Result<GatherEdge, String> {
         .iter()
         .find(|table| table.name == "docs")
         .expect("docs table converts");
-    let read_policy = docs.read_policy.as_ref().expect("docs read policy");
-    let [reachable] = read_policy.reachable.as_slice() else {
-        return Err(format!("expected one reachable, got {read_policy:?}"));
-    };
-    Ok(GatherEdge {
-        edge_table: reachable.edge_table.clone(),
-        edge_member_column: reachable.edge_member_column.clone(),
-        edge_parent_column: reachable.edge_parent_column.clone(),
-        edge_filters: reachable.edge_filters.clone(),
-        bound: reachable.bound.clone(),
-    })
+    Ok(docs.read_policy.clone().expect("docs read policy"))
 }
 
 fn lower_both(rel: &RelationExpr) -> Lowerings {
@@ -674,4 +683,117 @@ fn frontier_references_outside_a_step_are_rejected() {
         ),
     });
     assert!(query.is_err(), "{query:?}");
+}
+
+/// `Join(gather, access)` on the access row's team, as the TypeScript policy
+/// builder emits it.
+fn gather_access_join(access: RelationExpr) -> RelationExpr {
+    RelationExpr::Join {
+        left: Box::new(gather(scalar_parent_step())),
+        right: Box::new(access),
+        on: vec![RelationJoinCondition {
+            left: RelationColumnRef::unscoped("id"),
+            right: column("access", "team"),
+        }],
+        join_kind: RelationJoinKind::Inner,
+    }
+}
+
+fn outer_workspace(scope: &str) -> RelationPredicate {
+    equals(
+        scope,
+        "workspace",
+        RelationValueRef::OuterColumn(RelationColumnRef::unscoped("workspace")),
+    )
+}
+
+fn access_policy_error(rel: RelationExpr) -> String {
+    match docs_read_policy(PolicyExpr::ExistsRel { rel }) {
+        Ok(policy) => panic!("the policy must not compile, got {policy:?}"),
+        Err(error) => error,
+    }
+}
+
+/// A walk's access rows reach the protected row through one key column. A
+/// second correlation such as "the access row is in the document's
+/// workspace", or a join off the access rows, has nowhere to go in the
+/// lowered walk; dropping it would let the access row authorize documents
+/// in other workspaces, so each is rejected.
+#[test]
+fn gather_access_rows_keep_every_restriction_or_are_rejected() {
+    let access = || scan("doc_access", Some("access"));
+    let keyed_on_doc = || outer_doc();
+
+    // The supported shape: one correlation above the access join.
+    let accepted = docs_read_policy(PolicyExpr::ExistsRel {
+        rel: filter(gather_access_join(access()), keyed_on_doc()),
+    })
+    .expect("one access correlation compiles");
+    assert_eq!(accepted.reachable.len(), 1);
+
+    // A second correlation above the access join.
+    let error = access_policy_error(filter(
+        gather_access_join(access()),
+        RelationPredicate::And(vec![keyed_on_doc(), outer_workspace("access")]),
+    ));
+    assert!(
+        error.contains("correlated with the protected row more than once"),
+        "{error}"
+    );
+
+    // The same correlation on the access rows, below the join.
+    let error = access_policy_error(filter(
+        gather_access_join(filter(access(), outer_workspace("access"))),
+        keyed_on_doc(),
+    ));
+    assert!(error.contains("below their join"), "{error}");
+
+    // A join off the access rows, with its own filter.
+    let error = access_policy_error(filter(
+        gather_access_join(RelationExpr::Join {
+            left: Box::new(access()),
+            right: Box::new(filter(
+                scan("teams", Some("t2")),
+                equals(
+                    "t2",
+                    "enabled",
+                    RelationValueRef::literal(crate::model::public_schema::Value::Boolean(true)),
+                ),
+            )),
+            on: vec![RelationJoinCondition {
+                left: column("access", "team"),
+                right: column("t2", "id"),
+            }],
+            join_kind: RelationJoinKind::Inner,
+        }),
+        keyed_on_doc(),
+    ));
+    assert!(error.contains("joined to further tables"), "{error}");
+}
+
+/// A scalar gather can itself be the access rows, keyed on one column of the
+/// protected row; a second key would be dropped, so it is rejected.
+#[test]
+fn scalar_gather_keyed_twice_is_rejected() {
+    let keyed_on = |source: &str| {
+        equals(
+            "teams",
+            "id",
+            RelationValueRef::OuterColumn(RelationColumnRef::unscoped(source)),
+        )
+    };
+    let once = docs_read_policy(PolicyExpr::ExistsRel {
+        rel: filter(gather(scalar_parent_step()), keyed_on("team")),
+    })
+    .expect("one key compiles");
+    assert_eq!(once.reachable.len(), 1);
+
+    let error = access_policy_error(filter(
+        gather(scalar_parent_step()),
+        RelationPredicate::And(vec![keyed_on("team"), keyed_on("team2")]),
+    ));
+    assert!(
+        error.contains("correlated with the protected row more than once"),
+        "{error}"
+    );
 }
