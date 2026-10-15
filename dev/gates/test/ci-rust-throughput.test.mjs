@@ -46,8 +46,8 @@ const bandChatWalltime = fs.readFileSync(
   path.join(root, "examples/band-chat/benchmarks/benches/walltime.rs"),
   "utf8",
 );
-const realisticWorkflow = fs.readFileSync(
-  path.join(root, ".github/workflows/benchmarks.yml"),
+const nightlyWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/nightly-tests.yml"),
   "utf8",
 );
 const rnNativeArtifactsWorkflow = fs.readFileSync(
@@ -1261,7 +1261,7 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   }, /label removal/);
 });
 
-test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
+test("benchmark correctness stays on ordinary CI while API compilation runs nightly", () => {
   const workspace = job("test-rust-workspace");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   const scenarioMode = benchmarkSmokeMode("ci");
@@ -1303,7 +1303,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
     /s4_order_processing_smoke_debug_profile/,
   );
   assert.match(
-    realisticWorkflow,
+    nightlyWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
   );
   assert.match(
@@ -1342,84 +1342,6 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
         /required-features/,
       ),
     /required-features/,
-  );
-});
-
-test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
-  const document = parse(realisticWorkflow);
-  assert.deepEqual(document.on.pull_request, {
-    branches: ["main", "release"],
-    types: ["opened", "reopened", "synchronize", "labeled"],
-  });
-  assert.deepEqual(document.on.push, { branches: ["main"] });
-  assert.deepEqual(document.on.schedule, [{ cron: "0 5 * * *" }]);
-  assert.equal(document.on.workflow_dispatch.inputs.profile.default, "s");
-  assert.equal(document.on.workflow_dispatch.inputs.include_browser.type, "boolean");
-  assert.deepEqual(document.permissions, { contents: "read", issues: "write" });
-
-  const native = document.jobs.native;
-  assert.deepEqual(native["runs-on"], ["self-hosted", "linux", "x64", "jazz-bench"]);
-  assert.equal(native["timeout-minutes"], 180);
-  const expectedNativeCondition =
-    "${{ (github.event_name != 'push' || github.actor != 'github-actions[bot]') && ( github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'benchmark') && github.event.pull_request.head.repo.full_name == github.repository ) ) }}";
-  const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
-  assert.equal(normalizeCondition(native.if), expectedNativeCondition);
-
-  assert.throws(() => {
-    const unsafe = parse(realisticWorkflow.replace('  schedule:\n    - cron: "0 5 * * *"\n', ""));
-    assert.ok(unsafe.on.schedule, "nightly schedule must remain");
-  }, /nightly schedule/);
-  assert.throws(() => {
-    const unsafe = parse(
-      realisticWorkflow.replace(
-        "github.event.pull_request.head.repo.full_name == github.repository",
-        "true",
-      ),
-    );
-    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
-  }, /true/);
-  assert.throws(() => {
-    const unsafe = parse(
-      realisticWorkflow.replace(
-        "        )\n      }}\n    runs-on:",
-        "        ) || true\n      }}\n    runs-on:",
-      ),
-    );
-    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
-  }, /true/);
-});
-
-test("realistic timing retains every retired legacy smoke suite", () => {
-  for (const bench of [
-    "cold_subscription",
-    "sync",
-    "validation",
-    "relation_include_delivery",
-    "route_subscription_curve",
-    "micro",
-    "s8_branch_views",
-  ]) {
-    assert.match(realisticWorkflow, new RegExp(`--bench ${bench}(?: |\\n|$)`));
-  }
-  assert.match(realisticWorkflow, /Run legacy Jazz timing suites/);
-  assert.match(realisticWorkflow, /status_file=bench-out\/native\/legacy-jazz\/status\.tsv/);
-  assert.match(realisticWorkflow, /status: statuses\.get\(name\) \?\? "failed"/);
-  assert.match(realisticWorkflow, /exit "\$failed"/);
-  assert.throws(
-    () =>
-      assert.match(
-        realisticWorkflow.replaceAll("--bench route_subscription_curve", ""),
-        /--bench route_subscription_curve/,
-      ),
-    /route_subscription_curve/,
-  );
-  assert.throws(
-    () =>
-      assert.match(
-        realisticWorkflow.replace('status: statuses.get(name) ?? "failed"', 'status: "passed"'),
-        /statuses\.get\(name\)/,
-      ),
-    /statuses/,
   );
 });
 

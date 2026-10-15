@@ -414,54 +414,6 @@ test("native Criterion command runs the R13 assertion-bearing benchmark", () => 
   ]);
 });
 
-test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native binaries", () => {
-  const workflow = readFileSync(
-    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(
-    workflow,
-    /cargo build --release -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench/,
-  );
-  assert.match(
-    workflow,
-    /cargo build --release -p jazz --features client,sqlite,transport-compression-zstd --example realistic_bench/,
-  );
-  assert.match(
-    workflow,
-    /cargo bench -p jazz --features rocksdb,transport-compression-zstd --bench realistic_phase1 --no-run/,
-  );
-  assert.match(
-    workflow,
-    /cargo bench -p jazz --features sqlite,transport-compression-zstd --bench realistic_phase1 --no-run/,
-  );
-  assert.doesNotMatch(workflow, /-p jazz-tools\b/);
-});
-
-test("benchmark workflow runs the jazz-sim benchmark suite", () => {
-  const workflow = readFileSync(
-    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(workflow, /cargo bench -p jazz-sim --bench s2_canvas --no-run/);
-  assert.match(workflow, /--suite jazz-sim/);
-  assert.match(workflow, /bench-out\/native\/jazz-sim\/metadata\.json/);
-  assert.match(workflow, /kind: "realistic-bench-jazz-sim"/);
-  assert.match(workflow, /JAZZ_SIM_BENCHMARKS\.flatMap/);
-  assert.match(workflow, /path\.join\(dir, "manifest\.json"\)/);
-});
-
-test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
-  const workflow = readFileSync(
-    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(workflow, /pnpm --filter jazz-napi build/);
-});
-
 test("configured skips only activate after repeated timeout observations", () => {
   const skipSet = {
     entries: [

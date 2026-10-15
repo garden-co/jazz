@@ -206,8 +206,14 @@ Current browser scenarios:
 
 ## CI / Runner
 
-- Workflow: `.github/workflows/benchmarks.yml`
-- AWS setup: `dev/benchmarks/realistic/aws_runner_setup.md`
+The Realistic Benchmarks workflow (`.github/workflows/benchmarks.yml`) was
+retired on 2026-10-15: its self-hosted `jazz-bench` runner had been offline
+since late September. The benchmark code and scripts here remain runnable
+locally, and porting the useful suites to CodSpeed is tracked separately.
+Benchmark API compilation (`dev/gates/benchmark-smoke.sh --compile-ci`) now
+runs in the `benchmark-api` job of `.github/workflows/nightly-tests.yml`.
+
+- AWS runner setup (historical): `dev/benchmarks/realistic/aws_runner_setup.md`
 
 Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
@@ -216,7 +222,7 @@ Artifacts include `manifest.json` as a stable ingestion entrypoint:
 - jazz-sim: `bench-out/native/jazz-sim/manifest.json`
 - browser: `bench-out/browser/manifest.json`
 
-The workflow currently:
+The retired workflow:
 
 - runs on `main` pushes and nightly schedule
 - runs on PRs only when the PR has the `benchmark` label
@@ -227,7 +233,7 @@ The workflow currently:
 - records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; `update_history.mjs` ingests passed JSONL outputs into history as suite `jazz-sim`, keyed by scenario plus phase/variant, and exposes numeric JSONL fields to the static site/report as per-phase metrics
 - records browser outputs per scenario when they complete within budget
 
-The `site` job:
+Its `site` job:
 
 - pulls the benchmark artifacts for that run
 - updates `history/bench_history.json` with absolute metrics
