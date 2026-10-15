@@ -47,23 +47,15 @@ impl AuthAdmissionConfig {
     pub fn static_bearer(token: impl Into<String>) -> Self {
         Self {
             static_bearer_token: Some(token.into()),
-            jwt_verifier: None,
-            expected_issuer: None,
-            allow_local_first_auth: false,
-            expected_audience: None,
-            anonymous_subject: "anonymous".to_owned(),
+            ..Self::default()
         }
     }
 
     /// Require a signed JWT.
     pub fn jwt(verifier: JwtVerifierConfig) -> Self {
         Self {
-            static_bearer_token: None,
             jwt_verifier: Some(verifier),
-            expected_issuer: None,
-            allow_local_first_auth: false,
-            expected_audience: None,
-            anonymous_subject: "anonymous".to_owned(),
+            ..Self::default()
         }
     }
 
@@ -103,27 +95,11 @@ impl JwtVerifierConfig {
         }
     }
 
-    /// Verify RSA-signed tokens with a PEM-encoded public key.
-    pub fn rsa_public_key_pem(algorithm: Algorithm, public_key_pem: impl Into<Vec<u8>>) -> Self {
-        Self {
-            algorithm,
-            key: JwtVerificationKey::RsaPublicKeyPem(public_key_pem.into()),
-        }
-    }
-
     /// Verify EdDSA/Ed25519-signed tokens with a PEM-encoded public key.
     pub fn ed_public_key_pem(public_key_pem: impl Into<Vec<u8>>) -> Self {
         Self {
             algorithm: Algorithm::EdDSA,
             key: JwtVerificationKey::EdPublicKeyPem(public_key_pem.into()),
-        }
-    }
-
-    /// Verify EdDSA/Ed25519-signed tokens with a DER-encoded public key.
-    pub fn ed_public_key_der(public_key_der: impl Into<Vec<u8>>) -> Self {
-        Self {
-            algorithm: Algorithm::EdDSA,
-            key: JwtVerificationKey::EdPublicKeyDer(public_key_der.into()),
         }
     }
 }
@@ -133,12 +109,8 @@ impl JwtVerifierConfig {
 pub enum JwtVerificationKey {
     /// HMAC shared secret.
     HmacSecret(Vec<u8>),
-    /// PEM-encoded RSA public key.
-    RsaPublicKeyPem(Vec<u8>),
     /// PEM-encoded Ed25519 public key.
     EdPublicKeyPem(Vec<u8>),
-    /// DER-encoded Ed25519 public key.
-    EdPublicKeyDer(Vec<u8>),
 }
 
 /// First-frame auth handshake shape.
@@ -392,7 +364,7 @@ pub fn admit_local_first_jwt(
     } else {
         validation.validate_aud = false;
     }
-    let decoded = decode::<LocalFirstJwtClaims>(token, &key, &validation).map_err(jwt_error)?;
+    let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
     if !crate::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
@@ -451,30 +423,15 @@ pub fn admitted_session_claims(
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
     match &verifier.key {
         JwtVerificationKey::HmacSecret(secret) => Ok(DecodingKey::from_secret(secret)),
-        JwtVerificationKey::RsaPublicKeyPem(public_key) => {
-            DecodingKey::from_rsa_pem(public_key).map_err(jwt_error)
-        }
         JwtVerificationKey::EdPublicKeyPem(public_key) => {
             DecodingKey::from_ed_pem(public_key).map_err(jwt_error)
         }
-        JwtVerificationKey::EdPublicKeyDer(public_key) => Ok(DecodingKey::from_ed_der(public_key)),
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct JwtClaims {
     iss: String,
-    sub: String,
-    #[serde(rename = "exp")]
-    _exp: u64,
-    #[serde(flatten)]
-    extra: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LocalFirstJwtClaims {
-    #[serde(rename = "iss")]
-    _iss: String,
     sub: String,
     #[serde(rename = "exp")]
     _exp: u64,
