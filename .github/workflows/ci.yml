@@ -70,7 +70,12 @@ jobs:
         env:
           UNTRUSTED_RESULT: ${{ needs.untrusted.result }}
           TRUSTED_RESULT: ${{ needs.trusted.result }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
+          # A draft's suite runs no jobs, so its invocation reports skipped.
+          if [ "${DRAFT}" = true ]; then
+            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:skipped" && exit 0
+          fi
           test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
             test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
 
@@ -105,3 +110,58 @@ jobs:
             -f context=test-rust \
             -f description="Dispatched CI: ${RESULT}" \
             -f target_url="${TARGET_URL}"
+
+  # `test-rust` passes on ready PRs even though they only run the fast scope, so
+  # it cannot prove full-suite coverage (#4091). `full-suite` is a commit status
+  # posted only after the full suite passed: on the run's own head, and for a
+  # merge-group/* PR also on every PR head the group cleanly merged along its
+  # first-parent chain (dev/ci/full-suite-coverage.sh). A PR head no green full
+  # run covered carries no `full-suite` status, so a ruleset requiring it blocks
+  # that merge. A new push to a covered PR moves its head off the covered SHA
+  # and so voids coverage.
+  report-full-suite:
+    if: >-
+      always() && needs.test-rust.result == 'success' && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'push' && needs.trusted.result == 'success' ||
+        github.event_name == 'pull_request' && needs.trusted.result == 'success' &&
+          (startsWith(github.head_ref, 'merge-group/') || github.base_ref == 'release')
+      )
+    needs: [trusted, test-rust]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+      - name: Report full-suite on covered heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          IS_GROUP: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'merge-group/') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${IS_GROUP}" = true ]; then
+            description="Full suite passed in merge group #${PR_NUMBER}"
+            covered="$(dev/ci/full-suite-coverage.sh "${BASE_SHA}" "${HEAD_SHA}")"
+          else
+            description="Full suite passed on this commit"
+            covered="${HEAD_SHA}"
+          fi
+          for sha in ${covered}; do
+            echo "full-suite success on ${sha}"
+            gh api --method POST "repos/${REPO}/statuses/${sha}" \
+              -f state=success \
+              -f context=full-suite \
+              -f description="${description}" \
+              -f target_url="${TARGET_URL}" > /dev/null
+          done
