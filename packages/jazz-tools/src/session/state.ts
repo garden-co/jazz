@@ -2,6 +2,8 @@ import { settleAccountSelection } from "../accounts/selection-durability.js";
 import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
 import { isProvisionalAccount, type JWTAuth, type BackendAuth } from "../accounts/enrollment.js";
+import { hasAuthProviderConnection } from "./auth-provider.js";
+import { watchNeedsLogin } from "./needs-login-warning.js";
 import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
@@ -27,7 +29,24 @@ export type JazzSessionOperation =
   | "linkJWT"
   | "logout"
   | "retry";
-export interface JazzSessionSnapshot<Client> {
+/**
+ * Whether the open account still has to log in before it syncs.
+ *
+ * True while the selected account is a retained external-JWT account that a
+ * reload reopened before any provider credential: it reads and writes local
+ * data, but nothing leaves the device until `loginJWT` or
+ * `loginOrRegisterJWT` (or managed auth's revalidation) re-admits it. Its
+ * identity is already the signed-in identity, so check this flag rather than
+ * the identity to decide whether to log in again.
+ */
+export interface NeedsLoginState {
+  readonly needsLogin: boolean;
+}
+/** @internal The one place that decides {@link NeedsLoginState.needsLogin}. */
+export function accountNeedsLogin(account: AccountHandle | undefined): boolean {
+  return account !== undefined && isProvisionalAccount(account);
+}
+export interface JazzSessionSnapshot<Client> extends Partial<NeedsLoginState> {
   readonly status: "ready" | "signed-out" | "transitioning" | "error" | "closed";
   readonly account?: AccountHandle;
   readonly client?: Client;
@@ -83,9 +102,17 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     status: client ? "ready" : "signed-out",
     account: selected,
     client,
+    needsLogin: accountNeedsLogin(selected),
   });
   const listeners = new Set<() => void>();
   const leases = new Set<{ waiting?: () => void }>();
+  // Development builds only: warn an app that drives logins itself when it
+  // keeps writing to an account that still needs one.
+  const needsLoginWarning = watchNeedsLogin({
+    current: () => snapshot,
+    isManaged: () => hasAuthProviderConnection(session),
+    isBusy: () => busy !== undefined || loggingOut !== undefined,
+  });
   const versions = new WeakMap<object, number>();
   let version = 0;
   versions.set(snapshot, version);
@@ -97,9 +124,10 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   // again: reopening the still-unconfirmed account would hide the failure.
   let failedRevalidation: (() => Promise<void>) | undefined;
   let closed = false;
-  const publish = (next: JazzSessionSnapshot<Client>) => {
-    snapshot = Object.freeze(next);
+  const publish = (next: Omit<JazzSessionSnapshot<Client>, "needsLogin">) => {
+    snapshot = Object.freeze({ ...next, needsLogin: accountNeedsLogin(next.account) });
     versions.set(snapshot, ++version);
+    needsLoginWarning.update();
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -108,7 +136,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       }
     }
   };
-  const detach = (next: JazzSessionSnapshot<Client>) => {
+  const detach = (next: Omit<JazzSessionSnapshot<Client>, "needsLogin">) => {
     const waits = [...leases].map(
       (lease) =>
         new Promise<void>((resolve) => {
@@ -154,8 +182,14 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       }
       if (token !== generation) throw superseded();
       if (same === account && selected === account && client === current) {
-        // Clear an earlier failure; an unchanged ready snapshot stays as is.
-        if (snapshot.error || snapshot.status !== "ready" || snapshot.client !== current)
+        // Clear an earlier failure and the pending login; an unchanged ready
+        // snapshot stays as is.
+        if (
+          snapshot.error ||
+          snapshot.status !== "ready" ||
+          snapshot.client !== current ||
+          snapshot.needsLogin !== accountNeedsLogin(account)
+        )
           publish({ status: "ready", account, client: current });
         return;
       }
@@ -329,6 +363,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       return closing;
     },
   };
+  needsLoginWarning.update();
   consumers.set(session, () => {
     const lease: { waiting?: () => void } = {};
     leases.add(lease);

@@ -181,6 +181,7 @@ export type {
   JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
+  NeedsLoginState,
 } from "./session/state.js";
 
 export * from "./session/auth-provider-exports.js";

@@ -83,6 +83,7 @@ import {
   setDbInternalSession,
   setTrustedReservedSession,
 } from "./db-internal-session.js";
+import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
@@ -1896,6 +1897,7 @@ export class Db {
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
+    notifyLocalWrite(this);
     return setWriteWaitReadiness(handle, (tier) =>
       this.ensureReady(tier === "global" ? "server" : "runtime"),
     );
@@ -2122,6 +2124,7 @@ export class Db {
     const values = writeRecord("Insert", table, ordinaryData);
     const context = this.getAccessContext();
     const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    notifyLocalWrite(this);
     return client.insertStreaming(
       table._table,
       values,
@@ -2147,6 +2150,7 @@ export class Db {
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     const values = writeRecord("Update", table, ordinaryData);
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.updateStreaming(
       table._table,
       id,
@@ -2169,6 +2173,7 @@ export class Db {
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     const values = writeRecord("Upsert", table, ordinaryData);
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.upsertStreaming(
       table._table,
       id,
@@ -2354,6 +2359,7 @@ export class Db {
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     this.assertOpen();
+    notifyLocalWrite(this);
     const context = this.getAccessContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
