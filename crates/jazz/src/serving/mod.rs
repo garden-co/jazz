@@ -56,11 +56,6 @@ pub struct ServerSession {
     generation: u64,
 }
 
-#[derive(Debug)]
-enum SessionGenerationAllocationError {
-    Exhausted,
-}
-
 /// Capability selected by the server only after authenticating a WebSocket
 /// session and negotiating its transport features.
 ///
@@ -652,9 +647,7 @@ impl InMemoryServerShell {
         session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> ShellResult<ServerSession> {
-        let generation = self
-            .allocate_session_generation()
-            .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
+        let generation = self.allocate_session_generation()?;
         let transport = SharedWireTransport::counting(&self.session_frames_queued);
         let transport_adapter = Box::new(WireTransportAdapter::new_with_session_context(
             transport.clone(),
@@ -804,9 +797,7 @@ impl InMemoryServerShell {
                 actual: resume.identity,
             });
         }
-        let generation = self
-            .allocate_session_generation()
-            .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
+        let generation = self.allocate_session_generation()?;
         let Some((_, mut cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
             return Err(ShellError::InvalidResumeToken(resume.resume_token));
         };
@@ -891,25 +882,7 @@ impl InMemoryServerShell {
         session: ServerSession,
         frames: impl IntoIterator<Item = AbiBytes>,
     ) -> ShellResult<()> {
-        for frame in frames {
-            self.validate_session(session)?;
-            self.metrics.frames_received += 1;
-            self.metrics.bytes_received += frame.len() as u64;
-            let state = self.session_state(session)?;
-            let canonical = crate::local_executor::block_on(
-                state.auxiliary_pump.route_incoming_wire_frame(frame),
-            )
-            .map_err(ShellError::Transport)?;
-            if let Some(frame) = canonical {
-                state
-                    .transport
-                    .queues
-                    .borrow_mut()
-                    .stage_inbound(frame)
-                    .map_err(ShellError::Transport)?;
-            }
-        }
-        Ok(())
+        crate::local_executor::block_on(self.receive_frames_async(session, frames))
     }
 
     /// Async owner-thread variant used by native runtimes. It yields while
@@ -921,7 +894,7 @@ impl InMemoryServerShell {
         frames: impl IntoIterator<Item = AbiBytes>,
     ) -> ShellResult<()> {
         for frame in frames {
-            self.validate_session(session)?;
+            self.session_state(session)?;
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
@@ -1067,13 +1040,13 @@ impl InMemoryServerShell {
         })
     }
 
-    fn allocate_session_generation(
-        &mut self,
-    ) -> std::result::Result<u64, SessionGenerationAllocationError> {
+    fn allocate_session_generation(&mut self) -> ShellResult<u64> {
         let generation = self.next_session_generation;
         let Some(next_generation) = generation.checked_add(1) else {
             self.metrics.rejected_sessions += 1;
-            return Err(SessionGenerationAllocationError::Exhausted);
+            return Err(ShellError::Storage(
+                "server session generation exhausted".into(),
+            ));
         };
         self.next_session_generation = next_generation;
         Ok(generation)
@@ -1108,17 +1081,6 @@ impl InMemoryServerShell {
         self.metrics.active_sessions = self.metrics.active_sessions.saturating_sub(1);
     }
 
-    fn validate_session(&self, session: ServerSession) -> ShellResult<()> {
-        self.sessions
-            .get(session.transport())
-            .and_then(Option::as_ref)
-            .filter(|state| {
-                state.identity == session.identity() && state.generation == session.generation
-            })
-            .map(|_| ())
-            .ok_or(ShellError::InvalidSession)
-    }
-
     /// The admitted session's connection-scoped wire credit ledger.
     pub(crate) fn session_channel_credits(
         &self,
@@ -1141,16 +1103,7 @@ impl InMemoryServerShell {
     }
 
     fn take_session(&mut self, session: ServerSession) -> ShellResult<ServerSessionState> {
-        let valid = self
-            .sessions
-            .get(session.transport())
-            .and_then(Option::as_ref)
-            .is_some_and(|state| {
-                state.identity == session.identity() && state.generation == session.generation
-            });
-        if !valid {
-            return Err(ShellError::InvalidSession);
-        }
+        self.session_state(session)?;
         self.sessions
             .get_mut(session.transport())
             .and_then(Option::take)
