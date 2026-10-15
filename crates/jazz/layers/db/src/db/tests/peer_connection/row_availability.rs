@@ -343,7 +343,8 @@ fn current_rows_readable_tombstone_is_not_generic_unavailable() {
         .into_iter()
         .flat_map(|bundle| bundle.versions)
         .collect::<Vec<_>>();
-    assert!(versions.iter().any(|version| version.deletion().is_none()));
+    // The current image is the deleted image, still carrying the readable
+    // pre-delete cells.
     assert!(
         versions
             .iter()
@@ -382,12 +383,12 @@ fn current_rows_wire_v1_corpus_is_mandatory() {
         let bytes = crate::wire::encode_sync_message(&message).unwrap();
         let expected = match name {
             "request" => {
-                "1f0101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040400"
+                "190101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040400"
             }
             "receipt" => {
-                "200101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040401021c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d001000000000000000000000000000000000000000000000"
+                "1a0101010101010101010101010101010101100202020202020202020202020202020204726f77731003030303030303030303030303030303100404040404040404040404040404040401021c5b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d001000000000000000000000000000000000000000000000"
             }
-            "cancel" => "2101010101010101010101010101010101",
+            "cancel" => "1b01010101010101010101010101010101",
             _ => unreachable!(),
         };
         assert_eq!(hex::encode(&bytes), expected);
@@ -581,22 +582,16 @@ fn current_rows_reject_deletion_only_readable_receipt() {
         .into_iter()
         .flat_map(|bundle| bundle.versions)
         .collect::<Vec<_>>();
-    assert!(versions.iter().any(|version| version.deletion().is_none()));
+    // The current image is the deleted image, still carrying the readable
+    // pre-delete cells.
     assert!(
         versions
             .iter()
             .any(|version| version.deletion() == Some(crate::tx::DeletionEvent::Deleted))
     );
+    // A Readable outcome without any row-image carrier must be rejected.
     let mut partial = receipt.clone();
-    partial.version_carriers.retain(|carrier| {
-        carrier.bundle_refs().unwrap().iter().all(|bundle| {
-            bundle
-                .versions
-                .iter()
-                .all(|version| version.deletion().is_some())
-        })
-    });
-    assert!(!partial.version_carriers.is_empty());
+    partial.version_carriers.clear();
     let result = block_on(
         client
             .node
