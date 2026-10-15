@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Reduce encrypted lifecycle query work by reusing histories within one transaction, reusing accepted device snapshots within one call and bounding device metadata prefetches to the current account.
+Reduce encrypted lifecycle query work by reusing accepted histories and snapshots, sharing account-history preparation and coalescing concurrent device challenge responses. Keep private metadata prefetches account-scoped and refresh every history predicate after snapshot conflicts.

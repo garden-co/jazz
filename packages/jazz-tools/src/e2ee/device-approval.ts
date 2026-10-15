@@ -29,6 +29,7 @@ import type { AccountSuccessor } from "./account-successor.js";
 import { publicDeviceApprovalBytes } from "./public-device-approval.js";
 import {
   initialAccountAuthority,
+  prefetchPublicMembershipHistory,
   readPublicMembershipHistory,
   replayAccountMembership,
   type AccountMembership,
@@ -73,7 +74,7 @@ const comparePosition = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 /** Internal account-device handshake. Ordinary Jazz policies own record authorisation. */
 export class DeviceApproval {
   private readonly lifetime = new AbortController();
-  private readonly responding = new Set<string>();
+  private readonly responding = new Map<string, { promise: Promise<void>; foreground: boolean }>();
   private backgroundError: unknown;
   private knownRevoked = false;
   private snapshotPrefetched = false;
@@ -110,12 +111,10 @@ export class DeviceApproval {
         onUpdate: (rows) => {
           for (const row of rows) {
             if (this.responding.has(row.id)) continue;
-            this.responding.add(row.id);
-            this.respond(row.id)
-              .catch((error: unknown) => {
-                this.backgroundError = error;
-              })
-              .finally(() => this.responding.delete(row.id));
+            const response = this.startResponse(row.id);
+            response.promise.catch((error: unknown) => {
+              if (!response.foreground) this.backgroundError = error;
+            });
           }
         },
         onError: (error) => {
@@ -222,7 +221,7 @@ export class DeviceApproval {
     };
   }
 
-  private async prefetchSnapshot(): Promise<void> {
+  private async prefetchSnapshot(refreshPublicHistory = false): Promise<void> {
     await Promise.all([
       this.db.all(
         this.tables.__e2ee_account_successors.where({ "$createdBy.account": this.accountId }),
@@ -251,22 +250,7 @@ export class DeviceApproval {
         this.tables.__e2ee_device_deliveries.where({ "$createdBy.account": this.accountId }),
         { tier: "remote" },
       ),
-      this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
-        tier: "remote",
-      }),
-      this.db.all(this.tables.__e2ee_account_roots.where({ accountId: this.accountId }), {
-        tier: "remote",
-      }),
-      this.db.all(this.tables.__e2ee_device_keys.where({ "$createdBy.account": this.accountId }), {
-        tier: "remote",
-      }),
-      this.db.all(this.tables.__e2ee_public_device_approvals.where({ accountId: this.accountId }), {
-        tier: "remote",
-      }),
-      this.db.all(
-        this.tables.__e2ee_public_account_successors.where({ accountId: this.accountId }),
-        { tier: "remote" },
-      ),
+      prefetchPublicMembershipHistory(this.db, this.accountId, this.tables, refreshPublicHistory),
     ]);
     this.snapshotPrefetched = true;
   }
@@ -279,7 +263,7 @@ export class DeviceApproval {
     for (let attempt = 0; ; attempt++) {
       try {
         this.assertOpen();
-        if (!this.snapshotPrefetched || attempt > 0) await this.prefetchSnapshot();
+        if (!this.snapshotPrefetched || attempt > 0) await this.prefetchSnapshot(attempt > 0);
         else {
           // Non-transactional reads drain preceding writes before opening the
           // exclusive snapshot. Keep that ordering barrier without prefetching
@@ -808,7 +792,30 @@ export class DeviceApproval {
     }
   }
 
-  private async respond(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
+  private respond(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
+    const response = this.startResponse(challengeId, preparedSnapshot);
+    // The waiting foreground operation owns rejection. Do not also leave that
+    // same failure pending for its next retry as an unobserved background error.
+    response.foreground = true;
+    return response.promise;
+  }
+
+  private startResponse(challengeId: string, preparedSnapshot?: EpochSnapshot) {
+    const pending = this.responding.get(challengeId);
+    if (pending) return pending;
+    // The subscription and foreground recovery can observe one challenge at
+    // once. Share only unfinished work; every later attempt reads fresh state.
+    const response = {
+      promise: this.respondOnce(challengeId, preparedSnapshot).finally(() => {
+        this.responding.delete(challengeId);
+      }),
+      foreground: false,
+    };
+    this.responding.set(challengeId, response);
+    return response;
+  }
+
+  private async respondOnce(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
     if (await this.db.e2eeIsExplicitlyOffline()) return;
     const snapshot = preparedSnapshot ?? (await this.currentSnapshot());
     const challenge = snapshot.challenges.find(
