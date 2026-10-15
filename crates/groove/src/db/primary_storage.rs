@@ -491,6 +491,23 @@ impl Database {
             .await
     }
 
+    /// [`Self::primary_key_scan_range_raw`] that also observes writes already
+    /// staged in `batch`.
+    pub async fn primary_key_scan_range_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        start: &[Value],
+        end: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        self.ensure_batch_storage_txn(batch)?;
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
+            .await
+    }
+
     async fn primary_key_scan_range_raw_with_storage<'a, T>(
         &'a self,
         storage: &T,
