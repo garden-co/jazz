@@ -458,8 +458,9 @@ impl SparseGroups {
         self.overlay = Rc::default();
     }
 
-    /// Groups, positive rows and their encoded bytes (group keys plus row
-    /// bytes, the same measure as `ArrangementState::encoded_bytes`).
+    /// Groups, positive rows and their encoded bytes: group keys, sort
+    /// values and row bytes, rows measured like
+    /// `ArrangementState::encoded_bytes`.
     pub(super) fn footprint(&self) -> OperatorStateFootprint {
         let mut footprint = OperatorStateFootprint::default();
         for key in self.present_keys() {
@@ -468,10 +469,12 @@ impl SparseGroups {
             };
             footprint.groups += 1;
             footprint.encoded_bytes += key.len();
-            for ((_, row), weight) in group.iter() {
+            for ((sort, row), weight) in group.iter() {
                 if *weight > 0 {
                     footprint.rows += 1;
                     footprint.encoded_bytes += row.len();
+                    footprint.encoded_bytes +=
+                        sort.iter().map(TopBySortPart::encoded_len).sum::<usize>();
                 }
             }
         }
