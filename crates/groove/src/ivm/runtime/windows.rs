@@ -1264,13 +1264,7 @@ fn top_by_sort_value(
         (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
         (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
             let value = if value == 0.0 { 0.0 } else { value };
-            let bits = value.to_bits();
-            let ordered = if bits & (1 << 63) == 0 {
-                bits ^ (1 << 63)
-            } else {
-                !bits
-            };
-            TopBySortKey::F64(ordered)
+            TopBySortKey::F64(crate::records::ordered_key::f64_order_bits(value))
         }
         (ValueType::Bool, Value::Bool(value)) => TopBySortKey::Bool(value),
         (ValueType::String, Value::String(value)) => TopBySortKey::String(value),

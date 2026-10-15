@@ -529,15 +529,17 @@ fn mergeable_open_fresh_insert_reads_and_updates_its_own_write() {
     let fresh = row(1);
     core.open_mergeable(open_tx, author, Some(author)).unwrap();
     let schema_version = core.current_write_schema().unwrap().schema;
-    core.tx_write_mergeable_in_schema(
+    core.tx_write_mergeable_with(
         open_tx,
-        schema_version,
         "todos",
         fresh,
         mergeable_open_cells("fresh", "note"),
         None,
-        None,
-        true,
+        TxWriteOptions {
+            schema_version: Some(schema_version),
+            known_fresh_row: true,
+            ..TxWriteOptions::default()
+        },
     )
     .unwrap();
     assert_eq!(

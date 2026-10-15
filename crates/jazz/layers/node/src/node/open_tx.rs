@@ -572,81 +572,36 @@ where
         cells: BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<(), Error> {
-        self.tx_write_in_schema(
+        self.tx_write_with(
             tx_id,
-            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
             deletion,
+            TxWriteOptions::default(),
         )
         .await
     }
 
-    /// Stage a row write through an explicit registered schema view.
-    pub async fn tx_write_in_schema<V: Into<Value>>(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        cells: BTreeMap<String, V>,
-        deletion: Option<DeletionEvent>,
-    ) -> Result<(), Error> {
-        self.tx_write_in_schema_at_ms(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            cells,
-            deletion,
-            None,
-        )
-        .await
-    }
-
+    /// Stage an exclusive row replacement. Exclusive writes use only the
+    /// schema view, timestamp and staged large values of `opts`.
     #[doc(hidden)]
-    pub async fn tx_write_in_schema_at_ms<V: Into<Value>>(
+    pub async fn tx_write_with<V: Into<Value>>(
         &mut self,
         tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
-        now_ms: Option<u64>,
+        opts: TxWriteOptions,
     ) -> Result<(), Error> {
-        self.tx_write_in_schema_with_staged_large_values(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            cells,
-            deletion,
+        let TxWriteOptions {
+            schema_version,
             now_ms,
-            BTreeMap::new(),
-        )
-        .await
-    }
-
-    /// Stage an exclusive row replacement whose `staged_large_cells` columns
-    /// hold descriptors of Groove roots this transaction staged itself for a
-    /// partial large-value update (#2087). The transaction takes ownership of
-    /// those roots: commit publishes them, and a later replacement of the
-    /// column supersedes them.
-    #[allow(clippy::too_many_arguments)]
-    #[doc(hidden)]
-    pub async fn tx_write_in_schema_with_staged_large_values<V: Into<Value>>(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        cells: BTreeMap<String, V>,
-        deletion: Option<DeletionEvent>,
-        now_ms: Option<u64>,
-        staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
-    ) -> Result<(), Error> {
+            staged_large_cells,
+            ..
+        } = opts;
+        let write_schema_version = schema_version.unwrap_or(self.catalogue.active_schema.schema);
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Exclusive { .. }
@@ -715,94 +670,41 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        self.tx_write_mergeable_in_schema(
+        self.tx_write_mergeable_with(
             tx_id,
-            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
             deletion,
-            now_ms,
-            false,
+            TxWriteOptions {
+                now_ms,
+                ..TxWriteOptions::default()
+            },
         )
-        .await
     }
 
+    /// Stage a mergeable row replacement.
     #[doc(hidden)]
-    pub async fn tx_write_mergeable_in_schema(
+    pub fn tx_write_mergeable_with(
         &mut self,
         tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        now_ms: Option<u64>,
-        known_fresh_row: bool,
+        opts: TxWriteOptions,
     ) -> Result<(), Error> {
-        self.tx_write_mergeable_in_schema_and_branch(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            cells,
-            deletion,
-            now_ms,
-            BranchSelector::default(),
-            known_fresh_row,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[doc(hidden)]
-    pub fn tx_write_mergeable_in_schema_and_branch(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        cells: BTreeMap<String, Value>,
-        deletion: Option<DeletionEvent>,
-        now_ms: Option<u64>,
-        branch: BranchSelector,
-        known_fresh_row: bool,
-    ) -> Result<(), Error> {
-        self.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            cells,
-            deletion,
+        let TxWriteOptions {
+            schema_version,
             now_ms,
             branch,
             known_fresh_row,
-            None,
-            false,
-            None,
-        )
-    }
-
-    /// Stage a branch-local replacement whose unchanged cells were read from
-    /// a visible branch-view base. Commit construction reuses an indirect
-    /// descriptor only when its final cell still exactly matches this private
-    /// engine provenance.
-    #[allow(clippy::too_many_arguments)]
-    pub fn tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        cells: BTreeMap<String, Value>,
-        deletion: Option<DeletionEvent>,
-        now_ms: Option<u64>,
-        branch: BranchSelector,
-        known_fresh_row: bool,
-        verified_inherited_cells: Option<BTreeMap<String, Value>>,
-        replace_pending_deletion: bool,
-        branch_view_copy: Option<BranchViewCopyEvidence>,
-    ) -> Result<(), Error> {
+            replace_pending_deletion,
+            verified_inherited_cells,
+            branch_view_copy,
+            staged_large_cells,
+        } = opts;
+        let write_schema_version = schema_version.unwrap_or(self.catalogue.active_schema.schema);
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -827,7 +729,7 @@ where
                 known_fresh_row,
                 verified_inherited_cells,
                 branch_view_copy,
-                staged_large_cells: BTreeMap::new(),
+                staged_large_cells,
             },
             replace_pending_deletion,
         )
@@ -843,85 +745,39 @@ where
         patch: BTreeMap<String, Value>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        self.tx_patch_mergeable_in_schema(
+        self.tx_patch_mergeable_with(
             tx_id,
-            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             patch,
-            now_ms,
+            TxWriteOptions {
+                now_ms,
+                ..TxWriteOptions::default()
+            },
         )
         .await
     }
 
+    /// Stage a mergeable root patch. Patches use the schema view, timestamp,
+    /// branch, pending-deletion replacement and staged large values of `opts`.
     #[doc(hidden)]
-    pub async fn tx_patch_mergeable_in_schema(
+    pub async fn tx_patch_mergeable_with(
         &mut self,
         tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         patch: BTreeMap<String, Value>,
-        now_ms: Option<u64>,
+        opts: TxWriteOptions,
     ) -> Result<(), Error> {
-        self.tx_patch_mergeable_in_schema_and_branch(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            patch,
-            now_ms,
-            BranchSelector::default(),
-            false,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[doc(hidden)]
-    pub async fn tx_patch_mergeable_in_schema_and_branch(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        patch: BTreeMap<String, Value>,
-        now_ms: Option<u64>,
-        branch: BranchSelector,
-        replace_pending_deletion: bool,
-    ) -> Result<(), Error> {
-        self.tx_patch_mergeable_with_staged_large_values(
-            tx_id,
-            write_schema_version,
-            table,
-            row_uuid,
-            patch,
+        let TxWriteOptions {
+            schema_version,
             now_ms,
             branch,
             replace_pending_deletion,
-            BTreeMap::new(),
-        )
-        .await
-    }
-
-    /// Stage a mergeable root patch whose `staged_large_cells` columns hold
-    /// descriptors of Groove roots this transaction staged itself for a
-    /// partial large-value update (#2087). See
-    /// [`Self::tx_write_in_schema_with_staged_large_values`].
-    #[allow(clippy::too_many_arguments)]
-    #[doc(hidden)]
-    pub async fn tx_patch_mergeable_with_staged_large_values(
-        &mut self,
-        tx_id: OpenTransactionId,
-        write_schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        patch: BTreeMap<String, Value>,
-        now_ms: Option<u64>,
-        branch: BranchSelector,
-        replace_pending_deletion: bool,
-        staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
-    ) -> Result<(), Error> {
+            staged_large_cells,
+            ..
+        } = opts;
+        let write_schema_version = schema_version.unwrap_or(self.catalogue.active_schema.schema);
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -2690,4 +2546,32 @@ fn coalesce_exclusive_writes(writes: StagedWrites) -> Vec<(PendingWrite, bool)> 
         }
     }
     merged
+}
+
+/// Optional parts of a staged transaction write. The default writes the
+/// active schema on the main branch, stamped at commit time.
+#[derive(Default)]
+pub struct TxWriteOptions {
+    /// Registered schema view to write through; `None` is the active schema.
+    pub schema_version: Option<SchemaVersionId>,
+    /// Write timestamp; `None` stamps the write at commit.
+    pub now_ms: Option<u64>,
+    /// Branch to write; ignored by exclusive writes.
+    pub branch: BranchSelector,
+    /// The caller proved the row has never existed, so commit may skip the
+    /// prior-state read.
+    pub known_fresh_row: bool,
+    /// Replace a pending deletion of the row instead of rejecting the write.
+    pub replace_pending_deletion: bool,
+    /// Base cells read from a visible branch view. Commit construction reuses
+    /// an indirect descriptor only when its final cell still exactly matches
+    /// this engine provenance.
+    pub verified_inherited_cells: Option<BTreeMap<String, Value>>,
+    /// Evidence that the write copies a row from a branch-view base.
+    pub branch_view_copy: Option<BranchViewCopyEvidence>,
+    /// Descriptors of Groove roots this transaction staged itself for a
+    /// partial large-value update (#2087). The transaction takes ownership of
+    /// those roots: commit publishes them, and a later replacement of the
+    /// column supersedes them.
+    pub staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
 }

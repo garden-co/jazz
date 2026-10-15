@@ -7,7 +7,7 @@
 //! borrowed/owned record access. Query expressions and schemas refer to these
 //! value types but do not perform byte-level encoding themselves.
 
-use super::{DescriptorField, Error, FieldIdentity, OwnedRecord, RecordDescriptor};
+use super::{DescriptorField, Error, FieldIdentity, OwnedRecord, RecordDescriptor, ordered_key};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -2607,8 +2607,12 @@ fn encode_tuple_member(
         (Value::U32(value), ValueType::U32) => bytes.extend(value.to_be_bytes()),
         (Value::U64(value), ValueType::U64) => bytes.extend(value.to_be_bytes()),
         (Value::U48(value), ValueType::U48) => bytes.extend(u48_be_bytes(*value)?),
-        (Value::I32(value), ValueType::I32) => bytes.extend(order_preserving_i32(*value)),
-        (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
+        (Value::I32(value), ValueType::I32) => {
+            bytes.extend(ordered_key::i32_order_bits(*value).to_be_bytes())
+        }
+        (Value::I64(value), ValueType::I64) => {
+            bytes.extend(ordered_key::i64_order_bits(*value).to_be_bytes())
+        }
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
         (Value::String(value), ValueType::EnumTag(schema)) => {
@@ -2664,12 +2668,12 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         ValueType::U32 => Ok(Value::U32(u32::from_be_bytes(read_exact::<4>(bytes)?))),
         ValueType::U64 => Ok(Value::U64(u64::from_be_bytes(read_exact::<8>(bytes)?))),
         ValueType::U48 => Ok(Value::U48(u48_from_be_bytes(read_exact::<6>(bytes)?))),
-        ValueType::I32 => Ok(Value::I32(i32_from_order_preserving(read_exact::<4>(
-            bytes,
-        )?))),
-        ValueType::I64 => Ok(Value::I64(i64_from_order_preserving(read_exact::<8>(
-            bytes,
-        )?))),
+        ValueType::I32 => Ok(Value::I32(ordered_key::i32_from_order_bits(
+            u32::from_be_bytes(read_exact::<4>(bytes)?),
+        ))),
+        ValueType::I64 => Ok(Value::I64(ordered_key::i64_from_order_bits(
+            u64::from_be_bytes(read_exact::<8>(bytes)?),
+        ))),
         ValueType::Bool => match read_exact::<1>(bytes)?[0] {
             0 => Ok(Value::Bool(false)),
             1 => Ok(Value::Bool(true)),
@@ -2726,22 +2730,6 @@ fn read_exact<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
         return Err(Error::UnexpectedEof);
     }
     bytes.try_into().map_err(|_| Error::UnexpectedEof)
-}
-
-fn order_preserving_i64(value: i64) -> [u8; 8] {
-    ((value as u64) ^ (1_u64 << 63)).to_be_bytes()
-}
-
-fn i64_from_order_preserving(bytes: [u8; 8]) -> i64 {
-    (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64
-}
-
-fn order_preserving_i32(value: i32) -> [u8; 4] {
-    ((value as u32) ^ (1_u32 << 31)).to_be_bytes()
-}
-
-fn i32_from_order_preserving(bytes: [u8; 4]) -> i32 {
-    (u32::from_be_bytes(bytes) ^ (1_u32 << 31)) as i32
 }
 
 pub(super) fn write_u32(bytes: &mut Vec<u8>, value: u32) {

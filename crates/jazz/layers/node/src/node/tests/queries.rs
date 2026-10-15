@@ -3826,7 +3826,6 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     };
     assert_eq!(version_bundles.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     let second = peer
         .rehydrate_query(&mut core, &filtered_shape, &filtered_binding)
@@ -3896,7 +3895,6 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(!peer.shipped_complete_tx_payloads().contains(&tx_id));
 
     let second = peer
         .rehydrate_query(&mut core, &second_shape, &second_binding)

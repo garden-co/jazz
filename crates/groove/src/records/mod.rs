@@ -86,6 +86,7 @@
 //! ```
 
 pub mod macros;
+pub(crate) mod ordered_key;
 mod values;
 
 use std::ops::Deref;

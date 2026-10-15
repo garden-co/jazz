@@ -214,7 +214,8 @@ impl RecordField for i64 {
                 expected: ValueType::I64,
             });
         }
-        read_exact_array::<8>(bytes).map(|bytes| (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64)
+        read_exact_array::<8>(bytes)
+            .map(|bytes| super::ordered_key::i64_from_order_bits(u64::from_be_bytes(bytes)))
     }
 }
 
@@ -244,7 +245,8 @@ impl RecordField for i32 {
                 expected: ValueType::I32,
             });
         }
-        read_exact_array::<4>(bytes).map(|bytes| (u32::from_be_bytes(bytes) ^ (1_u32 << 31)) as i32)
+        read_exact_array::<4>(bytes)
+            .map(|bytes| super::ordered_key::i32_from_order_bits(u32::from_be_bytes(bytes)))
     }
 }
 

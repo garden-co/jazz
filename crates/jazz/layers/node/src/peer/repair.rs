@@ -27,12 +27,6 @@ impl PeerState {
         self.metrics.version_bundles_out += singleton_bundles.len() as u64;
         self.metrics.complete_tx_payload_refs_out +=
             peer_payload_inventory.complete_tx_payloads.len() as u64;
-
-        self.metrics.duplicate_version_bundles_out += singleton_bundles
-            .iter()
-            .filter(|bundle| bundle_contains_complete_tx_payload(bundle))
-            .filter(|bundle| self.shipped_complete_tx_payloads.contains(&bundle.tx.tx_id))
-            .count() as u64;
     }
 
     /// Evaluate a client commit's write policies at the terminal authority,

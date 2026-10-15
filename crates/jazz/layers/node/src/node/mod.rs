@@ -443,7 +443,7 @@ pub mod terminal_record;
 pub mod terminal_root;
 mod views;
 
-pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
+pub use open_tx::{TransactionBranchRowState, TransactionInsertTargetState, TxWriteOptions};
 pub use query_engine::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
 };

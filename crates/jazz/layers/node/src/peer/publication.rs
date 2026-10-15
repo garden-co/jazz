@@ -324,7 +324,11 @@ impl PeerState {
                     .subscription_awaits_selected_authority_source(source),
                 subscription: plan.subscription,
                 settled_through: plan.settled_through,
-                peer_complete_tx_payloads: self.acknowledged_complete_tx_payloads(),
+                // Complete-payload inventory refs are only safe once the receiver
+                // has explicitly acknowledged durable application. Until the
+                // protocol grows that ack, every served update carries the
+                // required bundles again.
+                peer_complete_tx_payloads: BTreeSet::new(),
                 known_state: plan.known_state,
                 leave_scan_after: plan.leave_scan_after,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads

@@ -1,6 +1,11 @@
 //! Index scan bounds, comparison semantics, and order-preserving key encoding.
 
 use super::*;
+pub(super) use crate::records::ordered_key::encode_ordered_bytes;
+use crate::records::ordered_key::{
+    put_bool, put_bytes, put_f64, put_i32, put_i64, put_nullable, put_scalar, put_str, put_u8,
+    put_u32, put_u48, put_u64, put_uuid,
+};
 
 /// A predicate reads fields, not necessarily a materialized intermediate row.
 /// Implementations retain the same typed comparison and SQL-null semantics.
@@ -552,132 +557,10 @@ pub(super) fn encode_scalar_key_part(
     key: &mut Vec<u8>,
     value: &Value,
 ) -> Result<(), IvmRuntimeError> {
-    match value {
-        Value::U8(value) | Value::EnumTag(value) => put_u8(key, *value),
-        Value::U16(value) => {
-            key.push(1);
-            key.extend(value.to_be_bytes());
-            Ok(())
-        }
-        Value::U32(value) => put_u32(key, *value),
-        Value::U64(value) => put_u64(key, *value),
-        Value::U48(value) => put_u48(key, *value),
-        Value::I32(value) => put_i32(key, *value),
-        Value::I64(value) => put_i64(key, *value),
-        Value::F64(value) => put_f64(key, *value),
-        Value::Bool(value) => put_bool(key, *value),
-        Value::String(value) => put_str(key, value),
-        Value::Bytes(value) => put_bytes(key, value),
-        Value::Uuid(value) => put_uuid(key, *value),
-        Value::Tuple(_)
-        | Value::Nullable(_)
-        | Value::Array(_)
-        | Value::Record(_)
-        | Value::Enum(_)
-        | Value::Large(_) => Err(IvmRuntimeError::UnsupportedJoinKey),
-    }
-}
-
-// One tagged writer per scalar key type, shared by the `Value` encoder and
-// the typed record-field fast path so the tag table lives in one place.
-
-type KeyResult = Result<(), IvmRuntimeError>;
-
-#[inline]
-fn put_u8(key: &mut Vec<u8>, value: u8) -> KeyResult {
-    key.extend([0, value]);
-    Ok(())
-}
-
-#[inline]
-fn put_u32(key: &mut Vec<u8>, value: u32) -> KeyResult {
-    key.push(2);
-    key.extend(value.to_be_bytes());
-    Ok(())
-}
-
-#[inline]
-fn put_u64(key: &mut Vec<u8>, value: u64) -> KeyResult {
-    key.push(3);
-    key.extend(value.to_be_bytes());
-    Ok(())
-}
-
-#[inline]
-fn put_u48(key: &mut Vec<u8>, value: u64) -> KeyResult {
-    key.push(16);
-    key.extend(crate::records::u48_be_bytes(value)?);
-    Ok(())
-}
-
-#[inline]
-fn put_i32(key: &mut Vec<u8>, value: i32) -> KeyResult {
-    key.push(14);
-    key.extend(order_preserving_i32_bits(value).to_be_bytes());
-    Ok(())
-}
-
-#[inline]
-fn put_i64(key: &mut Vec<u8>, value: i64) -> KeyResult {
-    key.push(13);
-    key.extend(order_preserving_i64_bits(value).to_be_bytes());
-    Ok(())
-}
-
-/// Callers that may see NaN reject it first with [`non_nan`].
-#[inline]
-fn put_f64(key: &mut Vec<u8>, value: f64) -> KeyResult {
-    key.push(4);
-    key.extend(order_preserving_f64_bits(value).to_be_bytes());
-    Ok(())
-}
-
-#[inline]
-fn put_bool(key: &mut Vec<u8>, value: bool) -> KeyResult {
-    key.extend([5, u8::from(value)]);
-    Ok(())
-}
-
-#[inline]
-fn put_str(key: &mut Vec<u8>, value: &str) -> KeyResult {
-    put_bytes_tagged(key, 6, value.as_bytes())
-}
-
-#[inline]
-fn put_bytes(key: &mut Vec<u8>, value: &[u8]) -> KeyResult {
-    put_bytes_tagged(key, 7, value)
-}
-
-#[inline]
-fn put_bytes_tagged(key: &mut Vec<u8>, tag: u8, value: &[u8]) -> KeyResult {
-    key.push(tag);
-    encode_ordered_bytes(key, value);
-    Ok(())
-}
-
-#[inline]
-fn put_uuid(key: &mut Vec<u8>, value: uuid::Uuid) -> KeyResult {
-    key.push(10);
-    key.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-/// `Value::Nullable` framing: 8 for null, else 9 followed by the value.
-#[inline]
-fn put_nullable<T>(
-    key: &mut Vec<u8>,
-    value: Option<T>,
-    put: impl FnOnce(&mut Vec<u8>, T) -> KeyResult,
-) -> KeyResult {
-    match value {
-        Some(value) => {
-            key.push(9);
-            put(key, value)
-        }
-        None => {
-            key.push(8);
-            Ok(())
-        }
+    if put_scalar(key, value)? {
+        Ok(())
+    } else {
+        Err(IvmRuntimeError::UnsupportedJoinKey)
     }
 }
 
@@ -689,37 +572,6 @@ fn non_nan(value: f64) -> Result<f64, IvmRuntimeError> {
         ));
     }
     Ok(value)
-}
-
-fn order_preserving_f64_bits(value: f64) -> u64 {
-    let bits = value.to_bits();
-    // Flip positive signs and invert negatives; the resulting unsigned integer
-    // sorts like IEEE numeric order for non-NaN values.
-    if bits & (1 << 63) == 0 {
-        bits ^ (1 << 63)
-    } else {
-        !bits
-    }
-}
-
-pub(super) fn order_preserving_i64_bits(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
-}
-
-pub(super) fn order_preserving_i32_bits(value: i32) -> u32 {
-    (value as u32) ^ (1_u32 << 31)
-}
-
-pub(super) fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
-    // 0x00 terminates the byte string; embedded NULs are escaped as 00 ff.
-    for byte in value {
-        if *byte == 0 {
-            key.extend([0, 0xff]);
-        } else {
-            key.push(*byte);
-        }
-    }
-    key.extend([0, 0]);
 }
 
 pub(super) fn project_binding_source_deltas(

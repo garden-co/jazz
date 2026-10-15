@@ -4374,7 +4374,6 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0x71)]),
     );
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 }
 
 #[test]
@@ -4595,7 +4594,6 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     assert_eq!(version_bundles[0].tx.n_total_writes, 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_a);
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
     let read_metrics = core.query_engine_read_metrics();
     assert!(read_metrics.policy_authorization_graphs > 0);
     assert!(read_metrics.policy_authorized_source_joins > 0);
@@ -4802,7 +4800,6 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
         "peer wire publishes covered inputs, not authority result members"
     );
     assert_eq!(peer.metrics.result_removes_out, 0);
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 }
 
 #[test]
@@ -5293,7 +5290,6 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_one);
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
     register_whole_table_receiver(&mut reader, "docs");
     reader.apply_sync_message_settled(first_update).unwrap();
     assert_eq!(

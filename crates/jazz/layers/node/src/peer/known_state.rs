@@ -160,18 +160,6 @@ impl PeerState {
         )
     }
 
-    /// Return transaction refs whose complete payload bundles have shipped on this peer.
-    pub fn shipped_complete_tx_payloads(&self) -> &BTreeSet<TxId> {
-        &self.shipped_complete_tx_payloads
-    }
-
-    fn acknowledged_complete_tx_payloads(&self) -> BTreeSet<TxId> {
-        // Complete-payload inventory refs are only safe once the receiver has
-        // explicitly acknowledged durable application. Until the protocol grows
-        // that ack, every served update must carry the required bundles again.
-        BTreeSet::new()
-    }
-
     /// Configure a trusted writer relay to receive complete accepted exclusive
     /// transaction payloads, so it can safely author later exclusive
     /// transactions from refreshed state. Ordinary readers intentionally keep
@@ -179,15 +167,6 @@ impl PeerState {
     /// identity-scoped client links.
     pub fn set_ship_complete_exclusive_payloads(&mut self, enabled: bool) {
         self.ship_complete_exclusive_payloads = enabled;
-    }
-
-    /// Forget complete-tx payload dedup markers for transactions whose local
-    /// payloads were evicted, so a standard rehydrate may resend them.
-    pub fn forget_evicted_versions(&mut self, tx_ids: impl IntoIterator<Item = TxId>) -> usize {
-        tx_ids
-            .into_iter()
-            .filter(|tx_id| self.shipped_complete_tx_payloads.remove(tx_id))
-            .count()
     }
 
     /// Return current result_set for one subscription.

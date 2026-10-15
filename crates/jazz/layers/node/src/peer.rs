@@ -61,7 +61,6 @@ pub struct PeerState {
     transport_capability: RelayTransportCapability,
     /// Explicit host admission for SYSTEM authority query delegation only.
     pub authority_query_delegate: bool,
-    shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical
     /// coverage outputs and concrete downstream publications. These entries
@@ -90,7 +89,6 @@ impl Default for PeerState {
             permission_identity: None,
             transport_capability: RelayTransportCapability::OrdinarySession,
             authority_query_delegate: false,
-            shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
             downstream_known_states: BTreeMap::new(),
@@ -134,8 +132,6 @@ pub struct PeerMetrics {
     pub view_updates_out: u64,
     /// Version bundles emitted.
     pub version_bundles_out: u64,
-    /// Complete transaction payload bundles emitted after already shipping the same complete tx.
-    pub duplicate_version_bundles_out: u64,
     /// Complete transaction references emitted.
     pub complete_tx_payload_refs_out: u64,
     /// Result-set additions emitted.
