@@ -231,6 +231,10 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     turbo: credentialedCache,
   };
 };
+// Ready PRs get the fast lint partition; the full suite runs on pushes,
+// dispatches, release PRs and the Review Loop's merge-group/* PRs.
+const ciScope =
+  "${{ github.event_name != 'pull_request' && 'full' || startsWith(github.head_ref, 'merge-group/') && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}";
 const workflowDocumentFor = (source) => {
   const document = parse(source);
   assert.equal(typeof document, "object", "CI entry workflow must be a YAML mapping");
@@ -264,6 +268,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(untrusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(untrusted.with, {
+    scope: ciScope,
     "sccache-write": false,
     "trusted-cache": false,
   });
@@ -282,6 +287,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
     "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    scope: ciScope,
     "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
   });
   assert.equal(trusted.secrets, "inherit");
@@ -314,7 +320,11 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(dispatchedStatus.steps[0].uses, undefined);
   assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
   assert.equal(document.on.pull_request_target, undefined);
-  assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
+  assert.deepEqual(
+    document.on.pull_request,
+    { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+    "stacked PR bases must not be branch-filtered, and marking a draft ready must run CI",
+  );
   assert.deepEqual(document.on.push, { branches: ["main", "release"] });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
@@ -2504,4 +2514,34 @@ test("CI rejects inherited live-log timing overrides", () => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /JAZZ_TEST_LOG_INTERVAL_SECONDS.*forbidden/);
+});
+
+test("ready PRs run only the lint partition and drafts run nothing", () => {
+  const suite = parse(workflowSuite);
+  assert.deepEqual(suite.on.workflow_call.inputs.scope, {
+    description: "Which partitions to run, full, fast or none.",
+    required: false,
+    type: "string",
+    default: "full",
+  });
+  assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
+  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+    assert.equal(
+      suite.jobs[name].if,
+      "inputs.scope == 'full'",
+      `${name} must run only in the full scope`,
+    );
+  assert.equal(suite.jobs["test-rust"].if, "always() && inputs.scope == 'full'");
+  assert.deepEqual(
+    Object.keys(suite.jobs).sort(),
+    [
+      "lint",
+      "test-react-native",
+      "test-rust",
+      "test-rust-workspace",
+      "test-storage-compat",
+      "test-ts",
+    ],
+    "a new suite job must declare which scope runs it",
+  );
 });

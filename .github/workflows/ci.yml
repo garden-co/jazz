@@ -3,8 +3,10 @@ name: CI
 on:
   workflow_dispatch:
   # Deliberately unfiltered so every layer of a stacked PR receives CI even
-  # when its base is another feature branch.
+  # when its base is another feature branch. ready_for_review starts the fast
+  # check when a draft is marked ready.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main, release]
 
@@ -33,6 +35,9 @@ jobs:
     with:
       trusted-cache: false
       sccache-write: false
+      # Ready PRs get lint and typecheck only; the Review Loop proves them with
+      # the full suite on a merge-group/* PR into main. Drafts run nothing.
+      scope: ${{ github.event_name != 'pull_request' && 'full' || startsWith(github.head_ref, 'merge-group/') && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
 
   trusted:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
@@ -46,6 +51,9 @@ jobs:
       # Keep ordinary GitHub caches without attempting credentialed cross-ref reads.
       trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
       sccache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # Ready PRs get lint and typecheck only; the Review Loop proves them with
+      # the full suite on a merge-group/* PR into main. Drafts run nothing.
+      scope: ${{ github.event_name != 'pull_request' && 'full' || startsWith(github.head_ref, 'merge-group/') && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
     secrets: inherit
 
   # Preserve the branch-protection check name while the implementation jobs
