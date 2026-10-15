@@ -13,7 +13,7 @@ use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
-    validate_permissions_relation_unions,
+    validate_permissions_relations,
 };
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
@@ -691,7 +691,7 @@ impl CatalogueStore for StoredCatalogue {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
-        validate_permissions_relation_unions(&permissions)
+        validate_permissions_relations(&permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         // Catalogue mutations take storage before the in-memory index. Holding
         // both locks makes parent validation and head advancement linearizable
@@ -887,7 +887,7 @@ mod tests {
     use std::time::Duration;
 
     use jazz::tools::public_schema::{
-        PolicyExpr, RelExpr, RelUnionArm, SchemaBuilder, TableName, TablePolicies,
+        PolicyExpr, RelationExpr, RelationUnionArm, SchemaBuilder, TableName, TablePolicies,
     };
 
     use super::{CatalogueStore, StoredCatalogue};
@@ -959,7 +959,7 @@ mod tests {
             Box::new(CatalogueMemoryStorage::new()),
         )
         .expect("catalogue");
-        let leaf = || RelExpr::TableScan {
+        let leaf = || RelationExpr::TableScan {
             table: TableName::new("todos"),
             alias: None,
         };
@@ -972,10 +972,10 @@ mod tests {
             let permissions = std::collections::HashMap::from([(
                 TableName::new("todos"),
                 TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                    rel: RelExpr::Union {
+                    rel: RelationExpr::Union {
                         inputs: labels
                             .into_iter()
-                            .map(|label| RelUnionArm {
+                            .map(|label| RelationUnionArm {
                                 label,
                                 input: leaf(),
                             })

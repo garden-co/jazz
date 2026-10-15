@@ -21,13 +21,13 @@ use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
 use crate::model::public_schema::{
-    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue, RelColumnRef as PublicRelColumnRef,
-    RelExpr as PublicRelExpr, RelJoinCondition as PublicRelJoinCondition,
-    RelJoinKind as PublicRelJoinKind, RelKeyRef as PublicRelKeyRef,
-    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
-    RelProjectColumn as PublicRelProjectColumn, RelProjectExpr as PublicRelProjectExpr,
-    RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
-    RowIdRef as PublicRelRowIdRef,
+    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue,
+    RecursionBound as PublicRelRecursionBound, RelationCmpOp as PublicRelPredicateCmpOp,
+    RelationColumnRef as PublicRelColumnRef, RelationExpr as PublicRelExpr,
+    RelationJoinCondition as PublicRelJoinCondition, RelationJoinKind as PublicRelJoinKind,
+    RelationKeyRef as PublicRelKeyRef, RelationPredicate as PublicRelPredicateExpr,
+    RelationProjectColumn as PublicRelProjectColumn, RelationProjectExpr as PublicRelProjectExpr,
+    RelationRowIdRef as PublicRelRowIdRef, RelationValueRef as PublicRelValueRef,
 };
 use crate::model::public_schema::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,

@@ -37,12 +37,12 @@ use crate::model::public_schema::{
     Value as PublicValue,
 };
 use crate::model::public_schema::{
-    RelColumnRef as PublicRelColumnRef, RelExpr as PublicRelExpr,
-    RelJoinCondition as PublicRelJoinCondition, RelJoinKind as PublicRelJoinKind,
-    RelKeyRef as PublicRelKeyRef, RelPredicateCmpOp as PublicRelPredicateCmpOp,
-    RelPredicateExpr as PublicRelPredicateExpr, RelProjectColumn as PublicRelProjectColumn,
-    RelProjectExpr as PublicRelProjectExpr, RelRecursionBound as PublicRelRecursionBound,
-    RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
+    RecursionBound as PublicRelRecursionBound, RelationCmpOp as PublicRelPredicateCmpOp,
+    RelationColumnRef as PublicRelColumnRef, RelationExpr,
+    RelationJoinCondition as PublicRelJoinCondition, RelationJoinKind as PublicRelJoinKind,
+    RelationKeyRef as PublicRelKeyRef, RelationPredicate as PublicRelPredicateExpr,
+    RelationProjectColumn as PublicRelProjectColumn, RelationProjectExpr as PublicRelProjectExpr,
+    RelationRowIdRef as PublicRelRowIdRef, RelationValueRef as PublicRelValueRef,
 };
 use crate::node::legacy_test_future::{
     FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,

@@ -15,10 +15,10 @@ use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelUnionArm,
-    RelValueRef, RowDescriptor, RowIdRef, Schema, SchemaHash, TableName, TablePolicies,
-    TableSchema, Value,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef, RowDescriptor,
+    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
@@ -951,16 +951,18 @@ const REL_JOIN_LEFT: u8 = 2;
 const REL_BOUND_FIXPOINT: u8 = 1;
 const REL_BOUND_MAX_DEPTH: u8 = 2;
 
-fn encode_canonical_relation_expr(buf: &mut Vec<u8>, rel: &RelExpr) {
+fn encode_canonical_relation_expr(buf: &mut Vec<u8>, rel: &RelationExpr) {
     buf.push(NESTED_CODEC_VERSION);
     encode_relation_expr_body(buf, rel);
 }
 
-/// Validate every relation-IR arm before an infallible catalogue encoder is
-/// allowed to hash or persist it. Server callers can publish `TablePolicies`
+/// Validate every relation-IR arm and literal before an infallible catalogue
+/// encoder is allowed to hash or persist it. Policies use a subset of the query
+/// relation IR: no output steps, query parameters or frontier columns, and
+/// literals are typed public values. Server callers can publish `TablePolicies`
 /// directly, bypassing core-schema conversion, so this is the admission
 /// boundary for the durable grammar as well as a decoder defense.
-pub fn validate_permissions_relation_unions(
+pub fn validate_permissions_relations(
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Result<(), CatalogueEncodingError> {
     for policies in permissions.values() {
@@ -975,21 +977,21 @@ pub fn validate_permissions_relation_unions(
         .into_iter()
         .flatten()
         {
-            validate_policy_relation_unions(policy)?;
+            validate_policy_relations(policy)?;
         }
     }
     Ok(())
 }
 
-fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
+fn validate_policy_relations(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
     match policy {
-        PolicyExpr::ExistsRel { rel } => validate_relation_union_labels(rel),
+        PolicyExpr::ExistsRel { rel } => validate_relation_policy(rel),
         PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
-            validate_policy_relation_unions(condition)
+            validate_policy_relations(condition)
         }
         PolicyExpr::And(expressions) | PolicyExpr::Or(expressions) => {
             for expression in expressions {
-                validate_policy_relation_unions(expression)?;
+                validate_policy_relations(expression)?;
             }
             Ok(())
         }
@@ -997,13 +999,22 @@ fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueE
     }
 }
 
-fn validate_relation_union_labels(rel: &RelExpr) -> Result<(), CatalogueEncodingError> {
+fn validate_relation_policy(rel: &RelationExpr) -> Result<(), CatalogueEncodingError> {
     match rel {
-        RelExpr::TableScan { .. } => Ok(()),
-        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
-            validate_relation_union_labels(input)
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, predicate } => {
+            validate_relation_policy_predicate(predicate)?;
+            validate_relation_policy(input)
         }
-        RelExpr::Union { inputs } => {
+        RelationExpr::Project { input, .. } => validate_relation_policy(input),
+        RelationExpr::Distinct { .. }
+        | RelationExpr::OrderBy { .. }
+        | RelationExpr::Offset { .. }
+        | RelationExpr::Limit { .. } => Err(CatalogueEncodingError::DecodeError {
+            message: "relation policies do not support Distinct, OrderBy, Offset or Limit"
+                .to_owned(),
+        }),
+        RelationExpr::Union { inputs } => {
             let mut labels = BTreeSet::new();
             for arm in inputs {
                 if arm.label.is_empty()
@@ -1017,36 +1028,82 @@ fn validate_relation_union_labels(rel: &RelExpr) -> Result<(), CatalogueEncoding
                                 .to_owned(),
                     });
                 }
-                validate_relation_union_labels(&arm.input)?;
+                validate_relation_policy(&arm.input)?;
             }
             Ok(())
         }
-        RelExpr::Join { left, right, .. } => {
-            validate_relation_union_labels(left)?;
-            validate_relation_union_labels(right)
+        RelationExpr::Join { left, right, .. } => {
+            validate_relation_policy(left)?;
+            validate_relation_policy(right)
         }
-        RelExpr::Gather { seed, step, .. } => {
-            validate_relation_union_labels(seed)?;
-            validate_relation_union_labels(step)
+        RelationExpr::Gather { seed, step, .. } => {
+            validate_relation_policy(seed)?;
+            validate_relation_policy(step)
         }
     }
 }
 
-fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
+fn validate_relation_policy_predicate(
+    predicate: &RelationPredicate,
+) -> Result<(), CatalogueEncodingError> {
+    match predicate {
+        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
+            validate_relation_policy_value(right)
+        }
+        RelationPredicate::In { values, .. } => {
+            values.iter().try_for_each(validate_relation_policy_value)
+        }
+        RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
+            validate_relation_policy_predicate(payload)
+        }
+        RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => predicates
+            .iter()
+            .try_for_each(validate_relation_policy_predicate),
+        RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::True
+        | RelationPredicate::False => Ok(()),
+    }
+}
+
+fn validate_relation_policy_value(value: &RelationValueRef) -> Result<(), CatalogueEncodingError> {
+    let message = match value {
+        RelationValueRef::Literal(literal) => match relation_policy_literal(literal) {
+            Ok(_) => return Ok(()),
+            Err(error) => format!("relation policy literals must be typed values: {error}"),
+        },
+        RelationValueRef::Param(_) => {
+            "relation policies do not support query parameters".to_owned()
+        }
+        RelationValueRef::FrontierColumn(_) => {
+            "relation policies do not support frontier column operands".to_owned()
+        }
+        RelationValueRef::SessionRef(_)
+        | RelationValueRef::OuterColumn(_)
+        | RelationValueRef::RowId(_) => return Ok(()),
+    };
+    Err(CatalogueEncodingError::DecodeError { message })
+}
+
+fn relation_policy_literal(literal: &serde_json::Value) -> Result<Value, serde_json::Error> {
+    serde_json::from_value(literal.clone())
+}
+
+fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelationExpr) {
     let mut tasks = vec![RelationEncodeTask::Expr(rel)];
     while let Some(task) = tasks.pop() {
         match task {
-            RelationEncodeTask::Expr(RelExpr::TableScan { table, alias }) => {
+            RelationEncodeTask::Expr(RelationExpr::TableScan { table, alias }) => {
                 buf.push(REL_TABLE_SCAN);
                 write_string(buf, table.as_str());
                 encode_optional_string(buf, alias.as_deref());
             }
-            RelationEncodeTask::Expr(RelExpr::Filter { input, predicate }) => {
+            RelationEncodeTask::Expr(RelationExpr::Filter { input, predicate }) => {
                 buf.push(REL_FILTER);
                 tasks.push(RelationEncodeTask::Pred(predicate));
                 tasks.push(RelationEncodeTask::Expr(input));
             }
-            RelationEncodeTask::Expr(RelExpr::Union { inputs }) => {
+            RelationEncodeTask::Expr(RelationExpr::Union { inputs }) => {
                 buf.push(REL_UNION_LABELED);
                 write_seq(buf, inputs, |buf, arm| {
                     assert!(
@@ -1061,7 +1118,7 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                     tasks.push(RelationEncodeTask::Expr(&arm.input));
                 }
             }
-            RelationEncodeTask::Expr(RelExpr::Join {
+            RelationEncodeTask::Expr(RelationExpr::Join {
                 left,
                 right,
                 on,
@@ -1072,12 +1129,12 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                 tasks.push(RelationEncodeTask::Expr(right));
                 tasks.push(RelationEncodeTask::Expr(left));
             }
-            RelationEncodeTask::Expr(RelExpr::Project { input, columns }) => {
+            RelationEncodeTask::Expr(RelationExpr::Project { input, columns }) => {
                 buf.push(REL_PROJECT);
                 tasks.push(RelationEncodeTask::ProjectTail(columns));
                 tasks.push(RelationEncodeTask::Expr(input));
             }
-            RelationEncodeTask::Expr(RelExpr::Gather {
+            RelationEncodeTask::Expr(RelationExpr::Gather {
                 seed,
                 step,
                 frontier_key,
@@ -1093,6 +1150,12 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                 tasks.push(RelationEncodeTask::Expr(step));
                 tasks.push(RelationEncodeTask::Expr(seed));
             }
+            RelationEncodeTask::Expr(
+                RelationExpr::Distinct { .. }
+                | RelationExpr::OrderBy { .. }
+                | RelationExpr::Offset { .. }
+                | RelationExpr::Limit { .. },
+            ) => unreachable!("validated relation policies have no output steps"),
             RelationEncodeTask::Pred(pred) => encode_relation_predicate_task(buf, pred, &mut tasks),
             RelationEncodeTask::JoinTail(on, kind) => {
                 write_seq(buf, on, |buf, c| {
@@ -1115,18 +1178,18 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
 }
 
 enum RelationEncodeTask<'a> {
-    Expr(&'a RelExpr),
-    Pred(&'a RelPredicateExpr),
-    JoinTail(&'a [RelJoinCondition], &'a RelJoinKind),
-    ProjectTail(&'a [RelProjectColumn]),
-    GatherTail(&'a RelKeyRef, &'a RelRecursionBound, &'a [RelKeyRef]),
+    Expr(&'a RelationExpr),
+    Pred(&'a RelationPredicate),
+    JoinTail(&'a [RelationJoinCondition], &'a RelationJoinKind),
+    ProjectTail(&'a [RelationProjectColumn]),
+    GatherTail(&'a RelationKeyRef, &'a RecursionBound, &'a [RelationKeyRef]),
 }
 
 fn decode_canonical_relation_expr(
     data: &[u8],
     offset: &mut usize,
     budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<RelExpr, CatalogueEncodingError> {
+) -> Result<RelationExpr, CatalogueEncodingError> {
     let start = *offset;
     let version = read_u8(data, offset)?;
     if version != NESTED_CODEC_VERSION {
@@ -1189,24 +1252,24 @@ enum RelationDecodeTask {
     ProjectDone,
     GatherTail,
     GatherDone,
-    EnumDone(RelColumnRef, String),
+    EnumDone(RelationColumnRef, String),
     AndDone(usize),
     OrDone(usize),
     NotDone,
 }
 enum RelationDecodeValue {
-    Expr(RelExpr),
-    Pred(RelPredicateExpr),
-    Join(Vec<RelJoinCondition>, RelJoinKind),
-    Project(Vec<RelProjectColumn>),
-    Gather(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>),
+    Expr(RelationExpr),
+    Pred(RelationPredicate),
+    Join(Vec<RelationJoinCondition>, RelationJoinKind),
+    Project(Vec<RelationProjectColumn>),
+    Gather(RelationKeyRef, RecursionBound, Vec<RelationKeyRef>),
 }
 
 fn decode_relation_expr_body_iterative(
     data: &[u8],
     offset: &mut usize,
     budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<RelExpr, CatalogueEncodingError> {
+) -> Result<RelationExpr, CatalogueEncodingError> {
     let mut tasks = vec![RelationDecodeTask::Expr(1)];
     let mut values = Vec::new();
     while let Some(task) = tasks.pop() {
@@ -1214,10 +1277,12 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::Expr(depth) => {
                 budget.enter(depth)?;
                 match read_u8(data, offset)? {
-                    REL_TABLE_SCAN => values.push(RelationDecodeValue::Expr(RelExpr::TableScan {
-                        table: TableName::new(read_string(data, offset, "relation_table")?),
-                        alias: decode_optional_string(data, offset, "relation_alias")?,
-                    })),
+                    REL_TABLE_SCAN => {
+                        values.push(RelationDecodeValue::Expr(RelationExpr::TableScan {
+                            table: read_string(data, offset, "relation_table")?,
+                            alias: decode_optional_string(data, offset, "relation_alias")?,
+                        }))
+                    }
                     REL_FILTER => {
                         budget.reserve(1)?;
                         tasks.push(RelationDecodeTask::FilterDone);
@@ -1291,7 +1356,7 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::FilterDone => {
                 let predicate = pop_pred(&mut values)?;
                 let input = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Filter {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Filter {
                     input: Box::new(input),
                     predicate,
                 }));
@@ -1299,13 +1364,13 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::UnionDone(labels) => {
                 let mut inputs = Vec::with_capacity(labels.len());
                 for label in labels.into_iter().rev() {
-                    inputs.push(RelUnionArm {
+                    inputs.push(RelationUnionArm {
                         label,
                         input: pop_expr(&mut values)?,
                     });
                 }
                 inputs.reverse();
-                values.push(RelationDecodeValue::Expr(RelExpr::Union { inputs }));
+                values.push(RelationDecodeValue::Expr(RelationExpr::Union { inputs }));
             }
             RelationDecodeTask::JoinTail => {
                 let (on, join_kind) = read_join_tail(data, offset)?;
@@ -1315,7 +1380,7 @@ fn decode_relation_expr_body_iterative(
                 let (on, join_kind) = pop_join(&mut values)?;
                 let right = pop_expr(&mut values)?;
                 let left = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Join {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Join {
                     left: Box::new(left),
                     right: Box::new(right),
                     on,
@@ -1328,7 +1393,7 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::ProjectDone => {
                 let columns = pop_project(&mut values)?;
                 let input = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Project {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Project {
                     input: Box::new(input),
                     columns,
                 }));
@@ -1341,7 +1406,7 @@ fn decode_relation_expr_body_iterative(
                 let (frontier_key, bound, dedupe_key) = pop_gather(&mut values)?;
                 let step = pop_expr(&mut values)?;
                 let seed = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Gather {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
                     frontier_key,
@@ -1351,7 +1416,7 @@ fn decode_relation_expr_body_iterative(
             }
             RelationDecodeTask::EnumDone(column, case) => {
                 let payload = pop_pred(&mut values)?;
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::EnumMatch {
+                values.push(RelationDecodeValue::Pred(RelationPredicate::EnumMatch {
                     column,
                     case,
                     payload: Box::new(payload),
@@ -1363,7 +1428,7 @@ fn decode_relation_expr_body_iterative(
                     expressions.push(pop_pred(&mut values)?);
                 }
                 expressions.reverse();
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::And(
+                values.push(RelationDecodeValue::Pred(RelationPredicate::And(
                     expressions,
                 )));
             }
@@ -1373,11 +1438,13 @@ fn decode_relation_expr_body_iterative(
                     expressions.push(pop_pred(&mut values)?);
                 }
                 expressions.reverse();
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::Or(expressions)));
+                values.push(RelationDecodeValue::Pred(RelationPredicate::Or(
+                    expressions,
+                )));
             }
             RelationDecodeTask::NotDone => {
                 let input = pop_pred(&mut values)?;
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::Not(Box::new(
+                values.push(RelationDecodeValue::Pred(RelationPredicate::Not(Box::new(
                     input,
                 ))));
             }
@@ -1401,16 +1468,18 @@ fn decode_relation_predicate_task_iterative(
 ) -> Result<(), CatalogueEncodingError> {
     budget.enter(depth)?;
     match read_u8(data, offset)? {
-        REL_PREDICATE_CMP => values.push(RelationDecodeValue::Pred(RelPredicateExpr::Cmp {
+        REL_PREDICATE_CMP => values.push(RelationDecodeValue::Pred(RelationPredicate::Cmp {
             left: decode_relation_column_ref(data, offset)?,
             op: decode_relation_cmp_op(data, offset)?,
             right: decode_relation_value_ref(data, offset)?,
         })),
-        REL_PREDICATE_IS_NULL => values.push(RelationDecodeValue::Pred(RelPredicateExpr::IsNull {
-            column: decode_relation_column_ref(data, offset)?,
-        })),
+        REL_PREDICATE_IS_NULL => {
+            values.push(RelationDecodeValue::Pred(RelationPredicate::IsNull {
+                column: decode_relation_column_ref(data, offset)?,
+            }))
+        }
         REL_PREDICATE_IS_NOT_NULL => {
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::IsNotNull {
+            values.push(RelationDecodeValue::Pred(RelationPredicate::IsNotNull {
                 column: decode_relation_column_ref(data, offset)?,
             }))
         }
@@ -1422,13 +1491,13 @@ fn decode_relation_predicate_task_iterative(
                 "relation_predicate_in",
                 decode_relation_value_ref,
             )?;
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::In {
+            values.push(RelationDecodeValue::Pred(RelationPredicate::In {
                 left,
                 values: items,
             }));
         }
         REL_PREDICATE_CONTAINS => {
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::Contains {
+            values.push(RelationDecodeValue::Pred(RelationPredicate::Contains {
                 left: decode_relation_column_ref(data, offset)?,
                 right: decode_relation_value_ref(data, offset)?,
             }))
@@ -1461,8 +1530,8 @@ fn decode_relation_predicate_task_iterative(
             tasks.push(RelationDecodeTask::NotDone);
             tasks.push(RelationDecodeTask::Pred(depth + 1));
         }
-        REL_PREDICATE_TRUE => values.push(RelationDecodeValue::Pred(RelPredicateExpr::True)),
-        REL_PREDICATE_FALSE => values.push(RelationDecodeValue::Pred(RelPredicateExpr::False)),
+        REL_PREDICATE_TRUE => values.push(RelationDecodeValue::Pred(RelationPredicate::True)),
+        REL_PREDICATE_FALSE => values.push(RelationDecodeValue::Pred(RelationPredicate::False)),
         tag => {
             return Err(CatalogueEncodingError::InvalidTypeTag {
                 tag,
@@ -1476,9 +1545,9 @@ fn decode_relation_predicate_task_iterative(
 fn read_join_tail(
     data: &[u8],
     offset: &mut usize,
-) -> Result<(Vec<RelJoinCondition>, RelJoinKind), CatalogueEncodingError> {
+) -> Result<(Vec<RelationJoinCondition>, RelationJoinKind), CatalogueEncodingError> {
     let on = read_seq(data, offset, "relation_join_conditions", |data, offset| {
-        Ok(RelJoinCondition {
+        Ok(RelationJoinCondition {
             left: decode_relation_column_ref(data, offset)?,
             right: decode_relation_column_ref(data, offset)?,
         })
@@ -1489,9 +1558,9 @@ fn read_join_tail(
 fn read_project_tail(
     data: &[u8],
     offset: &mut usize,
-) -> Result<Vec<RelProjectColumn>, CatalogueEncodingError> {
+) -> Result<Vec<RelationProjectColumn>, CatalogueEncodingError> {
     read_seq(data, offset, "relation_project_columns", |data, offset| {
-        Ok(RelProjectColumn {
+        Ok(RelationProjectColumn {
             alias: read_string(data, offset, "relation_project_alias")?,
             expr: decode_relation_project_expr(data, offset)?,
         })
@@ -1500,7 +1569,7 @@ fn read_project_tail(
 fn read_gather_tail(
     data: &[u8],
     offset: &mut usize,
-) -> Result<(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>), CatalogueEncodingError> {
+) -> Result<(RelationKeyRef, RecursionBound, Vec<RelationKeyRef>), CatalogueEncodingError> {
     let key = decode_relation_key_ref(data, offset)?;
     let bound = decode_relation_bound(data, offset)?;
     let keys = read_seq(
@@ -1516,7 +1585,7 @@ fn relation_frame_error() -> CatalogueEncodingError {
         message: "invalid relation decoder frame order".to_owned(),
     }
 }
-fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelExpr, CatalogueEncodingError> {
+fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelationExpr, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Expr(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1524,7 +1593,7 @@ fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelExpr, CatalogueE
 }
 fn pop_pred(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<RelPredicateExpr, CatalogueEncodingError> {
+) -> Result<RelationPredicate, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Pred(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1532,7 +1601,7 @@ fn pop_pred(
 }
 fn pop_join(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<(Vec<RelJoinCondition>, RelJoinKind), CatalogueEncodingError> {
+) -> Result<(Vec<RelationJoinCondition>, RelationJoinKind), CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Join(on, kind)) => Ok((on, kind)),
         _ => Err(relation_frame_error()),
@@ -1540,7 +1609,7 @@ fn pop_join(
 }
 fn pop_project(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<Vec<RelProjectColumn>, CatalogueEncodingError> {
+) -> Result<Vec<RelationProjectColumn>, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Project(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1548,7 +1617,7 @@ fn pop_project(
 }
 fn pop_gather(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>), CatalogueEncodingError> {
+) -> Result<(RelationKeyRef, RecursionBound, Vec<RelationKeyRef>), CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Gather(key, bound, keys)) => Ok((key, bound, keys)),
         _ => Err(relation_frame_error()),
@@ -1557,35 +1626,35 @@ fn pop_gather(
 
 fn encode_relation_predicate_task<'a>(
     buf: &mut Vec<u8>,
-    predicate: &'a RelPredicateExpr,
+    predicate: &'a RelationPredicate,
     tasks: &mut Vec<RelationEncodeTask<'a>>,
 ) {
     match predicate {
-        RelPredicateExpr::Cmp { left, op, right } => {
+        RelationPredicate::Cmp { left, op, right } => {
             buf.push(REL_PREDICATE_CMP);
             encode_relation_column_ref(buf, left);
             encode_relation_cmp_op(buf, op);
             encode_relation_value_ref(buf, right);
         }
-        RelPredicateExpr::IsNull { column } => {
+        RelationPredicate::IsNull { column } => {
             buf.push(REL_PREDICATE_IS_NULL);
             encode_relation_column_ref(buf, column);
         }
-        RelPredicateExpr::IsNotNull { column } => {
+        RelationPredicate::IsNotNull { column } => {
             buf.push(REL_PREDICATE_IS_NOT_NULL);
             encode_relation_column_ref(buf, column);
         }
-        RelPredicateExpr::In { left, values } => {
+        RelationPredicate::In { left, values } => {
             buf.push(REL_PREDICATE_IN);
             encode_relation_column_ref(buf, left);
             write_seq(buf, values, encode_relation_value_ref);
         }
-        RelPredicateExpr::Contains { left, right } => {
+        RelationPredicate::Contains { left, right } => {
             buf.push(REL_PREDICATE_CONTAINS);
             encode_relation_column_ref(buf, left);
             encode_relation_value_ref(buf, right);
         }
-        RelPredicateExpr::EnumMatch {
+        RelationPredicate::EnumMatch {
             column,
             case,
             payload,
@@ -1595,30 +1664,30 @@ fn encode_relation_predicate_task<'a>(
             write_string(buf, case);
             tasks.push(RelationEncodeTask::Pred(payload));
         }
-        RelPredicateExpr::And(expressions) => {
+        RelationPredicate::And(expressions) => {
             buf.push(REL_PREDICATE_AND);
             write_u32(buf, expressions.len() as u32);
             for expression in expressions.iter().rev() {
                 tasks.push(RelationEncodeTask::Pred(expression));
             }
         }
-        RelPredicateExpr::Or(expressions) => {
+        RelationPredicate::Or(expressions) => {
             buf.push(REL_PREDICATE_OR);
             write_u32(buf, expressions.len() as u32);
             for expression in expressions.iter().rev() {
                 tasks.push(RelationEncodeTask::Pred(expression));
             }
         }
-        RelPredicateExpr::Not(expression) => {
+        RelationPredicate::Not(expression) => {
             buf.push(REL_PREDICATE_NOT);
             tasks.push(RelationEncodeTask::Pred(expression));
         }
-        RelPredicateExpr::True => buf.push(REL_PREDICATE_TRUE),
-        RelPredicateExpr::False => buf.push(REL_PREDICATE_FALSE),
+        RelationPredicate::True => buf.push(REL_PREDICATE_TRUE),
+        RelationPredicate::False => buf.push(REL_PREDICATE_FALSE),
     }
 }
 
-fn encode_relation_column_ref(buf: &mut Vec<u8>, column: &RelColumnRef) {
+fn encode_relation_column_ref(buf: &mut Vec<u8>, column: &RelationColumnRef) {
     encode_optional_string(buf, column.scope.as_deref());
     write_string(buf, &column.column);
 }
@@ -1626,30 +1695,35 @@ fn encode_relation_column_ref(buf: &mut Vec<u8>, column: &RelColumnRef) {
 fn decode_relation_column_ref(
     data: &[u8],
     offset: &mut usize,
-) -> Result<RelColumnRef, CatalogueEncodingError> {
-    Ok(RelColumnRef {
+) -> Result<RelationColumnRef, CatalogueEncodingError> {
+    Ok(RelationColumnRef {
         scope: decode_optional_string(data, offset, "relation_column_scope")?,
         column: read_string(data, offset, "relation_column")?,
     })
 }
 
-fn encode_relation_value_ref(buf: &mut Vec<u8>, value: &RelValueRef) {
+fn encode_relation_value_ref(buf: &mut Vec<u8>, value: &RelationValueRef) {
     match value {
-        RelValueRef::Literal(value) => {
+        RelationValueRef::Literal(literal) => {
             buf.push(REL_VALUE_LITERAL);
-            encode_value(buf, value);
+            let value = relation_policy_literal(literal)
+                .expect("validated relation policy literals are typed values");
+            encode_value(buf, &value);
         }
-        RelValueRef::SessionRef(path) => {
+        RelationValueRef::SessionRef(path) => {
             buf.push(REL_VALUE_SESSION_REF);
             encode_string_list(buf, path);
         }
-        RelValueRef::OuterColumn(column) => {
+        RelationValueRef::OuterColumn(column) => {
             buf.push(REL_VALUE_OUTER_COLUMN);
             encode_relation_column_ref(buf, column);
         }
-        RelValueRef::RowId(row_id) => {
+        RelationValueRef::RowId(row_id) => {
             buf.push(REL_VALUE_ROW_ID);
             encode_relation_row_id(buf, row_id);
+        }
+        RelationValueRef::Param(_) | RelationValueRef::FrontierColumn(_) => {
+            unreachable!("validated relation policies have no parameters or frontier columns")
         }
     }
 }
@@ -1657,18 +1731,20 @@ fn encode_relation_value_ref(buf: &mut Vec<u8>, value: &RelValueRef) {
 fn decode_relation_value_ref(
     data: &[u8],
     offset: &mut usize,
-) -> Result<RelValueRef, CatalogueEncodingError> {
+) -> Result<RelationValueRef, CatalogueEncodingError> {
     match read_u8(data, offset)? {
-        REL_VALUE_LITERAL => Ok(RelValueRef::Literal(decode_value(data, offset)?)),
-        REL_VALUE_SESSION_REF => Ok(RelValueRef::SessionRef(decode_string_list(
+        REL_VALUE_LITERAL => Ok(RelationValueRef::literal(decode_value(data, offset)?)),
+        REL_VALUE_SESSION_REF => Ok(RelationValueRef::SessionRef(decode_string_list(
             data,
             offset,
             "relation_session_path",
         )?)),
-        REL_VALUE_OUTER_COLUMN => Ok(RelValueRef::OuterColumn(decode_relation_column_ref(
+        REL_VALUE_OUTER_COLUMN => Ok(RelationValueRef::OuterColumn(decode_relation_column_ref(
             data, offset,
         )?)),
-        REL_VALUE_ROW_ID => Ok(RelValueRef::RowId(decode_relation_row_id(data, offset)?)),
+        REL_VALUE_ROW_ID => Ok(RelationValueRef::RowId(decode_relation_row_id(
+            data, offset,
+        )?)),
         tag => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "relation_value_ref",
@@ -1677,35 +1753,35 @@ fn decode_relation_value_ref(
 }
 
 tag_codec!(
-    encode_relation_cmp_op, decode_relation_cmp_op, RelPredicateCmpOp, "relation_cmp_op";
-    RelPredicateCmpOp::Eq => 1,
-    RelPredicateCmpOp::Ne => 2,
-    RelPredicateCmpOp::Lt => 3,
-    RelPredicateCmpOp::Le => 4,
-    RelPredicateCmpOp::Gt => 5,
-    RelPredicateCmpOp::Ge => 6,
+    encode_relation_cmp_op, decode_relation_cmp_op, RelationCmpOp, "relation_cmp_op";
+    RelationCmpOp::Eq => 1,
+    RelationCmpOp::Ne => 2,
+    RelationCmpOp::Lt => 3,
+    RelationCmpOp::Le => 4,
+    RelationCmpOp::Gt => 5,
+    RelationCmpOp::Ge => 6,
 );
 
 tag_codec!(
-    encode_relation_row_id, decode_relation_row_id, RowIdRef, "relation_row_id";
-    RowIdRef::Current => REL_ROW_ID_CURRENT,
-    RowIdRef::Outer => REL_ROW_ID_OUTER,
-    RowIdRef::Frontier => REL_ROW_ID_FRONTIER,
+    encode_relation_row_id, decode_relation_row_id, RelationRowIdRef, "relation_row_id";
+    RelationRowIdRef::Current => REL_ROW_ID_CURRENT,
+    RelationRowIdRef::Outer => REL_ROW_ID_OUTER,
+    RelationRowIdRef::Frontier => REL_ROW_ID_FRONTIER,
 );
 
 tag_codec!(
-    encode_relation_join_kind, decode_relation_join_kind, RelJoinKind, "relation_join_kind";
-    RelJoinKind::Inner => REL_JOIN_INNER,
-    RelJoinKind::Left => REL_JOIN_LEFT,
+    encode_relation_join_kind, decode_relation_join_kind, RelationJoinKind, "relation_join_kind";
+    RelationJoinKind::Inner => REL_JOIN_INNER,
+    RelationJoinKind::Left => REL_JOIN_LEFT,
 );
 
-fn encode_relation_key_ref(buf: &mut Vec<u8>, key: &RelKeyRef) {
+fn encode_relation_key_ref(buf: &mut Vec<u8>, key: &RelationKeyRef) {
     match key {
-        RelKeyRef::Column(column) => {
+        RelationKeyRef::Column(column) => {
             buf.push(REL_KEY_COLUMN);
             encode_relation_column_ref(buf, column);
         }
-        RelKeyRef::RowId(row_id) => {
+        RelationKeyRef::RowId(row_id) => {
             buf.push(REL_KEY_ROW_ID);
             encode_relation_row_id(buf, row_id);
         }
@@ -1715,10 +1791,12 @@ fn encode_relation_key_ref(buf: &mut Vec<u8>, key: &RelKeyRef) {
 fn decode_relation_key_ref(
     data: &[u8],
     offset: &mut usize,
-) -> Result<RelKeyRef, CatalogueEncodingError> {
+) -> Result<RelationKeyRef, CatalogueEncodingError> {
     match read_u8(data, offset)? {
-        REL_KEY_COLUMN => Ok(RelKeyRef::Column(decode_relation_column_ref(data, offset)?)),
-        REL_KEY_ROW_ID => Ok(RelKeyRef::RowId(decode_relation_row_id(data, offset)?)),
+        REL_KEY_COLUMN => Ok(RelationKeyRef::Column(decode_relation_column_ref(
+            data, offset,
+        )?)),
+        REL_KEY_ROW_ID => Ok(RelationKeyRef::RowId(decode_relation_row_id(data, offset)?)),
         tag => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "relation_key_ref",
@@ -1726,13 +1804,13 @@ fn decode_relation_key_ref(
     }
 }
 
-fn encode_relation_project_expr(buf: &mut Vec<u8>, expression: &RelProjectExpr) {
+fn encode_relation_project_expr(buf: &mut Vec<u8>, expression: &RelationProjectExpr) {
     match expression {
-        RelProjectExpr::Column(column) => {
+        RelationProjectExpr::Column(column) => {
             buf.push(REL_PROJECT_COLUMN);
             encode_relation_column_ref(buf, column);
         }
-        RelProjectExpr::RowId(row_id) => {
+        RelationProjectExpr::RowId(row_id) => {
             buf.push(REL_PROJECT_ROW_ID);
             encode_relation_row_id(buf, row_id);
         }
@@ -1742,12 +1820,14 @@ fn encode_relation_project_expr(buf: &mut Vec<u8>, expression: &RelProjectExpr) 
 fn decode_relation_project_expr(
     data: &[u8],
     offset: &mut usize,
-) -> Result<RelProjectExpr, CatalogueEncodingError> {
+) -> Result<RelationProjectExpr, CatalogueEncodingError> {
     match read_u8(data, offset)? {
-        REL_PROJECT_COLUMN => Ok(RelProjectExpr::Column(decode_relation_column_ref(
+        REL_PROJECT_COLUMN => Ok(RelationProjectExpr::Column(decode_relation_column_ref(
             data, offset,
         )?)),
-        REL_PROJECT_ROW_ID => Ok(RelProjectExpr::RowId(decode_relation_row_id(data, offset)?)),
+        REL_PROJECT_ROW_ID => Ok(RelationProjectExpr::RowId(decode_relation_row_id(
+            data, offset,
+        )?)),
         tag => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "relation_project_expr",
@@ -1755,10 +1835,10 @@ fn decode_relation_project_expr(
     }
 }
 
-fn encode_relation_bound(buf: &mut Vec<u8>, bound: &RelRecursionBound) {
+fn encode_relation_bound(buf: &mut Vec<u8>, bound: &RecursionBound) {
     match bound {
-        RelRecursionBound::Fixpoint => buf.push(REL_BOUND_FIXPOINT),
-        RelRecursionBound::MaxDepth(depth) => {
+        RecursionBound::Fixpoint => buf.push(REL_BOUND_FIXPOINT),
+        RecursionBound::MaxDepth(depth) => {
             buf.push(REL_BOUND_MAX_DEPTH);
             write_u64(buf, *depth as u64);
         }
@@ -1768,16 +1848,16 @@ fn encode_relation_bound(buf: &mut Vec<u8>, bound: &RelRecursionBound) {
 fn decode_relation_bound(
     data: &[u8],
     offset: &mut usize,
-) -> Result<RelRecursionBound, CatalogueEncodingError> {
+) -> Result<RecursionBound, CatalogueEncodingError> {
     match read_u8(data, offset)? {
-        REL_BOUND_FIXPOINT => Ok(RelRecursionBound::Fixpoint),
+        REL_BOUND_FIXPOINT => Ok(RecursionBound::Fixpoint),
         REL_BOUND_MAX_DEPTH => {
             let depth = read_u64(data, offset)?;
             let depth =
                 usize::try_from(depth).map_err(|_| CatalogueEncodingError::DecodeError {
                     message: "relation recursion depth exceeds platform usize".to_owned(),
                 })?;
-            Ok(RelRecursionBound::MaxDepth(depth))
+            Ok(RecursionBound::MaxDepth(depth))
         }
         tag => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
@@ -2819,7 +2899,8 @@ mod tests {
     use super::*;
     use jazz::tools::public_schema::SchemaBuilder;
     use jazz::tools::public_schema::{
-        PolicyExpr, RelColumnRef, RelExpr, RelPredicateCmpOp, RelPredicateExpr, RelValueRef,
+        PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate,
+        RelationValueRef,
     };
     use serde_json::json;
 
@@ -2828,10 +2909,10 @@ mod tests {
     /// so any change to the relation IR must keep both outputs identical.
     fn golden_relation_policy() -> PolicyExpr {
         use jazz::tools::public_schema::{
-            RelJoinCondition, RelJoinKind, RelKeyRef, RelProjectColumn, RelProjectExpr,
-            RelRecursionBound, RelUnionArm, RowIdRef,
+            RecursionBound, RelationJoinCondition, RelationJoinKind, RelationKeyRef,
+            RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationUnionArm,
         };
-        let col = |scope: Option<&str>, column: &str| RelColumnRef {
+        let col = |scope: Option<&str>, column: &str| RelationColumnRef {
             scope: scope.map(str::to_owned),
             column: column.to_owned(),
         };
@@ -2858,128 +2939,131 @@ mod tests {
             },
             Value::Null,
         ];
-        let cmp = |column: &str, op, right| RelPredicateExpr::Cmp {
+        let cmp = |column: &str, op, right| RelationPredicate::Cmp {
             left: col(Some("t"), column),
             op,
             right,
         };
-        let predicate = RelPredicateExpr::And(vec![
+        let predicate = RelationPredicate::And(vec![
             cmp(
                 "a",
-                RelPredicateCmpOp::Eq,
-                RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+                RelationCmpOp::Eq,
+                RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
             ),
             cmp(
                 "b",
-                RelPredicateCmpOp::Ne,
-                RelValueRef::OuterColumn(col(None, "owner")),
+                RelationCmpOp::Ne,
+                RelationValueRef::OuterColumn(col(None, "owner")),
             ),
             cmp(
                 "c",
-                RelPredicateCmpOp::Lt,
-                RelValueRef::RowId(RowIdRef::Outer),
+                RelationCmpOp::Lt,
+                RelationValueRef::RowId(RelationRowIdRef::Outer),
             ),
             cmp(
                 "d",
-                RelPredicateCmpOp::Le,
-                RelValueRef::RowId(RowIdRef::Frontier),
+                RelationCmpOp::Le,
+                RelationValueRef::RowId(RelationRowIdRef::Frontier),
             ),
             cmp(
                 "e",
-                RelPredicateCmpOp::Gt,
-                RelValueRef::RowId(RowIdRef::Current),
+                RelationCmpOp::Gt,
+                RelationValueRef::RowId(RelationRowIdRef::Current),
             ),
             cmp(
                 "f",
-                RelPredicateCmpOp::Ge,
-                RelValueRef::Literal(Value::Integer(4)),
+                RelationCmpOp::Ge,
+                RelationValueRef::literal(Value::Integer(4)),
             ),
-            RelPredicateExpr::In {
+            RelationPredicate::In {
                 left: col(Some("t"), "g"),
-                values: literals.into_iter().map(RelValueRef::Literal).collect(),
+                values: literals
+                    .into_iter()
+                    .map(RelationValueRef::literal)
+                    .collect(),
             },
-            RelPredicateExpr::Or(vec![
-                RelPredicateExpr::IsNull {
+            RelationPredicate::Or(vec![
+                RelationPredicate::IsNull {
                     column: col(None, "h"),
                 },
-                RelPredicateExpr::Not(Box::new(RelPredicateExpr::IsNotNull {
+                RelationPredicate::Not(Box::new(RelationPredicate::IsNotNull {
                     column: col(Some("t"), "i"),
                 })),
             ]),
-            RelPredicateExpr::Contains {
+            RelationPredicate::Contains {
                 left: col(Some("t"), "tags"),
-                right: RelValueRef::Literal(Value::Text("x".to_owned())),
+                right: RelationValueRef::literal(Value::Text("x".to_owned())),
             },
-            RelPredicateExpr::EnumMatch {
+            RelationPredicate::EnumMatch {
                 column: col(Some("t"), "status"),
                 case: "active".to_owned(),
-                payload: Box::new(RelPredicateExpr::Cmp {
+                payload: Box::new(RelationPredicate::Cmp {
                     left: col(None, "since"),
-                    op: RelPredicateCmpOp::Gt,
-                    right: RelValueRef::Literal(Value::Timestamp(5)),
+                    op: RelationCmpOp::Gt,
+                    right: RelationValueRef::literal(Value::Timestamp(5)),
                 }),
             },
-            RelPredicateExpr::True,
-            RelPredicateExpr::False,
+            RelationPredicate::True,
+            RelationPredicate::False,
         ]);
-        let scan = |table: &str, alias: Option<&str>| RelExpr::TableScan {
+        let scan = |table: &str, alias: Option<&str>| RelationExpr::TableScan {
             table: TableName::new(table),
             alias: alias.map(str::to_owned),
         };
-        let gather = RelExpr::Gather {
-            seed: Box::new(RelExpr::Filter {
+        let gather = RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
                 input: Box::new(scan("teams", Some("t"))),
                 predicate,
             }),
-            step: Box::new(RelExpr::Project {
+            step: Box::new(RelationExpr::Project {
                 input: Box::new(scan("team_edges", None)),
                 columns: vec![
-                    RelProjectColumn {
+                    RelationProjectColumn {
                         alias: "id".to_owned(),
-                        expr: RelProjectExpr::Column(col(Some("team_edges"), "parent")),
+                        expr: RelationProjectExpr::Column(col(Some("team_edges"), "parent")),
                     },
-                    RelProjectColumn {
+                    RelationProjectColumn {
                         alias: "row".to_owned(),
-                        expr: RelProjectExpr::RowId(RowIdRef::Current),
+                        expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
                     },
                 ],
             }),
-            frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-            bound: RelRecursionBound::MaxDepth(6),
+            frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: RecursionBound::MaxDepth(6),
             dedupe_key: vec![
-                RelKeyRef::RowId(RowIdRef::Current),
-                RelKeyRef::Column(col(Some("t"), "a")),
+                RelationKeyRef::RowId(RelationRowIdRef::Current),
+                RelationKeyRef::Column(col(Some("t"), "a")),
             ],
         };
-        let fixpoint = RelExpr::Gather {
+        let fixpoint = RelationExpr::Gather {
             seed: Box::new(scan("teams", None)),
             step: Box::new(scan("teams", None)),
-            frontier_key: RelKeyRef::Column(col(None, "id")),
-            bound: RelRecursionBound::Fixpoint,
+            frontier_key: RelationKeyRef::Column(col(None, "id")),
+            bound: RecursionBound::Fixpoint,
             dedupe_key: Vec::new(),
         };
         PolicyExpr::ExistsRel {
-            rel: RelExpr::Union {
+            rel: RelationExpr::Union {
                 inputs: vec![
-                    RelUnionArm {
+                    RelationUnionArm {
                         label: "inner".to_owned(),
-                        input: RelExpr::Join {
+                        input: RelationExpr::Join {
                             left: Box::new(gather),
                             right: Box::new(scan("access", Some("access"))),
-                            on: vec![RelJoinCondition {
+                            on: vec![RelationJoinCondition {
                                 left: col(None, "id"),
                                 right: col(Some("access"), "team"),
                             }],
-                            join_kind: RelJoinKind::Inner,
+                            join_kind: RelationJoinKind::Inner,
                         },
                     },
-                    RelUnionArm {
+                    RelationUnionArm {
                         label: "left".to_owned(),
-                        input: RelExpr::Join {
+                        input: RelationExpr::Join {
                             left: Box::new(fixpoint),
                             right: Box::new(scan("access", None)),
                             on: Vec::new(),
-                            join_kind: RelJoinKind::Left,
+                            join_kind: RelationJoinKind::Left,
                         },
                     },
                 ],
@@ -3171,15 +3255,15 @@ mod tests {
         assert!(decoded_lens.ops.is_empty());
         assert!(decoded_lens.draft_ops.is_empty());
 
-        let rel = RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
+        let rel = RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: TableName::new("members"),
                 alias: Some("m".to_owned()),
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef::unscoped("owner_id"),
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef::unscoped("owner_id"),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
             },
         };
         let permissions = HashMap::from([(
@@ -3221,7 +3305,7 @@ mod tests {
         ];
         assert!(decode_canonical_json_value(&unordered_json, &mut offset).is_err());
 
-        let rel = RelExpr::TableScan {
+        let rel = RelationExpr::TableScan {
             table: TableName::new("docs"),
             alias: None,
         };
@@ -3796,7 +3880,7 @@ mod tests {
     }
 
     fn permissions_with_raw_relation(relation: Vec<u8>) -> Vec<u8> {
-        let leaf = RelExpr::TableScan {
+        let leaf = RelationExpr::TableScan {
             table: TableName::new("documents"),
             alias: None,
         };
@@ -3903,35 +3987,35 @@ mod tests {
 
     #[test]
     fn relation_policy_variants_keep_exact_catalogue_roundtrip() {
-        let column = RelColumnRef::unscoped("owner");
-        let predicate = RelPredicateExpr::And(vec![
-            RelPredicateExpr::Cmp {
+        let column = RelationColumnRef::unscoped("owner");
+        let predicate = RelationPredicate::And(vec![
+            RelationPredicate::Cmp {
                 left: column.clone(),
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["user".to_owned()]),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec!["user".to_owned()]),
             },
-            RelPredicateExpr::Or(vec![
-                RelPredicateExpr::Not(Box::new(RelPredicateExpr::IsNull {
+            RelationPredicate::Or(vec![
+                RelationPredicate::Not(Box::new(RelationPredicate::IsNull {
                     column: column.clone(),
                 })),
-                RelPredicateExpr::EnumMatch {
-                    column: RelColumnRef::unscoped("kind"),
+                RelationPredicate::EnumMatch {
+                    column: RelationColumnRef::unscoped("kind"),
                     case: "song".to_owned(),
-                    payload: Box::new(RelPredicateExpr::Contains {
-                        left: RelColumnRef::unscoped("title"),
-                        right: RelValueRef::Literal(Value::Text("jazz".to_owned())),
+                    payload: Box::new(RelationPredicate::Contains {
+                        left: RelationColumnRef::unscoped("title"),
+                        right: RelationValueRef::literal(Value::Text("jazz".to_owned())),
                     }),
                 },
             ]),
         ]);
-        let relation = RelExpr::Gather {
-            seed: Box::new(RelExpr::Project {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::Union {
-                        inputs: vec![RelUnionArm {
+        let relation = RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Union {
+                        inputs: vec![RelationUnionArm {
                             label: "documents".to_owned(),
-                            input: RelExpr::Filter {
-                                input: Box::new(RelExpr::TableScan {
+                            input: RelationExpr::Filter {
+                                input: Box::new(RelationExpr::TableScan {
                                     table: TableName::new("documents"),
                                     alias: Some("d".to_owned()),
                                 }),
@@ -3939,28 +4023,28 @@ mod tests {
                             },
                         }],
                     }),
-                    right: Box::new(RelExpr::TableScan {
+                    right: Box::new(RelationExpr::TableScan {
                         table: TableName::new("owners"),
                         alias: Some("o".to_owned()),
                     }),
-                    on: vec![RelJoinCondition {
-                        left: RelColumnRef::unscoped("owner"),
-                        right: RelColumnRef::unscoped("id"),
+                    on: vec![RelationJoinCondition {
+                        left: RelationColumnRef::unscoped("owner"),
+                        right: RelationColumnRef::unscoped("id"),
                     }],
-                    join_kind: RelJoinKind::Left,
+                    join_kind: RelationJoinKind::Left,
                 }),
-                columns: vec![RelProjectColumn {
+                columns: vec![RelationProjectColumn {
                     alias: "owner".to_owned(),
-                    expr: RelProjectExpr::Column(RelColumnRef::unscoped("owner")),
+                    expr: RelationProjectExpr::Column(RelationColumnRef::unscoped("owner")),
                 }],
             }),
-            step: Box::new(RelExpr::TableScan {
+            step: Box::new(RelationExpr::TableScan {
                 table: TableName::new("documents"),
                 alias: None,
             }),
-            frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-            bound: RelRecursionBound::MaxDepth(3),
-            dedupe_key: vec![RelKeyRef::Column(RelColumnRef::unscoped("owner"))],
+            frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: RecursionBound::MaxDepth(3),
+            dedupe_key: vec![RelationKeyRef::Column(RelationColumnRef::unscoped("owner"))],
         };
         let permissions = permissions_with_policy(PolicyExpr::ExistsRel { rel: relation });
         let encoded = encode_permissions(&permissions);
@@ -3976,18 +4060,18 @@ mod tests {
 
     #[test]
     fn labeled_relation_union_uses_explicit_canonical_wire_grammar() {
-        let relation = RelExpr::Union {
+        let relation = RelationExpr::Union {
             inputs: vec![
-                RelUnionArm {
+                RelationUnionArm {
                     label: "a".to_owned(),
-                    input: RelExpr::TableScan {
+                    input: RelationExpr::TableScan {
                         table: TableName::new("a"),
                         alias: None,
                     },
                 },
-                RelUnionArm {
+                RelationUnionArm {
                     label: "b".to_owned(),
-                    input: RelExpr::TableScan {
+                    input: RelationExpr::TableScan {
                         table: TableName::new("b"),
                         alias: None,
                     },
@@ -4027,18 +4111,18 @@ mod tests {
         let invalid = HashMap::from([(
             TableName::new("documents"),
             TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                rel: RelExpr::Union {
+                rel: RelationExpr::Union {
                     inputs: vec![
-                        RelUnionArm {
+                        RelationUnionArm {
                             label: "duplicate".to_owned(),
-                            input: RelExpr::TableScan {
+                            input: RelationExpr::TableScan {
                                 table: TableName::new("a"),
                                 alias: None,
                             },
                         },
-                        RelUnionArm {
+                        RelationUnionArm {
                             label: "duplicate".to_owned(),
-                            input: RelExpr::TableScan {
+                            input: RelationExpr::TableScan {
                                 table: TableName::new("b"),
                                 alias: None,
                             },
@@ -4047,7 +4131,7 @@ mod tests {
                 },
             }),
         )]);
-        assert!(validate_permissions_relation_unions(&invalid).is_err());
+        assert!(validate_permissions_relations(&invalid).is_err());
     }
 
     #[test]

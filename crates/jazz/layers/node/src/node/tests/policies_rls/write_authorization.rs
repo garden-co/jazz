@@ -1,11 +1,11 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
 use crate::query::{Include, JoinMode, OrderDirection};
-use crate::model::public_api::relation_ir::{
-    ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
-    JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
-    PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
-    ValueRef as PublicRelValueRef,
+use crate::query::{
+    RelationCmpOp as PublicRelPredicateCmpOp, RelationColumnRef as PublicRelColumnRef,
+    RelationExpr, RelationJoinCondition as PublicRelJoinCondition,
+    RelationJoinKind as PublicRelJoinKind, RelationPredicate as PublicRelPredicateExpr,
+    RelationValueRef as PublicRelValueRef,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -1344,14 +1344,14 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
         right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(outer_name)),
     };
     let task_policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
@@ -1553,14 +1553,14 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
         column: name.to_owned(),
     };
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
@@ -1622,18 +1622,18 @@ fn exists_rel_rejects_compound_joins_in_every_policy_context_before_lowering() {
     // before the lowering implementation can select (and silently retain only)
     // the first equality.
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Join {
-                    left: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("membership".to_owned()),
                     }),
-                    right: Box::new(PublicRelExpr::TableScan {
+                    right: Box::new(RelationExpr::TableScan {
                         table: "grants".into(),
                         alias: Some("grant".to_owned()),
                     }),
@@ -1746,19 +1746,19 @@ fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
         column: name.to_owned(),
     };
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Join {
-                    left: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
-                    right: Box::new(PublicRelExpr::Filter {
-                        input: Box::new(PublicRelExpr::TableScan {
+                    right: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
                             table: "grants".into(),
                             alias: Some("grants".to_owned()),
                         }),

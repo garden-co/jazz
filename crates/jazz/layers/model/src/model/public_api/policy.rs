@@ -4,8 +4,8 @@
 //! between rows in the database. Each operation (SELECT, INSERT, UPDATE, DELETE)
 //! can have its own policy expression.
 
-use super::relation_ir::RelExpr;
 use super::types::Value;
+use crate::query::RelationExpr;
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
@@ -123,7 +123,7 @@ pub enum PolicyExpr {
     /// Check if a relation expression returns any rows.
     ///
     /// This is the declarative relation-IR form emitted by policy.exists(relation).
-    ExistsRel { rel: RelExpr },
+    ExistsRel { rel: RelationExpr },
 
     /// Inherit permission from a related row.
     /// Looks up the row referenced by `via_column` (foreign key) and checks
@@ -245,7 +245,7 @@ enum PolicyExprSerde {
         condition: Box<PolicyExprSerde>,
     },
     ExistsRel {
-        rel: RelExpr,
+        rel: RelationExpr,
     },
     Inherits {
         operation: Operation,
@@ -511,8 +511,9 @@ impl PolicyExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::public_api::relation_ir::{
-        ColumnRef, PredicateCmpOp, PredicateExpr, ValueRef,
+    use crate::query::{
+        RelationCmpOp as PredicateCmpOp, RelationColumnRef as ColumnRef,
+        RelationPredicate as PredicateExpr, RelationValueRef as ValueRef,
     };
     use serde_json::json;
 
@@ -586,8 +587,8 @@ mod tests {
     #[test]
     fn policy_expr_serde_preserves_relation_ir_shape() {
         let expr = PolicyExpr::ExistsRel {
-            rel: RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: "todo_shares".into(),
                     alias: None,
                 }),
