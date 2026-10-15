@@ -9,7 +9,6 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
@@ -2205,46 +2204,4 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     ));
 }
 
-#[test]
-fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
-    let (db, schema) = open_history_complete_db();
-    let source = selector(0x91);
-    let target = selector(0x92);
-    let row = RowUuid::from_bytes([0x93; 16]);
-    db.insert(
-        "todos",
-        BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
-        jazz::db::InsertOptions {
-            row_id: Some(row),
-            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let selected = || {
-        [ContributionMergeRow {
-            table: "todos".to_owned(),
-            row_uuid: row,
-        }]
-    };
-    let merged = db
-        .merge_branch_contributions(source.clone(), target.clone(), selected())
-        .unwrap()
-        .expect("the first calculation emits an ordinary transaction");
-    let _ordinary_write_state = db.write_state(merged).unwrap();
-    assert!(
-        db.merge_branch_contributions(source, target.clone(), selected())
-            .unwrap()
-            .is_none(),
-        "observed contribution provenance suppresses a retry"
-    );
-
-    let query = db.prepare_query(&db.table("todos")).unwrap();
-    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
-    assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("source".to_owned()))
-    );
-}
 mod common;

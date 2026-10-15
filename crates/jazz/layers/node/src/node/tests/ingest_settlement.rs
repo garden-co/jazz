@@ -65,22 +65,13 @@ fn fragment_settlement_covers_earlier_content_and_deletion_versions() {
                     .unwrap();
             }
             assert_eq!(ahead_current_row_count(&mut reader, "todos"), 0);
-            let table_id = reader
-                .physical_table_id_for_schema(schema().version_id(), "todos")
-                .unwrap();
+            // Linear history keeps deletion in the row image: the settled
+            // global image of row 1 is this transaction's, deleted or not.
             assert_eq!(
                 reader
-                    .visible_global_layer_tx_id_for_physical_table_now(
-                        table_id,
-                        row(1),
-                        if deletion.is_some() {
-                            VersionLayer::Deletion
-                        } else {
-                            VersionLayer::Content
-                        },
-                    )
+                    .visible_global_current_now(schema().version_id(), "todos", row(1))
                     .resolve(),
-                Some(id)
+                Some((id, deletion.is_some()))
             );
             reader.database.close().unwrap();
             drop(reader);
@@ -301,9 +292,6 @@ fn batched_fragment_settlement_publishes_the_whole_transaction_once() {
                 &mut content,
                 &mut rejections,
             )
-            .unwrap();
-        reader
-            .write_merge_heads_for_bulk_content_versions(&mut batch, &content)
             .unwrap();
         let applied = reader.database.apply_batch(batch).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
