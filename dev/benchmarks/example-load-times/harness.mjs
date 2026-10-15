@@ -245,10 +245,11 @@ export function launchBrowser() {
       "--disable-background-networking",
       "--disable-component-update",
       "--disable-features=AutofillServerCommunication,OptimizationHints,MediaRouter",
-      // TEMPORARY diagnostic switch, removed before review.
-      ...(process.env.BENCH_SWIFTSHADER
-        ? ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        : []),
+      // No SwiftShader GL flags: none of the apps uses WebGL (World Tour's
+      // globe is canvas 2D), and with them Chromium rasterises through a
+      // software GPU. World Tour redraws its globe every frame, so its open
+      // pages then kept about 14 of the macro runner's 16 cores busy, and
+      // a Join click took 17 s instead of 0.5 s.
     ],
   });
 }

@@ -31,9 +31,11 @@ same scenarios.
 - **Sign-up rate limit.** Better Auth rate-limits sign-ups and sign-ins in production builds.
   `rateLimitGate` waits out its window, untimed, before a request would be refused.
 
-App builds, asset precompression, server startup, browser launch, fixture sign-ups and every
-setup step stay outside the timed region. Everything runs on localhost. There is no
-latency-throttled variant.
+App builds, asset precompression, server startup, browser launch, fixture sign-ups and every setup
+step stay outside the timed region. Chromium runs headless with its default rendering settings. It
+does not use the SwiftShader GL flags: none of the apps needs WebGL, and with those flags Chromium
+spent most of the runner's cores on rasterising World Tour's globe, which slowed every page beside
+it. Everything runs on localhost. There is no latency-throttled variant.
 
 ## Wall time, not instruction counts
 
@@ -64,6 +66,9 @@ BENCH_ROUNDS=1 BENCH_FILTER=stage_plan pnpm bench benches/stage-plan.bench.mjs
 - `BENCH_ROUNDS` sets the iterations per case.
 - `BENCH_FILTER` selects cases by substring.
 - `CHROMIUM_PATH` points at an installed Chromium instead of Playwright's.
+- `BENCH_TRACE=1` logs each iteration's untimed `prepare` and `finish` times, its timed `run`, the
+  CPU time each process group used during the run, and what the pages logged, loaded and sent over
+  WebSocket meanwhile. Reading the CPU times adds a little to each `run`, so it stays off on CI.
 
 Each app has its own bench file. A failing case drops only its app's results.
 The runner writes results to `.generated/results.json`, and keeps pidfiles for the servers'
