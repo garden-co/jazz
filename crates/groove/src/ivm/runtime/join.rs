@@ -850,6 +850,17 @@ impl ArrangementState {
             }
             last_used.remove(key);
         }
+        // Removing entries keeps a hash table's capacity, and with it the
+        // memory eviction is meant to free.
+        if index.capacity() > 2 * index.len() + 16 {
+            index.shrink_to_fit();
+        }
+        if absent.capacity() > 2 * absent.len() + 16 {
+            absent.shrink_to_fit();
+        }
+        if last_used.capacity() > 2 * last_used.len() + 16 {
+            last_used.shrink_to_fit();
+        }
     }
 
     fn track_use(&self, key: &JoinKey) {
