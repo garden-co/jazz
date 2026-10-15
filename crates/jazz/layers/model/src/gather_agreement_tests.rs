@@ -428,6 +428,22 @@ fn left_seed_hop_is_rejected() {
     assert_both_reject(&gather_from_seed(hopped_seed("id", RelationJoinKind::Left)));
 }
 
+/// After the hop both the seed and the target have an `id`, so an unscoped
+/// `id` does not say which row the walk starts from.
+#[test]
+fn seed_hop_projecting_an_unscoped_id_is_rejected() {
+    let RelationExpr::Project { input, .. } = hopped_seed("id", RelationJoinKind::Inner) else {
+        unreachable!("hopped_seed builds a Project");
+    };
+    assert_both_reject(&gather_from_seed(RelationExpr::Project {
+        input,
+        columns: vec![RelationProjectColumn {
+            alias: "id".to_owned(),
+            expr: RelationProjectExpr::Column(RelationColumnRef::unscoped("id")),
+        }],
+    }));
+}
+
 /// Only policies key their seed by a session claim; a query keeps every seed
 /// filter, so this one is policy-specific.
 #[test]
@@ -531,21 +547,10 @@ fn unscoped_edge_filters_lower_identically() {
     assert_eq!(scoped, unscoped);
 }
 
-/// Under `Or`, a row correlation cannot become a join. Dropping it as `true`
-/// would let every access row authorize the document.
-#[test]
-fn policy_row_correlation_under_or_is_rejected() {
-    let access_rel = filter(
-        scan("doc_access", Some("access")),
-        RelationPredicate::Or(vec![
-            equals(
-                "access",
-                "doc",
-                RelationValueRef::RowId(RelationRowIdRef::Outer),
-            ),
-            RelationPredicate::False,
-        ]),
-    );
+/// Compile a docs read policy over access rows filtered by `predicate`, and
+/// return the conversion error.
+fn policy_access_error(predicate: RelationPredicate) -> String {
+    let access_rel = filter(scan("doc_access", Some("access")), predicate);
     let schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("docs")
@@ -561,11 +566,112 @@ fn policy_row_correlation_under_or_is_rejected() {
                 .fk_column("team", "teams"),
         )
         .build();
-    let error = convert_public_schema(&schema).expect_err("correlation under Or must not compile");
-    assert!(
-        error
-            .to_string()
-            .contains("Row-id correlations under Or are not supported in policies yet"),
-        "{error:?}"
+    convert_public_schema(&schema)
+        .expect_err("the policy must not compile")
+        .to_string()
+}
+
+fn outer_doc() -> RelationPredicate {
+    equals(
+        "access",
+        "doc",
+        RelationValueRef::RowId(RelationRowIdRef::Outer),
+    )
+}
+
+/// Under `Or`, `Not` or an enum payload, a row correlation cannot become a
+/// join. Dropping it as `true` would let every access row authorize the
+/// document.
+#[test]
+fn policy_row_correlation_under_or_not_or_enum_payload_is_rejected() {
+    let cases = [
+        (
+            "Or",
+            RelationPredicate::Or(vec![outer_doc(), RelationPredicate::False]),
+        ),
+        ("Not", RelationPredicate::Not(Box::new(outer_doc()))),
+        (
+            "EnumMatch",
+            RelationPredicate::EnumMatch {
+                column: column("access", "team"),
+                case: "member".to_owned(),
+                payload: Box::new(RelationPredicate::Cmp {
+                    left: RelationColumnRef::unscoped("doc"),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
+                }),
+            },
+        ),
+    ];
+    for (under, predicate) in cases {
+        let error = policy_access_error(predicate);
+        assert!(
+            error.contains(&format!(
+                "Row-id correlations under {under} are not supported in policies yet"
+            )),
+            "{under}: {error}"
+        );
+    }
+}
+
+/// A walk's seed and edge rows cannot be joined to the protected row: as a
+/// `true` placeholder, the correlation would drop a restriction such as "the
+/// edge belongs to this document's workspace" and widen the policy.
+#[test]
+fn edge_filters_correlated_with_the_outer_row_are_rejected() {
+    for correlation in [
+        RelationValueRef::RowId(RelationRowIdRef::Outer),
+        RelationValueRef::OuterColumn(RelationColumnRef::unscoped("title")),
+    ] {
+        let rel = gather_with_edge_filter(equals("teams", "owner_id", correlation));
+        assert_both_reject(&rel);
+        let error = policy_lowering(&rel).unwrap_err();
+        assert!(
+            error.contains("Gather edge filters correlated with the protected row"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn seed_filters_correlated_with_the_outer_row_are_rejected() {
+    let seed = filter(
+        owned_teams_seed(),
+        equals(
+            "teams",
+            "owner_id",
+            RelationValueRef::OuterColumn(RelationColumnRef::unscoped("title")),
+        ),
     );
+    let rel = gather_from_seed(seed);
+    assert_both_reject(&rel);
+    let error = policy_lowering(&rel).unwrap_err();
+    assert!(
+        error.contains("Gather seed filters correlated with the protected row"),
+        "{error}"
+    );
+}
+
+/// Only a gather step's one frontier equality binds to the walk.
+#[test]
+fn frontier_references_outside_a_step_are_rejected() {
+    let frontier = || RelationValueRef::RowId(RelationRowIdRef::Frontier);
+    let seed = filter(owned_teams_seed(), equals("teams", "parent", frontier()));
+    assert_both_reject(&gather_from_seed(seed));
+
+    let error = policy_access_error(RelationPredicate::And(vec![
+        outer_doc(),
+        equals("access", "team", frontier()),
+    ]));
+    assert!(
+        error.contains("Frontier row-id references outside a gather step"),
+        "{error}"
+    );
+    let query = relation_query_to_query(&RelationQuery {
+        rel: filter(
+            scan("doc_access", Some("access")),
+            equals("access", "team", frontier()),
+        ),
+    });
+    assert!(query.is_err(), "{query:?}");
 }

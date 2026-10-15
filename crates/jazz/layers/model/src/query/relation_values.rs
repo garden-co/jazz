@@ -91,7 +91,6 @@ pub(crate) fn relation_comparison(
 pub(crate) enum RelationOperand {
     Operand(Operand),
     OuterRow(String),
-    FrontierRow,
 }
 
 /// One top-level conjunct of a lowered relation predicate.
@@ -123,7 +122,7 @@ pub(crate) fn lower_relation_conjuncts<'a>(
     };
     let operand = |value: RelationOperand, what: &str| match value {
         RelationOperand::Operand(operand) => Ok(operand),
-        RelationOperand::OuterRow(_) | RelationOperand::FrontierRow => {
+        RelationOperand::OuterRow(_) => {
             Err(format!("{what} against a row id are not supported yet"))
         }
     };
@@ -186,12 +185,10 @@ pub(crate) fn lower_relation_conjuncts<'a>(
                     relation_comparison(&left.column, *op, operand.clone())?
                 }
                 // A row-id equality is a correlation the caller consumes.
-                RelationOperand::OuterRow(_) | RelationOperand::FrontierRow
-                    if *op == RelationCmpOp::Eq =>
-                {
+                RelationOperand::OuterRow(_) if *op == RelationCmpOp::Eq => {
                     Predicate::All(Vec::new())
                 }
-                RelationOperand::OuterRow(_) | RelationOperand::FrontierRow => {
+                RelationOperand::OuterRow(_) => {
                     return Err(
                         "Row-id comparisons other than equality are not supported yet".to_owned(),
                     );
@@ -274,10 +271,7 @@ fn lower_uncorrelated<'a>(
     let mut columns = Vec::new();
     let mut predicates = Vec::new();
     for conjunct in conjuncts {
-        if matches!(
-            conjunct.value,
-            Some(RelationOperand::OuterRow(_) | RelationOperand::FrontierRow)
-        ) {
+        if matches!(conjunct.value, Some(RelationOperand::OuterRow(_))) {
             return Err(format!(
                 "Row-id correlations under {under} are not supported yet"
             ));

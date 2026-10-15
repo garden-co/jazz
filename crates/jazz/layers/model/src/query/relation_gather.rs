@@ -126,7 +126,8 @@ fn recognize_relation_gather_seed(seed: &RelationExpr) -> Result<RelationGatherS
                 .into(),
         );
     }
-    if projected.column != "id" || !relation_gather_in_scope(projected, hop_scope) {
+    // After the join an unscoped `id` could name either side's row.
+    if projected.column != "id" || projected.scope.as_deref() != Some(hop_scope) {
         return Err("Gather seed ids other than the hop target row id are not supported yet".into());
     }
     // Filters above the hop are applied to the seed rows, so they must name them.

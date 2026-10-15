@@ -108,7 +108,7 @@ fn project_id(input: RelationExpr, column: RelationColumnRef) -> RelationExpr {
 /// scan `team_entry`, the table that holds two refs to `teams`. This is built
 /// with the typed public relation IR because the fluent Rust relation builder
 /// cannot express a filter above a hop join or an `IN` list.
-fn dropdown_read_policy() -> PolicyExpr {
+fn dropdown_read_policy(bound: RecursionBound) -> PolicyExpr {
     let seed = project_id(
         RelationExpr::Filter {
             input: Box::new(RelationExpr::Join {
@@ -144,7 +144,7 @@ fn dropdown_read_policy() -> PolicyExpr {
         seed: Box::new(seed),
         step: Box::new(step),
         frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
-        bound: RecursionBound::MaxDepth(8),
+        bound,
         dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
     };
     let grants = RelationExpr::Filter {
@@ -174,7 +174,7 @@ fn dropdown_read_policy() -> PolicyExpr {
     }
 }
 
-fn schema() -> JazzSchema {
+fn schema(bound: RecursionBound) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -193,7 +193,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("dropdowns")
                     .column("name", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(dropdown_read_policy())),
+                    .policies(TablePolicies::new().with_select(dropdown_read_policy(bound))),
             )
             .table(
                 TableSchemaBuilder::new("dropdowns_access_edges")
@@ -207,8 +207,8 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_global_node() -> Db {
-    let schema = schema();
+fn open_global_node(bound: RecursionBound) -> Db {
+    let schema = schema(bound);
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
@@ -265,7 +265,17 @@ fn local_opts() -> ReadOpts {
 /// ```
 #[test]
 fn gather_seed_hops_the_target_ref_of_a_same_table_double_ref_edge() {
-    let db = open_global_node();
+    assert_session_reads_only_the_reachable_grant(RecursionBound::MaxDepth(8));
+}
+
+/// The same policy walked to a fixpoint instead of a depth bound.
+#[test]
+fn fixpoint_gather_policy_reads_only_the_reachable_grant() {
+    assert_session_reads_only_the_reachable_grant(RecursionBound::Fixpoint);
+}
+
+fn assert_session_reads_only_the_reachable_grant(bound: RecursionBound) {
+    let db = open_global_node(bound);
     let (user_team, direct, nested) = (row(0x01), row(0x02), row(0x03));
     let (visible, source_only) = (row(0x11), row(0x12));
     for (id, name) in [(user_team, "User"), (direct, "Direct"), (nested, "Nested")] {

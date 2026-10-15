@@ -2322,10 +2322,15 @@ fn lower_gather_rel(
 ) -> Result<LoweredRel, SchemaConversionError> {
     let (from, seed) = lower_gather_seed(table, path, &shape.seed)?;
     let step = &shape.step;
-    let edge_filters = rel_predicates_to_policy(table, path, &step.filters)?
-        .into_iter()
-        .map(|filter| filter.predicate)
-        .collect();
+    let edge_filters = uncorrelated_gather_filters(
+        table,
+        path,
+        rel_predicates_to_policy(table, path, &step.filters)?,
+        "Gather edge filters",
+    )?
+    .into_iter()
+    .map(|filter| filter.predicate)
+    .collect();
     let output_table = step.output_table.map(str::to_owned);
     // A scalar frontier has no materialized output table, but its projected
     // FK still identifies the logical source used by scoped joins from Gather.
@@ -2380,7 +2385,12 @@ fn lower_gather_seed(
     path: &str,
     seed: &crate::query::RelationGatherSeed<'_>,
 ) -> Result<(Operand, crate::query::ReachableSeed), SchemaConversionError> {
-    let lowered_filters = rel_predicates_to_policy(table, path, &seed.filters)?;
+    let lowered_filters = uncorrelated_gather_filters(
+        table,
+        path,
+        rel_predicates_to_policy(table, path, &seed.filters)?,
+        "Gather seed filters",
+    )?;
     let seed_index = lowered_filters
         .iter()
         .position(|filter| {
@@ -2425,6 +2435,27 @@ fn lower_gather_seed(
             filters,
         },
     ))
+}
+
+/// A walk's seed and edge filters cannot join the protected row: lowering
+/// such a correlation as its placeholder `true` would drop the restriction
+/// and widen the policy, so it is rejected.
+fn uncorrelated_gather_filters(
+    table: &TableName,
+    path: &str,
+    filters: Vec<LoweredRelPredicate>,
+    what: &str,
+) -> Result<Vec<LoweredRelPredicate>, SchemaConversionError> {
+    if filters
+        .iter()
+        .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+    {
+        return Err(err(
+            policy_path(table, path),
+            format!("{what} correlated with the protected row are not supported in policies yet"),
+        ));
+    }
+    Ok(filters)
 }
 
 fn rel_predicate_to_policy(
@@ -2477,7 +2508,12 @@ fn rel_value_to_policy_operand(
         RelationValueRef::RowId(RelationRowIdRef::Outer) => {
             Ok(LoweredRelValue::OuterRow("id".to_owned()))
         }
-        RelationValueRef::RowId(RelationRowIdRef::Frontier) => Ok(LoweredRelValue::FrontierRow),
+        // A gather step's one frontier equality is consumed by the gather
+        // recognizer; any other frontier read has no walk to bind to.
+        RelationValueRef::RowId(RelationRowIdRef::Frontier) => Err(err(
+            policy_path(table, path),
+            "Frontier row-id references outside a gather step are not supported in policies yet",
+        )),
         RelationValueRef::RowId(RelationRowIdRef::Current) => Err(err(
             policy_path(table, path),
             "core schema ExistsRel policies do not support Current row-id operands here",
