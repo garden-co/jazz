@@ -124,7 +124,7 @@ fn main() {
             "arrangement_count": stats.arrangement_count,
             "arrangement_rows": stats.arrangement_rows,
             "arrangement_encoded_bytes": stats.arrangement_encoded_bytes,
-            "operator_state_rows": stats.operator_state_rows,
+            "grouped_operator_state_rows": stats.grouped_operator_state_rows,
             "graph_nodes": stats.graph_nodes,
             "arrangement_rows_after_writes": stats_after_writes.arrangement_rows,
             "rss_kib_after_seed": rss_after_seed,
