@@ -655,15 +655,17 @@ fn peel_relation_output_steps(
     Ok((current, filters, order_by, offset, limit))
 }
 
-/// Scope was already checked by the gather recognizer.
+/// The gather recognizer already checked every column names its one table.
 fn relation_gather_predicates_to_query(
     predicates: &[&RelationPredicate],
 ) -> Result<Vec<Predicate>, QueryError> {
     let mut lowered = Vec::new();
     for predicate in predicates {
-        if let Some((_, predicate)) = relation_predicate_to_query_predicate(predicate)? {
-            lowered.push(predicate);
-        }
+        lowered.extend(
+            relation_query_conjuncts(predicate)?
+                .into_iter()
+                .map(|conjunct| conjunct.predicate),
+        );
     }
     Ok(lowered)
 }
@@ -910,176 +912,47 @@ pub fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> 
 fn relation_predicate_to_query_predicate(
     predicate: &RelationPredicate,
 ) -> Result<Option<(String, Predicate)>, QueryError> {
-    match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            let scope = relation_scope(left)?;
-            let predicate =
-                relation_comparison(&left.column, *op, relation_value_to_operand(right)?)
-                    .map_err(relation_unification_error)?;
-            Ok(Some((scope, predicate)))
-        }
-        RelationPredicate::IsNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::IsNull(Operand::Column(column.column.clone())),
-        ))),
-        RelationPredicate::IsNotNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
-                column.column.clone(),
-            )))),
-        ))),
-        RelationPredicate::In { left, values } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::In(
-                Operand::Column(left.column.clone()),
-                values
-                    .iter()
-                    .map(relation_value_to_operand)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ))),
-        RelationPredicate::Contains { left, right } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::Contains(
-                Operand::Column(left.column.clone()),
-                relation_value_to_operand(right)?,
-            ),
-        ))),
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::EnumMatch {
-                column: column.column.clone(),
-                case: case.clone(),
-                payload: Box::new(relation_payload_predicate_to_predicate(payload)?),
-            },
-        ))),
-        RelationPredicate::And(predicates) => relation_predicate_list(predicates, true),
-        RelationPredicate::Or(predicates) => relation_predicate_list(predicates, false),
-        RelationPredicate::Not(predicate) => {
-            let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
-                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
-            };
-            if is_always_false(&predicate) {
-                return Ok(None);
-            }
-            Ok(Some((scope, Predicate::Not(Box::new(predicate)))))
-        }
-        RelationPredicate::True => Ok(None),
-        RelationPredicate::False => Ok(Some((String::new(), Predicate::Any(Vec::new())))),
-    }
-}
-
-fn relation_payload_predicate_to_predicate(
-    predicate: &RelationPredicate,
-) -> Result<Predicate, QueryError> {
-    let unscoped_column = |column: &RelationColumnRef| {
-        if column.scope.is_some() {
-            return Err(relation_unification_error(
-                "payload enum predicate fields must be unscoped",
-            ));
-        }
-        Ok(Operand::Column(column.column.clone()))
-    };
-    match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            unscoped_column(left)?;
-            relation_comparison(&left.column, *op, relation_value_to_operand(right)?)
-                .map_err(relation_unification_error)
-        }
-        RelationPredicate::IsNull { column } => Ok(Predicate::IsNull(unscoped_column(column)?)),
-        RelationPredicate::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
-            unscoped_column(column)?,
-        )))),
-        RelationPredicate::In { left, values } => Ok(Predicate::In(
-            unscoped_column(left)?,
-            values
-                .iter()
-                .map(relation_value_to_operand)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Contains { left, right } => Ok(Predicate::Contains(
-            unscoped_column(left)?,
-            relation_value_to_operand(right)?,
-        )),
-        RelationPredicate::And(children) => Ok(Predicate::All(
-            children
-                .iter()
-                .map(relation_payload_predicate_to_predicate)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Or(children) => Ok(Predicate::Any(
-            children
-                .iter()
-                .map(relation_payload_predicate_to_predicate)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Not(child) => Ok(Predicate::Not(Box::new(
-            relation_payload_predicate_to_predicate(child)?,
-        ))),
-        RelationPredicate::True => Ok(Predicate::All(Vec::new())),
-        RelationPredicate::False => Ok(Predicate::Any(Vec::new())),
-        RelationPredicate::EnumMatch { .. } => Err(relation_unification_error(
-            "nested payload enum matches are not supported",
-        )),
-    }
-}
-
-fn relation_predicate_list(
-    predicates: &[RelationPredicate],
-    is_and: bool,
-) -> Result<Option<(String, Predicate)>, QueryError> {
+    let conjuncts = relation_query_conjuncts(predicate)?;
+    // A query filter lands on one source, so every column must name the same one.
     let mut scope = None::<String>;
-    let mut items = Vec::new();
-    for predicate in predicates {
-        let Some((predicate_scope, predicate)) = relation_predicate_to_query_predicate(predicate)?
-        else {
-            if is_and {
-                continue;
+    let mut predicates = Vec::new();
+    for conjunct in conjuncts {
+        for column in &conjunct.columns {
+            let column_scope = relation_scope(column)?;
+            match &scope {
+                Some(existing) if *existing != column_scope => {
+                    return Err(relation_unification_error(
+                        "Relation predicates across scopes are not supported in queries yet",
+                    ));
+                }
+                Some(_) => {}
+                None => scope = Some(column_scope),
             }
-            return Ok(None);
-        };
-        if is_always_false(&predicate) {
-            if is_and {
-                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
-            }
-            continue;
         }
-        if predicate_scope.is_empty() {
-            items.push(predicate);
-            continue;
-        }
-        match &scope {
-            Some(existing) if existing != &predicate_scope => {
-                return Err(relation_unification_error(
-                    "relation predicate composition across scopes is not unified yet",
-                ));
-            }
-            Some(_) => {}
-            None => scope = Some(predicate_scope),
-        }
-        items.push(predicate);
+        predicates.push(conjunct.predicate);
     }
-    let Some(scope) = scope else {
-        return if is_and {
-            Ok(None)
-        } else {
-            Ok(Some((String::new(), Predicate::Any(Vec::new()))))
-        };
-    };
-    let predicate = if is_and {
-        Predicate::All(items)
-    } else {
-        Predicate::Any(items)
-    };
-    Ok(Some((scope, predicate)))
+    Ok(relation_conjunction(predicates).map(|predicate| (scope.unwrap_or_default(), predicate)))
 }
 
-fn is_always_false(predicate: &Predicate) -> bool {
-    matches!(predicate, Predicate::Any(predicates) if predicates.is_empty())
+fn relation_query_conjuncts(
+    predicate: &RelationPredicate,
+) -> Result<Vec<RelationConjunct<'_>>, QueryError> {
+    lower_relation_conjuncts(predicate, &mut |value| match relation_value_to_operand(value) {
+        Ok(operand) => Ok(RelationOperand::Operand(operand)),
+        Err(QueryError::UnsupportedRelationQuery(message)) => Err(message),
+        Err(error) => Err(error.to_string()),
+    })
+    .map_err(|message| {
+        relation_unification_error(message.replace("not supported yet", "not supported in queries yet"))
+    })
+}
+
+fn relation_conjunction(mut predicates: Vec<Predicate>) -> Option<Predicate> {
+    match predicates.len() {
+        0 => None,
+        1 => predicates.pop(),
+        _ => Some(Predicate::All(predicates)),
+    }
 }
 
 fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryError> {

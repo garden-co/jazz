@@ -20,11 +20,11 @@ use crate::model::public_schema::{
     TableSchema, Value,
 };
 use crate::query::{
-    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind,
-    RelationPredicate, RelationRowIdRef, RelationValueRef,
+    RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
+    RelationRowIdRef, RelationValueRef,
 };
 #[cfg(test)]
-use crate::query::{RelationJoinCondition, RelationKeyRef, RelationProjectExpr};
+use crate::query::{RelationCmpOp, RelationJoinCondition, RelationKeyRef, RelationProjectExpr};
 
 const DIRECT_USER_CLAIM: &str = "user";
 #[cfg(test)]
@@ -1548,12 +1548,7 @@ struct LoweredRelPredicate {
     value: Option<LoweredRelValue>,
 }
 
-#[derive(Clone)]
-enum LoweredRelValue {
-    Operand(Operand),
-    OuterRow(String),
-    FrontierRow,
-}
+use crate::query::RelationOperand as LoweredRelValue;
 
 #[derive(Clone)]
 struct PendingReachable {
@@ -2437,143 +2432,18 @@ fn rel_predicate_to_policy(
     path: &str,
     predicate: &RelationPredicate,
 ) -> Result<Vec<LoweredRelPredicate>, SchemaConversionError> {
-    match predicate {
-        RelationPredicate::True => Ok(Vec::new()),
-        RelationPredicate::False => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::Any(Vec::new()),
-            column: None,
-            value: None,
-        }]),
-        RelationPredicate::And(children) => {
-            let mut lowered = Vec::new();
-            for child in children {
-                lowered.extend(rel_predicate_to_policy(table, path, child)?);
-            }
-            Ok(lowered)
-        }
-        RelationPredicate::Or(children) => {
-            let predicates = children
-                .iter()
-                .map(|child| {
-                    rel_predicate_to_policy(table, path, child).map(|parts| {
-                        Predicate::All(parts.into_iter().map(|part| part.predicate).collect())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Any(predicates),
-                column: None,
-                value: None,
-            }])
-        }
-        RelationPredicate::Not(child) => {
-            let predicates = rel_predicate_to_policy(table, path, child)?
-                .into_iter()
-                .map(|part| part.predicate)
-                .collect::<Vec<_>>();
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Not(Box::new(Predicate::All(predicates))),
-                column: None,
-                value: None,
-            }])
-        }
-        RelationPredicate::Cmp { left, op, right } => {
-            let value = rel_value_to_policy_operand(table, path, right)?;
-            let predicate = match &value {
-                LoweredRelValue::Operand(operand) => {
-                    crate::query::relation_comparison(&left.column, *op, operand.clone())
-                        .map_err(|message| policy_error(table, path, message))?
-                }
-                // Row-id equalities are correlations, consumed by the caller.
-                LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow
-                    if *op == RelationCmpOp::Eq =>
-                {
-                    Predicate::All(Vec::new())
-                }
-                LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow => {
-                    return Err(err(
-                        policy_path(table, path),
-                        "Row-id comparisons other than equality are not supported in policies yet",
-                    ));
-                }
-            };
-            // A null test keys nothing, so it carries no value to match on.
-            let value = (!matches!(
-                value,
-                LoweredRelValue::Operand(Operand::Literal(GrooveValue::Nullable(None)))
-            ))
-            .then_some(value);
-            Ok(vec![LoweredRelPredicate {
-                predicate,
-                column: Some(left.column.clone()),
-                value,
-            }])
-        }
-        RelationPredicate::IsNull { column } => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::IsNull(Operand::Column(column.column.clone())),
-            column: Some(column.column.clone()),
-            value: None,
-        }]),
-        RelationPredicate::IsNotNull { column } => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
-                column.column.clone(),
-            )))),
-            column: Some(column.column.clone()),
-            value: None,
-        }]),
-        RelationPredicate::Contains { left, right } => {
-            let LoweredRelValue::Operand(operand) =
-                rel_value_to_policy_operand(table, path, right)?
-            else {
-                return Err(err(
-                    policy_path(table, path),
-                    "core schema ExistsRel Contains does not support row-id operands",
-                ));
-            };
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Contains(Operand::Column(left.column.clone()), operand),
-                column: Some(left.column.clone()),
-                value: None,
-            }])
-        }
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            let payload = rel_predicate_to_policy(table, path, payload)?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::EnumMatch {
-                    column: column.column.clone(),
-                    case: case.clone(),
-                    payload: Box::new(Predicate::All(
-                        payload.into_iter().map(|part| part.predicate).collect(),
-                    )),
-                },
-                column: Some(column.column.clone()),
-                value: None,
-            }])
-        }
-        RelationPredicate::In { left, values } => {
-            let values = values
-                .iter()
-                .map(
-                    |value| match rel_value_to_policy_operand(table, path, value)? {
-                        LoweredRelValue::Operand(operand) => Ok(operand),
-                        _ => Err(err(
-                            policy_path(table, path),
-                            "core schema ExistsRel In does not support row-id operands",
-                        )),
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::In(Operand::Column(left.column.clone()), values),
-                column: Some(left.column.clone()),
-                value: None,
-            }])
-        }
-    }
+    let conjuncts = crate::query::lower_relation_conjuncts(predicate, &mut |value| {
+        rel_value_to_policy_operand(table, path, value).map_err(|error| error.message)
+    })
+    .map_err(|message| policy_error(table, path, message))?;
+    Ok(conjuncts
+        .into_iter()
+        .map(|conjunct| LoweredRelPredicate {
+            predicate: conjunct.predicate,
+            column: conjunct.column.map(|column| column.column.clone()),
+            value: conjunct.value,
+        })
+        .collect())
 }
 
 fn rel_predicates_to_policy(

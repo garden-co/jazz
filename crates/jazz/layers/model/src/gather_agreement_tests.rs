@@ -515,3 +515,57 @@ fn null_comparisons_lower_to_null_tests() {
         null(),
     )));
 }
+
+#[test]
+fn unscoped_edge_filters_lower_identically() {
+    let scoped = assert_both_accept(&gather_with_edge_filter(compare(
+        "enabled",
+        RelationCmpOp::Eq,
+        RelationValueRef::Literal(serde_json::json!(true)),
+    )));
+    let unscoped = assert_both_accept(&gather_with_edge_filter(RelationPredicate::Cmp {
+        left: RelationColumnRef::unscoped("enabled"),
+        op: RelationCmpOp::Eq,
+        right: RelationValueRef::Literal(serde_json::json!(true)),
+    }));
+    assert_eq!(scoped, unscoped);
+}
+
+/// Under `Or`, a row correlation cannot become a join. Dropping it as `true`
+/// would let every access row authorize the document.
+#[test]
+fn policy_row_correlation_under_or_is_rejected() {
+    let access_rel = filter(
+        scan("doc_access", Some("access")),
+        RelationPredicate::Or(vec![
+            equals(
+                "access",
+                "doc",
+                RelationValueRef::RowId(RelationRowIdRef::Outer),
+            ),
+            RelationPredicate::False,
+        ]),
+    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("docs")
+                .column("title", ColumnType::Text)
+                .policies(
+                    TablePolicies::new().with_select(PolicyExpr::ExistsRel { rel: access_rel }),
+                ),
+        )
+        .table(TableSchemaBuilder::new("teams").column("enabled", ColumnType::Boolean))
+        .table(
+            TableSchemaBuilder::new("doc_access")
+                .fk_column("doc", "docs")
+                .fk_column("team", "teams"),
+        )
+        .build();
+    let error = convert_public_schema(&schema).expect_err("correlation under Or must not compile");
+    assert!(
+        error
+            .to_string()
+            .contains("Row-id correlations under Or are not supported in policies yet"),
+        "{error:?}"
+    );
+}
