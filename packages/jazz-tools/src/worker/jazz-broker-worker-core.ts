@@ -40,6 +40,7 @@ import {
 } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
+import { toError } from "../runtime/util.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -652,7 +653,7 @@ async function acquireForegroundNodeLease(
         type: "foreground-node-lease-cancelled",
         error: serializeBrowserRelayError(
           new Error("Shared browser foreground lease cancellation failed", {
-            cause: asError(error),
+            cause: toError(error),
           }),
         ),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
@@ -1477,9 +1478,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         post(peer.port, {
           type: "result",
           id: message.id,
-          error: serializeBrowserRelayError(
-            error instanceof Error ? error : new Error(String(error)),
-          ),
+          error: serializeBrowserRelayError(toError(error)),
         });
     }
     return;
@@ -1757,8 +1756,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // Normal transport/tick messages must continue to settle these writes.
       void peer.context.runtime!.waitForPendingWrites("global").then(
         () => result(peer, message.id),
-        (error) =>
-          result(peer, message.id, error instanceof Error ? error : new Error(String(error))),
+        (error) => result(peer, message.id, toError(error)),
       );
       return;
     }
@@ -1813,8 +1811,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     ) {
       return;
     }
-    if ("id" in message) result(peer, message.id, asError(error));
-    else failPeer(peer, asError(error));
+    if ("id" in message) result(peer, message.id, toError(error));
+    else failPeer(peer, toError(error));
   }
 }
 
@@ -2227,7 +2225,7 @@ function attachPeerTransport(
         copies.map((frame) => frame.buffer),
       );
     },
-    (error) => failPeer(peer, asError(error)),
+    (error) => failPeer(peer, toError(error)),
     peer.context.options.logLevel === "trace"
       ? (entries) => {
           post(peer.port, {
@@ -2285,8 +2283,4 @@ function post(
     | BrowserForegroundNodeLeasePortEvent,
 ): void {
   port.postMessage(event);
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

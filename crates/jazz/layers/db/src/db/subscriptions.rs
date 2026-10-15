@@ -150,17 +150,6 @@ where
         .await
     }
 
-    /// Subscribe to an output-changing relation query evaluated as `author`.
-    pub async fn subscribe_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
-            .await
-    }
-
     /// Attach a one-shot usage-site query coverage request.
     ///
     /// Binding read operations own this attachment internally, drive
@@ -187,28 +176,6 @@ where
             prepared.request_policy_binding(self.identity.author)?,
             read_coverage_tier(&opts) >= DurabilityTier::Global,
         )
-    }
-
-    /// Attach one-shot coverage for the immutable base of an open transaction.
-    /// Pending writes remain local overlays and are never sent upstream.
-    #[doc(hidden)]
-    pub fn attach_query_in_transaction_with_opts(
-        &self,
-        prepared: &PreparedQuery,
-        open_tx_id: OpenTransactionId,
-        mut opts: ReadOpts,
-    ) -> Result<QueryAttachment, Error> {
-        let snapshot = self
-            .node
-            .node
-            .borrow()
-            .open_transaction_snapshot(open_tx_id)?;
-        opts.read_view = ReadViewSpec {
-            source: ReadViewSourceSpec::Snapshot {
-                snapshot: snapshot.into(),
-            },
-        };
-        self.attach_query_with_opts(prepared, opts)
     }
 
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
@@ -244,28 +211,6 @@ where
             prepared.request_policy_binding(author)?,
             read_coverage_tier(&opts) >= DurabilityTier::Global,
         )
-    }
-
-    /// Identity-aware counterpart of [`Db::attach_query_in_transaction_with_opts`].
-    #[doc(hidden)]
-    pub fn attach_query_in_transaction_with_opts_for_identity(
-        &self,
-        prepared: &PreparedQuery,
-        open_tx_id: OpenTransactionId,
-        mut opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<QueryAttachment, Error> {
-        let snapshot = self
-            .node
-            .node
-            .borrow()
-            .open_transaction_snapshot(open_tx_id)?;
-        opts.read_view = ReadViewSpec {
-            source: ReadViewSourceSpec::Snapshot {
-                snapshot: snapshot.into(),
-            },
-        };
-        self.attach_query_with_opts_for_identity(prepared, opts, author)
     }
 
     /// LocalOnly owns no remote coverage, even for a memory-only foreground.

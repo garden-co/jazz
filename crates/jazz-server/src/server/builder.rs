@@ -1093,17 +1093,17 @@ mod tests {
         );
     }
 
-    /// Internal fixture access is needed to recreate a pre-active-schema store.
-    /// Startup must restore the administrative revision before clients receive schema B.
+    /// Alice activates a descendant schema and permissions, then restarts.
+    /// Startup must retain the selection and revision before serving snapshots.
     #[tokio::test]
-    async fn legacy_authority_restores_active_descendant_before_serving_snapshots() {
+    async fn authority_reopens_active_descendant_before_serving_snapshots() {
         use jazz::tools::schema_lens::{Lens, LensOp};
         use jazz::tools::{
             ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchema,
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let app_id = AppId::from_name("legacy-authority-active-descendant");
+        let app_id = AppId::from_name("authority-active-descendant");
         let base = dynamic_bootstrap_schema();
         let target = SchemaBuilder::new()
             .table(TableSchema::builder("notes").column("content", ColumnType::Text))
@@ -1156,40 +1156,6 @@ mod tests {
         .expect("activate descendant");
         core.shutdown().await;
         drop(core);
-
-        // Kind 8 / nil UUID is the existing active-schema record key. Removing
-        // it leaves the old selected pointer and structural catalogue intact;
-        // no storage encoding or codec profile changes are involved.
-        {
-            let families = target_runtime.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            let storage =
-                jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
-                    dir.path().join(SERVER_SHELL_ROCKSDB_DIR),
-                    &refs,
-                    jazz_storage_rocksdb::Durability::WalNoSync,
-                    &jazz::storage_codec_profile::node_storage_codec_profile().unwrap(),
-                )
-                .unwrap();
-            let mut database = groove::db::Database::new_with_storage_layout(
-                target_runtime.lower_catalogue_meta_to_groove(),
-                storage,
-                groove::storage::StorageLayout::jazz_class_v2(),
-            )
-            .await
-            .unwrap();
-            let mut batch = database.open_batch();
-            batch.delete(
-                "jazz_catalogue",
-                groove::db::PrimaryKeyValue::Composite(vec![
-                    groove::db::PrimaryKeyValue::U64(8),
-                    groove::db::PrimaryKeyValue::Uuid(uuid::Uuid::nil()),
-                ]),
-            );
-            let applied = database.apply_batch(batch).await.unwrap();
-            let persisted = applied.persist().await;
-            database.finish_persistence(persisted).unwrap();
-        }
 
         // No HTTP publication or test-side activation after reopen.
         let reopened = builder().build().await.unwrap();

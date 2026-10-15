@@ -30,6 +30,7 @@ import {
   verifiedLocalFirstRequestProof,
   type BackendRequestOptions,
 } from "./request-auth.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -539,20 +540,6 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     if (this.mutationErrorSinkRef)
       this.coreSource.detachMutationErrorSink(this.mutationErrorSinkRef);
   }
-}
-
-export function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 function assertValidBackendConfig(config: BackendContextConfig): void {

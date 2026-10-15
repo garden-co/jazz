@@ -8,7 +8,9 @@ use jazz::tx::Transaction;
 /// Estimate row-delivery bytes carried by a sync message.
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::Reserved14(retired) | SyncMessage::Reserved15(retired) => match *retired {},
+        SyncMessage::Reserved14(retired)
+        | SyncMessage::Reserved15(retired)
+        | SyncMessage::Reserved29(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
@@ -30,7 +32,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         }
         SyncMessage::CurrentRowsRequest(_) | SyncMessage::CurrentRowsCancel { .. } => 0,
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
-        SyncMessage::RetryLater { .. } => 2 * tx_id_wire_bytes(),
         SyncMessage::ReadBarrier { .. } => 0,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
@@ -60,7 +61,9 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 /// Estimate the irreducible row-version payload bytes carried by a sync message.
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::Reserved14(retired) | SyncMessage::Reserved15(retired) => match *retired {},
+        SyncMessage::Reserved14(retired)
+        | SyncMessage::Reserved15(retired)
+        | SyncMessage::Reserved29(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers, ..
         }) => version_carriers_bytes_floor(version_carriers),

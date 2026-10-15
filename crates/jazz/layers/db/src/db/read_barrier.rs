@@ -68,15 +68,15 @@ pub(super) struct ReadBarrierReceiver {
     /// Ordinals of received commit units with no answer yet.
     unanswered: BTreeSet<u64>,
     /// The unanswered ordinals of each transaction, oldest first. A writer
-    /// resends a write after `RetryLater`, so one transaction can arrive
-    /// more than once on a link.
+    /// can resend a write, so one transaction can arrive more than once on a
+    /// link.
     unanswered_by_tx: BTreeMap<TxId, VecDeque<u64>>,
     /// Writes this link has answered as stored here and not yet settled.
     /// A copy of one that arrives later is already answered: a recovering
     /// relay acknowledges a write it restored from its own storage before
     /// the writer's resent copy reaches it, and does not acknowledge the
-    /// copy again. A terminal fate or `RetryLater` removes the entry, so it
-    /// holds at most the writes still in flight on this link.
+    /// copy again. A terminal fate removes the entry, so it holds at most the
+    /// writes still in flight on this link.
     answered: BTreeSet<TxId>,
     /// Requests from the first unsatisfied barrier on, in arrival order. The
     /// front is always a `ReadBarrier`.
@@ -100,34 +100,29 @@ impl ReadBarrierReceiver {
     }
 
     /// Record an answer this link sent downstream: the first `FateUpdate`
-    /// for a write, or a `RetryLater`. Either means this node has stored or
-    /// decided the write: a node with an upstream first sends a local
+    /// for a write. It means this node has stored or decided the write: a
+    /// node with an upstream first sends a local
     /// acknowledgement once the write is durable here, and the authority
     /// sends the write's terminal fate. Waiting for this node rather than the
     /// authority keeps a local-first relay serving its clients offline; a
     /// relay's own upstream link puts the write ahead of the requests it
     /// forwards. Returns whether held requests may now be released.
     pub(super) fn answer_sent(&mut self, message: &SyncMessage) -> bool {
-        let (SyncMessage::FateUpdate { tx_id, .. } | SyncMessage::RetryLater { tx_id, .. }) =
-            message
-        else {
+        let SyncMessage::FateUpdate { tx_id, .. } = message else {
             return false;
         };
         let tx_id = *tx_id;
-        // A terminal fate or `RetryLater` ends this answer's standing: after
-        // `RetryLater` a resent copy is stored anew, and a copy arriving after
+        // A terminal fate ends this answer's standing: a copy arriving after
         // a terminal fate gets that fate again.
         let settled = matches!(
             message,
-            SyncMessage::RetryLater { .. }
-                | SyncMessage::FateUpdate {
-                    fate: Fate::Rejected(_),
-                    ..
-                }
-                | SyncMessage::FateUpdate {
-                    durability: Some(DurabilityTier::Global),
-                    ..
-                }
+            SyncMessage::FateUpdate {
+                fate: Fate::Rejected(_),
+                ..
+            } | SyncMessage::FateUpdate {
+                durability: Some(DurabilityTier::Global),
+                ..
+            }
         );
         if settled {
             self.answered.remove(&tx_id);
@@ -333,21 +328,6 @@ mod tests {
         assert!(worker.pop_released().is_none());
         assert!(worker.answer_sent(&accepted(tx(1), DurabilityTier::Global)));
         assert_eq!(opened_ids(&mut worker), [2]);
-
-        // After `RetryLater` the write was not stored, so a resent copy
-        // waits for its own answer.
-        let mut core = ReadBarrierReceiver::default();
-        core.commit_unit_received(tx(2));
-        assert!(!core.answer_sent(&SyncMessage::RetryLater {
-            tx_id: tx(2),
-            awaiting: tx(1),
-        }));
-        core.commit_unit_received(tx(2));
-        core.admit(request(barrier(2)));
-        core.admit(request(open(3)));
-        assert!(core.pop_released().is_none());
-        assert!(core.answer_sent(&accepted(tx(2), DurabilityTier::Global)));
-        assert_eq!(opened_ids(&mut core), [3]);
     }
 
     #[test]
@@ -364,11 +344,8 @@ mod tests {
         assert!(server.admit(request(open(1))).is_some());
         // Messages outside the requests channel are never held.
         server.admit(request(barrier(5)));
-        let write = request(SyncMessage::RetryLater {
-            tx_id: tx(9),
-            awaiting: tx(8),
-        });
-        assert!(server.admit(write).is_some());
+        let fate = request(accepted(tx(9), DurabilityTier::Global));
+        assert!(server.admit(fate).is_some());
     }
 
     /// Bob's second read names a later write than his first. Answering the
@@ -393,9 +370,13 @@ mod tests {
     fn a_resent_write_is_answered_once_per_arrival() {
         let mut server = ReadBarrierReceiver::default();
         server.commit_unit_received(tx(1));
-        assert!(!server.answer_sent(&SyncMessage::RetryLater {
+        // A rejection settles the write, so a resent copy waits for its own
+        // answer.
+        assert!(!server.answer_sent(&SyncMessage::FateUpdate {
             tx_id: tx(1),
-            awaiting: tx(0),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("no".into())),
+            global_time: None,
+            durability: None,
         }));
         server.commit_unit_received(tx(1));
         server.admit(request(barrier(2)));

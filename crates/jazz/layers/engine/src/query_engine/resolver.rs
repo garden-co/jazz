@@ -318,6 +318,48 @@ impl CapabilityReport {
     pub fn is_supported(&self) -> bool {
         self.gaps.is_empty()
     }
+
+    /// A report with one runtime-contract gap and no explanation.
+    pub(crate) fn runtime(message: impl Into<String>) -> Box<Self> {
+        Self::single(UnsupportedReason::Runtime(message.into()))
+    }
+
+    /// A report with one unrepresented-operator gap and no explanation.
+    pub(crate) fn operator(message: impl Into<String>) -> Box<Self> {
+        Self::single(UnsupportedReason::Operator(message.into()))
+    }
+
+    fn single(gap: UnsupportedReason) -> Box<Self> {
+        Box::new(Self {
+            gaps: vec![gap],
+            explain: ExplainPlan::default(),
+        })
+    }
+
+    /// A report with one gap and the capability that explains it.
+    pub(crate) fn explained(gap: UnsupportedReason, capability: impl Into<String>) -> Box<Self> {
+        Box::new(Self {
+            gaps: vec![gap],
+            explain: ExplainPlan {
+                capabilities: vec![capability.into()],
+                ..ExplainPlan::default()
+            },
+        })
+    }
+}
+
+impl ResolvedSource {
+    /// Look up a source the lowering already resolved; `role` names it in the
+    /// "{role} source {id:?} was not resolved" runtime gap.
+    pub(crate) fn lookup<'a>(
+        sources: &'a BTreeMap<SourceId, ResolvedSource>,
+        id: &SourceId,
+        role: &str,
+    ) -> CapabilityResult<&'a Self> {
+        sources.get(id).ok_or_else(|| {
+            CapabilityReport::runtime(format!("{role} source {id:?} was not resolved"))
+        })
+    }
 }
 
 /// Reason a request is not yet supported by unified lowering.

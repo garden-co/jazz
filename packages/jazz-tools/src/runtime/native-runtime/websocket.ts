@@ -649,14 +649,6 @@ function canonicalAuthorSubjectPart(author: string): string | null {
   return parseCanonicalAuthorSubject(author)?.user_id ?? null;
 }
 
-export async function connectWebSocketCarrier(
-  options: WebSocketCarrierOptions,
-): Promise<WebSocketCarrier> {
-  const carrier = new WebSocketCarrier(options);
-  await carrier.ready();
-  return carrier;
-}
-
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) {

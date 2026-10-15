@@ -26,6 +26,11 @@ import {
 } from "./account-session.js";
 import { serializeSchemaSource } from "../drivers/schema-wire.js";
 import {
+  REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
+  REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
+  REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
+} from "./errors.js";
+import {
   NativeForegroundDb,
   type NativeForegroundFactory,
   type NativeForegroundModule,
@@ -49,13 +54,6 @@ export type ReactNativeDbConfig = DbConfig & {
   nativeRelay?: ReactNativeRelayConfig;
 };
 
-export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =
-  "React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability";
-export const REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR =
-  "React Native nativeRelay is only valid with persistent storage; remove nativeRelay when driver.type='memory'";
-export const REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR =
-  "React Native requires the installed JazzRelay native runtime; driver.type='memory' is not supported";
-
 function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
   return (config.driver?.type ?? "persistent") === "persistent";
 }
@@ -76,7 +74,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         if (this.pendingCapability || this.admittedCapability) return;
         assertAccountConfig(config);
         const session = resolveNativeSession(config);
-        const module = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        const module = await import("jazz-rn/relay");
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
         this.pendingCapability = beginNativeAccountSession(factory, config, session);
@@ -106,7 +104,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         // Capture before the first await: caller-owned bytes must never select
         // a different scope after native identity preflight.
         const capability = new Uint8Array(config.nativeRelay.capability);
-        const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        const foreground = await import("jazz-rn/relay");
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         if (this.foregroundFactory.accountSecret)
           installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);
