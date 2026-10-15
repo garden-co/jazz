@@ -2299,6 +2299,7 @@ dependencies = [
  "jazz",
  "jazz-benchmark-guard",
  "jazz-storage-rocksdb",
+ "jazz-storage-sqlite",
  "libc",
  "serde_json",
  "tempfile",
