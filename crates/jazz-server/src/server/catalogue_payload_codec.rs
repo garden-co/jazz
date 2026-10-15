@@ -2823,6 +2823,188 @@ mod tests {
     };
     use serde_json::json;
 
+    /// Every relation-IR node kind, including one literal of each value type.
+    /// Policy relations are durable (catalogue JSON and these canonical bytes),
+    /// so any change to the relation IR must keep both outputs identical.
+    fn golden_relation_policy() -> PolicyExpr {
+        use jazz::tools::public_schema::{
+            RelJoinCondition, RelJoinKind, RelKeyRef, RelProjectColumn, RelProjectExpr,
+            RelRecursionBound, RelUnionArm, RowIdRef,
+        };
+        let col = |scope: Option<&str>, column: &str| RelColumnRef {
+            scope: scope.map(str::to_owned),
+            column: column.to_owned(),
+        };
+        let uuid = ObjectId::from_uuid(uuid::Uuid::from_u128(0x0123_4567_89ab_cdef));
+        let literals = vec![
+            Value::Integer(-7),
+            Value::BigInt(9_007_199_254_740_993),
+            Value::Double(1.5),
+            Value::Boolean(true),
+            Value::Text("viewer".to_owned()),
+            Value::Timestamp(1_700_000_000_000),
+            Value::Uuid(uuid),
+            Value::TransactionId([7; 16]),
+            Value::Bytea(vec![0, 1, 255]),
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+            // The catalogue codec does not carry nested-row ids.
+            Value::Row {
+                id: None,
+                values: vec![Value::Text("a".to_owned()), Value::Null],
+            },
+            Value::Enum {
+                case: "active".to_owned(),
+                values: vec![Value::Integer(3)],
+            },
+            Value::Null,
+        ];
+        let cmp = |column: &str, op, right| RelPredicateExpr::Cmp {
+            left: col(Some("t"), column),
+            op,
+            right,
+        };
+        let predicate = RelPredicateExpr::And(vec![
+            cmp(
+                "a",
+                RelPredicateCmpOp::Eq,
+                RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+            ),
+            cmp(
+                "b",
+                RelPredicateCmpOp::Ne,
+                RelValueRef::OuterColumn(col(None, "owner")),
+            ),
+            cmp(
+                "c",
+                RelPredicateCmpOp::Lt,
+                RelValueRef::RowId(RowIdRef::Outer),
+            ),
+            cmp(
+                "d",
+                RelPredicateCmpOp::Le,
+                RelValueRef::RowId(RowIdRef::Frontier),
+            ),
+            cmp(
+                "e",
+                RelPredicateCmpOp::Gt,
+                RelValueRef::RowId(RowIdRef::Current),
+            ),
+            cmp(
+                "f",
+                RelPredicateCmpOp::Ge,
+                RelValueRef::Literal(Value::Integer(4)),
+            ),
+            RelPredicateExpr::In {
+                left: col(Some("t"), "g"),
+                values: literals.into_iter().map(RelValueRef::Literal).collect(),
+            },
+            RelPredicateExpr::Or(vec![
+                RelPredicateExpr::IsNull {
+                    column: col(None, "h"),
+                },
+                RelPredicateExpr::Not(Box::new(RelPredicateExpr::IsNotNull {
+                    column: col(Some("t"), "i"),
+                })),
+            ]),
+            RelPredicateExpr::Contains {
+                left: col(Some("t"), "tags"),
+                right: RelValueRef::Literal(Value::Text("x".to_owned())),
+            },
+            RelPredicateExpr::EnumMatch {
+                column: col(Some("t"), "status"),
+                case: "active".to_owned(),
+                payload: Box::new(RelPredicateExpr::Cmp {
+                    left: col(None, "since"),
+                    op: RelPredicateCmpOp::Gt,
+                    right: RelValueRef::Literal(Value::Timestamp(5)),
+                }),
+            },
+            RelPredicateExpr::True,
+            RelPredicateExpr::False,
+        ]);
+        let scan = |table: &str, alias: Option<&str>| RelExpr::TableScan {
+            table: TableName::new(table),
+            alias: alias.map(str::to_owned),
+        };
+        let gather = RelExpr::Gather {
+            seed: Box::new(RelExpr::Filter {
+                input: Box::new(scan("teams", Some("t"))),
+                predicate,
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(scan("team_edges", None)),
+                columns: vec![
+                    RelProjectColumn {
+                        alias: "id".to_owned(),
+                        expr: RelProjectExpr::Column(col(Some("team_edges"), "parent")),
+                    },
+                    RelProjectColumn {
+                        alias: "row".to_owned(),
+                        expr: RelProjectExpr::RowId(RowIdRef::Current),
+                    },
+                ],
+            }),
+            frontier_key: RelKeyRef::RowId(RowIdRef::Current),
+            bound: RelRecursionBound::MaxDepth(6),
+            dedupe_key: vec![
+                RelKeyRef::RowId(RowIdRef::Current),
+                RelKeyRef::Column(col(Some("t"), "a")),
+            ],
+        };
+        let fixpoint = RelExpr::Gather {
+            seed: Box::new(scan("teams", None)),
+            step: Box::new(scan("teams", None)),
+            frontier_key: RelKeyRef::Column(col(None, "id")),
+            bound: RelRecursionBound::Fixpoint,
+            dedupe_key: Vec::new(),
+        };
+        PolicyExpr::ExistsRel {
+            rel: RelExpr::Union {
+                inputs: vec![
+                    RelUnionArm {
+                        label: "inner".to_owned(),
+                        input: RelExpr::Join {
+                            left: Box::new(gather),
+                            right: Box::new(scan("access", Some("access"))),
+                            on: vec![RelJoinCondition {
+                                left: col(None, "id"),
+                                right: col(Some("access"), "team"),
+                            }],
+                            join_kind: RelJoinKind::Inner,
+                        },
+                    },
+                    RelUnionArm {
+                        label: "left".to_owned(),
+                        input: RelExpr::Join {
+                            left: Box::new(fixpoint),
+                            right: Box::new(scan("access", None)),
+                            on: Vec::new(),
+                            join_kind: RelJoinKind::Left,
+                        },
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn relation_policy_json_and_catalogue_bytes_are_frozen() {
+        let policy = golden_relation_policy();
+        let json = serde_json::to_string(&policy).unwrap();
+        let permissions = HashMap::from([(
+            TableName::new("docs"),
+            TablePolicies::new().with_select(policy.clone()),
+        )]);
+        let bytes = encode_permissions(&permissions);
+        assert_eq!(json, GOLDEN_RELATION_POLICY_JSON);
+        assert_eq!(hex(&bytes), GOLDEN_RELATION_POLICY_HEX);
+        assert_eq!(serde_json::from_str::<PolicyExpr>(&json).unwrap(), policy);
+        assert_eq!(decode_permissions(&bytes).unwrap(), permissions);
+    }
+
+    const GOLDEN_RELATION_POLICY_JSON: &str = r#"{"type":"ExistsRel","rel":{"Union":{"inputs":[{"label":"inner","input":{"Join":{"left":{"Gather":{"seed":{"Filter":{"input":{"TableScan":{"table":"teams","alias":"t"}},"predicate":{"And":[{"Cmp":{"left":{"scope":"t","column":"a"},"op":"Eq","right":{"SessionRef":["claims","sub"]}}},{"Cmp":{"left":{"scope":"t","column":"b"},"op":"Ne","right":{"OuterColumn":{"scope":null,"column":"owner"}}}},{"Cmp":{"left":{"scope":"t","column":"c"},"op":"Lt","right":{"RowId":"Outer"}}},{"Cmp":{"left":{"scope":"t","column":"d"},"op":"Le","right":{"RowId":"Frontier"}}},{"Cmp":{"left":{"scope":"t","column":"e"},"op":"Gt","right":{"RowId":"Current"}}},{"Cmp":{"left":{"scope":"t","column":"f"},"op":"Ge","right":{"Literal":{"type":"Integer","value":4}}}},{"In":{"left":{"scope":"t","column":"g"},"values":[{"Literal":{"type":"Integer","value":-7}},{"Literal":{"type":"BigInt","value":"9007199254740993"}},{"Literal":{"type":"Double","value":1.5}},{"Literal":{"type":"Boolean","value":true}},{"Literal":{"type":"Text","value":"viewer"}},{"Literal":{"type":"Timestamp","value":1700000000000}},{"Literal":{"type":"Uuid","value":"00000000-0000-0000-0123-456789abcdef"}},{"Literal":{"type":"TransactionId","value":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}},{"Literal":{"type":"Bytea","value":[0,1,255]}},{"Literal":{"type":"Array","value":[{"type":"Integer","value":1},{"type":"Integer","value":2}]}},{"Literal":{"type":"Row","value":{"values":[{"type":"Text","value":"a"},{"type":"Null"}]}}},{"Literal":{"type":"Enum","value":{"case":"active","values":[{"type":"Integer","value":3}]}}},{"Literal":{"type":"Null"}}]}},{"Or":[{"IsNull":{"column":{"scope":null,"column":"h"}}},{"Not":{"IsNotNull":{"column":{"scope":"t","column":"i"}}}}]},{"Contains":{"left":{"scope":"t","column":"tags"},"right":{"Literal":{"type":"Text","value":"x"}}}},{"EnumMatch":{"column":{"scope":"t","column":"status"},"case":"active","payload":{"Cmp":{"left":{"scope":null,"column":"since"},"op":"Gt","right":{"Literal":{"type":"Timestamp","value":5}}}}}},"True","False"]}}},"step":{"Project":{"input":{"TableScan":{"table":"team_edges"}},"columns":[{"alias":"id","expr":{"Column":{"scope":"team_edges","column":"parent"}}},{"alias":"row","expr":{"RowId":"Current"}}]}},"frontier_key":{"RowId":"Current"},"bound":{"MaxDepth":6},"dedupe_key":[{"RowId":"Current"},{"Column":{"scope":"t","column":"a"}}]}},"right":{"TableScan":{"table":"access","alias":"access"}},"on":[{"left":{"scope":null,"column":"id"},"right":{"scope":"access","column":"team"}}],"join_kind":"Inner"}}},{"label":"left","input":{"Join":{"left":{"Gather":{"seed":{"TableScan":{"table":"teams"}},"step":{"TableScan":{"table":"teams"}},"frontier_key":{"Column":{"scope":null,"column":"id"}},"bound":"Fixpoint","dedupe_key":[]}},"right":{"TableScan":{"table":"access"}},"on":[],"join_kind":"Left"}}}]}}}"#;
+    const GOLDEN_RELATION_POLICY_HEX: &str = "010100000004000000646f6373010d01070200000005000000696e6e6572040000006c65667404060201050000007465616d73010100000074070c00000001010100000074010000006101020200000006000000636c61696d7303000000737562010101000000740100000062020300050000006f776e6572010101000000740100000063030402010101000000740100000064040403010101000000740100000065050401010101000000740100000066060101040000000401010000007401000000670d0000000101f9ffffff01020100000000002000010a000000000000f83f01030101040600000076696577657201050068e5cf8b010000010600000000000000000123456789abcdef010c07070707070707070707070707070707010b030000000001ff0107020000000101000000010200000001080200000004010000006100010d060000006163746976650100000001030000000100080200000002000100000068090301010000007401000000690501010000007404000000746167730104010000007806010100000074060000007374617475730600000061637469766501000500000073696e636505010505000000000000000a0b05010a0000007465616d5f6564676573000200000002000000696401010a0000007465616d5f656467657306000000706172656e7403000000726f77020102010206000000000000000200000002010101010000007401000000610106000000616363657373010600000061636365737301000000000200000069640106000000616363657373040000007465616d01040601050000007465616d730001050000007465616d730001000200000069640100000000010600000061636365737300000000000200000000000000";
+
     #[test]
     fn schema_roundtrip_simple() {
         let schema = SchemaBuilder::new()
