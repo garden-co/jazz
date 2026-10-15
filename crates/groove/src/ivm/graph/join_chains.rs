@@ -201,6 +201,11 @@ fn join_side_demand(
 fn demanded_names(fields: &[ProjectField]) -> Option<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for field in fields {
+        if let ProjectExpr::Tuple(sources) = &field.expression {
+            for source in sources {
+                names.insert(field_ref_name(source)?);
+            }
+        }
         if let Some(source) = project_expr_source(&field.expression) {
             names.insert(field_ref_name(source)?);
         }
@@ -231,13 +236,15 @@ fn provides(field: &ProjectField, name: &str) -> bool {
 fn project_expr_source(expression: &ProjectExpr) -> Option<&FieldRef> {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_)
+        ProjectExpr::Tuple(_)
+        | ProjectExpr::Literal(_)
         | ProjectExpr::TypedLiteral { .. }
         | ProjectExpr::Null(_)
         | ProjectExpr::TemplateArgument { .. } => None,

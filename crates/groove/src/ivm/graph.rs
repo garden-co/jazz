@@ -1593,13 +1593,15 @@ impl ProjectField {
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
+            | ProjectExpr::Required(source)
             | ProjectExpr::RecordField { source, .. }
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
             | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
-            ProjectExpr::Literal(_)
+            ProjectExpr::Tuple(_)
+            | ProjectExpr::Literal(_)
             | ProjectExpr::TypedLiteral { .. }
             | ProjectExpr::Null(_)
             | ProjectExpr::TemplateArgument { .. } => None,
@@ -1609,6 +1611,10 @@ impl ProjectField {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
+    /// Assemble a tuple from scalar source fields.
+    Tuple(Vec<FieldRef>),
+    /// Unwrap a required value, failing evaluation if it is absent.
+    Required(FieldRef),
     /// Process-local scalar argument with its exact output contract.
     /// Ordinary graph installation rejects unbound arguments.
     TemplateArgument {

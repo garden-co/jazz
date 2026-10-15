@@ -694,6 +694,28 @@ pub(super) fn project_descriptor(
         .iter()
         .map(|project_field| {
             let value_type = match &project_field.expression {
+                ProjectExpr::Tuple(fields) => ValueType::Tuple(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            let index = resolve_field_ref(input, field)?;
+                            let ty = input.fields()[index].value_type.clone();
+                            if ty.fixed_size().is_none() {
+                                return Err(IvmRuntimeError::RecordEncoding(
+                                    records::Error::InvalidTupleMember { member_type: ty },
+                                ));
+                            }
+                            Ok(ty)
+                        })
+                        .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                ),
+                ProjectExpr::Required(source) => {
+                    let index = resolve_field_ref(input, source)?;
+                    let ValueType::Nullable(inner) = &input.fields()[index].value_type else {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    };
+                    *inner.clone()
+                }
                 ProjectExpr::RecordField { source, path } => {
                     let index = resolve_field_ref(input, source)?;
                     let mut ty = input.fields()[index].value_type.clone();
@@ -1284,7 +1306,13 @@ pub(super) fn project_field_expr(
 ) -> Result<ProjectExpr, IvmRuntimeError> {
     let mut expression = field.expression.clone();
     match &mut expression {
+        ProjectExpr::Tuple(fields) => {
+            for field in fields {
+                *field = FieldRef::Resolved(resolve_field_ref(input, field)?);
+            }
+        }
         ProjectExpr::Field(source)
+        | ProjectExpr::Required(source)
         | ProjectExpr::RecordField { source, .. }
         | ProjectExpr::Nullable(source)
         | ProjectExpr::NullableFlat(source)
@@ -1352,6 +1380,13 @@ pub(super) fn project_field_value(
     };
     Ok(match &expr.expression {
         ProjectExpr::TemplateArgument { .. } => return Err(IvmRuntimeError::UnsupportedOperator),
+        ProjectExpr::Tuple(fields) => {
+            Value::Tuple(fields.iter().map(resolved).collect::<Result<_, _>>()?)
+        }
+        ProjectExpr::Required(field) => match resolved(field)? {
+            Value::Nullable(Some(value)) => *value,
+            _ => return Err(IvmRuntimeError::RequiredProjectionValueMissing),
+        },
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
             let mut value = resolved(source)?;
@@ -1734,7 +1769,9 @@ pub(super) fn raw_projection_fields(
                 ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
                     prepared_constant_field(output_desc, output_idx, value.to_value())
                 }
-                ProjectExpr::EnumTagRemap { .. }
+                ProjectExpr::Tuple(_)
+                | ProjectExpr::Required(_)
+                | ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }
                 | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
             })

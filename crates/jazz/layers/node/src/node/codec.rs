@@ -4573,7 +4573,7 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
     ))
 }
 
-pub(super) fn current_row_prefix_and_cells_from_version(
+fn current_row_prefix_and_cells_from_version(
     table: &TableSchema,
     version: &VersionRow,
 ) -> Result<Vec<Value>, Error> {
@@ -4588,7 +4588,7 @@ pub(super) fn current_row_prefix_and_cells_from_version(
     Ok(values)
 }
 
-pub(super) fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
+fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
     values.push(
         RowAuthor::from_persisted_subject(provenance.created_by())
             .expect("stored provenance is a row author")
@@ -4626,7 +4626,7 @@ pub(super) fn current_row_column_type(column: &crate::schema::ColumnSchema) -> r
     }
 }
 
-pub(super) fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<CurrentRowDescriptorCacheEntry>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()));

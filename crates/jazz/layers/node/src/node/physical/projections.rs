@@ -329,6 +329,33 @@ where
         schema_version: SchemaVersionId,
         logical_table: &str,
     ) -> Result<GraphBuilder, Error> {
+        self.physical_history_source_graph_with_scan(schema_version, logical_table, None)
+    }
+
+    /// Read only one row's history under its exact stored branch coordinate.
+    pub(super) fn physical_history_row_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        branch_key: &BranchKey,
+        row: RowUuid,
+    ) -> Result<GraphBuilder, Error> {
+        self.physical_history_source_graph_with_scan(
+            schema_version,
+            logical_table,
+            Some(groove::ivm::StaticScanSpec::Prefix(vec![
+                Value::Bytes(branch_key.canonical_bytes()).into(),
+                Value::Uuid(row.0).into(),
+            ])),
+        )
+    }
+
+    fn physical_history_source_graph_with_scan(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        scan: Option<groove::ivm::StaticScanSpec>,
+    ) -> Result<GraphBuilder, Error> {
         let alias = self
             .catalogue
             .schema_version_aliases
@@ -344,10 +371,11 @@ where
             schema_version,
             logical_table,
         )?;
-        Ok(GraphBuilder::variant_source(
-            storage_table,
-            physical_history_projection_target(alias, logical_table),
-        ))
+        let target = physical_history_projection_target(alias, logical_table);
+        Ok(match scan {
+            Some(scan) => GraphBuilder::variant_source_scan(storage_table, target, scan),
+            None => GraphBuilder::variant_source(storage_table, target),
+        })
     }
 
     pub(super) async fn register_physical_history_variant_projections(

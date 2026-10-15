@@ -2518,8 +2518,9 @@ where
         &mut self,
         request: &SourceRequest,
     ) -> Result<Option<QueryProgramRequest>, Error> {
-        // The bounded history snapshot authorizes its current row through a
-        // separate ordinary point source. Historical values are never policy inputs.
+        // History compiles its underlying current-table authorization program
+        // as a graph dependency. Prepare those policies in that program, never
+        // against the historical values or the virtual table name.
         if request
             .source
             .table

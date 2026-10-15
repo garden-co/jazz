@@ -619,6 +619,9 @@ impl From<crate::dictionary::DictionaryTranscodeError> for IvmRuntimeError {
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
+    /// A required nullable projection encountered an absent value.
+    #[error("required projection value is missing")]
+    RequiredProjectionValueMissing,
     #[error("runtime persistence outcome is indeterminate; reopen before continuing")]
     PersistenceOutcomeIndeterminate,
     #[error("aggregate result exceeds its declared numeric width")]

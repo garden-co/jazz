@@ -3613,15 +3613,28 @@ fn content_version_witness_graph_from_visible_graph(
     let mut fields = witness_fields;
     for field in &mut fields {
         use groove::ivm::ProjectExpr;
+        if let ProjectExpr::Tuple(keys) = &mut field.expression {
+            for key in keys {
+                match key {
+                    FieldRef::Name(name) | FieldRef::StoredName(name) => {
+                        *key = FieldRef::stored_name(format!("right.{name}"));
+                    }
+                    FieldRef::Resolved(_) => unreachable!("witness carriers are bound by name"),
+                }
+            }
+            continue;
+        }
         let key = match &mut field.expression {
             ProjectExpr::Field(key)
+            | ProjectExpr::Required(key)
             | ProjectExpr::Nullable(key)
             | ProjectExpr::NullableFlat(key)
             | ProjectExpr::RecordField { source: key, .. }
             | ProjectExpr::EnumTagRemap { source: key, .. }
             | ProjectExpr::EnumRemap { source: key, .. }
             | ProjectExpr::RecursiveEnumRemap { source: key, .. } => key,
-            ProjectExpr::Literal(_)
+            ProjectExpr::Tuple(_)
+            | ProjectExpr::Literal(_)
             | ProjectExpr::TypedLiteral { .. }
             | ProjectExpr::Null(_)
             | ProjectExpr::TemplateArgument { .. } => {

@@ -63,69 +63,148 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .select(["id"])
             .validate_with_schema_version(schema, schema_version)?;
         let binding = visibility.bind(BTreeMap::new())?;
-        let visible = Box::pin(self.node.query_row_visibility_for_link_physical_row(
-            &visibility,
-            &binding,
-            tier,
-            identity,
-            row,
-        ))
-        .await?;
-        let descriptor = crate::node::codec::current_row_descriptor(&table);
-        let mut rows = Vec::new();
-        if !visible.is_empty() {
-            for version in self.node.query_row_versions(base_name, row).await? {
-                let seq = version.seq()?;
-                if seq == GlobalTime(0) {
-                    continue;
-                }
-                if self
-                    .node
-                    .schema_version_for_alias(version.schema_version_alias())
-                    != Some(schema_version)
-                {
-                    return Err(unsupported(
-                        "historical versions authored in a different schema",
-                    ));
-                }
-                let authored = version.authored_column_ids()?.ok_or_else(|| {
-                    unsupported("versions without exact authored-column metadata")
-                })?;
-                if authored.contains(&DELETION_COLUMN_ID) && authored.len() == 1 {
-                    continue;
-                }
-                let tx = self.node.version_tx_id(&version)?;
-                let mut values = crate::node::codec::current_row_prefix_and_cells_from_version(
-                    &base_table,
-                    &version,
-                )?;
-                values.extend(HistoryMetadataColumn::ALL.map(|column| {
-                    let value = match column {
-                        HistoryMetadataColumn::TransactionId => tx_id_value(tx),
-                        HistoryMetadataColumn::Sequence => Value::U64(seq.0),
-                    };
-                    Value::Nullable(Some(Box::new(value)))
-                }));
-                crate::node::codec::append_current_row_provenance(&mut values, &version);
-                let raw = descriptor.create(&values)?;
-                rows.push(CurrentRow::new(
-                    table.name.clone(),
-                    OwnedRecord::new(raw, descriptor),
-                ));
-            }
-        }
-        let alias = self
+        // Compile the ordinary authorized point read into the source graph. No
+        // query is executed while preparing history, and permission changes
+        // remain dependencies of the resulting graph.
+        let visibility_request = self
             .node
-            .ensure_schema_version_alias(schema_version)
-            .await?;
-        let (graph, descriptor, metadata) =
-            read_sources::inline_current_graph_with_source_metadata(
-                &table,
-                rows,
-                alias,
-                "history",
-                &request.requirements,
+            .current_query_program_request_with_inline_binding_source(
+                &visibility,
+                &binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AuthorizedRows,
+                &ReadViewSpec::default(),
+                QueryAuthorizationMode::TrustedServing,
             )?;
+        let visibility_program =
+            Box::pin(self.node.compile_query_program_request_with_access_paths(
+                visibility_request,
+                BTreeMap::from([(
+                    root_source_id(base_name),
+                    CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+                )]),
+            ))
+            .await?;
+        let authorized =
+            lowering::lowered_terminal_graph(&visibility_program, "policy.authorized_rows")?
+                .project(["row_uuid"]);
+        let history = self.node.physical_history_row_source_graph(
+            schema_version,
+            base_name,
+            &BranchKey::default(),
+            row,
+        )?;
+        let history = GraphBuilder::semi_join(history, authorized, ["row_uuid"], ["row_uuid"])
+            .filter(PredicateExpr::gt("seq", Value::U64(0)));
+        let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
+        let history_fields = descriptor_field_names(&history_descriptor)?;
+        let history = history
+            .project_fields(history_fields.iter().map(|name| {
+                let mut field = ProjectField::named(name);
+                if name == "authored_columns" {
+                    field.expression =
+                        groove::ivm::ProjectExpr::Required(groove::ivm::FieldRef::name(name));
+                }
+                field
+            }))
+            .filter(PredicateExpr::Neq {
+                field: "authored_columns".to_owned(),
+                value: Value::Array(vec![Value::U64(DELETION_COLUMN_ID.0)]).into(),
+            });
+
+        // Metadata lookups are keyed by versions already selected under the
+        // exact row prefix; neither transaction nor node tables are scanned.
+        let transactions = GraphBuilder::lookup(
+            GraphBuilder::table("jazz_transactions"),
+            history.clone().project(["tx_time", "tx_node_id"]),
+            ["tx_time", "tx_node_id"],
+        )
+        .ok_or(Error::InvalidStoredValue(
+            "transaction lookup requires a table source",
+        ))?;
+        let with_author = GraphBuilder::join(
+            history,
+            transactions,
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            history_fields
+                .iter()
+                .map(|name| ProjectField::renamed(format!("left.{name}"), name))
+                .chain([ProjectField::renamed("right.made_by", "transaction_author")]),
+        );
+        let nodes = GraphBuilder::lookup(
+            GraphBuilder::table("jazz_nodes"),
+            with_author.clone().project(["tx_node_id"]),
+            ["tx_node_id"],
+        )
+        .ok_or(Error::InvalidStoredValue(
+            "node lookup requires a table source",
+        ))?;
+        let source = GraphBuilder::join(with_author, nodes, ["tx_node_id"], ["id"]).project_fields(
+            history_fields
+                .iter()
+                .map(|name| ProjectField::renamed(format!("left.{name}"), name))
+                .chain([
+                    ProjectField::renamed("left.transaction_author", "transaction_author"),
+                    ProjectField::renamed("right.uuid", "transaction_node"),
+                ]),
+        );
+        let projection = |stored_author: bool| {
+            let mut fields = vec![ProjectField::named("row_uuid")];
+            fields.extend(base_table.columns.iter().map(|column| {
+                ProjectField::named_with_identity(
+                    user_column_field(&column.name),
+                    records::FieldIdentity::Name(column.name.clone()),
+                )
+            }));
+            fields.extend(HistoryMetadataColumn::ALL.map(|column| {
+                let expression = match column {
+                    HistoryMetadataColumn::TransactionId => groove::ivm::ProjectExpr::Tuple(vec![
+                        groove::ivm::FieldRef::name("tx_time"),
+                        groove::ivm::FieldRef::name("transaction_node"),
+                    ]),
+                    HistoryMetadataColumn::Sequence => {
+                        groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::name("seq"))
+                    }
+                };
+                ProjectField {
+                    expression,
+                    output_name: user_column_field(column.name()),
+                    output_identity: records::FieldIdentity::Name(column.name().to_owned()),
+                }
+            }));
+            fields.extend([
+                ProjectField::renamed("created_by", "$createdBy"),
+                ProjectField::renamed("created_at", "$createdAt"),
+                ProjectField::renamed(
+                    if stored_author {
+                        "updated_by"
+                    } else {
+                        "transaction_author"
+                    },
+                    "$updatedBy",
+                ),
+                ProjectField::renamed("updated_at", "$updatedAt"),
+                ProjectField::named("tx_time"),
+                ProjectField::named("tx_node_id"),
+            ]);
+            fields
+        };
+        let graph = GraphBuilder::union([
+            source
+                .clone()
+                .filter(PredicateExpr::is_not_null("updated_by"))
+                .unwrap_nullable("updated_by")
+                .project_fields(projection(true)),
+            source
+                .filter(PredicateExpr::is_null("updated_by"))
+                .project_fields(projection(false)),
+        ]);
+        let descriptor = self.node.database.graph_output_descriptor(&graph)?;
+        let metadata = BTreeMap::new();
         Ok(ResolvedSource {
             stored_column_ids: BTreeMap::new(),
             table_schema: table.into(),
