@@ -310,19 +310,18 @@ inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,
 `INV-BVIEW-10`).
 
-Live one-shot `include_deleted` reads also retain a selected `Deleted` register
-when the selected view has no content winner. An exact-head read returns that
-row with the head branch values and absent non-branch cells; it does not fetch
-a body from an undeclared branch. An explicitly selected current base can
-supply the body. A register-only row takes its creation and update provenance
-from the register; a content-backed tombstone retains content creation
-provenance and takes update provenance from the selected deletion.
+Live one-shot `include_deleted` reads retain deleted head row images. Deleting
+an inherited row creates a head image with absent non-branch cells. That image
+masks the base body even when a current base is explicitly selected. Its
+creation and update provenance come from the head image. Deleting a row with
+its own head content retains that content and its creation provenance, with
+update provenance from the deletion. Restoring an empty head with supplied
+content replaces its body; it does not fetch content from the base.
 
-Physical content presence is decided before compatibility projection. A head
-winner that an older reader must omit still masks base content and cannot
-become a register-only tombstone. Register-only application output does not
-establish read-policy eligibility: trusted non-System reads still require
-selected content under the effective head's policy (`INV-RLS-8`).
+Physical head presence is decided before compatibility projection. A head
+image that an older reader must omit still masks base content. Trusted
+non-System reads evaluate the selected row image under the effective head's
+policy, including when that image is deleted and has no body (`INV-RLS-8`).
 
 Masking precedes predicates. If base row A has `status="open"` and head row A
 has `status="closed"`, a query for open rows must not return base A. Index plans

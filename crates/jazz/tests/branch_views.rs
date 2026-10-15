@@ -1892,9 +1892,9 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
 }
 
 /// Alice's exact head exposes its tombstones without implicitly reading a base.
-/// An explicit base supplies inherited cells; restoration replaces the tombstone.
+/// A deleted head image masks base cells; restoration supplies new head content.
 ///
-/// alice ──base insert──► head delete ──► exact head (sparse) / declared base (body)
+/// alice ──base insert──► head delete ──► exact head / declared base (empty body)
 #[test]
 fn include_deleted_reads_select_the_requested_live_branch_view() {
     let (db, schema) = open_db();
@@ -2039,7 +2039,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 )
             ),
         ]),
-        "exact head keeps register-only tombstones without fetching an undeclared body"
+        "exact head keeps deleted row images without fetching an undeclared body"
     );
     let base_rows = block_on(db.all(&prepared, current_base_opts.clone())).unwrap();
     assert_eq!(
@@ -2047,13 +2047,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
         BTreeMap::from([
             (
                 inherited_deleted,
-                (
-                    Some(Value::String("deleted from head".to_owned())),
-                    head_cell.clone(),
-                    true,
-                    1_000,
-                    4_000
-                )
+                (None, head_cell.clone(), true, 4_000, 4_000)
             ),
             (
                 inherited_visible,
@@ -2076,7 +2070,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 )
             ),
         ]),
-        "declared base supplies content while head deletion and branch coordinates win"
+        "a deleted head image masks the declared base, including its body and provenance"
     );
     let exact_base_rows = block_on(db.all(
         &prepared,
@@ -2147,7 +2141,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 (Some(Value::String("deleted on head".to_owned())), true)
             ),
         ]),
-        "restore supersedes the register-only tombstone without a duplicate"
+        "restore supplies head content without duplicating the deleted row image"
     );
 
     let unsupported_snapshot_base = ReadOpts {
@@ -2172,13 +2166,13 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
     assert_eq!(error.code, jazz::db::ErrorCode::Query);
 }
 
-/// Alice's cached sparse tombstone cannot establish its own authority read proof.
-/// A declared base supplies a subject only under the requested head's policy.
+/// Alice's deleted head image remains subject to the requested head's read policy.
+/// Its empty body masks the base even when Bob later acquires the head grant.
 ///
-/// base content ──head delete──► local tombstone
-///                              └─authority─► selected content AND head grant
+/// alice ──base insert──► head delete ──► empty deleted head image
+///                       head owner -> bob ──► alice denied / bob allowed
 #[test]
-fn include_deleted_branch_tombstones_require_selected_content_for_authority_reads() {
+fn include_deleted_branch_tombstones_follow_head_policy_for_authority_reads() {
     let alice = AuthorSubject::for_test_bytes([0x76; 16]);
     let bob = AuthorSubject::for_test_bytes([0x77; 16]);
     let base_row = RowUuid::from_bytes([0x48; 16]);
@@ -2262,22 +2256,14 @@ fn include_deleted_branch_tombstones_require_selected_content_for_authority_read
             vec![(todo, None, Some(Value::Uuid(head_row.0)), true)],
             "client-local output remains policy-free retained knowledge"
         );
-        assert!(
-            block_on(db.all_for_identity(&query, exact, alice))
-                .unwrap()
-                .is_empty(),
-            "even an unconditional grant needs selected content, not a sparse self-proof"
-        );
-        let allowed = vec![(
-            todo,
-            Some(Value::String("retained base".to_owned())),
-            Some(Value::Uuid(head_row.0)),
-            true,
-        )];
-        assert_eq!(
-            states(block_on(db.all_for_identity(&query, composed.clone(), alice)).unwrap()),
-            allowed
-        );
+        let allowed = vec![(todo, None, Some(Value::Uuid(head_row.0)), true)];
+        for opts in [exact.clone(), composed.clone()] {
+            assert_eq!(
+                states(block_on(db.all_for_identity(&query, opts, alice)).unwrap()),
+                allowed,
+                "authority reads use the stored head image without borrowing base cells"
+            );
+        }
         if reference_policy {
             db.update(
                 "branches",
@@ -2286,29 +2272,33 @@ fn include_deleted_branch_tombstones_require_selected_content_for_authority_read
                 Default::default(),
             )
             .unwrap();
-            assert!(
-                block_on(db.all_for_identity(&query, composed.clone(), alice))
-                    .unwrap()
-                    .is_empty(),
-                "an Alice-readable base cannot authorize a Bob-owned effective head"
-            );
-            assert_eq!(
-                states(block_on(db.all_for_identity(&query, composed.clone(), bob)).unwrap()),
-                allowed
-            );
+            for opts in [exact.clone(), composed.clone()] {
+                assert!(
+                    block_on(db.all_for_identity(&query, opts.clone(), alice))
+                        .unwrap()
+                        .is_empty(),
+                    "an Alice-readable base cannot authorize a Bob-owned effective head"
+                );
+                assert_eq!(
+                    states(block_on(db.all_for_identity(&query, opts, bob)).unwrap()),
+                    allowed
+                );
+            }
             db.delete("branches", head_row, Default::default()).unwrap();
-            assert!(
-                block_on(db.all_for_identity(&query, composed, bob))
-                    .unwrap()
-                    .is_empty(),
-                "missing head reference evidence fails closed"
-            );
+            for opts in [exact, composed] {
+                assert!(
+                    block_on(db.all_for_identity(&query, opts, bob))
+                        .unwrap()
+                        .is_empty(),
+                    "missing head reference evidence fails closed"
+                );
+            }
         }
     }
 }
 
 /// An old reader omits Bob's incompatible head content instead of resurrecting
-/// it as a sparse tombstone or falling through to Alice's compatible base.
+/// Alice's compatible base. An empty deleted head image also masks the base.
 ///
 /// alice: base/open ──► bob: head/closed + delete ──► old reader: omitted
 #[test]
@@ -2446,10 +2436,7 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
     );
     assert_eq!(
         states(block_on(old.all(&whole, composed.clone())).unwrap()),
-        BTreeMap::from([(
-            sparse,
-            (Some(Value::String("base sparse".to_owned())), true)
-        )])
+        BTreeMap::from([(sparse, (None, true))])
     );
     let title_only = old
         .prepare_query(&Query::from("todos").select(["title"]))
@@ -2465,7 +2452,7 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
                 incompatible,
                 Some(Value::String("head incompatible".to_owned()))
             ),
-            (sparse, Some(Value::String("base sparse".to_owned()))),
+            (sparse, None),
         ]),
         "an unselected unknown enum does not omit the retained head row"
     );
@@ -2486,15 +2473,15 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([
             (incompatible, (Some(Value::EnumTag(1)), true)),
-            (sparse, (Some(Value::EnumTag(0)), true)),
+            (sparse, (None, true)),
         ])
     );
 }
 
 /// Alice distinguishes an absent tombstone body from an authored logical null.
-/// Enum head coordinates and selected JSON survive the sparse-source union.
+/// Enum head coordinates, authored nulls and retained JSON survive deletion.
 ///
-/// base/null + head/closed ──head deletes──► exact sparse / composed base body
+/// base/null + head/closed + head/null ──head deletes──► head images mask base
 #[test]
 fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
     let schema = compile_schema(
@@ -2536,6 +2523,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
     let head = BranchSelector::new([("branch", Value::EnumTag(1))]);
     let sparse = RowUuid::from_bytes([0x7a; 16]);
     let retained = RowUuid::from_bytes([0x7b; 16]);
+    let retained_null = RowUuid::from_bytes([0x7e; 16]);
     let json = Value::String("{\"answer\":42}".to_owned());
     for (row, branch, status) in [
         (sparse, base.clone(), Value::Nullable(None)),
@@ -2544,6 +2532,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
             head.clone(),
             Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
         ),
+        (retained_null, head.clone(), Value::Nullable(None)),
     ] {
         db.insert(
             "todos",
@@ -2559,7 +2548,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
         )
         .unwrap();
     }
-    for row in [sparse, retained] {
+    for row in [sparse, retained, retained_null] {
         db.delete(
             "todos",
             row,
@@ -2603,26 +2592,26 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
         Some(json.clone()),
         true,
     );
+    let retained_null_cells = (
+        Some(Value::EnumTag(1)),
+        Some(Value::Nullable(None)),
+        Some(json),
+        true,
+    );
     assert_eq!(
         states(block_on(db.all(&query, exact)).unwrap()),
         BTreeMap::from([
             (sparse, (Some(Value::EnumTag(1)), None, None, true)),
             (retained, retained_cells.clone()),
+            (retained_null, retained_null_cells.clone()),
         ])
     );
     assert_eq!(
         states(block_on(db.all(&query, composed)).unwrap()),
         BTreeMap::from([
-            (
-                sparse,
-                (
-                    Some(Value::EnumTag(1)),
-                    Some(Value::Nullable(None)),
-                    Some(json),
-                    true
-                )
-            ),
+            (sparse, (Some(Value::EnumTag(1)), None, None, true)),
             (retained, retained_cells),
+            (retained_null, retained_null_cells),
         ])
     );
 }
