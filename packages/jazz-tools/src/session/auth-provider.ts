@@ -1,3 +1,4 @@
+import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
 
 /** A stable provider session identifier, never a JWT. Pending means initial hydration. */
@@ -48,17 +49,35 @@ export function connectAuthProvider<Client>(
   let running: Promise<void> | undefined;
   let signOut: (() => unknown) | undefined;
   let failure: Error | undefined;
+  /** The retained account an in-flight admission is revalidating in place. */
+  let revalidating: object | undefined;
   const listeners = new Set<() => void>();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
     const error = failure ?? desired.error ?? current.error;
-    const ready =
+    // A retained account opens before the provider has hydrated. Keep it
+    // usable while the provider hydrates and while its first admission
+    // revalidates it in place; a signed-out provider or a different identity
+    // replaces it through an ordinary transition instead.
+    const provisional =
       !signOut &&
-      !desired.isPending &&
       !error &&
-      admitted === desired.key &&
-      (desired.key === null ? current.status === "signed-out" : current.status === "ready");
+      current.status === "ready" &&
+      current.account !== undefined &&
+      (desired.isPending
+        ? isProvisionalAccount(current.account)
+        : desired.key !== null &&
+          !!running &&
+          attempted === desired.key &&
+          revalidating === current.account);
+    const ready =
+      provisional ||
+      (!signOut &&
+        !desired.isPending &&
+        !error &&
+        admitted === desired.key &&
+        (desired.key === null ? current.status === "signed-out" : current.status === "ready"));
     const isPending = !!desired.isPending || !!running || (!error && admitted !== desired.key);
     if (
       snapshot.key === desired.key &&
@@ -85,6 +104,14 @@ export function connectAuthProvider<Client>(
     attempted = key;
     admitted = undefined;
     failure = undefined;
+    const opened = session.getSnapshot();
+    revalidating =
+      key !== null &&
+      opened.status === "ready" &&
+      opened.account !== undefined &&
+      isProvisionalAccount(opened.account)
+        ? opened.account
+        : undefined;
     let established = false;
     const operation = Promise.resolve().then(async () => {
       await predecessor;
@@ -122,6 +149,7 @@ export function connectAuthProvider<Client>(
       .finally(() => {
         if (running !== task) return;
         running = undefined;
+        revalidating = undefined;
         publish();
         if (!disposed && token !== generation) void reconcile();
       });

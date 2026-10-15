@@ -264,7 +264,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
     permissions,
     driver: { type: "persistent", dataPath },
     env: "test",
-    tier: "global",
   });
   onTestFinished(async () => {
     context.flush();
@@ -278,7 +277,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
 
 async function createServerBackedReproContext(
   defineCasePermissions: ReproPermissions,
-  tier: "local" | "global" = "global",
 ): Promise<JazzContext> {
   const appId = randomUUID();
   const backendSecret = `permissions-repro-backend-${appId}`;
@@ -306,7 +304,6 @@ async function createServerBackedReproContext(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier,
   });
 
   onTestFinished(async () => {
@@ -343,7 +340,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        tier: "global",
       });
       const backend = context.asBackend(relatedWriteApp);
       const playlist = await backend
@@ -446,7 +442,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
           ),
         ];
       },
-      "global",
     );
 
     const db = context.asBackend(reproApp);
@@ -627,7 +622,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
       permissions,
       driver: { type: "persistent", dataPath },
       env: "test",
-      tier: "global",
     });
     onTestFinished(async () => {
       context.flush();
@@ -737,7 +731,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
           ),
         ];
       },
-      "local",
     );
 
     const db = context.asBackend(reproApp);

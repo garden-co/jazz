@@ -41,9 +41,7 @@ import {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
-  type ReactNativeSqliteStorageDriver,
   type JazzClientConfig,
   useLocalFirstAuth,
 } from "./index.js";
@@ -113,9 +111,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("exports the exact installed-package persistence boundary messages", () => {
-    expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
-      "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
-    );
     expect(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR).toMatch(/JazzRelay native artifact/);
   });
 
@@ -338,41 +333,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
-  });
-
-  it("rejects an injected SQLite driver before opening it", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-persistent-boundary-test")),
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("rejects rather than ignores sqliteStorage combined with memory mode", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-memory-sqlite-ambiguity-test")),
-      driver: { type: "memory" },
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
   });
 
   it("keeps the Node-only memory scaffold out of the React Native entrypoint", async () => {

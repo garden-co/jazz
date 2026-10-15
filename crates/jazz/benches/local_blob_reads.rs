@@ -219,10 +219,8 @@ impl ProtocolTrace {
                     Some(KnownStateDeclaration::FastWithAuthorizationProgress { .. }) => {
                         json!("fast_with_authorization")
                     }
-                    Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
-                        detail["known_versions"] = json!(versions.len());
-                        json!("exact_versions")
-                    }
+                    Some(KnownStateDeclaration::Watermark { .. }) => json!("watermark"),
+                    Some(KnownStateDeclaration::Reserved2(_)) => json!("reserved"),
                 };
                 "Subscribe"
             }
@@ -252,8 +250,6 @@ impl ProtocolTrace {
             SyncMessage::SessionClaims { .. } => "SessionClaims",
             SyncMessage::ChunkRequestBatch { .. } => "ChunkRequestBatch",
             SyncMessage::ChunkResponseBatch { .. } => "ChunkResponseBatch",
-            SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
-            SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
             SyncMessage::CommitUnit { .. } => "CommitUnit",
             SyncMessage::FateUpdate { .. } => "FateUpdate",
             _ => "other",

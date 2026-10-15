@@ -277,18 +277,25 @@ pub struct StorageWriteMetrics {
 }
 
 impl StorageWriteMetrics {
-    pub(super) fn from_operations(operations: &[crate::storage::WriteOperation<'_>]) -> Self {
+    pub(super) fn from_operations(
+        operations: &[crate::storage::WriteOperation<'_>],
+        index_ids: &IndexIdRegistry,
+    ) -> Self {
         let mut metrics = Self::default();
         for operation in operations {
-            metrics.record(operation);
+            metrics.record(operation, index_ids);
         }
         metrics
     }
 
-    pub(super) fn record(&mut self, operation: &crate::storage::WriteOperation<'_>) {
+    pub(super) fn record(
+        &mut self,
+        operation: &crate::storage::WriteOperation<'_>,
+        index_ids: &IndexIdRegistry,
+    ) {
         let bytes = write_operation_bytes(operation);
         self.total.record(bytes);
-        match storage_write_destination(operation) {
+        match storage_write_destination(operation, index_ids) {
             StorageWriteDestination::HistoryRows => self.history_rows.record(bytes),
             StorageWriteDestination::HistoryIndexes => self.history_indexes.record(bytes),
             StorageWriteDestination::GlobalCurrentRows => self.global_current_rows.record(bytes),
@@ -340,19 +347,56 @@ pub struct StorageReadMetrics {
     pub other: StorageReadBucket,
 }
 
+/// A database's read counters plus the index-id registry that names the
+/// durable index an `indices` key belongs to.
+pub(crate) struct ReadMetricsSink {
+    metrics: RefCell<StorageReadMetrics>,
+    index_ids: SharedIndexIds,
+}
+
+impl ReadMetricsSink {
+    pub(crate) fn new(index_ids: SharedIndexIds) -> Self {
+        Self {
+            metrics: RefCell::new(StorageReadMetrics::default()),
+            index_ids,
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, StorageReadMetrics> {
+        self.metrics.borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, StorageReadMetrics> {
+        self.metrics.borrow_mut()
+    }
+
+    fn destination(&self, cf: &str, key: &[u8]) -> StorageReadDestination {
+        storage_read_destination(cf, key, &self.index_ids.borrow())
+    }
+
+    pub(super) fn record_point(&self, cf: &str, key: &[u8]) {
+        let destination = self.destination(cf, key);
+        self.metrics
+            .borrow_mut()
+            .record_destination(destination, 1, 1);
+    }
+
+    pub(super) fn record_range(&self, cf: &str, key: &[u8]) {
+        let destination = self.destination(cf, key);
+        self.metrics
+            .borrow_mut()
+            .record_destination(destination, 0, 1);
+    }
+
+    pub(super) fn record_range_row(&self, cf: &str, key: &[u8]) {
+        let destination = self.destination(cf, key);
+        self.metrics
+            .borrow_mut()
+            .record_destination(destination, 1, 0);
+    }
+}
+
 impl StorageReadMetrics {
-    pub(super) fn record_point(&mut self, cf: &str, key: &[u8]) {
-        self.record_destination(storage_read_destination(cf, key), 1, 1);
-    }
-
-    pub(super) fn record_range(&mut self, cf: &str, key: &[u8]) {
-        self.record_destination(storage_read_destination(cf, key), 0, 1);
-    }
-
-    pub(super) fn record_range_row(&mut self, cf: &str, key: &[u8]) {
-        self.record_destination(storage_read_destination(cf, key), 1, 0);
-    }
-
     pub(super) fn record_destination(
         &mut self,
         destination: StorageReadDestination,
@@ -424,11 +468,11 @@ impl<T> std::ops::Deref for LocalHandle<'_, T> {
 
 pub(crate) struct MeteredStorage<'a, S> {
     storage: LocalHandle<'a, S>,
-    metrics: LocalHandle<'a, RefCell<StorageReadMetrics>>,
+    metrics: LocalHandle<'a, ReadMetricsSink>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
-    pub(crate) fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
+    pub(crate) fn new(storage: &'a S, metrics: &'a ReadMetricsSink) -> Self {
         Self {
             storage: LocalHandle::Borrowed(storage),
             metrics: LocalHandle::Borrowed(metrics),
@@ -437,7 +481,7 @@ impl<'a, S> MeteredStorage<'a, S> {
 
     pub(crate) fn new_owned(
         storage: Rc<S>,
-        metrics: Rc<RefCell<StorageReadMetrics>>,
+        metrics: Rc<ReadMetricsSink>,
     ) -> MeteredStorage<'static, S>
     where
         S: 'static,
@@ -452,7 +496,7 @@ impl<'a, S> MeteredStorage<'a, S> {
 struct MeteredStorageCursor<'a> {
     inner: crate::storage::StorageScan<'a>,
     column_family: String,
-    metrics: &'a RefCell<StorageReadMetrics>,
+    metrics: &'a ReadMetricsSink,
 }
 
 impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
@@ -465,9 +509,8 @@ impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
         Box::pin(async move {
             let batch = self.inner.next_batch().await?;
             if let Some(batch) = &batch {
-                let mut metrics = self.metrics.borrow_mut();
                 for (key, _) in batch {
-                    metrics.record_range_row(&self.column_family, key);
+                    self.metrics.record_range_row(&self.column_family, key);
                 }
             }
             Ok(batch)
@@ -495,7 +538,7 @@ where
             crate::storage::ScanBounds::Prefix(prefix) => prefix.clone(),
             crate::storage::ScanBounds::Range { start, .. } => start.clone(),
         };
-        self.metrics.borrow_mut().record_range(&cf, &metric_key);
+        self.metrics.record_range(&cf, &metric_key);
         Box::pin(async move {
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan(request).await?,
@@ -542,7 +585,7 @@ where
         '_,
         Result<crate::storage::ValueComparison, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.metrics.record_point(&cf, &key);
         self.storage.compare_value(cf, key, expected)
     }
 
@@ -554,7 +597,7 @@ where
         '_,
         Result<Option<crate::storage::Value>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.metrics.record_point(&cf, &key);
         self.storage.get(cf, key)
     }
 
@@ -567,7 +610,7 @@ where
         '_,
         Result<Option<crate::storage::Value>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.metrics.record_point(&cf, &key);
         self.storage.put_if_absent(cf, key, value)
     }
 
@@ -577,7 +620,7 @@ where
         key: Vec<u8>,
         expected: Vec<u8>,
     ) -> crate::storage::StorageFuture<'_, Result<bool, crate::storage::Error>> {
-        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.metrics.record_point(&cf, &key);
         self.storage.compare_and_delete(cf, key, expected)
     }
 
@@ -606,11 +649,11 @@ where
         '_,
         Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        self.metrics.record_range(&cf, &prefix);
         Box::pin(async move {
             let value = self.storage.last_with_prefix(cf.clone(), prefix).await?;
             if let Some((key, _)) = &value {
-                self.metrics.borrow_mut().record_range_row(&cf, key);
+                self.metrics.record_range_row(&cf, key);
             }
             Ok(value)
         })
@@ -625,14 +668,14 @@ where
         '_,
         Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
     > {
-        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        self.metrics.record_range(&cf, &prefix);
         Box::pin(async move {
             let value = self
                 .storage
                 .last_with_prefix_before_or_at(cf.clone(), prefix, upper)
                 .await?;
             if let Some((key, _)) = &value {
-                self.metrics.borrow_mut().record_range_row(&cf, key);
+                self.metrics.record_range_row(&cf, key);
             }
             Ok(value)
         })
@@ -742,12 +785,13 @@ pub(super) enum StorageReadDestination {
 
 pub(super) fn storage_write_destination(
     operation: &crate::storage::WriteOperation<'_>,
+    index_ids: &IndexIdRegistry,
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
         | crate::storage::WriteOperation::Delete { cf, key } => {
             if *cf == "indices" {
-                storage_index_write_destination(key)
+                storage_index_write_destination(key, index_ids)
             } else {
                 storage_table_write_destination(cf)
             }
@@ -778,8 +822,11 @@ pub(super) fn storage_table_write_destination(table: &str) -> StorageWriteDestin
     }
 }
 
-pub(super) fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestination {
-    let Some((table, index)) = durable_index_table_and_name(key) else {
+pub(super) fn storage_index_write_destination(
+    key: &[u8],
+    index_ids: &IndexIdRegistry,
+) -> StorageWriteDestination {
+    let Some((table, index)) = durable_index_table_and_name(key, index_ids) else {
         return StorageWriteDestination::Other;
     };
     if table == "jazz_global_changes"
@@ -803,9 +850,13 @@ pub(super) fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestina
     }
 }
 
-pub(super) fn storage_read_destination(cf: &str, key: &[u8]) -> StorageReadDestination {
+pub(super) fn storage_read_destination(
+    cf: &str,
+    key: &[u8],
+    index_ids: &IndexIdRegistry,
+) -> StorageReadDestination {
     if cf == "indices" {
-        storage_index_read_destination(key)
+        storage_index_read_destination(key, index_ids)
     } else {
         storage_table_read_destination(cf)
     }
@@ -829,8 +880,11 @@ pub(super) fn storage_table_read_destination(table: &str) -> StorageReadDestinat
     }
 }
 
-pub(super) fn storage_index_read_destination(key: &[u8]) -> StorageReadDestination {
-    match storage_index_write_destination(key) {
+pub(super) fn storage_index_read_destination(
+    key: &[u8],
+    index_ids: &IndexIdRegistry,
+) -> StorageReadDestination {
+    match storage_index_write_destination(key, index_ids) {
         StorageWriteDestination::HistoryIndexes => StorageReadDestination::HistoryIndexes,
         StorageWriteDestination::GlobalCurrentIndexes => {
             StorageReadDestination::GlobalCurrentIndexes
@@ -843,13 +897,14 @@ pub(super) fn storage_index_read_destination(key: &[u8]) -> StorageReadDestinati
     }
 }
 
-pub(super) fn durable_index_table_and_name(key: &[u8]) -> Option<(&str, &str)> {
-    let table_end = key.iter().position(|byte| *byte == 0)?;
-    let rest = key.get(table_end + 1..)?;
-    let index_end = rest.iter().position(|byte| *byte == 0)?;
-    let table = str::from_utf8(&key[..table_end]).ok()?;
-    let index = str::from_utf8(&rest[..index_end]).ok()?;
-    Some((table, index))
+/// The table and index a durable index key (or scan prefix) belongs to, via
+/// its numeric id.
+pub(super) fn durable_index_table_and_name<'a>(
+    key: &[u8],
+    index_ids: &'a IndexIdRegistry,
+) -> Option<(&'a str, &'a str)> {
+    let (id, _) = split_durable_index_key(key)?;
+    index_ids.names(id)
 }
 
 #[derive(Clone, Debug)]

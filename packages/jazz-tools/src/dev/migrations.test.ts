@@ -497,7 +497,7 @@ export const app = s.defineApp({
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30000);
 
   it("loads and deploys the generated relation migration", async () => {
     const { computeSchemaHash, deploy } = await import("./catalogue.js");

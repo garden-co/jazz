@@ -124,15 +124,19 @@ visible state, but it is not a normal application-facing feature yet.
 ### Monotonic direct-write ordering
 
 Each runtime instance maintains a small monotonic clock for direct writes. New row versions created
-by that runtime get strictly increasing local timestamps, which makes deterministic last-writer-wins
-ordering straightforward within a single device or process.
+by that runtime get strictly increasing local timestamps, which identify its transactions and order
+them within a single device or process. Timestamps do not decide merges.
 
 ### Merge strategies
 
-By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. If two
-clients update the same column of the same row simultaneously, Jazz's deterministic
-[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering chooses the
-winner.
+By default, Jazz merges concurrent edits column by column against what each writer saw. Every
+write records the version of the row it was made over. When the server applies a write, each column
+the write changed takes the new value unless someone else changed that column since the version the
+writer saw. In that case the value already accepted stays, and the losing edit is kept in the row's
+history. Edits to different columns of the same row all survive. When two clients change the same
+column from the same starting point, the edit the server receives first wins, whatever the clients'
+clocks say. A long run of offline edits merges the same way: each edit is compared with what that
+device had seen, including its own earlier offline edits.
 
 This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
 imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
@@ -169,6 +173,11 @@ Counter merges are useful for things like:
 - Any other counter where you care about preserving every increment rather than which device
   wrote last.
 
+A counter never wraps around. If applying an update would take the column past its type's range
+(for example two devices each subtract `1` from a counter at the type's minimum, or each add `1` at
+its maximum), the server applies the first and rejects the second with an explicit
+"out of range" rejection, and the counter keeps the value it had.
+
 <Callout type="warn">
   `merge("counter")` is only valid on **non-nullable integer or bigint columns**. Calling it on a
   string, a nullable integer (`s.int().optional()`), a nullable bigint (`s.bigint().optional()`), or
@@ -177,9 +186,10 @@ Counter merges are useful for things like:
 
 #### Grow-only sets
 
-Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under
-last-writer-wins, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
-`"blocked"`, one write clobbers the whole array and a tag is silently lost.
+Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under the
+default merge, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
+`"blocked"`, the array is one field: the edit the server receives second loses whole, and a tag is
+silently dropped.
 
 Use `.merge("g-set")` to make an array column a grow-only set instead — concurrent writes converge
 to the union of every replica's elements:
