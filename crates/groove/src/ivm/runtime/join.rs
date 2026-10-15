@@ -807,24 +807,22 @@ impl ArrangementState {
 
     /// The resident keys of a stored arrangement with their last use and
     /// estimated bytes, for eviction.
-    pub(super) fn resident_entries(&self) -> impl Iterator<Item = (u64, JoinKey, usize)> + '_ {
+    pub(super) fn resident_entries(&self) -> impl Iterator<Item = (u64, &JoinKey, usize)> + '_ {
         let last_used = |key: &JoinKey| self.last_used.get(key).copied().unwrap_or_default();
         self.index
             .iter()
             .map(move |(key, bucket)| {
                 (
                     last_used(key),
-                    key.clone(),
+                    key,
                     resident_bucket_bytes(key, Some(bucket)),
                 )
             })
-            .chain(self.absent.iter().map(move |key| {
-                (
-                    last_used(key),
-                    key.clone(),
-                    resident_bucket_bytes(key, None),
-                )
-            }))
+            .chain(
+                self.absent
+                    .iter()
+                    .map(move |key| (last_used(key), key, resident_bucket_bytes(key, None))),
+            )
     }
 
     /// Drop resident buckets of a committed stored arrangement; later reads

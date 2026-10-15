@@ -1911,7 +1911,7 @@ impl TickEvaluator<'_> {
         if let Some(entry) = self.eval_memo.get_mut(&lookup.key)
             && entry.input_watermark == current_watermark
         {
-            *self.memo_use_clock = residency::residency_tick();
+            *self.memo_use_clock += 1;
             entry.last_used = *self.memo_use_clock;
             if self.context.eval_mode == EvalMode::Hydrate {
                 self.metrics.hydration_memo_hits += 1;
@@ -1985,7 +1985,7 @@ impl TickEvaluator<'_> {
             }
             // Readiness is checked live above, never stored in the register.
             let (_, entry) = self.eval_memo.slot_mut(slot).expect("validated frame slot");
-            *self.memo_use_clock = residency::residency_tick();
+            *self.memo_use_clock += 1;
             entry.last_used = *self.memo_use_clock;
             if self.context.eval_mode == EvalMode::Hydrate {
                 self.metrics.hydration_memo_hits += 1;
@@ -2074,7 +2074,7 @@ impl TickEvaluator<'_> {
         self.metrics.nodes_evaluated += 1;
         let result = Arc::new(result);
         let payload_bytes = record_deltas_encoded_bytes(&result);
-        *self.memo_use_clock = residency::residency_tick();
+        *self.memo_use_clock += 1;
         if let Some(previous) = self.eval_memo.insert(
             lookup.key.clone(),
             EvalMemoEntry::new(

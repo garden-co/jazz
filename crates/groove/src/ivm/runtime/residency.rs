@@ -1,14 +1,16 @@
-//! One memory budget for what the runtime keeps only to avoid recomputing:
-//! the resident buckets of stored arrangements and the retained hydration
-//! memo.
+//! One memory budget for the resident buckets of stored arrangements.
 //!
 //! A stored arrangement keeps the buckets it read resident, as a cache over
-//! storage (see `stored_arrangement`), and the hydration memo keeps node
-//! results for later hydrations to reuse. The budget bounds their estimated
-//! bytes together: after each install, a runtime over budget evicts the
-//! least recently read buckets and memo entries, which later reads fetch
-//! from storage or recompute. Lowering the budget therefore trades memory
-//! for work smoothly, with no switch between a held and a stored plan.
+//! storage (see `stored_arrangement`). The budget bounds their estimated
+//! bytes: after each install, a runtime over budget evicts the least
+//! recently read buckets, which later reads fetch from storage again.
+//! Lowering the budget therefore trades memory for work smoothly, with no
+//! switch between a held and a stored plan.
+//!
+//! The retained hydration memo stays outside the budget. It holds the
+//! results every hydration of a shared graph reads, and evicting them costs
+//! a full recomputation of the shared path per subscribe (measured 15x
+//! slower at a 32 MB budget) without lowering RSS.
 //!
 //! The budget is process-wide, shared by every runtime in the process, so
 //! that one figure (set from the process memory limit, and lowered under
@@ -96,8 +98,7 @@ impl IvmRuntime {
         self.cache_memory_budget().is_some()
     }
 
-    /// Evict the least recently read resident buckets and memo entries
-    /// until this runtime fits its own budget, or the process fits the
+    /// Evict the least recently read resident buckets until this runtime fits its own budget, or the process fits the
     /// process budget. Eviction stops some way under the budget so the next
     /// install does not evict again at once.
     pub(super) fn enforce_cache_budget(&mut self) {
@@ -107,8 +108,7 @@ impl IvmRuntime {
             .arrangement_states
             .values()
             .map(|state| state.value().resident_bytes())
-            .sum::<usize>()
-            + self.eval_memo.values().map(memo_entry_bytes).sum::<usize>();
+            .sum::<usize>();
         // Bytes to free, and the process total they come out of.
         let excess = match (self.cache_budget, process_cache_budget()) {
             (Some(budget), _) => excess_over(resident, budget),
@@ -131,59 +131,29 @@ impl IvmRuntime {
                 state
                     .value()
                     .resident_entries()
-                    .map(move |(last_used, key, bytes)| {
-                        (last_used, Cached::Bucket(arrangement, key), bytes)
-                    })
+                    .map(move |(last_used, key, bytes)| (last_used, arrangement, key, bytes))
             });
-        let memos = self
-            .eval_memo
-            .iter()
-            .map(|(key, entry)| (entry.last_used, Cached::Memo(key), memo_entry_bytes(entry)));
-        let mut entries = buckets.chain(memos).collect::<Vec<_>>();
+        let mut entries = buckets.collect::<Vec<_>>();
         entries.sort_unstable_by_key(|(last_used, ..)| *last_used);
-        let mut evict_buckets: HashMap<ArrangementKey, Vec<join::JoinKey>> = HashMap::default();
-        let mut evict_memos = Vec::new();
+        let mut evict: HashMap<ArrangementKey, Vec<join::JoinKey>> = HashMap::default();
         let mut freed = 0;
-        for (_, cached, bytes) in entries {
+        for (_, arrangement, key, bytes) in entries {
             if freed >= excess {
                 break;
             }
             freed += bytes;
-            match cached {
-                Cached::Bucket(arrangement, key) => {
-                    evict_buckets
-                        .entry(arrangement.clone())
-                        .or_default()
-                        .push(key);
-                }
-                Cached::Memo(key) => evict_memos.push(key.clone()),
-            }
+            evict
+                .entry(arrangement.clone())
+                .or_default()
+                .push(key.clone());
         }
-        for (arrangement, keys) in evict_buckets {
+        for (arrangement, keys) in evict {
             if let Some(state) = self.arrangement_states.get_mut(&arrangement) {
                 state.value_mut().evict(&keys);
             }
         }
-        for key in evict_memos {
-            self.remove_retained_eval_memo(&key);
-        }
         self.resident_share.report(resident.saturating_sub(freed));
     }
-}
-
-/// Something the budget can evict.
-enum Cached<'a> {
-    Bucket(&'a ArrangementKey, join::JoinKey),
-    Memo(&'a EvalMemoKey),
-}
-
-/// Estimated bytes a retained memo entry holds: its encoded records, their
-/// handles, and the entry itself.
-fn memo_entry_bytes(entry: &EvalMemoEntry) -> usize {
-    const ENTRY_OVERHEAD: usize = 128;
-    entry.payload_bytes
-        + entry.records.deltas.len() * std::mem::size_of::<RecordDelta>()
-        + ENTRY_OVERHEAD
 }
 
 /// Bytes to free so `resident` lands a tenth under `budget`, or `None`
