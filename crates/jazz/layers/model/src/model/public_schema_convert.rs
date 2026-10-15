@@ -2132,7 +2132,7 @@ fn lower_exists_rel(
             if *frontier_key != current_row || dedupe_key.as_slice() != [current_row] {
                 return Err(err(
                     policy_path(table, path),
-                    "Gather policies require current-row frontier and dedupe keys",
+                    "Gather keyed on anything but the current row id is not supported in policies yet",
                 ));
             }
             lower_gather_rel(schema, table, path, seed, step, bound)
@@ -2151,6 +2151,15 @@ fn lower_exists_rel(
             }
             let mut left = lower_exists_rel(schema, table, path, left)?;
             let right = lower_exists_rel(schema, table, path, right)?;
+            // Only a Gather on the left feeds the access join below; one on the
+            // right would otherwise be dropped, leaving a plain join that
+            // authorizes without the reachability check.
+            if right.pending_reachable.is_some() {
+                return Err(err(
+                    policy_path(table, path),
+                    "Gather on the right side of a join is not supported in policies yet",
+                ));
+            }
             let Some(on) = on.first() else {
                 return Err(err(
                     policy_path(table, path),
@@ -2374,10 +2383,11 @@ fn lower_gather_seed(
     let seed_index = lowered_filters
         .iter()
         .position(|filter| {
-            matches!(
-                filter.value,
-                Some(LoweredRelValue::Operand(Operand::Claim(_)))
-            )
+            matches!(filter.predicate, Predicate::Eq(..))
+                && matches!(
+                    filter.value,
+                    Some(LoweredRelValue::Operand(Operand::Claim(_)))
+                )
         })
         .ok_or_else(|| {
             err(
@@ -2438,11 +2448,30 @@ fn unwrap_seed_projection<'a>(
     };
     let (project_input, filters) = unwrap_rel_filter(input);
     if let RelExpr::Join {
-        left, right, on, ..
+        left,
+        right,
+        on,
+        join_kind,
     } = project_input
     {
-        let (left, team_column) =
-            unwrap_joined_seed_projection(table, path, left, right, on, projected)?;
+        let (left, team_column, seed_scope) =
+            unwrap_joined_seed_projection(table, path, left, right, on, join_kind, projected)?;
+        // These filters are applied to the seed table, so they must name it.
+        let mut columns = Vec::new();
+        for filter in &filters {
+            collect_rel_predicate_columns(filter, &mut columns);
+        }
+        if columns.iter().any(|column| {
+            column
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope != seed_scope)
+        }) {
+            return Err(err(
+                policy_path(table, path),
+                "Gather seed filters on the hop target are not supported in policies yet",
+            ));
+        }
         return Ok((left, team_column, filters));
     }
     Ok((input.as_ref(), Some(projected.column.clone()), Vec::new()))
@@ -2454,10 +2483,12 @@ fn unwrap_joined_seed_projection<'a>(
     left: &'a RelExpr,
     right: &RelExpr,
     on: &[crate::model::public_api::relation_ir::JoinCondition],
+    join_kind: &RelJoinKind,
     projected: &ColumnRef,
-) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
+) -> Result<(&'a RelExpr, Option<String>, &'a str), SchemaConversionError> {
     let RelExpr::TableScan {
-        alias: right_alias, ..
+        table: right_table,
+        alias: right_alias,
     } = right
     else {
         return Err(err(
@@ -2465,19 +2496,51 @@ fn unwrap_joined_seed_projection<'a>(
             "Gather projected seed hop must join to a table scan",
         ));
     };
-    let Some(join) = on.first() else {
+    let RelExpr::TableScan {
+        table: seed_table,
+        alias: seed_alias,
+    } = unwrap_rel_filter(left).0
+    else {
         return Err(err(
             policy_path(table, path),
-            "Gather projected seed hop requires a join condition",
+            "Gather projected seed hop must start from a filtered table scan",
         ));
     };
+    let seed_scope = seed_alias.as_deref().unwrap_or(seed_table.as_str());
+    let target_scope = right_alias.as_deref().unwrap_or(right_table.as_str());
+    // Like a recursive hop, the seed hop names the target row only when it
+    // is one inner equality from a seed-table FK to that row's id.
+    let [join] = on else {
+        return Err(err(
+            policy_path(table, path),
+            "Gather seed hops without exactly one join equality are not supported in policies yet",
+        ));
+    };
+    if *join_kind != RelJoinKind::Inner
+        || join.right.column != "id"
+        || join
+            .right
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope != target_scope)
+        || join
+            .left
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope != seed_scope)
+    {
+        return Err(err(
+            policy_path(table, path),
+            "Gather seed hops other than an inner join from a seed FK to the target id are not supported in policies yet",
+        ));
+    }
     if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
         return Err(err(
             policy_path(table, path),
             "Gather projected seed id must come from the hop target row id",
         ));
     }
-    Ok((left, Some(join.left.column.clone())))
+    Ok((left, Some(join.left.column.clone()), seed_scope))
 }
 
 fn lower_gather_step(
@@ -2496,69 +2559,87 @@ fn lower_gather_step(
     // output table. Policy reachability instead carries only the projected
     // parent key; accepting that canonical scalar form avoids requiring every
     // reachable parent to have another row in the seed-membership table.
-    let (edge_rel, output_table, edge_parent_column, projected_scope) =
-        if let RelExpr::Join {
-            left, right, on, ..
-        } = input.as_ref()
-        {
-            let RelExpr::TableScan {
-                table: output_table,
-                alias: output_alias,
-            } = right.as_ref()
-            else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hop must join to the output table",
-                ));
-            };
-            let [on] = on.as_slice() else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hop join requires exactly one column equality",
-                ));
-            };
-            // The hop names the parent row only when it joins that row's id.
-            let output_scope = output_alias
-                .as_deref()
-                .unwrap_or_else(|| output_table.as_str());
-            if on.right.column != "id"
-                || on
-                    .right
-                    .scope
-                    .as_deref()
-                    .is_some_and(|scope| scope != output_scope)
-            {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather recursive hop must join its edge FK to the output row id",
-                ));
-            }
-            (
-                left.as_ref(),
-                Some(output_table.as_str().to_owned()),
-                on.left.column.clone(),
-                None,
-            )
-        } else {
-            let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather scalar recursive hop must project its parent key as id",
-                ));
-            };
-            let RelProjectExpr::Column(projected) = &projected.expr else {
-                return Err(err(
-                    policy_path(table, path),
-                    "Gather scalar recursive hop id must be a column projection",
-                ));
-            };
-            (
-                input.as_ref(),
-                None,
-                projected.column.clone(),
-                projected.scope.clone(),
-            )
+    let (edge_rel, output_table, edge_parent_column, projected_scope) = if let RelExpr::Join {
+        left,
+        right,
+        on,
+        join_kind,
+    } = input.as_ref()
+    {
+        let RelExpr::TableScan {
+            table: output_table,
+            alias: output_alias,
+        } = right.as_ref()
+        else {
+            return Err(err(
+                policy_path(table, path),
+                "Gather recursive hop must join to the output table",
+            ));
         };
+        let [on] = on.as_slice() else {
+            return Err(err(
+                policy_path(table, path),
+                "Gather recursive hops without exactly one join equality are not supported in policies yet",
+            ));
+        };
+        // The hop names the parent row only when it joins that row's id.
+        let output_scope = output_alias.as_deref().unwrap_or(output_table.as_str());
+        if *join_kind != RelJoinKind::Inner
+            || on.right.column != "id"
+            || on
+                .right
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope != output_scope)
+        {
+            return Err(err(
+                policy_path(table, path),
+                "Gather recursive hops other than an inner join from an edge FK to the output id are not supported in policies yet",
+            ));
+        }
+        // The next frontier is the projected `id`; it must be the joined
+        // parent row's own id, or the step walks somewhere else.
+        let projects_output_id = columns.iter().any(|column| {
+            column.alias == "id"
+                && matches!(
+                    &column.expr,
+                    RelProjectExpr::Column(ColumnRef { scope, column })
+                        if column == "id"
+                            && scope.as_deref().is_none_or(|scope| scope == output_scope)
+                )
+        });
+        if !projects_output_id {
+            return Err(err(
+                policy_path(table, path),
+                "Gather recursive hops projecting anything but the output row id as id are not supported in policies yet",
+            ));
+        }
+        (
+            left.as_ref(),
+            Some(output_table.as_str().to_owned()),
+            on.left.column.clone(),
+            on.left.scope.clone(),
+        )
+    } else {
+        let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
+            return Err(err(
+                policy_path(table, path),
+                "Gather scalar recursive hop must project its parent key as id",
+            ));
+        };
+        let RelProjectExpr::Column(projected) = &projected.expr else {
+            return Err(err(
+                policy_path(table, path),
+                "Gather scalar recursive hop id must be a column projection",
+            ));
+        };
+        (
+            input.as_ref(),
+            None,
+            projected.column.clone(),
+            projected.scope.clone(),
+        )
+    };
 
     let (edge_input, filters) = unwrap_rel_filter(edge_rel);
     let RelExpr::TableScan {
@@ -2571,14 +2652,14 @@ fn lower_gather_step(
             "Gather recursive hop must start from an edge table scan",
         ));
     };
-    let edge_scope = edge_alias.as_deref().unwrap_or_else(|| edge_table.as_str());
+    let edge_scope = edge_alias.as_deref().unwrap_or(edge_table.as_str());
     if projected_scope
         .as_deref()
         .is_some_and(|scope| scope != edge_scope)
     {
         return Err(err(
             policy_path(table, path),
-            "Gather scalar recursive hop id must project an edge-table column",
+            "Gather recursive hop keys from outside the edge table are not supported in policies yet",
         ));
     }
 
