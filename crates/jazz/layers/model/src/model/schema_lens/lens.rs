@@ -220,6 +220,19 @@ impl Lens {
     pub fn is_draft(&self) -> bool {
         self.forward.has_drafts() || self.backward.has_drafts()
     }
+
+    /// Tables the forward transform adds and removes, in operation order.
+    pub fn table_changes(&self) -> (Vec<String>, Vec<String>) {
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        for op in &self.forward.ops {
+            match op {
+                LensOp::AddTable { table, .. } => added.push(table.clone()),
+                LensOp::RemoveTable { table, .. } => removed.push(table.clone()),
+                _ => {}
+            }
+        }
+        (added, removed)
+    }
 }
 
 #[cfg(test)]
