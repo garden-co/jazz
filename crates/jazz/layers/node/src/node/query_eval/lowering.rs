@@ -9,8 +9,8 @@ use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
 use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
-/// A first-result consumer owns exactly its subscription and, when needed,
-/// its prepared shape. Dropping a suspended read cannot keep a binding alive
+/// An installing or first-result consumer owns its subscription and, when needed,
+/// its prepared shape. Dropping a suspended operation cannot keep a binding alive
 /// or retire graph roots owned by a different subscription.
 struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
@@ -90,7 +90,7 @@ fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>,
     })
 }
 
-fn app_row_terminal_route_eligible_fields(
+pub(super) fn app_row_terminal_route_eligible_fields(
     output: &ProgramOutputSchemas,
 ) -> Result<Vec<String>, Error> {
     let app_rows = app_row_terminal_schema(output)?;
@@ -234,7 +234,9 @@ fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
     }
 }
 
-fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
+pub(super) fn prepared_route_param_names(
+    parameters: &super::query_engine::ParameterDomain,
+) -> Vec<String> {
     prepared_params_from_domain(parameters)
         .iter()
         .map(prepared_param_route_field)
@@ -257,7 +259,10 @@ fn prepared_route_value_indices(
         .collect()
 }
 
-fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
+pub(super) fn terminal_route_fields(
+    route_params: &[String],
+    route_eligible_fields: &[String],
+) -> Vec<String> {
     let route_eligible_fields = route_eligible_fields.iter().collect::<BTreeSet<_>>();
     route_params
         .iter()
@@ -273,7 +278,9 @@ fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>
     }
 }
 
-fn terminal_route_eligible_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
+pub(super) fn terminal_route_eligible_fields(
+    terminal: &OutputTerminalSchema,
+) -> Result<Vec<String>, Error> {
     let mut fields = terminal_public_fields(terminal)?;
     if let OutputTerminalSchema::AppRows(rows) = terminal {
         fields.extend(rows.hidden_fields.iter().cloned());
@@ -317,7 +324,6 @@ pub(super) fn fact_public_fields(
             let mut fields = vec![
                 schema.synthetic.table_field.clone(),
                 schema.synthetic.row_field.clone(),
-                schema.synthetic.replacement_field.clone(),
             ];
             fields.extend(
                 schema
@@ -475,7 +481,6 @@ fn version_witness_public_fields(
         schema.identity.tx_time_field.clone(),
         schema.identity.tx_node_field.clone(),
         schema.identity.schema_field.clone(),
-        schema.parents_field.clone(),
         schema.authored_columns_field.clone(),
         schema.created_by_field.clone(),
         schema.created_at_field.clone(),
@@ -1005,6 +1010,7 @@ where
             Err(error) => Err(error),
         };
         if let Ok(program) = result.as_mut() {
+            resolver.node.scope_program_binding_source(program);
             program
                 .lowered
                 .targeted_refresh_tables
@@ -1467,6 +1473,8 @@ where
 
     /// The same installation and binding path serves one-result and retained
     /// consumers. Output terminals differ, but source hydration does not.
+    /// Only a first-result private shape leaves a caller-owned retirement
+    /// obligation; retained bindings own their private or shared shapes.
     async fn install_lowered_program_subscription(
         &mut self,
         program: QueryProgram,
@@ -1541,12 +1549,12 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        // Retained client-local subscribers of identical terminals share one
-        // prepared shape, which retires itself with its last retained
-        // binding. Serving installs keep a shape per subscriber for now. A
-        // first-result read owns a private shape and retires it on return.
-        let shared_shape = lifetime == SubscriptionLifetime::Retained
-            && binding_source_shape.ends_with(":client-local");
+        // Retained subscribers of identical terminals share one prepared
+        // shape, which retires itself with its last retained binding. This
+        // holds for trusted serving too: a server holds one graph per query
+        // family, not one per connected subscriber (#4017). First-result
+        // reads retire their private shape on return.
+        let shared_shape = lifetime == SubscriptionLifetime::Retained;
         let prepared = if shared_shape {
             self.database
                 .prepare_shared(terminals, binding_source_shape, binding_descriptor)
@@ -1587,7 +1595,10 @@ where
                 Error::Groove(error)
             })?;
         owner.prepared_shape = None;
-        Ok((subscription, Some(prepared.id())))
+        Ok((
+            subscription,
+            (lifetime == SubscriptionLifetime::FirstResult).then_some(prepared.id()),
+        ))
     }
 
     /// `root_indirect_values` decides which root fields the result rebuilds
@@ -1738,7 +1749,6 @@ mod tests {
             created_at_field: "created_at".to_owned(),
             updated_by_field: "updated_by".to_owned(),
             updated_at_field: "updated_at".to_owned(),
-            parents_field: "parents".to_owned(),
             authored_columns_field: "authored_columns".to_owned(),
             deletion_field: "_deletion".to_owned(),
             user_fields: BTreeMap::new(),

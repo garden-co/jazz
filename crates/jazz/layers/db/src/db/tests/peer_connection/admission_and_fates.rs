@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::db::peer_connection::{
-    ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
-    coverage_group_subscription_key,
+    ConnectionLink, PendingSubscriberControlResponse, coverage_group_subscription_key,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -496,91 +495,6 @@ fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
-/// Missing-version repair is an upstream one-shot request, not a recomputable
-/// subscription update. A bounded transport must therefore retain it locally
-/// and arrange its own retry instead of relying on an unrelated reconnect or
-/// inbound wakeup to make the repair possible.
-#[test]
-fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
-    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
-    let schema = schema();
-    let client = open_db(0xc3, identity, &schema);
-    let outbound = Rc::new(RefCell::new(VecDeque::new()));
-    let upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
-        BackpressureOnceTransport {
-            outbound: Rc::clone(&outbound),
-            failed: false,
-        },
-    )));
-    let request = RowVersionRef::new(
-        "todos",
-        RowUuid::from_bytes([0xc3; 16]),
-        TxId::new(TxTime::from(3), NodeUuid::from_bytes([0xc3; 16])),
-    );
-    {
-        let mut connection = upstream.borrow_mut();
-        let ConnectionLink::Upstream(state) = &mut connection.link else {
-            panic!("client connection must be upstream");
-        };
-        state
-            .pending_row_version_fetches
-            .push_back(PendingRowVersionFetch {
-                requests: VecDeque::from([request.clone()]),
-                sent_count: 0,
-                policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
-            });
-    }
-
-    upstream
-        .borrow_mut()
-        .tick()
-        .expect("backpressure retains the upstream repair fetch");
-    {
-        let connection = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &connection.link else {
-            panic!("client connection must be upstream");
-        };
-        assert_eq!(
-            state.pending_row_version_fetches.front(),
-            Some(&PendingRowVersionFetch {
-                requests: VecDeque::from([request.clone()]),
-                sent_count: 0,
-                policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
-            }),
-            "a rejected byte admission retains the exact upstream repair request"
-        );
-    }
-    assert!(outbound.borrow().is_empty());
-
-    upstream
-        .borrow_mut()
-        .tick()
-        .expect("scheduled retry accepts the upstream repair fetch");
-    {
-        let connection = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &connection.link else {
-            panic!("client connection must be upstream");
-        };
-        assert_eq!(
-            state
-                .pending_row_version_fetches
-                .front()
-                .unwrap()
-                .sent_count,
-            1,
-            "the accepted batch remains owned until its reply arrives"
-        );
-    }
-    assert_eq!(
-        outbound.borrow_mut().pop_front(),
-        Some(SyncMessage::FetchRowVersions {
-            requests: vec![request],
-            delegated_session: None,
-        })
-    );
-    assert!(outbound.borrow().is_empty());
-}
-
 /// Subscription rejection follows the same ownership rule. A malformed or
 /// unsupported one-shot registration must not turn into a permanently pending
 /// caller when the first byte admission is temporarily full.
@@ -706,55 +620,6 @@ fn subscriber_control_replies_stay_bounded_during_permanent_backpressure() {
         4,
         "one logical control reply is retried per tick"
     );
-}
-
-/// Repair payloads retain the normal sync-context send path. This matters on
-/// trusted links where `send_with_sync_context` may first announce a catalogue
-/// snapshot; the row-version response itself must still remain pending until
-/// the adapter accepts it.
-#[test]
-fn row_version_repair_reply_retries_with_sync_context_after_backpressure() {
-    let identity = AuthorSubject::for_test_bytes([0xc6; 16]);
-    let schema = schema();
-    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    let outbound = Rc::new(RefCell::new(VecDeque::new()));
-    let subscriber = server.accept_subscriber(
-        Box::new(BackpressureOnceTransport {
-            outbound: Rc::clone(&outbound),
-            failed: false,
-        }),
-        identity,
-    );
-    let response = SyncMessage::RowVersionPayloads {
-        version_bundles: Vec::new(),
-    };
-    subscriber.borrow_mut().pending_control_responses.push_back(
-        PendingSubscriberControlResponse::WithSyncContext(response.clone()),
-    );
-
-    subscriber
-        .borrow_mut()
-        .tick()
-        .expect("bounded transport defers the repair reply");
-    assert_eq!(
-        subscriber
-            .borrow()
-            .pending_control_responses
-            .front()
-            .map(PendingSubscriberControlResponse::message),
-        Some(&response)
-    );
-    subscriber
-        .borrow_mut()
-        .tick()
-        .expect("later capacity accepts the retained repair reply");
-    assert!(subscriber.borrow().pending_control_responses.is_empty());
-    assert!(matches!(
-        outbound.borrow_mut().pop_front(),
-        Some(SyncMessage::CatalogueSnapshot(_))
-    ));
-    assert_eq!(outbound.borrow_mut().pop_front(), Some(response));
-    assert!(outbound.borrow().is_empty());
 }
 
 /// An authorization-scope intent remains owned by the requesting client until
@@ -1301,10 +1166,10 @@ fn authorization_scope_replies_retry_fifo_after_backpressure() {
     assert!(subscriber.borrow().pending_control_responses.is_empty());
 }
 
-// The exact bounded-adapter refusal and retained control queue are internal
-// transport state; the public API only observes the eventual receipt.
+/// Alice receives Bob's aggregate receipt exactly once after backpressure.
+/// The transport seam exposes queue retention, which public row APIs hide.
 #[test]
-fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
+fn queued_aggregate_authorization_receipt_survives_backpressure_exactly_once() {
     let identity = AuthorSubject::for_test_bytes([0xc8; 16]);
     let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1315,13 +1180,8 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
         }),
         identity,
     );
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid::Uuid::from_bytes([0x31; 16])),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x32; 16])),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    let response = SyncMessage::AuthorizationScopeReceipt {
-        subscription,
+    let response = SyncMessage::AuthorizationScopeAggregateReceipt {
+        request_id: PermissionAdviceRequestId([0x31; 16]),
         receipt: AuthorizationScopeReceipt {
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0x41; 32],
@@ -1346,7 +1206,7 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
     subscriber
         .borrow_mut()
         .tick()
-        .expect("the refused sibling receipt remains queued");
+        .expect("the refused aggregate receipt remains queued");
     assert_eq!(
         subscriber
             .borrow()
@@ -1358,7 +1218,7 @@ fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
     subscriber
         .borrow_mut()
         .tick()
-        .expect("capacity retry accepts the sibling receipt");
+        .expect("capacity retry accepts the aggregate receipt");
     subscriber
         .borrow_mut()
         .tick()
@@ -4522,19 +4382,24 @@ fn probe_3386_update_advice_latency() {
     }
 }
 
+/// Alice receives only Bob's correlated decision, without policy rows or reasons.
+/// Pin the wire bytes here because the public advice API hides the payload layout.
 #[test]
 fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
-    let request_id = PermissionAdviceRequestId([7; 16]);
-    let message = SyncMessage::PermissionAdviceResponse {
-        request_id,
+    let message = SyncMessage::AuthorizationScopeDecision {
+        request_id: PermissionAdviceRequestId([7; 16]),
         advice: PermissionAdvice::Denied,
     };
+    let mut expected = vec![21]; // AuthorizationScopeDecision in wire v5 and v6.
+    expected.extend_from_slice(&[7; 16]);
+    expected.push(1); // Denied.
     assert_eq!(
-        message,
-        SyncMessage::PermissionAdviceResponse {
-            request_id,
-            advice: PermissionAdvice::Denied,
-        }
+        crate::wire::encode_sync_message(&message).unwrap(),
+        expected
+    );
+    assert_eq!(
+        crate::wire::decode_sync_message(&expected).unwrap(),
+        message
     );
 }
 

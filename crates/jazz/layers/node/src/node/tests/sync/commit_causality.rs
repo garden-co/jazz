@@ -1,4 +1,4 @@
-// Commit causality, parking, malformed units, and rejection cascades.
+// Commit admission: global-time allocation, malformed units, and HLC boundaries.
 
 #[test]
 fn observed_global_time_advances_authority_allocator() {
@@ -44,66 +44,6 @@ fn observed_global_time_advances_authority_allocator() {
     assert_eq!(
         core.clock.global_time_register,
         core.clock.committed_global_time
-    );
-}
-#[test]
-fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let (root, root_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 1).cells(title_cells("root")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = root_unit else {
-        panic!("expected commit unit");
-    };
-    let [root_fate] = core
-        .ingest_commit_unit_settled(tx, versions, 0)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert!(matches!(
-        root_fate,
-        SyncMessage::FateUpdate {
-            fate: Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-            ..
-        }
-    ));
-
-    let (child, child_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 10)
-                .parents(vec![root])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = child_unit else {
-        panic!("expected commit unit");
-    };
-    let [child_fate] = core
-        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        child_fate,
-        SyncMessage::FateUpdate {
-            tx_id: child,
-            fate: Fate::Rejected(RejectionReason::Cascade { root }),
-            global_time: None,
-            durability: None,
-        }
-    );
-    assert_eq!(
-        core.transaction_state_settled(child).unwrap().0,
-        Fate::Rejected(RejectionReason::Cascade { root })
-    );
-    assert!(
-        core.current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -206,263 +146,7 @@ fn rejected_update_does_not_silence_the_next_fresh_row_commit() {
         BTreeMap::from([(target, title_cells("fresh"))])
     );
 }
-#[test]
-fn client_side_rejection_cascades_to_local_mergeable_descendant() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    commit_mergeable_global(
-        &mut client,
-        &mut core,
-        MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
-    );
-    let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
-    client
-        .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
-        .unwrap();
-    let (exclusive, exclusive_unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, SKEW_TOLERANCE_MS + 1)
-        .unwrap();
-    let (dependent, dependent_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 2)
-                .parents(vec![exclusive])
-                .cells(BTreeMap::from([(
-                    "title".to_owned(),
-                    "dependent".to_owned(),
-                )])),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = exclusive_unit else {
-        panic!("expected commit unit");
-    };
-    let [exclusive_fate] = core
-        .ingest_commit_unit_settled(tx, versions, 0)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    client.apply_sync_message_settled(exclusive_fate).unwrap();
-    assert_eq!(
-        client.transaction_state_settled(exclusive).unwrap().0,
-        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
-    );
-    assert_eq!(
-        client.transaction_state_settled(dependent).unwrap().0,
-        Fate::Rejected(RejectionReason::Cascade { root: exclusive })
-    );
-    assert_eq!(
-        client
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row, title_cells("old"))])
-    );
 
-    let SyncMessage::CommitUnit { tx, versions } = dependent_unit else {
-        panic!("expected commit unit");
-    };
-    let [dependent_fate] = core
-        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        dependent_fate,
-        SyncMessage::FateUpdate {
-            tx_id: dependent,
-            fate: Fate::Rejected(RejectionReason::Cascade { root: exclusive }),
-            global_time: None,
-            durability: None,
-        }
-    );
-    client.apply_sync_message_settled(dependent_fate).unwrap();
-    assert_eq!(
-        client.transaction_state_settled(dependent).unwrap().0,
-        Fate::Rejected(RejectionReason::Cascade { root: exclusive })
-    );
-}
-
-// Stack safety is an implementation-level property. This NodeState integration
-// test arranges a deep speculative local chain, then asserts terminal states
-// and retracted local rows through its fate entry point.
-#[test]
-fn client_rejects_deep_local_causal_chain_without_recursing() {
-    const DEPTH: usize = 128;
-
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let mut parent = None;
-    let mut tx_ids = Vec::with_capacity(DEPTH);
-
-    for time in 1..=DEPTH {
-        // Version ancestry is confined to one physical row/layer.  Keep this
-        // stack-safety chain in that legitimate coordinate rather than using
-        // arbitrary transaction dependencies.
-        let mut commit = MergeableCommit::new("todos", row(1), time as u64)
-            .cells(title_cells(&format!("depth-{time}")));
-        if let Some(parent) = parent {
-            commit = commit.parents(vec![parent]);
-        }
-        let (tx_id, _) = client.commit_mergeable_unit_settled(commit).unwrap();
-        parent = Some(tx_id);
-        tx_ids.push(tx_id);
-    }
-
-    let root = tx_ids[0];
-    client
-        .apply_fate_update(
-            root,
-            Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-            None,
-            None,
-        )
-        .unwrap();
-
-    for tx_id in tx_ids {
-        assert_eq!(
-            client.transaction_state_settled(tx_id).unwrap().0,
-            if tx_id == root {
-                Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
-            } else {
-                Fate::Rejected(RejectionReason::Cascade { root })
-            }
-        );
-    }
-    assert!(
-        client
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn authority_unparks_child_after_unknown_parent_accepts() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
-    client
-        .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
-        .unwrap();
-    let (exclusive, exclusive_unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 1)
-        .unwrap();
-    let (child, child_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 2)
-                .parents(vec![exclusive])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = child_unit else {
-        panic!("expected commit unit");
-    };
-    assert!(
-        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-            .unwrap()
-            .is_empty()
-    );
-
-    let SyncMessage::CommitUnit { tx, versions } = exclusive_unit else {
-        panic!("expected commit unit");
-    };
-    let updates = core
-        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
-    assert_eq!(core.sync_metrics().parked_orphans_resolved, 1);
-    assert_eq!(
-        updates,
-        vec![
-            SyncMessage::FateUpdate {
-                tx_id: exclusive,
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime::new(1, 0).unwrap()),
-                durability: Some(DurabilityTier::Global),
-            },
-            SyncMessage::FateUpdate {
-                tx_id: child,
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime::new(2, 0).unwrap()),
-                durability: Some(DurabilityTier::Global),
-            },
-        ]
-    );
-    assert_eq!(
-        core.current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row, title_cells("child"))])
-    );
-}
-#[test]
-fn duplicate_unknown_parent_commit_unit_parks_once() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let missing = TxId::new(TxTime::from(99), node(1));
-    let (_child, child_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(7), 2)
-                .parents(vec![missing])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = child_unit else {
-        panic!("expected commit unit");
-    };
-    assert!(
-        core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(core.sync_metrics().parked_orphans, 1);
-    assert_eq!(core.sync_metrics().parked_orphans_resolved, 0);
-}
-/// A parked commit unit may be resent over a different transport: first
-/// from a checked wire decoder (receipts already validated), then over an
-/// in-process link (not validated). The versions, identity and trust are
-/// identical, so the resend is a duplicate of the parked unit, not a
-/// conflicting one (#3376 review).
-#[test]
-fn parked_commit_unit_resent_over_another_transport_is_not_conflicting() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let missing = TxId::new(TxTime::from(99), node(1));
-    let (_child, child_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row(7), 2)
-                .parents(vec![missing])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-    let context = |version_receipts_validated| {
-        Some(crate::node::CommitUnitIngestContext {
-            identity: AuthorSubject::SYSTEM,
-            trust: crate::node::CommitUnitTrust::TrustedBackend,
-            admitted_write_authorization: false,
-            version_receipts_validated,
-        })
-    };
-
-    for validated in [true, false] {
-        let _ = core.apply_sync_message_with_ingest_context(child_unit.clone(), context(validated))
-            .resolve()
-            .expect("a resent parked unit is a duplicate, not a conflict");
-    }
-
-    assert_eq!(core.sync_metrics().parked_orphans, 1);
-    assert_eq!(core.sync_metrics().parked_orphans_resolved, 0);
-}
 #[test]
 fn m2_writer_core_reader_converges_against_oracle() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
@@ -483,7 +167,7 @@ fn m2_writer_core_reader_converges_against_oracle() {
         MergeableCommit::new("todos", row_a, 13).cells(title_cells("a2")),
     ] {
         let row_uuid = commit.row_uuid;
-        let parents = commit.parents.clone();
+        let parents: Vec<TxId> = Vec::new();
         let cells = commit.cells.clone();
         let deletion = commit.deletion;
         let (tx_id, commit_unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
@@ -506,20 +190,14 @@ fn m2_writer_core_reader_converges_against_oracle() {
                 panic!("expected view update");
             };
             assert!(!payload.peer_payload_inventory.opening_pending);
-            assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
-                matches!(
-                    fact,
-                    input
-                        if input.row == row_a
-                            && input.version.tx == tx_id
-                            && input.version.layer == crate::protocol::ResultRowLayer::Deletion
-                )
+            // The deleted row leaves the result and ships its deleted image.
+            assert!(version_bundles_for_update(&update).iter().any(|bundle| {
+                bundle.tx.tx_id == tx_id
+                    && bundle.versions.iter().any(|version| {
+                        version.row_uuid() == row_a
+                            && version.deletion() == Some(DeletionEvent::Deleted)
+                    })
             }));
-            assert!(
-                version_bundles_for_update(&update)
-                    .iter()
-                    .any(|bundle| bundle.tx.tx_id == tx_id)
-            );
         }
         reader.apply_sync_message_settled(update).unwrap();
         assert_current_rows_match_oracle(&mut reader, &oracle);
@@ -588,14 +266,12 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
             &schema.tables[0],
             original.schema_version(),
             original.row_uuid(),
-            original.parents(),
             original.created_by(),
             HLC_MAX_PHYSICAL_MS,
             original.updated_by(),
             HLC_MAX_PHYSICAL_MS,
             &[original.cell_at(0)],
-            original.deletion(),
-        )
+            original.deletion(),)
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let accepted = core
@@ -628,14 +304,12 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
             &schema.tables[0],
             original.schema_version(),
             original.row_uuid(),
-            original.parents(),
             original.created_by(),
             HLC_MAX_PHYSICAL_MS + 1,
             original.updated_by(),
             HLC_MAX_PHYSICAL_MS + 1,
             &[original.cell_at(0)],
-            original.deletion(),
-        )
+            original.deletion(),)
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let rejected = core

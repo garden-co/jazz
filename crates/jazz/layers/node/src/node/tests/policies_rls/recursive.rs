@@ -746,7 +746,6 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     let seed_move = accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 51)
-            .parents(vec![seed_grant])
             .cells(BTreeMap::from([
                 ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
                 ("team".to_owned(), Value::Uuid(team_d.0)),
@@ -765,7 +764,6 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 52)
-            .parents(vec![seed_move])
             .cells(BTreeMap::from([
                 ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
                 ("team".to_owned(), Value::Uuid(team_a.0)),
@@ -957,13 +955,11 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
     let (_, allowed_update_fate) = apply(
         MergeableCommit::new("docs", update_doc, 52)
             .made_by(reader)
-            .parents(vec![update_parent])
             .cells(recursive_doc_cells("update new", "write")),
     );
     let (_, denied_update_fate) = apply(
         MergeableCommit::new("docs", hidden_doc, 53)
             .made_by(reader)
-            .parents(vec![hidden_parent])
             .cells(recursive_doc_cells("denied update", "write")),
     );
     let (_, allowed_delete_fate) = apply(
@@ -1004,17 +1000,12 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([update_doc, allowed_insert])
     );
+    // A fresh reader holds nothing to clear, so the deleted document ships
+    // nothing: removals are row deltas against what a receiver already holds.
     assert_view_update_only_ships_rows(
         &final_read,
-        BTreeSet::from([update_doc, allowed_insert, delete_doc]),
+        BTreeSet::from([update_doc, allowed_insert]),
     );
-    // The deleted row is absent from public results above, but its currently
-    // authorized deletion is carried so a receiver can clear cached content.
-    // It must not be confused with disclosure of the hidden document or with
-    // shipping the deleted document's content body again.
-    assert!(version_bundles_for_update(&final_read).iter().flat_map(|bundle| &bundle.versions)
-        .filter(|version| version.row_uuid() == delete_doc)
-        .all(|version| version.deletion() == Some(DeletionEvent::Deleted)));
 }
 
 #[test]

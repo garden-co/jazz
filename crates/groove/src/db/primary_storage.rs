@@ -23,6 +23,53 @@ impl Database {
         Ok(false)
     }
 
+    /// How many entries of `table`'s index `index_name` start with `prefix`,
+    /// counting no further than `max_items`: the number of rows an index
+    /// prefix scan of the same values (`StaticScanSpec::Prefix`) would read,
+    /// capped. Like [`Self::table_has_stored_rows`] it observes the applied
+    /// resident state, requests at most `max_items` storage entries and
+    /// decodes nothing, so it costs at most the capped scan's keys.
+    pub async fn index_prefix_entries_up_to(
+        &self,
+        table: &str,
+        index_name: &str,
+        prefix: &[Value],
+        max_items: usize,
+    ) -> Result<usize, Error> {
+        if max_items == 0 {
+            return Ok(0);
+        }
+        let index = self.index(table, index_name)?;
+        if prefix.len() > index.columns.len() {
+            return Err(Error::IndexKeyArity {
+                index: index_name.to_owned(),
+                expected: index.columns.len(),
+                actual: prefix.len(),
+            });
+        }
+        // The same bytes as an IVM index prefix scan of these values.
+        let mut storage_prefix =
+            durable_index_key_prefix(self.ivm_runtime.index_storage_id(table, index));
+        for value in prefix {
+            encode_key_part(&mut storage_prefix, value).map_err(Error::IvmRuntime)?;
+        }
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
+        let mut cursor = storage
+            .scan(
+                crate::storage::ScanRequest::prefix("indices".to_owned(), storage_prefix)
+                    .with_max_items(max_items),
+            )
+            .await?;
+        let mut entries = 0;
+        while entries < max_items
+            && let Some(rows) = cursor.next_batch().await?
+        {
+            entries += rows.len();
+        }
+        Ok(entries.min(max_items))
+    }
+
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///
@@ -288,7 +335,12 @@ impl Database {
         table: &str,
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_storage_txn(batch)?;
+        // Staging the batch only serves reads that can observe it: a table
+        // this batch never writes reads exactly as resident storage.
+        let batch_writes_table = batch.writes_table(table);
+        if batch_writes_table {
+            self.ensure_batch_storage_txn(batch)?;
+        }
         let table_schema = self.table(table)?;
         let primary_key = table_schema
             .primary_key
@@ -307,10 +359,11 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut encoded_key, value)?;
         }
-        let staged_contains_key = batch
-            .txn_operations
-            .borrow_mut()
-            .contains_key(table, &encoded_key);
+        let staged_contains_key = batch_writes_table
+            && batch
+                .txn_operations
+                .borrow_mut()
+                .contains_key(table, &encoded_key);
         if !staged_contains_key {
             let resident = self.resident_storage();
             let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
@@ -449,6 +502,39 @@ impl Database {
         start: &[Value],
         end: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
+        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
+            .await
+    }
+
+    /// [`Self::primary_key_scan_range_raw`] that also observes writes already
+    /// staged in `batch`.
+    pub async fn primary_key_scan_range_raw_in_batch(
+        &self,
+        batch: &DatabaseBatch,
+        table: &str,
+        start: &[Value],
+        end: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
+        self.ensure_batch_storage_txn(batch)?;
+        let resident = self.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        self.primary_key_scan_range_raw_with_storage(&storage, table, start, end)
+            .await
+    }
+
+    async fn primary_key_scan_range_raw_with_storage<'a, T>(
+        &'a self,
+        storage: &T,
+        table: &str,
+        start: &[Value],
+        end: &[Value],
+    ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
+    where
+        T: OrderedKvStorage,
+    {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
             .primary_key
@@ -479,9 +565,7 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut end_key, value)?;
         }
-        let resident = self.resident_storage();
-        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let store = RecordStore::new(&storage, table, &descriptor);
+        let store = RecordStore::new(storage, table, &descriptor);
         store
             .range(&start_key, &end_key)
             .await?
@@ -752,16 +836,15 @@ impl Database {
         let table_schema = self.table(table)?;
         let storage_descriptor = self.table_storage_descriptor(table)?;
         let store = RecordStore::new(storage, table, &storage_descriptor);
-        let index_descriptor = index_record_descriptor();
+        let index = self.index(table, index_name)?;
         let mut records = Vec::new();
-        for (storage_key, persisted_record) in raw_entries {
-            let index_record = index_descriptor.bind(&persisted_record);
+        for (storage_key, stored_value) in raw_entries {
             let primary_key = persisted_index_primary_key(
                 table_schema,
                 index_name,
-                self.index(table, index_name)?,
+                index,
                 &storage_key,
-                &index_record.get("value")?,
+                &stored_value,
             )?;
             if let Some(record) = store.get_raw(&primary_key).await? {
                 records.push(self.decode_stored_key_value(table_schema, primary_key, record)?);
@@ -817,20 +900,11 @@ impl Database {
                 })?;
             encode_index_prefix_part(&mut logical_key, value, &column.column_type)?;
         }
-        let mut storage_prefix = durable_index_key_prefix(table, index_name);
-        if !logical_key.is_empty() {
-            // Persist stores IndexBy's logical bytes as a Value::Bytes key field.
-            // For prefix scans we emit the Bytes tag and escaped payload bytes
-            // without the terminal 00 00, so longer non-unique keys remain in range.
-            storage_prefix.push(7);
-            for byte in logical_key {
-                if byte == 0 {
-                    storage_prefix.extend([0, 0xff]);
-                } else {
-                    storage_prefix.push(byte);
-                }
-            }
-        }
+        // Durable entries are the index id followed directly by the ordered,
+        // prefix-free part encodings, so a logical prefix stays a byte prefix.
+        let mut storage_prefix =
+            durable_index_key_prefix(self.ivm_runtime.index_storage_id(table, index));
+        storage_prefix.extend(logical_key);
         Ok(storage_prefix)
     }
 }

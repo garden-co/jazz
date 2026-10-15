@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
+import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -141,7 +142,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     receipt(`cleanup:done; pinned-phase=${pinnedCorpusPhase}`);
   });
 
-  it("rejects the published alpha.54 browser corpus without rewriting it", async () => {
+  // The linear row-history format does not read DAG-layout roots. A published
+  // alpha.54 browser root is refused at open with the typed storage-format
+  // error naming the three codec families it lacks, and no page is rewritten.
+  it("refuses the published alpha.54 browser corpus with a typed storage-format error", async () => {
     const digest = Array.from(
       new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(publishedAlpha54Corpus)),
@@ -160,17 +164,20 @@ describe("browser Jazz storage compatibility corpus", () => {
       ),
       driver: { type: "persistent", dbName },
     };
-    const db = await openPersistentDb(config);
+    const bootstrap = await openPersistentDb(config);
     const physicalDbName = await trackPhysicalDatabase(dbName);
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
+    await bootstrap.shutdown();
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
     await IndexedDbPageStore.destroy(physicalDbName);
-    await installRawRecords(physicalDbName, JSON.parse(publishedAlpha54Corpus));
-    expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
-    await expect(createDb(config)).rejects.toThrow(
-      "Missing or invalid IndexedDB storage epoch manifest",
+    const published = JSON.parse(publishedAlpha54Corpus) as Record<string, string>;
+    await installRawRecords(physicalDbName, published);
+    expect(await rawRecords(physicalDbName)).toEqual(published);
+    await expect(
+      withTimeout(createDb(config), 5_000, "published alpha.54 open did not reject"),
+    ).rejects.toThrow(
+      'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2"] required by this build and declares [] that this build does not read',
     );
-    expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
+    expect(await rawRecords(physicalDbName)).toEqual(published);
   }, 30_000);
 
   it("produces the current catalogue/history/branch/large-value corpus through public WasmDb", async () => {
@@ -293,7 +300,11 @@ describe("browser Jazz storage compatibility corpus", () => {
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
   }, 90_000);
 
-  it("rejects the pinned previous-durability corpus without rewriting it", async () => {
+  // `current-browser-jazz-corpus.json` is real output of the producer test
+  // above in the linear row-history layout. Regenerate it only for a storage
+  // format change: run this file with JAZZ_BROWSER_CORPUS_OUT set to a new
+  // path and check in the exported candidate.
+  it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
     pinnedCorpusPhase = "pinned-test:start";
     receipt(pinnedCorpusPhase);
     const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
@@ -325,7 +336,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
     const account = accounts.restoreLocalFirst(secret);
     expect(account.id).toBe(owner.auth.account);
-    // Omit serverUrl: profile admission must reject using only the stored root.
+    // Omit serverUrl on the context: every pinned read and append is local,
+    // including the first open, so upstream cannot repair a missing page.
     const config: DbConfig = {
       appId: owner.appId,
       account,
@@ -348,10 +360,226 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawBeforeReadOnlyInspection,
     );
 
-    await expect(createDb(config)).rejects.toThrow(
-      "Missing or invalid IndexedDB storage epoch manifest",
+    let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
+    // The persistent replica lives in the worker. Use the public local-first
+    // read across that hop. With no serverUrl, the worker cannot contact Core.
+    // Inspector LocalOnly reads only the foreground's in-memory rows.
+    const rawWhileReopened = await pinnedPhase("read-open-records", () =>
+      rawRecords(physicalDbName),
     );
-    expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
+    // Reopen must materialize the durable local replica without depending on
+    // a fresh remote-coverage round trip. The earlier global read proves the
+    // synced fixture; this is specifically the offline persistence boundary.
+    const reopenedMain = await pinnedPhase("readonly-main-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+    );
+    const reopenedDraft = await pinnedPhase("readonly-draft-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+    );
+    expect(reopenedMain).toHaveLength(1);
+    expect(reopenedDraft).toHaveLength(1);
+    expect(reopenedMain).toMatchObject({
+      0: { branch: "main", title: "current title", body: "large value ".repeat(20_000) },
+    });
+    expect(reopenedDraft).toMatchObject({
+      0: { branch: "draft", title: "draft override", body: "large value ".repeat(20_000) },
+    });
+    await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("readonly-settle", () => sleep(100));
+    const rawAfterReadOnlyInspection = await pinnedPhase("read-post-readonly-records", () =>
+      rawRecords(physicalDbName),
+    );
+    expectForegroundLeaseLifecycle(
+      rawBeforeReadOnlyInspection,
+      rawWhileReopened,
+      rawAfterReadOnlyInspection,
+    );
+    // The corpus is already in this build's layout, so a read-only open has no
+    // upgrade to perform: every page, metadata record and manifest entry must
+    // come back byte-identical, apart from the opaque lease token checked above.
+    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
+      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+    );
+
+    // A second read-only open must also preserve the complete raw receipt,
+    // not merely decoded query rows.
+    db = await pinnedPhase("second-readonly-open", () =>
+      openPersistentDb(config, "pinned-second-readonly"),
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" })).toEqual(
+      reopenedMain,
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
+      reopenedDraft,
+    );
+    await pinnedPhase("second-readonly-shutdown", () =>
+      shutdownTrackedDb(db, "pinned-second-readonly"),
+    );
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("second-readonly-settle", () => sleep(100));
+    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
+    );
+
+    // This planted high-water regression must remain visible through the raw
+    // receipt. In particular, normalization may hide a fresh opaque lease
+    // token, but never a node identity, retired set, or HLC floor.
+    const plantedLeaseRegression = corruptReusableLeaseHighWater(rawAfterReadOnlyInspection);
+    expect(normalizeRuntimeLeaseRecords(plantedLeaseRegression)).not.toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
+    );
+
+    // Append with today's writer only after the historical read-only/raw-byte
+    // receipt above. Both generations must survive a fresh public open of
+    // this same authenticated principal root.
+    db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
+    const historicalProjects = await pinnedPhase("writer-projects-query", () =>
+      db.all(app.projects, { tier: ReadTier.LocalFirst }),
+    );
+    const currentBody = "current writer large value ".repeat(12_000);
+    const currentWrite = await pinnedPhase("writer-transaction", () =>
+      db.transaction((tx) => {
+        const project = tx.insert(app.projects, { name: "current writer project" });
+        const document = tx.insert(
+          app.documents,
+          {
+            branch: "main",
+            title: "current writer document",
+            projectId: project.id,
+            body: currentBody,
+          },
+          { branch: "main" },
+        );
+        return { project, document };
+      }),
+    );
+    await pinnedPhase("writer-local-settlement", () =>
+      withTimeout(
+        currentWrite.wait({ tier: "local" }),
+        10_000,
+        "current corpus write did not settle locally",
+      ),
+    );
+    await pinnedPhase("writer-shutdown", () => shutdownTrackedDb(db, "pinned-writer"));
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("writer-settle", () => sleep(100));
+    const rawAfterCurrentWrite = await pinnedPhase("read-post-writer-records", () =>
+      rawRecords(physicalDbName),
+    );
+    expect(rawAfterCurrentWrite[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
+      rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
+    );
+
+    // The config has no serverUrl, so this is a persistence receipt: no
+    // server can repair lost current pages before the post-reopen assertions.
+    db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
+    expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
+      physicalDbName,
+    );
+    const mixedMain = await pinnedPhase("offline-main-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+    );
+    const mixedDraft = await pinnedPhase("offline-draft-query", () =>
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
+    );
+    const mixedProjects = await pinnedPhase("offline-projects-query", () =>
+      db.all(app.projects, { tier: ReadTier.LocalFirst }),
+    );
+    expect(mixedMain).toHaveLength(2);
+    expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
+    expect(mixedMain).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "current writer document",
+          branch: "main",
+          body: currentBody,
+        }),
+      ]),
+    );
+    expect(mixedDraft).toEqual(reopenedDraft);
+    expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
+    expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
+    const currentProject = mixedProjects.find(
+      (project) => project.name === "current writer project",
+    );
+    expect(currentProject).toBeDefined();
+    expect(
+      mixedMain.find((document) => document.title === "current writer document")?.projectId,
+    ).toBe(currentProject!.id);
+    pinnedCorpusPhase = "pinned-test:complete";
+    receipt(pinnedCorpusPhase);
+  }, 90_000);
+
+  // The linear row-history format does not read DAG-layout roots. The browser
+  // corpus pinned before that change is real producer output for this exact
+  // principal; opening it through the public path must be refused with the
+  // typed storage-format error naming the missing codec families, and the
+  // refusal must not rewrite a single raw record.
+  it("refuses the pre-linear catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+    pinnedCorpusPhase = "pinned-test:start";
+    receipt(pinnedCorpusPhase);
+    const pinnedRecords = JSON.parse(preLinearCorpus) as Record<string, string>;
+    const owner = JSON.parse(
+      rawManifest(pinnedRecords).find(
+        ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+      )![1] as string,
+    );
+    expect(owner).toMatchObject({
+      version: 1,
+      appId: "ba96582c-7167-5f52-ba63-3ebefe1c2b96",
+      env: "dev",
+      auth: { kind: "account" },
+    });
+    const registry = new URL(owner.auth.registry);
+    const registrySuffix = `/apps/${owner.appId}/accounts`;
+    expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
+    const serverBase = new URL(registry);
+    serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
+    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
+    // Registry authority is part of the stored owner. Reopen under the exact
+    // producer authority, even though that test server no longer exists. A
+    // newly allocated test-server port is a different account namespace.
+    const accounts = await createAccountManager({
+      appId: owner.appId,
+      serverUrl: serverBase.href,
+    });
+    const dbName = "browser-storage-compat-historical-root-v1";
+    const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    const account = accounts.restoreLocalFirst(secret);
+    expect(account.id).toBe(owner.auth.account);
+    // Omit serverUrl on the context: the bootstrap and the refused open are
+    // local, so upstream cannot repair or replace a pinned page.
+    const config: DbConfig = {
+      appId: owner.appId,
+      account,
+      driver: { type: "persistent", dbName },
+    };
+    // Prepare the real key-bound account before creating a context. Provision
+    // once through the public path to identify its account-scoped physical root
+    // before installing the pinned receipt.
+    const bootstrap = await pinnedPhase("bootstrap-open", () =>
+      openPersistentDb(config, "pinned-bootstrap"),
+    );
+    const physicalDbName = await pinnedPhase("physical-root", () => trackPhysicalDatabase(dbName));
+    await pinnedPhase("bootstrap-shutdown", () => shutdownTrackedDb(bootstrap, "pinned-bootstrap"));
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
+    await pinnedPhase("bootstrap-settle", () => sleep(100));
+    await pinnedPhase("install-pinned-records", () =>
+      installRawRecords(physicalDbName, pinnedRecords),
+    );
+    expect(await pinnedPhase("read-installed-records", () => rawRecords(physicalDbName))).toEqual(
+      pinnedRecords,
+    );
+
+    await pinnedPhase("refused-open", () =>
+      expect(openPersistentDb(config, "pinned-refused")).rejects.toThrow(
+        'unsupported storage format: this epoch-1 root lacks codec families ["groove.durable-index.v2","jazz.history-version-current.v4","jazz.transaction-durability.v2"] required by this build and declares [] that this build does not read',
+      ),
+    );
+    expect(await pinnedPhase("read-refused-records", () => rawRecords(physicalDbName))).toEqual(
+      pinnedRecords,
+    );
     pinnedCorpusPhase = "pinned-test:complete";
     receipt(pinnedCorpusPhase);
   }, 90_000);
