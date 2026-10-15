@@ -1090,10 +1090,6 @@ where
         batch: &mut DatabaseBatch,
         active: &ActiveSchema,
     ) -> Result<(), Error> {
-        batch.update(
-            "jazz_catalogue_pointer",
-            vec![Value::U64(active.revision), Value::Uuid(active.schema.0)],
-        );
         put_catalogue(
             batch,
             codec::CatalogueRecordKind::ActiveSchema,
