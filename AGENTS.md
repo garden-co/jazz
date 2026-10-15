@@ -42,3 +42,20 @@ layers, WASM + NAPI + React Native bindings.
 Behavior-changing PRs describe before/after behavior, the invariants that
 govern it, non-goals, and worked examples for the normal path and the
 meaningful edge or failure cases.
+
+CI runs by PR state. Draft PRs run nothing. A ready PR runs only the lint
+partition (format, lint, typecheck, workspace check) on its latest push; run
+`node dev/gates/local-ci-equivalent.mjs --ci-partition lint` before pushing.
+Marking a PR ready puts it in the review and merge queue. A PR is approved by a
+GitHub review or by its author's own approval comment once the agent review
+passes. The queue merges approved heads together on a `merge-group/<n>` PR into
+main, which runs the full suite once; on green it merges each PR in order with
+its own merge commit. A green full run posts a `full-suite` commit status on
+its head and, for a merge group, on each PR head the group merged cleanly;
+branch protection requires it on main, so every PR into main (Dependabot,
+docs-only and hotfixes included) goes through a merge group or a dispatched
+full run, and pushing to a covered PR voids its coverage. Like `test-rust`,
+the status trusts repository writers: the workflow that posts it comes from
+the ref under test.
+PRs into `release` still run the full suite. To get a full run earlier,
+dispatch the CI workflow on your branch.

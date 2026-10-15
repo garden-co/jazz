@@ -1,0 +1,15 @@
+{
+  "name": "jazz-example-load-times-benchmark",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:apps": "node build.mjs",
+    "bench": "vitest bench --run --config vitest.config.bench.ts"
+  },
+  "devDependencies": {
+    "@codspeed/vitest-plugin": "^5.7.1",
+    "@playwright/test": "^1.58.2",
+    "vitest": "catalog:default"
+  }
+}

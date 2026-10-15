@@ -109,10 +109,10 @@ fn indexed_branch_todos_schema() -> JazzSchema {
 /// a whole branch key, and main's settled rows outside the prefix are never
 /// read as content. Main is still masked exactly: by the draft's presence (a
 /// draft edit that left the prefix hides its main row) and, within main, by
-/// the shadow of main's pending edits (a pending edit that left the prefix
-/// hides its settled image; one that entered it is found by the local
-/// index). An unindexed read of the same view is the control: it scans both
-/// branch keys.
+/// main's whole presence in its local delta (a pending edit that left the
+/// prefix hides its settled image; one that entered it is found by the
+/// local index). An unindexed read of the same
+/// view is the control: it scans both branch keys.
 ///
 /// The deletion registers and the draft's presence are not index-bounded
 /// (a draft row can be deleted by its main image anywhere in main), so they
@@ -221,8 +221,9 @@ fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
         metrics.source_full_scans, 0,
         "no content layer of the indexed branch view may scan a whole branch key"
     );
-    // Draft and main each read local, origin and origin's shadow.
-    assert_eq!(metrics.source_index_probes, 6, "{metrics:?}");
+    // Draft and main each read local and origin under the prefix; each
+    // local delta masks its origin by its whole presence, not an index probe.
+    assert_eq!(metrics.source_index_probes, 4, "{metrics:?}");
     // Both deletion registers and the draft's presence are looked up by
     // the candidates' row ids: none reads a branch key whole.
     assert_eq!(metrics.source_branch_register_full_scans, 0, "{metrics:?}");
@@ -397,9 +398,9 @@ fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
     // The policy subplan under an indexed branch view. The proof is
     // specialized from the outer `todos` source and shares its deduplicated
     // physical branch layers, so they are counted once, for the outer read:
-    // draft and main each read local, origin and origin's shadow under the
-    // prefix; both deletion registers and the draft's presence are looked
-    // up by the candidates' row ids.
+    // draft and main each read local and origin under the prefix (each local
+    // delta masks its origin by its whole presence); both deletion registers and
+    // the draft's presence are looked up by the candidates' row ids.
     // The specialized proof is compiled for this read, and its `labels`
     // source, correlated only through the outer row, reads whole. The
     // control reads both branch keys and both registers whole, no presence.
@@ -427,7 +428,7 @@ fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
             metrics.source_full_scans,
             metrics.source_branch_register_full_scans,
         ),
-        (1, 6, 1, 0),
+        (1, 4, 1, 0),
         "{metrics:?}"
     );
     assert_eq!(
@@ -655,6 +656,369 @@ fn indexed_branch_view_registers_are_read_by_candidate_row_ids() {
     assert!(
         small.global_current_rows.reads <= 8,
         "only the candidates' rows are read: {small:?}"
+    );
+}
+
+fn indexed_todos_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["title"]),
+            )
+            .allow_all(),
+    )
+}
+
+/// An authority whose writes stay pending until the test settles them.
+fn open_settling_authority(node: u8, schema: &JazzSchema) -> Db {
+    block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
+    }))
+    .expect("open history-complete authority")
+}
+
+fn title_cells(title: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
+}
+
+/// Insert `row_id` with `title` and settle it into origin.
+fn insert_settled(db: &Db, row_id: RowUuid, title: &str) {
+    let write = block_on(db.insert(
+        "todos",
+        title_cells(title),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+    db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+        .expect("settle row");
+}
+
+/// Write a pending edit of `row_id`'s title; it stays in the local delta.
+fn update_pending(db: &Db, row_id: RowUuid, title: &str) -> TxId {
+    block_on(db.update("todos", row_id, title_cells(title), Default::default()))
+        .expect("pending edit")
+        .mergeable_tx_id()
+}
+
+/// Alice reads `title = needle` at `Local` while she holds pending edits,
+/// some of them on rows outside the prefix. Origin is read under the index
+/// prefix, and the local delta masks origin's candidates by its presence,
+/// read whichever way reads fewer rows: whole (its pending rows) when it is
+/// smaller than origin's candidates, else looked up by those candidates. So
+/// the read never visits origin's rows outside the prefix, never probes the
+/// delta once per candidate when the delta is the smaller side (the #4022
+/// `pages_live` regression), and never reads every pending row when the
+/// candidates are fewer (the #4022 local-only regressions: a node whose
+/// delta is the whole table). A pending edit that moved a candidate out of
+/// the prefix still hides it either way; one that moved a row in is found
+/// by the delta's own index.
+///
+/// White-box because storage-read attribution and the read path's source
+/// counters are not public.
+///
+/// ```text
+/// origin:  a=needle  b=needle  out=needle  in=hay  needle x m  hay x n
+/// local:   out -> hay   in -> needle   k hay rows -> straw
+/// alice ──title = needle, Local──► {a, b, in, needle x m}
+///          origin reads independent of n and k;
+///          delta reads independent of n, of m once m + 3 > k + 2,
+///          and of k once k + 2 > m + 3
+/// ```
+#[test]
+fn indexed_local_read_masks_origin_by_the_cheaper_pending_presence() {
+    let read = |hay: u8, needles: u8, pending_hay: u8| {
+        let schema = indexed_todos_schema();
+        let db = open_settling_authority(0xda, &schema);
+        let (a, b, moved_out, moved_in) = (row(1), row(2), row(3), row(4));
+        for (row_id, title) in [
+            (a, "needle"),
+            (b, "needle"),
+            (moved_out, "needle"),
+            (moved_in, "hay"),
+        ] {
+            insert_settled(&db, row_id, title);
+        }
+        for n in 0..hay {
+            insert_settled(&db, row(0x10 + n), "hay");
+        }
+        let extra_needles = (0..needles).map(|n| row(0x80 + n)).collect::<Vec<_>>();
+        for &row_id in &extra_needles {
+            insert_settled(&db, row_id, "needle");
+        }
+        update_pending(&db, moved_out, "hay");
+        update_pending(&db, moved_in, "needle");
+        for n in 0..pending_hay {
+            update_pending(&db, row(0x10 + n), "straw");
+        }
+        let local = ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let needle = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+            .expect("prepare indexed query");
+        let sorted = |mut rows: Vec<RowUuid>| {
+            rows.sort();
+            rows
+        };
+        let expected = sorted([a, b, moved_in].into_iter().chain(extra_needles).collect());
+        // Warm the plan so the measured read is the row read alone.
+        assert_eq!(
+            sorted(row_ids(
+                &block_on(db.all(&needle, local.clone())).expect("warm read")
+            )),
+            expected
+        );
+        db.reset_storage_read_metrics_for_test();
+        db.node.node.borrow_mut().reset_query_engine_read_metrics();
+        assert_eq!(
+            sorted(row_ids(
+                &block_on(db.all(&needle, local)).expect("indexed read")
+            )),
+            expected
+        );
+        let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+        assert_eq!(metrics.source_full_scans, 0, "{metrics:?}");
+        assert_eq!(
+            metrics.source_index_probes, 2,
+            "origin and the local delta each probe the index once: {metrics:?}"
+        );
+        db.take_storage_read_metrics_for_test()
+    };
+    // Three candidates (a, b, out) and four pending rows: the delta is
+    // looked up by the candidates.
+    let base = read(20, 0, 2);
+    let more_hay = read(60, 0, 2);
+    assert_eq!(
+        (base.global_current_rows, base.ahead_current_rows),
+        (more_hay.global_current_rows, more_hay.ahead_current_rows),
+        "origin's rows outside the prefix may not be read: {base:?} vs {more_hay:?}"
+    );
+    // Many more pending rows than candidates: the delta is still looked up
+    // by the three candidates, so its reads do not grow with it.
+    let more_pending = read(60, 0, 20);
+    let most_pending = read(60, 0, 40);
+    assert_eq!(
+        (base.global_current_rows, base.ahead_current_rows),
+        (
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {base:?} vs {more_pending:?}"
+    );
+    assert_eq!(
+        (
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
+        ),
+        (
+            most_pending.global_current_rows,
+            most_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {more_pending:?} vs {most_pending:?}"
+    );
+    // Many more candidates than pending rows: the delta is read whole, so
+    // its reads do not grow with origin's candidates.
+    let more_candidates = read(20, 40, 2);
+    let most_candidates = read(20, 80, 2);
+    assert_eq!(
+        more_candidates.ahead_current_rows, most_candidates.ahead_current_rows,
+        "origin's candidates may not cost reads of the delta: \
+         {more_candidates:?} vs {most_candidates:?}"
+    );
+    assert!(
+        more_candidates.ahead_current_rows.reads <= base.ahead_current_rows.reads + 4,
+        "the whole delta is its four pending rows: {base:?} vs {more_candidates:?}"
+    );
+}
+
+/// Alice keeps a `title = needle` subscription open at `Local` while her
+/// pending edits appear over rows origin already holds under the index
+/// prefix and then settle. The local delta masks origin by its maintained
+/// presence, so every step is one exact delta: a pending edit leaving the
+/// prefix removes the origin candidate, one entering adds the row, and
+/// settling an edit changes nothing the subscriber sees. White-
+/// box only for settling (`finalize_local_mergeable_commit_for_test`); the
+/// assertions are on the public subscription stream.
+///
+/// ```text
+/// origin: a=needle  b=needle  c=hay
+/// alice subscribes ──► {a, b}
+/// pending a -> hay      ──► -a
+/// pending c -> needle   ──► +c
+/// settle both           ──► (nothing)
+/// pending a -> needle   ──► +a ; settle ──► (nothing)
+/// ```
+#[test]
+fn indexed_local_subscription_follows_pending_rows_over_origin_candidates() {
+    let schema = indexed_todos_schema();
+    let db = open_settling_authority(0xdb, &schema);
+    let (a, b, c) = (row(1), row(2), row(3));
+    insert_settled(&db, a, "needle");
+    insert_settled(&db, b, "needle");
+    insert_settled(&db, c, "hay");
+    for n in 0..8 {
+        insert_settled(&db, row(0x10 + n), "hay");
+    }
+    let local = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let query = Query::from("todos").filter(eq(col("title"), lit("needle")));
+    let mut subscription = prepared_subscribe(&db, &query, local.clone()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut ids = row_ids(&initial.rows);
+    ids.sort();
+    assert_eq!(ids, vec![a, b]);
+    let removed_ids =
+        |removed: &[RemovedRow]| removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>();
+    let one_shot = |db: &Db| {
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let mut ids = row_ids(&block_on(db.all(&prepared, local.clone())).expect("read"));
+        ids.sort();
+        ids
+    };
+
+    let a_out = update_pending(&db, a, "hay");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty() && updated.is_empty());
+    assert_eq!(
+        removed_ids(&removed),
+        vec![a],
+        "a's pending edit left the prefix"
+    );
+
+    let c_in = update_pending(&db, c, "needle");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&added),
+        vec![c],
+        "c's pending edit entered the prefix"
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    assert_eq!(one_shot(&db), vec![b, c]);
+
+    db.finalize_local_mergeable_commit_for_test(a_out)
+        .expect("settle a");
+    db.finalize_local_mergeable_commit_for_test(c_in)
+        .expect("settle c");
+    block_on(db.tick()).unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        let (added, updated, removed) = delta_rows(event);
+        assert!(
+            added.is_empty() && updated.is_empty() && removed.is_empty(),
+            "settling moves rows from the local delta into origin unchanged: \
+             {added:?} {updated:?} {removed:?}"
+        );
+    }
+    assert_eq!(one_shot(&db), vec![b, c]);
+
+    let a_back = update_pending(&db, a, "needle");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&added),
+        vec![a],
+        "a re-entered the prefix while pending"
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    db.finalize_local_mergeable_commit_for_test(a_back)
+        .expect("settle a again");
+    block_on(db.tick()).unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        let (added, updated, removed) = delta_rows(event);
+        assert!(
+            added.is_empty() && updated.is_empty() && removed.is_empty(),
+            "{added:?} {updated:?} {removed:?}"
+        );
+    }
+    assert_eq!(one_shot(&db), vec![a, b, c]);
+}
+
+/// Alice's pending edit of a settled indexed row and its settlement write
+/// only the local delta, origin and the history: no copy of origin's image
+/// is stored beside the delta (the retired `ahead_shadow` table cost one
+/// row and one entry per index on commit, and their deletes on settle).
+/// The commit of an edit over a settled row therefore writes exactly what
+/// the commit of a fresh pending insert writes, and settling either deletes
+/// only the delta row and its index entry beside origin's own writes.
+/// White-box because storage-write attribution is not public.
+///
+/// ```text
+/// origin: a=hay
+/// alice ──pending insert b──► writes W
+/// alice ──pending edit a over origin──► writes W too (nothing for a mask)
+/// ```
+#[test]
+fn pending_edit_over_origin_writes_no_mask_rows() {
+    let schema = indexed_todos_schema();
+    let db = open_settling_authority(0xdc, &schema);
+    let (a, b) = (row(1), row(2));
+    insert_settled(&db, a, "hay");
+    let last_writes = |db: &Db| {
+        db.node
+            .node
+            .borrow()
+            .last_commit_metrics()
+            .expect("a committed batch")
+            .storage_writes
+    };
+
+    let insert = block_on(db.insert(
+        "todos",
+        title_cells("needle"),
+        crate::db::InsertOptions {
+            row_id: Some(b),
+            ..Default::default()
+        },
+    ))
+    .expect("pending insert");
+    let fresh = last_writes(&db);
+    let edit = update_pending(&db, a, "needle");
+    let over_origin = last_writes(&db);
+    // Both write the delta row and its index entries; the retired mask
+    // wrote two more for the edit (origin's image and its `title` entry).
+    assert_eq!(
+        over_origin.other.count, fresh.other.count,
+        "a pending edit over origin writes its delta row and index entries only: \
+         {over_origin:?} vs {fresh:?}"
+    );
+    assert_eq!(
+        (
+            over_origin.global_current_rows.count,
+            over_origin.global_current_indexes.count
+        ),
+        (0, 0),
+        "a pending edit leaves origin alone: {over_origin:?}"
+    );
+
+    db.finalize_local_mergeable_commit_for_test(insert.mergeable_tx_id())
+        .expect("settle insert");
+    let fresh = last_writes(&db);
+    db.finalize_local_mergeable_commit_for_test(edit)
+        .expect("settle edit");
+    let over_origin = last_writes(&db);
+    // Outside origin's row, its `title` entry, the history and the
+    // transaction log, settling writes only: the delta row and its `title`
+    // entry deleted, and origin's `by_seq` entry inserted (fresh row) or
+    // moved (edit). The retired mask cost one more delete for the fresh row
+    // and two (its row and `title` entry) for the edit.
+    assert_eq!(
+        (fresh.other.count, over_origin.other.count),
+        (3, 4),
+        "settling deletes the delta row and nothing beside it: \
+         {fresh:?} vs {over_origin:?}"
     );
 }
 
