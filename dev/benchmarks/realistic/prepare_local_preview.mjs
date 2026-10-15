@@ -57,18 +57,27 @@ function parseArgs(argv) {
   return out;
 }
 
+const RETIRED_WORKFLOW_MESSAGE =
+  "The Realistic Benchmarks workflow (.github/workflows/benchmarks.yml) was retired on " +
+  "2026-10-15, so there are no new runs to discover. Pass --run-id (and optionally " +
+  "--main-run-id) for a historical run whose realistic-site artifact is still retained.";
+
 function printHelp() {
   console.log(`Usage:
   node dev/benchmarks/realistic/prepare_local_preview.mjs \\
+    --run-id 22833327994 \\
+    [--main-run-id 22833300000] \\
     [--branch codex/benchmark-runner] \\
-    [--run-id 22833327994] \\
     [--out bench-out/local-preview]
+
+The Realistic Benchmarks workflow was retired on 2026-10-15. This script only
+previews realistic-site artifacts from historical runs, so --run-id is
+required; main history is merged only when --main-run-id is given.
 
 Defaults:
   --repo garden-co/jazz2
-  --branch current git branch
+  --branch current git branch (label only)
   --out bench-out/local-preview
-  includes latest successful main site history when available
 `);
 }
 
@@ -92,27 +101,6 @@ function run(command, args, options = {}) {
 
 function currentBranch() {
   return run("git", ["branch", "--show-current"]);
-}
-
-function latestSuccessfulRunId(repo, branch) {
-  const raw = run("gh", [
-    "run",
-    "list",
-    "--repo",
-    repo,
-    "--workflow",
-    "benchmarks.yml",
-    "--branch",
-    branch,
-    "--status",
-    "success",
-    "--limit",
-    "1",
-    "--json",
-    "databaseId",
-  ]);
-  const parsed = JSON.parse(raw);
-  return parsed[0] && parsed[0].databaseId ? String(parsed[0].databaseId) : "";
 }
 
 function artifactInfo(repo, runId) {
@@ -165,10 +153,8 @@ function main() {
   const branch = args.branch || currentBranch();
   if (!branch) fail("Could not determine git branch");
 
-  const branchRunId = args.runId || latestSuccessfulRunId(args.repo, branch);
-  if (!branchRunId) {
-    fail(`No successful benchmark workflow runs found for branch ${branch}`);
-  }
+  const branchRunId = args.runId;
+  if (!branchRunId) fail(RETIRED_WORKFLOW_MESSAGE);
 
   const outDir = path.resolve(args.out);
   fs.rmSync(outDir, { recursive: true, force: true });
@@ -180,7 +166,7 @@ function main() {
 
   try {
     if (args.includeMain) {
-      const mainRunId = args.mainRunId || latestSuccessfulRunId(args.repo, "main");
+      const mainRunId = args.mainRunId;
       if (mainRunId) {
         const mainDownload = downloadSiteHistory(args.repo, mainRunId, "main", tempRoot);
         if (mainDownload) {

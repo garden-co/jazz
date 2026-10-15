@@ -21,7 +21,8 @@ workload's `nightly` extra in `dev/benchmarks/codspeed-artifact.mjs`. The
 scheduled nightly CodSpeed run (`.github/workflows/codspeed.yml`, or a manual
 dispatch with `suite: nightly`) measures them on main, so each keeps its own
 CodSpeed history; merges and `benchmark`-labelled PRs do not.
-`dev/gates/benchmark-smoke.sh --compile-ci` compiles them on every PR, and
+`dev/gates/benchmark-smoke.sh --compile-ci` compiles them in the nightly
+`benchmark-api` job (`.github/workflows/nightly-tests.yml`), and
 `cargo bench -p <package> --bench nightly` runs them locally.
 
 ## Add an app benchmark variant

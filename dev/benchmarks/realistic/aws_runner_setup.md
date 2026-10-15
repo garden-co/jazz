@@ -1,5 +1,8 @@
 # AWS EC2 Self-Hosted Runner Setup
 
+> Historical: the Realistic Benchmarks workflow that used this runner was
+> retired on 2026-10-15.
+
 Use this for predictable benchmark runs with absolute-number logging.
 
 ## Why this setup
@@ -87,13 +90,10 @@ Disable unattended package upgrades during benchmark windows.
 
 ## 5. Run workflow
 
-Use `.github/workflows/benchmarks.yml`.
-
-- Nightly and `main` push native benchmarks run automatically.
-- PR benchmarks run only when the PR has the `benchmark` label.
-- Browser benchmarks run when the workflow includes the browser job.
-
-Artifacts include absolute JSON results plus machine/toolchain metadata.
+The `.github/workflows/benchmarks.yml` workflow that targeted this runner was
+retired on 2026-10-15, and no workflow currently schedules jobs on the
+`jazz-bench` label. Porting the useful suites to CodSpeed is tracked
+separately; this guide is kept for reference.
 
 ## 6. Cost optimization options
 
