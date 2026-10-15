@@ -913,32 +913,9 @@ fn relation_predicate_to_query_predicate(
     match predicate {
         RelationPredicate::Cmp { left, op, right } => {
             let scope = relation_scope(left)?;
-            let predicate = match op {
-                RelationCmpOp::Eq => Predicate::Eq(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ne => Predicate::Ne(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Lt => Predicate::Lt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Le => Predicate::Lte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Gt => Predicate::Gt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ge => Predicate::Gte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-            };
+            let predicate =
+                relation_comparison(&left.column, *op, relation_value_to_operand(right)?)
+                    .map_err(relation_unification_error)?;
             Ok(Some((scope, predicate)))
         }
         RelationPredicate::IsNull { column } => Ok(Some((
@@ -1009,16 +986,9 @@ fn relation_payload_predicate_to_predicate(
     };
     match predicate {
         RelationPredicate::Cmp { left, op, right } => {
-            let left = unscoped_column(left)?;
-            let right = relation_value_to_operand(right)?;
-            Ok(match op {
-                RelationCmpOp::Eq => Predicate::Eq(left, right),
-                RelationCmpOp::Ne => Predicate::Ne(left, right),
-                RelationCmpOp::Lt => Predicate::Lt(left, right),
-                RelationCmpOp::Le => Predicate::Lte(left, right),
-                RelationCmpOp::Gt => Predicate::Gt(left, right),
-                RelationCmpOp::Ge => Predicate::Gte(left, right),
-            })
+            unscoped_column(left)?;
+            relation_comparison(&left.column, *op, relation_value_to_operand(right)?)
+                .map_err(relation_unification_error)
         }
         RelationPredicate::IsNull { column } => Ok(Predicate::IsNull(unscoped_column(column)?)),
         RelationPredicate::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
@@ -1115,7 +1085,9 @@ fn is_always_false(predicate: &Predicate) -> bool {
 fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryError> {
     match value {
         RelationValueRef::Literal(value) => {
-            Ok(Operand::Literal(json_value_to_record_value(value)?))
+            Ok(Operand::Literal(
+                relation_literal_to_record_value(value).map_err(relation_unification_error)?,
+            ))
         }
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
@@ -1140,157 +1112,3 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
     }
 }
 
-fn json_value_to_record_value(value: &serde_json::Value) -> Result<Value, QueryError> {
-    match value {
-        serde_json::Value::Null => Ok(Value::Nullable(None)),
-        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Ok(Value::U64(value))
-            } else if let Some(value) = value.as_i64() {
-                Ok(Value::I64(value))
-            } else if let Some(value) = value.as_f64() {
-                Ok(Value::F64(value))
-            } else {
-                Err(relation_unification_error("relation literal is not finite"))
-            }
-        }
-        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
-        serde_json::Value::Array(values) => Ok(Value::Array(
-            values
-                .iter()
-                .map(json_value_to_record_value)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        serde_json::Value::Object(map) => runtime_value_object_to_record_value(map),
-    }
-}
-
-fn runtime_value_object_to_record_value(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Value, QueryError> {
-    let Some(serde_json::Value::String(value_type)) = map.get("type") else {
-        return Err(relation_unification_error(
-            "object relation literals must use the runtime value envelope",
-        ));
-    };
-    let value = map.get("value");
-    match value_type.as_str() {
-        "Null" => Ok(Value::Nullable(None)),
-        "Boolean" => Ok(Value::Bool(runtime_bool_value(value)?)),
-        "Text" => Ok(Value::String(runtime_string_value(value)?.to_owned())),
-        "Uuid" => uuid::Uuid::parse_str(runtime_string_value(value)?)
-            .map(Value::Uuid)
-            .map_err(|_| relation_unification_error("invalid Uuid relation literal")),
-        "Bytea" => Ok(Value::Bytes(runtime_bytea_value(value)?)),
-        "Integer" => Ok(Value::I32(runtime_i32_value(value)?)),
-        "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
-        "BigInt" => Ok(Value::I64(runtime_i64_value(value)?)),
-        "Double" => Ok(Value::F64(runtime_f64_value(value)?)),
-        "Array" => {
-            let Some(serde_json::Value::Array(values)) = value else {
-                return Err(relation_unification_error(
-                    "Array relation literal requires an array value",
-                ));
-            };
-            Ok(Value::Array(
-                values
-                    .iter()
-                    .map(json_value_to_record_value)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ))
-        }
-        _ => Err(relation_unification_error(format!(
-            "unsupported runtime relation literal type {value_type}"
-        ))),
-    }
-}
-
-fn runtime_bool_value(value: Option<&serde_json::Value>) -> Result<bool, QueryError> {
-    match value {
-        Some(serde_json::Value::Bool(value)) => Ok(*value),
-        _ => Err(relation_unification_error(
-            "Boolean relation literal requires a boolean value",
-        )),
-    }
-}
-
-fn runtime_string_value(value: Option<&serde_json::Value>) -> Result<&str, QueryError> {
-    match value {
-        Some(serde_json::Value::String(value)) => Ok(value),
-        _ => Err(relation_unification_error(
-            "string relation literal requires a string value",
-        )),
-    }
-}
-
-fn runtime_bytea_value(value: Option<&serde_json::Value>) -> Result<Vec<u8>, QueryError> {
-    let Some(serde_json::Value::Array(values)) = value else {
-        return Err(relation_unification_error(
-            "Bytea relation literal requires an array value",
-        ));
-    };
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| {
-                    relation_unification_error("Bytea relation literal values must be bytes")
-                })
-        })
-        .collect()
-}
-
-fn runtime_u64_value(value: Option<&serde_json::Value>) -> Result<u64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value.as_u64().ok_or_else(|| {
-            relation_unification_error("integer relation literal must be non-negative")
-        }),
-        _ => Err(relation_unification_error(
-            "integer relation literal requires a numeric value",
-        )),
-    }
-}
-
-fn runtime_i32_value(value: Option<&serde_json::Value>) -> Result<i32, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value
-            .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or_else(|| {
-                relation_unification_error(
-                    "Integer relation literal requires a signed 32-bit integer",
-                )
-            }),
-        _ => Err(relation_unification_error(
-            "Integer relation literal requires an integer value",
-        )),
-    }
-}
-
-fn runtime_i64_value(value: Option<&serde_json::Value>) -> Result<i64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
-            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
-        }),
-        Some(serde_json::Value::String(value)) => value.parse::<i64>().map_err(|_| {
-            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
-        }),
-        _ => Err(relation_unification_error(
-            "BigInt relation literal requires an integer value",
-        )),
-    }
-}
-
-fn runtime_f64_value(value: Option<&serde_json::Value>) -> Result<f64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value
-            .as_f64()
-            .ok_or_else(|| relation_unification_error("double relation literal must be finite")),
-        _ => Err(relation_unification_error(
-            "double relation literal requires a numeric value",
-        )),
-    }
-}

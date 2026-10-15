@@ -25,6 +25,7 @@ include!("query/relation_codec.rs");
 // Executable lowering and normalization remain in `node::query_eval`.
 include!("query/relation_resolution.rs");
 include!("query/relation_gather.rs");
+include!("query/relation_values.rs");
 
 // Fluent query builders.
 include!("query/builders.rs");

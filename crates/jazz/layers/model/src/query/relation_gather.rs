@@ -183,11 +183,13 @@ fn recognize_relation_gather_step(step: &RelationExpr) -> Result<RelationGatherS
         // The next frontier is the output row's id. A projection may carry
         // output columns, but an `id` alias must still be that row's id or the
         // step walks somewhere else.
+        // Both sides of the join are in scope here, so an unscoped column
+        // could name the edge row instead; only the output's own are allowed.
         for column in columns {
             let RelationProjectExpr::Column(projected) = &column.expr else {
                 return Err("Gather steps projecting a row id are not supported yet".into());
             };
-            if !relation_gather_in_scope(projected, output_scope)
+            if projected.scope.as_deref() != Some(output_scope)
                 || (column.alias == "id" && projected.column != "id")
             {
                 return Err(

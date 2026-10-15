@@ -197,6 +197,7 @@ fn policy_lowering(rel: &RelationExpr) -> Result<GatherEdge, String> {
             TableSchemaBuilder::new("teams")
                 .column("owner_id", ColumnType::Uuid)
                 .column("enabled", ColumnType::Boolean)
+                .nullable_column("archived_at", ColumnType::Timestamp)
                 .fk_column("parent", "teams"),
         )
         .table(
@@ -332,6 +333,40 @@ fn step_projecting_another_target_column_as_id_is_rejected() {
     assert_both_reject(&gather(joined_parent_step_projecting("id", "parent")));
 }
 
+#[test]
+fn joined_step_projecting_ambiguous_or_edge_columns_is_rejected() {
+    // In a joined step both the edge and the output row are in scope, so an
+    // unscoped column could name either one. Only output columns may be projected.
+    let projections = [
+        (
+            "id",
+            RelationProjectExpr::Column(RelationColumnRef::unscoped("id")),
+        ),
+        (
+            "parent",
+            RelationProjectExpr::Column(column("teams", "parent")),
+        ),
+        (
+            "x",
+            RelationProjectExpr::Column(RelationColumnRef::unscoped("parent")),
+        ),
+        ("x", RelationProjectExpr::RowId(RelationRowIdRef::Frontier)),
+    ];
+    for (alias, expr) in projections {
+        let RelationExpr::Project { input, .. } = joined_parent_step("id") else {
+            unreachable!("joined_parent_step returns a projection");
+        };
+        let step = RelationExpr::Project {
+            input,
+            columns: vec![RelationProjectColumn {
+                alias: alias.to_owned(),
+                expr,
+            }],
+        };
+        assert_both_reject(&gather(step));
+    }
+}
+
 /// Gather from a seed whose rows hop to `teams` before starting the frontier.
 fn gather_from_seed(seed: RelationExpr) -> RelationExpr {
     let RelationExpr::Gather {
@@ -408,4 +443,75 @@ fn policy_seed_claim_inequality_does_not_key_the_seed() {
     );
     let lowered = policy_lowering(&gather_from_seed(seed));
     assert!(lowered.is_err(), "{lowered:#?}");
+}
+
+/// A scalar step whose edge rows must also satisfy `edge_filter`.
+fn gather_with_edge_filter(edge_filter: RelationPredicate) -> RelationExpr {
+    gather(RelationExpr::Project {
+        input: Box::new(filter(
+            scan("teams", None),
+            RelationPredicate::And(vec![
+                equals(
+                    "teams",
+                    "id",
+                    RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                ),
+                edge_filter,
+            ]),
+        )),
+        columns: vec![RelationProjectColumn {
+            alias: "id".to_owned(),
+            expr: RelationProjectExpr::Column(column("teams", "parent")),
+        }],
+    })
+}
+
+fn compare(column_name: &str, op: RelationCmpOp, right: RelationValueRef) -> RelationPredicate {
+    RelationPredicate::Cmp {
+        left: column("teams", column_name),
+        op,
+        right,
+    }
+}
+
+#[test]
+fn bare_and_typed_literals_lower_to_the_same_value() {
+    let bare = assert_both_accept(&gather_with_edge_filter(compare(
+        "enabled",
+        RelationCmpOp::Eq,
+        RelationValueRef::Literal(serde_json::json!(true)),
+    )));
+    let typed = assert_both_accept(&gather_with_edge_filter(compare(
+        "enabled",
+        RelationCmpOp::Eq,
+        RelationValueRef::literal(crate::model::public_schema::Value::Boolean(true)),
+    )));
+    assert_eq!(bare, typed);
+    assert_eq!(bare, expected_edge(RecursionBound::MaxDepth(4)));
+}
+
+#[test]
+fn null_comparisons_lower_to_null_tests() {
+    let null = || RelationValueRef::literal(crate::model::public_schema::Value::Null);
+    let owner = || crate::query::Operand::Column("archived_at".to_owned());
+    let is_null = assert_both_accept(&gather_with_edge_filter(compare(
+        "archived_at",
+        RelationCmpOp::Eq,
+        null(),
+    )));
+    assert_eq!(is_null.edge_filters, vec![Predicate::IsNull(owner())]);
+    let not_null = assert_both_accept(&gather_with_edge_filter(compare(
+        "archived_at",
+        RelationCmpOp::Ne,
+        RelationValueRef::Literal(serde_json::Value::Null),
+    )));
+    assert_eq!(
+        not_null.edge_filters,
+        vec![Predicate::Not(Box::new(Predicate::IsNull(owner())))]
+    );
+    assert_both_reject(&gather_with_edge_filter(compare(
+        "archived_at",
+        RelationCmpOp::Lt,
+        null(),
+    )));
 }

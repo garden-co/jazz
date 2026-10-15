@@ -2319,19 +2319,6 @@ fn unsupported_exists_rel_output_step(table: &TableName, path: &str) -> SchemaCo
 }
 
 /// Policy relation literals are typed public values in their JSON envelope.
-fn policy_relation_literal(
-    table: &TableName,
-    path: &str,
-    literal: &serde_json::Value,
-) -> Result<Value, SchemaConversionError> {
-    serde_json::from_value(literal.clone()).map_err(|error| {
-        err(
-            policy_path(table, path),
-            format!("core schema ExistsRel literals must be typed values: {error}"),
-        )
-    })
-}
-
 fn lower_gather_rel(
     schema: &Schema,
     table: &TableName,
@@ -2491,65 +2478,35 @@ fn rel_predicate_to_policy(
             }])
         }
         RelationPredicate::Cmp { left, op, right } => {
-            if let RelationValueRef::Literal(literal) = right
-                && policy_relation_literal(table, path, literal)? == Value::Null
-            {
-                let predicate = match op {
-                    RelationCmpOp::Eq => Predicate::IsNull(Operand::Column(left.column.clone())),
-                    RelationCmpOp::Ne => Predicate::Not(Box::new(Predicate::IsNull(
-                        Operand::Column(left.column.clone()),
-                    ))),
-                    RelationCmpOp::Lt
-                    | RelationCmpOp::Le
-                    | RelationCmpOp::Gt
-                    | RelationCmpOp::Ge => {
-                        return Err(err(
-                            policy_path(table, path),
-                            "core schema ExistsRel NULL comparisons only support equality and inequality",
-                        ));
-                    }
-                };
-                return Ok(vec![LoweredRelPredicate {
-                    predicate,
-                    column: Some(left.column.clone()),
-                    value: None,
-                }]);
-            }
             let value = rel_value_to_policy_operand(table, path, right)?;
-            let predicate = match (&value, op) {
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Eq) => {
-                    Predicate::Eq(Operand::Column(left.column.clone()), operand.clone())
+            let predicate = match &value {
+                LoweredRelValue::Operand(operand) => {
+                    crate::query::relation_comparison(&left.column, *op, operand.clone())
+                        .map_err(|message| policy_error(table, path, message))?
                 }
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Ne) => {
-                    Predicate::Ne(Operand::Column(left.column.clone()), operand.clone())
+                // Row-id equalities are correlations, consumed by the caller.
+                LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow
+                    if *op == RelationCmpOp::Eq =>
+                {
+                    Predicate::All(Vec::new())
                 }
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Lt) => {
-                    Predicate::Lt(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Le) => {
-                    Predicate::Lte(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Gt) => {
-                    Predicate::Gt(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelationCmpOp::Ge) => {
-                    Predicate::Gte(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (
-                    LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow,
-                    RelationCmpOp::Eq,
-                ) => Predicate::All(Vec::new()),
-                _ => {
+                LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow => {
                     return Err(err(
                         policy_path(table, path),
-                        "core schema ExistsRel special row-id comparisons only support equality",
+                        "Row-id comparisons other than equality are not supported in policies yet",
                     ));
                 }
             };
+            // A null test keys nothing, so it carries no value to match on.
+            let value = (!matches!(
+                value,
+                LoweredRelValue::Operand(Operand::Literal(GrooveValue::Nullable(None)))
+            ))
+            .then_some(value);
             Ok(vec![LoweredRelPredicate {
                 predicate,
                 column: Some(left.column.clone()),
-                value: Some(value),
+                value,
             }])
         }
         RelationPredicate::IsNull { column } => Ok(vec![LoweredRelPredicate {
@@ -2638,7 +2595,8 @@ fn rel_value_to_policy_operand(
 ) -> Result<LoweredRelValue, SchemaConversionError> {
     match value {
         RelationValueRef::Literal(literal) => Ok(LoweredRelValue::Operand(Operand::Literal(
-            convert_policy_literal(table, path, &policy_relation_literal(table, path, literal)?)?,
+            crate::query::relation_literal_to_record_value(literal)
+                .map_err(|message| policy_error(table, path, message))?,
         ))),
         RelationValueRef::SessionRef(path_segments) => Ok(LoweredRelValue::Operand(
             convert_session_path_operand(table, path, path_segments)?,
@@ -3115,33 +3073,27 @@ fn convert_policy_literal(
     path: &str,
     value: &Value,
 ) -> Result<GrooveValue, SchemaConversionError> {
-    match value {
-        Value::Null => Ok(GrooveValue::Nullable(None)),
-        Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
-        Value::Text(value) => Ok(GrooveValue::String(value.clone())),
-        Value::Integer(value) => Ok(GrooveValue::I32(*value)),
-        Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
-        Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
-        Value::Double(_) => Err(err(
-            policy_path(table, path),
-            "core schema policy floating-point literals must be finite numbers",
-        )),
-        Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
-        Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
-        Value::Bytea(value) => Ok(GrooveValue::Bytes(value.clone())),
-        Value::Array(values) => values
+    // Recurse here so an error names the offending array element's path.
+    if let Value::Array(values) = value {
+        return values
             .iter()
             .enumerate()
             .map(|(index, value)| {
                 convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(GrooveValue::Array),
-        other => Err(err(
-            policy_path(table, path),
-            format!("core schema policies do not support {other:?} literals yet"),
-        )),
+            .map(GrooveValue::Array);
     }
+    crate::query::public_value_to_record_value(value)
+        .map_err(|message| policy_error(table, path, message))
+}
+
+/// A shared relation error, worded for policies.
+fn policy_error(table: &TableName, path: &str, message: String) -> SchemaConversionError {
+    err(
+        policy_path(table, path),
+        message.replace("not supported yet", "not supported in policies yet"),
+    )
 }
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
@@ -4374,7 +4326,7 @@ mod tests {
             );
             assert_eq!(
                 error.message,
-                "core schema policy floating-point literals must be finite numbers"
+                "floating-point literals must be finite numbers"
             );
         }
     }
@@ -5586,7 +5538,7 @@ mod tests {
             columns: vec![RelationProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelationProjectExpr::Column(RelationColumnRef {
-                    scope: None,
+                    scope: Some("teams".to_owned()),
                     column: "id".to_owned(),
                 }),
             }],
