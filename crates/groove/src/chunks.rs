@@ -636,34 +636,14 @@ pub struct StorageChunkProvider<S> {
 
 impl<S> StorageChunkProvider<S> {
     pub fn new(storage: S) -> Self {
-        Self {
-            storage,
-            resolver: Rc::new(UnavailableChunkResolver),
-            observer: Rc::new(NoopChunkInstallObserver),
-            journal: Rc::new(NoopChunkInstallJournal),
-            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
-        }
+        Self::with_resolver(storage, Rc::new(UnavailableChunkResolver))
     }
 
     pub fn with_resolver(storage: S, resolver: Rc<dyn MissingChunkResolver>) -> Self {
-        Self {
-            storage,
-            resolver,
-            observer: Rc::new(NoopChunkInstallObserver),
-            journal: Rc::new(NoopChunkInstallJournal),
-            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
-        }
-    }
-
-    pub fn with_resolver_and_observer(
-        storage: S,
-        resolver: Rc<dyn MissingChunkResolver>,
-        observer: Rc<dyn ChunkInstallObserver>,
-    ) -> Self {
         Self::with_resolver_observer_and_journal(
             storage,
             resolver,
-            observer,
+            Rc::new(NoopChunkInstallObserver),
             Rc::new(NoopChunkInstallJournal),
         )
     }

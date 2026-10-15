@@ -11,9 +11,6 @@ use crate::query::Query;
 use crate::tools::{JazzClient, QueryResult, ReadTier};
 
 #[cfg(feature = "testing")]
-pub use crate::model::admin_catalogue_row_format::decode_row;
-
-#[cfg(feature = "testing")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
 /// Project ordinary query results into row-ID/value fixtures for assertions.

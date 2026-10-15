@@ -204,17 +204,12 @@ pub enum SyncMessage {
     /// the same subscription, `settled_through`, supporting-set transition kind
     /// and revisions; only the final part's `peer_payload_inventory` counts.
     ViewUpdatePart(ViewUpdatePayload),
-    /// The fate authority's answer to a commit unit whose writer's pending
-    /// predecessor (named by a version's base) has no fate there yet: it is
-    /// unknown there or still pending. The authority stores nothing and
-    /// decides nothing. The writer keeps the write pending and uploads it
-    /// again after `awaiting` (SPEC 4 §4.6, SPEC 8).
-    RetryLater {
-        /// The uploaded transaction the authority did not take.
-        tx_id: TxId,
-        /// The writer's pending predecessor the authority waits for.
-        awaiting: TxId,
-    },
+    /// Retired tag of the fate authority's "retry later" answer to a write
+    /// whose pending predecessor it had not decided. Writes of one node reach
+    /// the authority in their authored order, so it never waits for one; the
+    /// tag stays reserved and is never reused.
+    #[doc(hidden)]
+    Reserved29(ReservedWireMessage),
 }
 
 /// Maximum known rows in one current-availability request.

@@ -757,11 +757,17 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        if versions.iter().all(|version| {
+        let schemas_known = versions.iter().all(|version| {
             self.catalogue
                 .catalogue_schemas
                 .contains_key(&version.schema_version())
-        }) {
+        });
+        // A write chained on a predecessor parked here waits behind it, so
+        // the authority still decides one node's writes in their order
+        // (SPEC 4 §4.6). The lookup is in memory.
+        let behind_parked_predecessor = mode.ingress_role == ParkedIngressRole::Authority
+            && self.has_parked_same_node_predecessor(tx, versions);
+        if schemas_known && !behind_parked_predecessor {
             return Ok(false);
         }
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
@@ -783,8 +789,10 @@ where
             return Ok(true);
         }
         self.sync_metrics.parked_orphans += 1;
-        self.sync_metrics.parked_catalogue_orphans += 1;
-        self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        if !schemas_known {
+            self.sync_metrics.parked_catalogue_orphans += 1;
+            self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        }
         self.parking.parked_commit_units.insert(
             tx.tx_id,
             ParkedCommitUnit {
@@ -798,33 +806,49 @@ where
         Ok(true)
     }
 
-    /// The pending predecessor a version of the unit names, of its own
-    /// writer and older than it, that has no fate here yet. The fate
-    /// authority answers such a unit with `RetryLater` and stores nothing
-    /// (SPEC 4 §4.6).
-    pub(super) async fn commit_unit_awaited_predecessor(
-        &mut self,
+    /// Whether a version of the unit names, as its pending predecessor, an
+    /// older write of the unit's own node that is parked here for the
+    /// authority, and has been for less than
+    /// [`PARKED_PREDECESSOR_WAIT_MS`].
+    ///
+    /// The wait is bounded: a predecessor whose schema has not arrived by
+    /// then stops holding its writer's later writes back, and the next
+    /// authority ingest decides them as written over the row's current image
+    /// (the predecessor is treated as never arriving, `INV-HIST-20`). Should
+    /// its schema arrive after all, the predecessor is then late and refused
+    /// (`INV-HIST-23`), so one write whose schema never arrives costs itself,
+    /// not the rest of its writer's chain.
+    ///
+    /// The wait is measured on the authority's ingest clock, the newest
+    /// `now_ms` any commit ingest has seen, and nothing else drives it:
+    /// - No timer runs it out. On an idle Core the chained write stays
+    ///   parked past the wait until the next commit ingest (of any writer)
+    ///   advances the clock, or the predecessor's schema arrives.
+    /// - The clock is wall time, never moved back. A forward jump of Core's
+    ///   clock runs out every parked wait at the next ingest; a backward
+    ///   jump only lengthens them until wall time catches up.
+    /// - The clock and the parked units are in memory. A restart drops both,
+    ///   so a writer resends its pending writes in order and the wait starts
+    ///   again from their new arrival.
+    fn has_parked_same_node_predecessor(
+        &self,
         tx: &Transaction,
         versions: &[VersionRecord],
-    ) -> Result<Option<TxId>, Error> {
-        for version in versions {
-            let Some(predecessor) = version.base().pending else {
-                continue;
-            };
-            // A predecessor Core would refuse is answered by validation,
-            // not waited for.
-            if pending_predecessor_refusal(predecessor, tx.tx_id).is_some() {
-                continue;
-            }
-            match self.query_transaction(predecessor).await? {
-                None => return Ok(Some(predecessor)),
-                Some(stored) if matches!(stored.fate, Fate::Pending) => {
-                    return Ok(Some(predecessor));
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(None)
+    ) -> bool {
+        versions.iter().any(|version| {
+            version.base().pending.is_some_and(|predecessor| {
+                pending_predecessor_refusal(predecessor, tx.tx_id).is_none()
+                    && self
+                        .parking
+                        .parked_commit_units
+                        .get(&predecessor)
+                        .is_some_and(|unit| {
+                            unit.ingress_role == ParkedIngressRole::Authority
+                                && unit.now_ms.saturating_add(PARKED_PREDECESSOR_WAIT_MS)
+                                    > self.parking.newest_ingest_ms
+                        })
+            })
+        })
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -846,6 +870,8 @@ where
                                 .catalogue_schemas
                                 .contains_key(&version.schema_version())
                         })
+                        // Its parked predecessor goes first, on a later pass.
+                        && !self.has_parked_same_node_predecessor(&unit.tx, &unit.versions)
                 })
                 .map(|(tx_id, _)| *tx_id)
                 .collect::<Vec<_>>();
