@@ -224,13 +224,33 @@ export class DeviceApproval {
 
   private async prefetchSnapshot(): Promise<void> {
     await Promise.all([
-      this.db.all(this.tables.__e2ee_account_successors, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_account_identities, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_device_requests, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_device_challenges, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_device_proofs, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_device_approvals, { tier: "remote" }),
-      this.db.all(this.tables.__e2ee_device_deliveries, { tier: "remote" }),
+      this.db.all(
+        this.tables.__e2ee_account_successors.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
+      this.db.all(this.tables.__e2ee_account_identities.where({ id: this.accountId }), {
+        tier: "remote",
+      }),
+      this.db.all(
+        this.tables.__e2ee_device_requests.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
+      this.db.all(
+        this.tables.__e2ee_device_challenges.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
+      this.db.all(
+        this.tables.__e2ee_device_proofs.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
+      this.db.all(
+        this.tables.__e2ee_device_approvals.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
+      this.db.all(
+        this.tables.__e2ee_device_deliveries.where({ "$createdBy.account": this.accountId }),
+        { tier: "remote" },
+      ),
       this.db.all(this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }), {
         tier: "remote",
       }),
@@ -760,7 +780,8 @@ export class DeviceApproval {
         !this.responding.has(challenge.id) &&
         !snapshot.proofs.some((proof) => proof.id === challenge.id)
       )
-        await this.respond(challenge.id);
+        // This call already holds the accepted challenge and proof predicates.
+        await this.respond(challenge.id, snapshot);
     }
     const active = new Set(snapshot.successor ? [] : snapshot.baseMembers);
     const eligible = await this.eligibleApprovals(snapshot);
@@ -787,9 +808,9 @@ export class DeviceApproval {
     }
   }
 
-  private async respond(challengeId: string): Promise<void> {
+  private async respond(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
     if (await this.db.e2eeIsExplicitlyOffline()) return;
-    const snapshot = await this.currentSnapshot();
+    const snapshot = preparedSnapshot ?? (await this.currentSnapshot());
     const challenge = snapshot.challenges.find(
       (item) =>
         item.id === challengeId &&
@@ -805,7 +826,7 @@ export class DeviceApproval {
         secret = await this.keys.open(
           device,
           this.context(challenge, "challenge"),
-          challenge.envelope,
+          challenge.envelope.slice(),
         );
       } catch {
         this.assertOpen();

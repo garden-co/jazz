@@ -1082,13 +1082,21 @@ export class Spaces {
     const recipients: InitialRecipient[] = [];
     const expectedRecipients: unknown[] = [];
     for (const recipientId of ids) {
-      const history =
+      const observedHistory =
         recipientId === this.accountId
           ? state.publicHistory
-          : await readPublicMembershipHistory(tx, recipientId, this.tables);
+          : groupSnapshot?.histories.get(recipientId);
       const group = graph?.get(recipientId);
-      if (group && history.roots.rows.length) throw new Error("Ambiguous E2EE space recipient ID");
       if (group) {
+        // Only an accepted account root can make this group ID ambiguous.
+        // Keep that predicate in this transaction without reading four unused
+        // account-history tables. Reused histories were read by this same tx.
+        const accountRoots =
+          observedHistory?.roots ??
+          (await tx.allSettledForE2ee(
+            this.tables.__e2ee_account_roots.where({ accountId: recipientId }),
+          ));
+        if (accountRoots.rows.length) throw new Error("Ambiguous E2EE space recipient ID");
         if (group.sealed || group.rotationRequired)
           throw new Error("E2EE initial recipient group requires reconciliation");
         recipients.push({
@@ -1103,6 +1111,8 @@ export class Spaces {
           group.members,
         ]);
       } else {
+        const history =
+          observedHistory ?? (await readPublicMembershipHistory(tx, recipientId, this.tables));
         if (!history.roots.rows.length)
           throw new E2eeInitializationNotReady("E2EE initial recipient account is unavailable");
         const recipient = await replayAccountMembership(

@@ -502,7 +502,9 @@ export class Groups {
               throw new Error("E2EE group cycle or depth limit exceeded");
           }
         } else {
-          const recipient = await readPublicMembershipHistory(tx, memberId, this.tables);
+          const recipient =
+            group.histories.get(memberId) ??
+            (await readPublicMembershipHistory(tx, memberId, this.tables));
           await replayAccountMembership(recipient, this.accountContext(memberId), this.signer);
         }
         const record = {
