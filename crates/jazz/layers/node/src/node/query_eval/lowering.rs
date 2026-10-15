@@ -607,12 +607,19 @@ fn query_program_cache_safe(request: &QueryProgramRequest) -> bool {
 }
 
 fn query_program_sources_cache_safe(request: &QueryProgramRequest) -> bool {
+    // History relations currently prepare bounded snapshots. Their rows and
+    // current-row authorization must be refreshed on every read.
     request
         .reads
         .primary
         .sources
-        .values()
-        .all(query_program_source_cache_safe)
+        .iter()
+        .all(|(source, expression)| {
+            !source
+                .table
+                .starts_with(crate::schema::history::HISTORY_PREFIX)
+                && query_program_source_cache_safe(expression)
+        })
         && request
             .reads
             .fact_reads
@@ -1007,7 +1014,12 @@ where
                 explain,
                 |graph| resolver.node.database.describe_template_input(graph),
             ),
-            Err(error) => Err(error),
+            Err(error) => {
+                resolver
+                    .node
+                    .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
+                return Err(error);
+            }
         };
         if let Ok(program) = result.as_mut() {
             resolver.node.scope_program_binding_source(program);

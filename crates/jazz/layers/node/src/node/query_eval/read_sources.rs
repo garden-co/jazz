@@ -2275,10 +2275,19 @@ impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    type Error = Error;
+
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
+        if request
+            .source
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Box::pin(self.prepare_history_source_graph(request));
+        }
         Box::pin(async move {
             let exclusion_scope = self.local_exclusion_scope(request);
             // A physical limit is valid only when no later source filter can
@@ -2509,6 +2518,15 @@ where
         &mut self,
         request: &SourceRequest,
     ) -> Result<Option<QueryProgramRequest>, Error> {
+        // The bounded history snapshot authorizes its current row through a
+        // separate ordinary point source. Historical values are never policy inputs.
+        if request
+            .source
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Ok(None);
+        }
         let SourceAuthorizationRequest::PolicyFiltered {
             permission_subject,
             plan,
@@ -5027,17 +5045,17 @@ where
         if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
             return Ok(None);
         }
-        let table = self.table_in_schema_ref(&source.table, read_view.read_schema)?;
+        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
         let selected = match selector {
             AccessPathSelector::Ordinary => {
-                select_current_access_path(table, equalities).or_else(|| {
+                select_current_access_path(&table, equalities).or_else(|| {
                     covered_column.and_then(|covered| {
-                        select_composite_leading_equality_access_path(table, equalities, covered)
+                        select_composite_leading_equality_access_path(&table, equalities, covered)
                     })
                 })
             }
             AccessPathSelector::CompositeEquality => {
-                select_composite_equality_access_path(table, equalities)
+                select_composite_equality_access_path(&table, equalities)
             }
         };
         let Some(mut path) = selected else {
@@ -5120,7 +5138,7 @@ where
             return Ok(paths);
         }
         let root = root_source_id(&query.table);
-        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
         if table.has_any_policy() {
             return Ok(paths);
         }
@@ -5381,7 +5399,7 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        self.table_in_schema(&query.table, shape.schema_version())?;
         // Policy-bearing roots take the point path too (#3511). The point
         // narrows only the content source: the deletion register stays a full
         // maintained source anti-joined after it, and policy proofs keep their
@@ -5993,7 +6011,7 @@ fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<Gr
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
-fn inline_current_graph_with_source_metadata(
+pub(super) fn inline_current_graph_with_source_metadata(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
     schema_version_alias: SchemaVersionAlias,
@@ -6842,4 +6860,19 @@ fn single_root_join_source<'a>(
     let contribution = root_joins.next()?;
     (root_joins.next().is_none() && contribution.source.table == join_table)
         .then_some(&contribution.source)
+}
+
+impl From<SourceResolutionError> for Error {
+    fn from(error: SourceResolutionError) -> Self {
+        Error::QueryCapability(format!(
+            "{:?}",
+            CapabilityReport {
+                gaps: vec![query_engine::UnsupportedReason::Source(error.gap)],
+                explain: query_engine::ExplainPlan {
+                    read: vec![format!("failed source request: {:#?}", error.request)],
+                    ..query_engine::ExplainPlan::default()
+                },
+            }
+        ))
+    }
 }

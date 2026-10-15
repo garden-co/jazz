@@ -1,8 +1,7 @@
-//! Virtual history relation resolution. These descriptors are query-only: they
+//! Virtual history relation descriptors. These descriptors are query-only: they
 //! are not application tables, storage declarations, or permission grants.
 
-use super::{ColumnSchema, GrooveColumnType, RuntimeSchema, TableSchema};
-use crate::query::QueryError;
+use super::{ColumnSchema, GrooveColumnType, TableSchema};
 
 /// Reserved prefix for query-visible history relations.
 pub const HISTORY_PREFIX: &str = "history.";
@@ -10,6 +9,41 @@ pub const HISTORY_PREFIX: &str = "history.";
 pub const TRANSACTION_ID_COLUMN: &str = "$transactionId";
 /// Accepted sequence of a settled content version.
 pub const SEQUENCE_COLUMN: &str = "$seq";
+
+/// Metadata supplied for each accepted content version.
+#[derive(Clone, Copy, Debug)]
+pub enum HistoryMetadataColumn {
+    /// Portable content transaction identity.
+    TransactionId,
+    /// Accepted sequence number.
+    Sequence,
+}
+
+impl HistoryMetadataColumn {
+    /// Canonical metadata column order, shared by descriptors and row encoding.
+    pub const ALL: [Self; 2] = [Self::TransactionId, Self::Sequence];
+
+    /// Query-visible column name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TransactionId => TRANSACTION_ID_COLUMN,
+            Self::Sequence => SEQUENCE_COLUMN,
+        }
+    }
+
+    fn schema(self) -> ColumnSchema {
+        let ty = match self {
+            Self::TransactionId => super::tx_id_column(),
+            Self::Sequence => GrooveColumnType::U64,
+        };
+        ColumnSchema::new(self.name(), ty)
+    }
+
+    /// Whether a name denotes history metadata.
+    pub fn contains(name: &str) -> bool {
+        Self::ALL.iter().any(|column| column.name() == name)
+    }
+}
 
 /// Read-only, derived schema for a history query source.
 ///
@@ -24,7 +58,23 @@ pub struct HistoryRelationSchema<'a> {
     columns: Vec<ColumnSchema>,
 }
 
-impl HistoryRelationSchema<'_> {
+impl<'a> HistoryRelationSchema<'a> {
+    /// Derive a query-only history descriptor from an already resolved table.
+    /// Name lookup and execution capability checks belong to query resolution.
+    ///
+    /// `$transactionId` uses the logical `(u64, UUID)` transaction tuple, never
+    /// a node-local alias. Both metadata columns are non-null because history
+    /// exposes only accepted, settled versions.
+    pub fn new(source_table: &'a TableSchema) -> Self {
+        let mut columns = source_table.columns.clone();
+        columns.extend(HistoryMetadataColumn::ALL.map(HistoryMetadataColumn::schema));
+        Self {
+            name: format!("{HISTORY_PREFIX}{}", source_table.name),
+            source_table,
+            columns,
+        }
+    }
+
     /// Fully qualified virtual relation name.
     pub fn name(&self) -> &str {
         &self.name
@@ -39,38 +89,5 @@ impl HistoryRelationSchema<'_> {
     /// remains an implicit UUID column rather than an application declaration.
     pub fn columns(&self) -> &[ColumnSchema] {
         &self.columns
-    }
-}
-
-impl RuntimeSchema {
-    /// Resolve `history.<table>` without modifying the application catalogue.
-    ///
-    /// `$transactionId` uses the existing logical transaction tuple `(u64,
-    /// UUID)`; bindings must encode the full originating node UUID, never a
-    /// node-local alias. Both metadata columns are non-null because the relation
-    /// will expose only accepted, settled versions.
-    ///
-    /// Schema admission reserves `history.` table names and `$` column names,
-    /// so virtual relations cannot shadow application declarations. This is a
-    /// descriptor lookup, not an execution capability check.
-    pub fn resolve_history_relation(
-        &self,
-        name: &str,
-    ) -> Result<HistoryRelationSchema<'_>, QueryError> {
-        let table = name
-            .strip_prefix(HISTORY_PREFIX)
-            .filter(|name| !name.is_empty())
-            .and_then(|table_name| self.tables.iter().find(|table| table.name == table_name))
-            .ok_or_else(|| QueryError::UnknownTable(name.to_owned()))?;
-        let mut columns = table.columns.clone();
-        columns.extend([
-            ColumnSchema::new(TRANSACTION_ID_COLUMN, super::tx_id_column()),
-            ColumnSchema::new(SEQUENCE_COLUMN, GrooveColumnType::U64),
-        ]);
-        Ok(HistoryRelationSchema {
-            name: name.to_owned(),
-            source_table: table,
-            columns,
-        })
     }
 }

@@ -255,6 +255,7 @@ enum CurrentQueryProgramOutput {
     MaintainedView,
 }
 
+mod history;
 mod read_sources;
 
 use read_sources::*;
@@ -1201,6 +1202,13 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        if shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Err(history::unsupported("history relations at a snapshot cut"));
+        }
         self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
@@ -1479,6 +1487,22 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        if shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            if !matches!(output, CurrentQueryProgramOutput::AppRows) {
+                return Err(history::unsupported(
+                    "maintained or structured history results",
+                ));
+            }
+            if authorization_mode != QueryAuthorizationMode::TrustedServing {
+                return Err(history::unsupported(
+                    "client-local history without serving authorization",
+                ));
+            }
+        }
         let policy = self.query_program_policy_context(identity);
         let requested_shape_id = shape.shape_id();
         // Linked shapes carry read-policy alternatives so a trusted serving
@@ -1513,7 +1537,11 @@ where
             && tier == DurabilityTier::Local
             && read_view.is_default()
             && matches!(output, CurrentQueryProgramOutput::MaintainedView);
-        let use_prepared_binding_source = (!client_local || client_local_prepared)
+        let use_prepared_binding_source = !shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1638,7 +1666,7 @@ where
                 .schema
         };
         let root_has_read_policy = self
-            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
+            .table_in_schema(&shape.query().table, shape.schema_version())?
             .read_policy
             .is_some();
         let storage_backed_result_materialization = matches!(output, CurrentQueryProgramOutput::MaintainedView)
@@ -2027,6 +2055,15 @@ where
         authorization_mode: QueryAuthorizationMode,
         mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        if shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            if include_deleted {
+                return Err(history::unsupported("deleted-row history"));
+            }
+        }
         let phase_started = profile.as_ref().map(|_| Instant::now());
         if include_deleted {
             let mut rows = self

@@ -400,6 +400,76 @@ fn validate_query_with_schema_version_as(
 
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
+impl Query {
+    /// Exact row operand admitted by the initial one-shot history reader.
+    #[doc(hidden)]
+    pub fn history_row_operand(&self) -> Option<&Operand> {
+        match self.filters.as_slice() {
+            [Predicate::Eq(Operand::Column(column), value)]
+            | [Predicate::Eq(value, Operand::Column(column))]
+                if column == "id" && matches!(value, Operand::Literal(_) | Operand::Param(_)) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn validate_history_query(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    let source_name = query
+        .table
+        .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+        .ok_or_else(|| QueryError::UnknownTable(query.table.clone()))?;
+    let source = schema_table(schema, source_name)
+        .map_err(|_| QueryError::UnknownTable(query.table.clone()))?;
+    let history = crate::schema::history::HistoryRelationSchema::new(source);
+    let unsupported = |pattern: &str| {
+        QueryError::UnsupportedRelationQuery(format!(
+            "Reading {pattern} is not supported in history queries yet"
+        ))
+    };
+    if !query.joins.is_empty()
+        || query.flat_join.is_some()
+        || !query.includes.is_empty()
+        || !query.array_subqueries.is_empty()
+        || !query.reachable.is_empty()
+        || !query.inherits.is_empty()
+        || !query.policy_branches.is_empty()
+        || query.relation.is_some()
+        || query.aggregate.is_some()
+    {
+        return Err(unsupported("joins, relationships, or aggregates"));
+    }
+    if !history.source_table().branch_by.is_empty() {
+        return Err(unsupported("branched tables"));
+    }
+    if query.history_row_operand().is_none() {
+        return Err(unsupported(
+            "anything other than one exact id equality filter",
+        ));
+    }
+    if query.order_by.iter().any(|order| order.column != "$seq") {
+        return Err(unsupported("ordering by columns other than $seq"));
+    }
+    if query.select.as_ref().is_some_and(|columns| {
+        columns.iter().any(|column| {
+            column.starts_with('$') && !crate::schema::history::HistoryMetadataColumn::contains(column)
+        })
+    }) {
+        return Err(unsupported("current-row provenance columns"));
+    }
+    // This is a query-local descriptor, never a writable catalogue table.
+    let table = TableSchema::new(query.table.clone(), history.columns().iter().cloned());
+    let mut schema = schema.clone();
+    schema.tables.push(table);
+    validate_query_canonical_parts_as(query, &schema, role)
+}
+
 fn validate_query_canonical_parts(
     query: &Query,
     schema: &RuntimeSchema,
@@ -1014,6 +1084,11 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    if query.table.starts_with(crate::schema::history::HISTORY_PREFIX)
+        && !schema.tables.iter().any(|table| table.name == query.table)
+    {
+        return validate_history_query(query, schema, role);
+    }
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -1836,6 +1911,11 @@ fn validate_aggregate_order_by(
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
         "id" => Ok(()),
+        name if table.name.starts_with(crate::schema::history::HISTORY_PREFIX)
+                && crate::schema::history::HistoryMetadataColumn::contains(name) =>
+        {
+            column_type(table, column).map(|_| ())
+        }
         name if executable_magic_column_type(name)?.is_some() => Ok(()),
         name if name.starts_with('$') => Err(unknown_column(&table.name, &name)),
         name => column_type(table, name).map(|_| ()),

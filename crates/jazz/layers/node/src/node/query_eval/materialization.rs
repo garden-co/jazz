@@ -1233,7 +1233,7 @@ where
             )?;
             return Ok(());
         }
-        let table = self.table_in_schema_ref(&query.table, schema_version)?;
+        let table = self.table_in_schema(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
@@ -1262,7 +1262,7 @@ where
         let Some(columns) = &query.select else {
             return Ok(());
         };
-        let table = self.table_in_schema_ref(&query.table, schema_version)?;
+        let table = self.table_in_schema(&query.table, schema_version)?;
         for row in rows {
             *row = row.project(&table, columns)?;
         }

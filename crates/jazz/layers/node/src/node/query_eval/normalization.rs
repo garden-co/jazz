@@ -355,6 +355,15 @@ fn app_row_payload_projection(
             // terminal payload is delivered as is, so they keep the plain
             // selection. Include reads still sort without the key (#3503).
             if retain_order_keys {
+                if query
+                    .table
+                    .starts_with(crate::schema::history::HISTORY_PREFIX)
+                {
+                    fields.extend(
+                        crate::schema::history::HistoryMetadataColumn::ALL
+                            .map(|column| column.name().to_owned()),
+                    );
+                }
                 for order in &query.order_by {
                     if order.column != "id" {
                         fields.insert(order.column.clone());
@@ -1333,7 +1342,7 @@ where
     let mut sources = BTreeSet::new();
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
-    let root_schema = node.table_in_schema_ref(root_table, schema_version)?;
+    let root_schema = node.table_in_schema(root_table, schema_version)?;
     let explicit_root_segments = includes
         .iter()
         .filter_map(|include| include.path.split('.').next())
@@ -2984,6 +2993,20 @@ where
             .schema_for_version(shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let query = shape.query();
+        let schema: &RuntimeSchema = schema;
+        let mut virtual_schema;
+        let schema = if query
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            virtual_schema = schema.clone();
+            virtual_schema
+                .tables
+                .push(self.table_in_schema(&query.table, shape.schema_version())?);
+            &virtual_schema
+        } else {
+            schema
+        };
         if let Some(relation) = &query.relation
             && crate::query::relation_union_parts(&relation.rel).is_some()
         {

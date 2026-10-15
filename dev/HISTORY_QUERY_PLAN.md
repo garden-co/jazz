@@ -31,7 +31,8 @@ adds a result; losing current read permission retracts the row's history.
 
 ### Initial Rust boundary
 
-- Ordinary prepared queries and subscriptions on history-complete nodes.
+- Ordinary prepared queries over locally retained history on any node;
+  subscriptions follow in a later implementation step.
 - Exact branch selection using existing branch bindings; no implicit union of
   all branches or synthesized history of a composed branch view.
 - Accepted, settled content images. Pending authored patches are not exposed as
@@ -48,10 +49,12 @@ History contains only settled versions: an offline edit does not
 appear in this relation until accepted and settled, even if it is already
 visible in the ordinary current-row view.
 
-Partial clients must fail with a typed completeness error rather than return
-their cached subset as complete history. This is an initial execution limit,
-not the eventual API model: subscribing to `history.tasks` is intended to be how
-a partial client obtains the requested history through normal sync.
+History completeness is not required. Queries return the locally retained,
+accepted content versions that pass current-row authorization. A partial node
+may return fewer versions, and an empty result does not prove the row has no
+history upstream. This increment does not fetch missing history automatically.
+Existing authorization requirements still apply: this does not enable raw
+history access through client-local reads without authorized history coverage.
 
 ## Names and virtual catalogue entries
 
@@ -213,10 +216,10 @@ observable even when they were not present at subscription attachment. Track
 current-row and policy dependencies through the ordinary authorization path;
 do not hydrate unrelated history.
 
-Do not silently downgrade an incomplete client's request to local-cache
-semantics. Check history completeness before execution and subscription
-attachment. Keep the source identity and output contract usable by normal sync;
-do not introduce a direct server-storage bypass for the initial Rust feature.
+Local availability is the initial history-query contract; do not reject a
+query solely because the node is not history-complete. Keep the source identity
+and output contract usable by normal sync, including future subscriptions that
+receive additional versions. Do not bypass normal authorization or sync.
 
 The eventual remote contract must prove coverage for the requested history
 range, deliver version-addressed results, track policy revocation, and allow
@@ -233,18 +236,30 @@ support does not claim to implement this coverage protocol.
    projection and current-row authorization. Implement bounded history access
    in the regular planner.
 3. **Rust reads.** Expose history names through the ordinary prepared
-   query APIs. Enable the admitted shapes above and fail closed for the rest.
+   query APIs. The first increment prepares an authorized, exact-row snapshot
+   as a regular source, using the existing history decoder. The shared query
+   pipeline owns filtering, ordering, slicing, projection, and materialization;
+   there is no history query executor. Snapshot programs are not cached between
+   reads. Retain version metadata through internal projection, then remove it
+   when it was not selected. This increment does not publish result keys or
+   change their encoding; version-aware maintained keys belong to the next
+   step. Enable the admitted shapes above and fail closed for the rest.
 4. **Rust subscriptions.** Reuse the same program, with incremental history,
-   current-row authorization and policy dependencies. Require history completeness.
+   current-row authorization and policy dependencies over locally available history.
 5. **TypeScript surface.** Carry the same virtual names through query builders,
    validation, adapters, WASM/NAPI/native codecs, and bindings. Infer history
    application columns plus `$transactionId: TxId` and `$seq: bigint`, preserve
    composite result identities in client collections, and reject mutations at type and runtime boundaries.
-   Do not advertise partial-client availability until normal sync can supply
-   complete results.
+   Describe results as locally available history until normal sync can prove
+   complete coverage.
 
-These are implementation stages for this feature, not a backlog. Separate
-follow-up work is tracked in GitHub Issues, not appended here as TODOs.
+### Follow-up: fetch complete history when needed
+
+When a query or subscription needs history beyond the locally retained subset,
+fetch the requested row/range from the upstream database through normal sync.
+Track coverage so callers can distinguish locally available results from a
+complete response, preserve version identities, and propagate current-policy
+revocations. Do not interpret an empty local result as proof of complete history.
 
 ### Primary code boundaries
 
@@ -295,7 +310,8 @@ Read `crates/jazz/TESTING_GUIDELINES.md` before implementing Rust tests. Cover:
 - Schema-renamed fields use the selected read schema or fail explicitly.
 - Indexed row/sequence restrictions avoid decoding unrelated history, for
   both cold reads and subscription maintenance; unsupported scans fail early.
-- Incomplete clients fail explicitly; ordinary current queries are unchanged.
+- Partial nodes return locally retained settled versions, including an empty
+  subset, while preserving current-row authorization; current queries are unchanged.
 - Naming collisions, aliases, writes, metadata collisions, ordering ties,
   pagination, and any changed encoded identities have regression coverage.
 

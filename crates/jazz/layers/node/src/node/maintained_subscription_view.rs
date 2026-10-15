@@ -3807,12 +3807,12 @@ mod tests {
 
         struct Source;
         impl q::SourceGraphPreparer for Source {
+            type Error = Box<q::CapabilityReport>;
             fn prepare_source_graph<'a>(
                 &'a mut self,
                 request: &'a q::SourceRequest,
-            ) -> std::pin::Pin<
-                Box<dyn Future<Output = Result<q::ResolvedSource, q::SourceResolutionError>> + 'a>,
-            > {
+            ) -> std::pin::Pin<Box<dyn Future<Output = Result<q::ResolvedSource, Self::Error>> + 'a>>
+            {
                 Box::pin(async move {
                     Ok(q::ResolvedSource {
                         stored_column_ids: BTreeMap::from([(

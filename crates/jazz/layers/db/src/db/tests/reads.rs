@@ -7813,3 +7813,311 @@ fn strict_serialized_one_shot_drops_deleted_held_row_but_keeps_unreadable_one() 
         "the deletion reaches alice's local store; the unreadable row stays cached"
     );
 }
+
+/// Alice reads locally retained settled versions on a non-history-complete
+/// node. Projection preserves versions even when their visible values are equal.
+/// partial node stores first -> second -> second; alice queries -> three versions
+#[test]
+fn history_query_reads_versions_metadata_and_projection() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xf1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let target = row(0x71);
+    let transactions = ["first", "second", "second"]
+        .into_iter()
+        .map(|title| {
+            db.seed_settled_mergeable_for_bootstrap(
+                "tasks",
+                target,
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    db.seed_settled_mergeable_for_bootstrap(
+        "tasks",
+        row(0x72),
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([("title".to_owned(), Value::String("unrelated".to_owned()))]),
+    )
+    .unwrap();
+    let query = Query::from("history.tasks")
+        .filter(eq(col("id"), param("row")))
+        .order_by("$seq", OrderDirection::Asc);
+    let prepare = |query: &Query| {
+        db.prepare_query_bound(
+            query,
+            BTreeMap::from([("row".to_owned(), Value::Uuid(target.0))]),
+        )
+        .unwrap()
+    };
+    let read = |query: &Query| {
+        block_on(db.all_for_identity(
+            &prepare(query),
+            ReadOpts {
+                tier: ReadTier::Remote,
+                ..Default::default()
+            },
+            alice,
+        ))
+        .unwrap()
+    };
+    let rows = read(&query);
+    assert_eq!(rows.len(), 3);
+    for (index, version) in rows.iter().enumerate() {
+        assert_eq!(version.row_uuid(), target);
+        assert_eq!(version.table(), "history.tasks");
+        assert_eq!(
+            version.raw_field("$transactionId"),
+            Some(Value::Tuple(vec![
+                Value::U64(transactions[index].time.0),
+                Value::Uuid(transactions[index].node.0),
+            ]))
+        );
+    }
+    let sequences = rows
+        .iter()
+        .map(|version| match version.raw_field("$seq") {
+            Some(Value::U64(seq)) => seq,
+            other => panic!("expected sequence, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(sequences[0] > 0 && sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    let projected = read(&query.clone().select(["title"]));
+    assert_eq!(projected.len(), 3);
+    assert_eq!(
+        projected[1], projected[2],
+        "equal projections retain both versions"
+    );
+    assert!(
+        projected
+            .iter()
+            .all(|row| row.raw_field("$transactionId").is_none())
+    );
+    assert_eq!(
+        projected[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("first".to_owned()))
+    );
+    assert_eq!(
+        projected[1].cell(&schema.tables()[0], "title"),
+        Some(Value::String("second".to_owned()))
+    );
+    let projected_without_order = read(
+        &Query::from("history.tasks")
+            .filter(eq(col("id"), param("row")))
+            .select(["title"]),
+    );
+    assert_eq!(projected_without_order.len(), 3);
+    assert_eq!(
+        projected_without_order
+            .iter()
+            .filter(|row| {
+                row.cell(&schema.tables()[0], "title") == Some(Value::String("second".to_owned()))
+            })
+            .count(),
+        2
+    );
+    assert!(projected_without_order.iter().all(|row| {
+        row.raw_field("$transactionId").is_none() && row.raw_field("$seq").is_none()
+    }));
+    let descending = Query::from("history.tasks")
+        .filter(eq(col("id"), param("row")))
+        .order_by("$seq", OrderDirection::Desc)
+        .limit(2);
+    let page = read(&descending);
+    assert_eq!(
+        page[0].raw_field("$transactionId"),
+        rows[2].raw_field("$transactionId")
+    );
+    assert_eq!(
+        page[1].raw_field("$transactionId"),
+        rows[1].raw_field("$transactionId")
+    );
+    assert_eq!(
+        read(&descending.offset(1).limit(1))[0].raw_field("$transactionId"),
+        rows[1].raw_field("$transactionId")
+    );
+}
+
+/// Alice's history access follows the current row's policy values, not each
+/// historical version's values, even on a partial node:
+/// public -> private denies all; public restores all.
+#[test]
+fn history_query_uses_current_row_permissions() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("title", PublicColumnType::Text)
+                .column("visible", PublicColumnType::Boolean)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_literal_eq("visible", PublicValue::Boolean(true))),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xf2; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let target = row(0x73);
+    let prepared = db
+        .prepare_query(
+            &Query::from("history.tasks").filter(eq(col("id"), lit(Value::Uuid(target.0)))),
+        )
+        .unwrap();
+    for (visible, expected_count) in [(true, 1), (false, 0), (true, 3)] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "tasks",
+            target,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("version".to_owned())),
+                ("visible".to_owned(), Value::Bool(visible)),
+            ]),
+        )
+        .unwrap();
+        let rows = block_on(db.all_for_identity(
+            &prepared,
+            ReadOpts {
+                tier: ReadTier::Remote,
+                ..Default::default()
+            },
+            alice,
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), expected_count);
+    }
+}
+
+/// Alice sees only settled content versions. A pending edit stays out;
+/// deleting hides history, and restoration reveals content without event rows.
+#[test]
+fn history_query_excludes_pending_and_deletion_only_versions() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xf3; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let target = row(0x74);
+    db.seed_settled_mergeable_for_bootstrap(
+        "tasks",
+        target,
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([("title".to_owned(), Value::String("settled".to_owned()))]),
+    )
+    .unwrap();
+    let prepared = db
+        .prepare_query(
+            &Query::from("history.tasks").filter(eq(col("id"), lit(Value::Uuid(target.0)))),
+        )
+        .unwrap();
+    let read = || {
+        block_on(db.all_for_identity(
+            &prepared,
+            ReadOpts {
+                tier: ReadTier::Remote,
+                ..Default::default()
+            },
+            alice,
+        ))
+        .unwrap()
+    };
+    let pending = block_on(db.update(
+        "tasks",
+        target,
+        BTreeMap::from([("title".to_owned(), Value::String("pending".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read().len(), 1);
+    db.finalize_local_mergeable_commit_for_test(pending.mergeable_tx_id())
+        .unwrap();
+    assert_eq!(read().len(), 2);
+    let deleted = block_on(db.delete("tasks", target, Default::default())).unwrap();
+    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
+        .unwrap();
+    assert!(read().is_empty());
+    let restored = block_on(db.restore("tasks", target, None, Default::default())).unwrap();
+    db.finalize_local_mergeable_commit_for_test(restored.mergeable_tx_id())
+        .unwrap();
+    assert_eq!(
+        read().len(),
+        2,
+        "deletion and restore events are not content versions"
+    );
+}
+
+/// Alice can read an empty local history on a partial node, while unbounded
+/// execution and deferred capabilities still fail explicitly.
+#[test]
+fn history_query_rejects_unbounded_reads_and_deferred_modes() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text)),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xf4; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    let query = Query::from("history.tasks").filter(eq(col("id"), lit(Value::Uuid(row(0x75).0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    assert!(db.read(&prepared).unwrap().is_empty());
+    for unsupported in [
+        Query::from("history.tasks"),
+        query.clone().filter(eq(col("title"), lit("anything"))),
+        query.clone().include("owner"),
+    ] {
+        let error = db.prepare_query(&unsupported).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(error.message.contains("not supported"), "{error}");
+    }
+    let result = block_on(db.subscribe(&prepared, ReadOpts::default()));
+    let error = match result {
+        Ok(_) => panic!("history subscriptions must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("history subscriptions"));
+}

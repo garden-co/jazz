@@ -2164,6 +2164,12 @@ impl CurrentRow {
         columns: &[String],
         column_binding: impl Fn(&str) -> Option<usize>,
     ) -> Result<Self, Error> {
+        let history_metadata = |name: &str| {
+            table
+                .name
+                .starts_with(crate::schema::history::HISTORY_PREFIX)
+                && crate::schema::history::HistoryMetadataColumn::contains(name)
+        };
         let projected_public_name = |column_name: &str| -> String {
             column_binding(column_name)
                 .and_then(|index| self.publication_fields[index].application_name())
@@ -2184,7 +2190,11 @@ impl CurrentRow {
             let public_name = projected_public_name(&column.name);
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                if history_metadata(&column.name) {
+                    column.column_type.clone()
+                } else {
+                    records::ValueType::Nullable(Box::new(column.column_type.clone()))
+                },
             )
             .with_identity(records::FieldIdentity::Name(public_name))
         }));
@@ -2210,7 +2220,11 @@ impl CurrentRow {
                     Value::Nullable(Some(value)) => Some(*value),
                     value => Some(value),
                 });
-            let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
+            let projected = if history_metadata(&column.name) {
+                cell.ok_or(Error::InvalidStoredValue(
+                    "history version metadata is missing",
+                ))?
+            } else if matches!(column.column_type, records::ValueType::Nullable(_)) {
                 match cell {
                     Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
                     Some(value) => {
@@ -2234,7 +2248,11 @@ impl CurrentRow {
         }
         // Derived rows (for example aggregates) have no originating write.
         // Preserve that absence instead of inventing system provenance.
-        if let Some(provenance) = self.provenance()? {
+        if !table
+            .name
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && let Some(provenance) = self.provenance()?
+        {
             descriptor_fields.extend([
                 records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
                 records::DescriptorField::new("$createdAt", records::ValueType::U64),
@@ -2268,7 +2286,11 @@ impl CurrentRow {
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
-        if let Some((time, node)) = self.projected_tx_alias() {
+        if !table
+            .name
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && let Some((time, node)) = self.projected_tx_alias()
+        {
             descriptor_fields.extend([
                 records::DescriptorField::new("tx_time", records::ValueType::U64),
                 records::DescriptorField::new("tx_node_id", records::ValueType::U64),

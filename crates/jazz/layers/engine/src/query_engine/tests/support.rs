@@ -630,10 +630,11 @@ pub(super) struct FakeSourceResolver {
 }
 
 impl SourceGraphPreparer for FakeSourceResolver {
+    type Error = Box<CapabilityReport>;
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
         Box::pin(async move {
             self.requests.push(request.clone());
             let deletion_register = request
@@ -837,10 +838,11 @@ impl InlineCollectorResolver {
 }
 
 impl SourceGraphPreparer for InlineCollectorResolver {
+    type Error = Box<CapabilityReport>;
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
         Box::pin(async move {
             self.requests.push(request.clone());
             let descriptor = RecordDescriptor::new([

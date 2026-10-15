@@ -119,11 +119,14 @@ pub enum FieldRequirement {
 /// This is not the Groove runtime source resolver. New code must keep this
 /// trait on the preparation side of `lower_resolved_query_program`.
 pub trait SourceGraphPreparer {
+    /// Preparation failures, including operational errors from the source owner.
+    type Error;
+
     /// Prepare one source request into a concrete Groove graph and row shape.
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>>;
 }
 
 /// Concrete source selected for one logical source request.

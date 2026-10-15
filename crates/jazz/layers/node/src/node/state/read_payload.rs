@@ -17,6 +17,11 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<TableSchema, Error> {
+        if let Some(source) = table.strip_prefix(crate::schema::history::HISTORY_PREFIX) {
+            let source = self.table_in_schema_ref(source, schema_version)?;
+            let history = crate::schema::history::HistoryRelationSchema::new(source);
+            return Ok(TableSchema::new(table, history.columns().iter().cloned()));
+        }
         self.table_in_schema_ref(table, schema_version).cloned()
     }
 

@@ -170,19 +170,22 @@ pub fn authorized_deletion_preimage_source_request(
 /// This is an explicit compatibility boundary while snapshot capture and
 /// physical-layout preparation remain async. Runtime production code calls
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
-pub async fn prepare_and_lower_query_program(
+pub async fn prepare_and_lower_query_program<P: SourceGraphPreparer>(
     compilation: QueryProgramCompilation,
-    source_preparer: &mut impl SourceGraphPreparer,
-) -> QueryCompileResult {
+    source_preparer: &mut P,
+) -> Result<QueryProgram, P::Error>
+where
+    P::Error: From<Box<CapabilityReport>>,
+{
     let (sources, explain) = prepare_query_program_sources(&compilation, source_preparer).await?;
-    lower_resolved_query_program(compilation, sources, explain)
+    lower_resolved_query_program(compilation, sources, explain).map_err(Into::into)
 }
 
 #[doc(hidden)]
-pub async fn prepare_query_program_sources(
+pub async fn prepare_query_program_sources<P: SourceGraphPreparer>(
     compilation: &QueryProgramCompilation,
-    source_preparer: &mut impl SourceGraphPreparer,
-) -> CapabilityResult<(ResolvedQuerySources, ExplainPlan)> {
+    source_preparer: &mut P,
+) -> Result<(ResolvedQuerySources, ExplainPlan), P::Error> {
     let mut explain = ExplainPlan::default();
 
     let request = compilation.request();
@@ -194,40 +197,13 @@ pub async fn prepare_query_program_sources(
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
         let mut resolved_source =
-            match Box::pin(source_preparer.prepare_source_graph(source_request)).await {
-                Ok(resolved_source) => resolved_source,
-                Err(err) => {
-                    let mut failure_explain = explain.clone();
-                    failure_explain
-                        .read
-                        .push(format!("failed source request: {:#?}", err.request));
-                    return Err(Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Source(err.gap)],
-                        explain: explain_with_request(&request, failure_explain),
-                    }));
-                }
-            };
+            Box::pin(source_preparer.prepare_source_graph(source_request)).await?;
         if resolved_source.deletion_register.is_some()
             && let Some(preimage_request) =
                 authorized_deletion_preimage_source_request(source_request)
         {
-            let preimage = Box::pin(source_preparer.prepare_source_graph(&preimage_request))
-                .await
-                .map_err(|err| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Source(err.gap)],
-                        explain: explain_with_request(
-                            &request,
-                            ExplainPlan {
-                                read: vec![format!(
-                                    "failed authorized deletion preimage request: {:#?}",
-                                    err.request
-                                )],
-                                ..ExplainPlan::default()
-                            },
-                        ),
-                    })
-                })?;
+            let preimage =
+                Box::pin(source_preparer.prepare_source_graph(&preimage_request)).await?;
             resolved_source.authorized_deletion_preimage = Some(AuthorizedDeletionPreimage {
                 graph: preimage.graph,
                 routing_fields: preimage.routing_fields,
@@ -451,7 +427,7 @@ fn covered_input_source_descriptors(
 #[doc(hidden)]
 pub async fn lower_query_program(
     request: QueryProgramRequest,
-    source_preparer: &mut impl SourceGraphPreparer,
+    source_preparer: &mut impl SourceGraphPreparer<Error = Box<CapabilityReport>>,
 ) -> QueryCompileResult {
     prepare_and_lower_query_program(QueryProgramCompilation::analyze(request)?, source_preparer)
         .await

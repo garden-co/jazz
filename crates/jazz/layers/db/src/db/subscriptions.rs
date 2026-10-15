@@ -276,6 +276,17 @@ where
         open_tx_id: Option<OpenTransactionId>,
         author: Option<AuthorSubject>,
     ) -> Result<QueryAttachment, Error> {
+        if prepared
+            .shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "Reading history subscriptions is not supported yet",
+            ));
+        }
         self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_read_view(&opts)?;
         let mut node = match open_tx_id {
@@ -994,6 +1005,17 @@ where
         allow_pending_overlay: bool,
         coverage_tier: Option<DurabilityTier>,
     ) -> Result<SubscriptionStream, Error> {
+        if prepared
+            .shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "Reading history subscriptions is not supported yet",
+            ));
+        }
         let coverage_tier = coverage_tier.unwrap_or_else(|| read_coverage_tier(&opts));
         self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_subscription_read_opts(&opts)?;
