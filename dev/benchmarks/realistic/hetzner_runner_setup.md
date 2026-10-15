@@ -37,25 +37,74 @@ If you need password-based first boot from rescue mode, include `FORCE_PASSWORD 
 
 ## Bootstrap the runner
 
-Use the checked-in bootstrap script from the repo:
+The bootstrap supports a fresh Ubuntu 24.04 x64 host. It pins Rust `1.93.1`,
+rustup-init `1.28.2`, Node `24.13.0`, Actions Runner `2.337.0`, and
+wasm-pack `0.13.1`. Each downloaded installer or archive must match the SHA-256
+digest in `bootstrap_runner.sh` before it is executed or extracted. Rustup
+checks the Rust toolchain components against their release checksums.
+
+Keep the versions and digests together when updating them. Node and runner
+digests come from their official release checksums; the wasm-pack digest is
+pinned from the official [release archive](https://github.com/wasm-bindgen/wasm-pack/releases/tag/v0.13.1).
+The script uses no floating releases or `curl | sh`.
+
+Run bootstrap as root. Rust, wasm-pack and the runner are installed for the
+non-root runner account; Node and its Corepack shims are installed under
+`/opt/node-v24.13.0/bin`. The runner's generated `svc.sh` installs and starts
+the standard `actions.runner.*.service` service. Hardening runs afterwards
+unless `SKIP_HARDENING=1`.
+
+The registration token is passed only to configuration through
+`ACTIONS_RUNNER_INPUT_TOKEN`, never through command arguments. Configuration
+output is suppressed to keep the token out of failure diagnostics. A failed
+download check, required installation, configuration or service action aborts
+bootstrap.
+
+Bootstrap refuses an existing `~/actions-runner` directory. Use a fresh host
+for reprovisioning or after a partial installation. This script does not
+upgrade or migrate an existing runner. Runner updates are disabled; review and
+update the pinned runner release before GitHub's update deadline.
+
+`INSTALL_SSM_AGENT=auto` installs SSM on detected AWS hardware and skips it
+elsewhere. Use `1` to require it, or `0` to skip it explicitly. SSM is installed
+through Ubuntu's apt/snap repositories; requested installation failures abort
+setup.
+
+Use the checked-in script:
 
 ```bash
-sudo RUNNER_TOKEN="<repo registration token>" \
-  RUNNER_URL="https://github.com/garden-co/jazz2" \
+read -rsp "GitHub registration token: " RUNNER_TOKEN
+printf '\n'
+export RUNNER_TOKEN
+sudo --preserve-env=RUNNER_TOKEN env \
+  RUNNER_URL="https://github.com/garden-co/jazz" \
   RUNNER_USER=runner \
   RUNNER_NAME="benchmark-runner-hetzner" \
   RUNNER_LABELS="jazz-bench,hetzner" \
   INSTALL_SSM_AGENT=0 \
   dev/benchmarks/realistic/bootstrap_runner.sh
+bootstrap_status=$?
+unset RUNNER_TOKEN
+exit "${bootstrap_status}"
 ```
 
-The bootstrap script will:
+Run the focused checks with
+`node --test dev/benchmarks/realistic/bootstrap_runner.test.mjs`.
+They use miniature archives and command stubs in temporary directories. They
+cover checksum failures, non-root installation commands, token handling and
+required installation failures; they do not validate a live systemd host.
 
-- create the runner user if it does not exist
-- install Rust, Node, `pnpm`, `wasm-pack`, and `libclang`
-- install and register the GitHub Actions runner as a systemd service
-- skip AWS SSM installation automatically on non-AWS hardware
-- apply `dev/benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
+Before reprovisioning real runners, bootstrap one disposable host with
+`RUNNER_NAME=bootstrap-smoke-<unique-id>`, `RUNNER_LABELS=jazz-bootstrap-smoke`
+and `SKIP_HARDENING=1`. Keep its label separate from `jazz-bench` so it does
+not take production benchmark jobs. Check that its GitHub registration is
+online and that its `actions.runner.*.service` is active. As the runner user,
+check `rustc --version`, `rustup target list --installed`, `node --version`,
+`pnpm --version` and `wasm-pack --version` with
+`/opt/node-v24.13.0/bin` and `~/.cargo/bin` on `PATH`. Confirm the pinned
+versions and the `wasm32-unknown-unknown` target, then reboot and check the
+service again. Remove the disposable GitHub registration and host when done.
+Reprovision real hosts one at a time after this check succeeds.
 
 ## Hardening choices
 
@@ -85,7 +134,7 @@ cat /sys/devices/system/cpu/smt/control
 cat /sys/devices/system/cpu/online
 cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 cat /sys/devices/system/cpu/cpufreq/boost
-systemctl is-active actions.runner.garden-co-jazz2.benchmark-runner-hetzner.service
+systemctl list-units 'actions.runner.*.service'
 ```
 
 Expected output on the current box:
