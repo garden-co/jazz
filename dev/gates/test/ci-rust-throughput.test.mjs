@@ -246,7 +246,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["report-dispatched-test-rust", "test-rust", "trusted", "untrusted"],
+    ["report-dispatched-test-rust", "report-full-suite", "test-rust", "trusted", "untrusted"],
     "the credential boundary must account for every entry-workflow job",
   );
   const {
@@ -254,6 +254,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     trusted,
     "test-rust": aggregate,
     "report-dispatched-test-rust": dispatchedStatus,
+    "report-full-suite": fullSuiteStatus,
   } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
@@ -319,6 +320,34 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(dispatchedStatus.steps.length, 1);
   assert.equal(dispatchedStatus.steps[0].uses, undefined);
   assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
+
+  // full-suite coverage (#4091) is posted only after test-rust passed, and only
+  // by runs that executed the full suite with a write-capable token.
+  assert.deepEqual(Object.keys(fullSuiteStatus).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' &&\s+\(startsWith\(github\.head_ref, 'merge-group\/'\) \|\| github\.base_ref == 'release'\)/,
+  );
+  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
+  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
+  assert.equal(fullSuiteStatus.steps.length, 2);
+  assert.equal(
+    fullSuiteStatus.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+  );
+  assert.equal(fullSuiteStatus.steps[1].uses, undefined);
+  assert.match(fullSuiteStatus.steps[1].run, /dev\/ci\/full-suite-coverage\.sh /);
+  assert.match(fullSuiteStatus.steps[1].run, /-f context=full-suite /);
+  assert.match(fullSuiteStatus.steps[1].run, /-f state=success /);
   assert.equal(document.on.pull_request_target, undefined);
   assert.deepEqual(
     document.on.pull_request,
@@ -2544,4 +2573,63 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     ],
     "a new suite job must declare which scope runs it",
   );
+});
+
+test("full-suite coverage credits merge-group PR heads only through clean merges", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "full-suite-coverage-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commitFile = (name) => {
+    fs.writeFileSync(path.join(repo, name), `${name}\n`);
+    git("add", name);
+    git("commit", "-qm", name);
+    return git("rev-parse", "HEAD");
+  };
+  const coverage = (base, head) => {
+    const result = spawnSync(
+      "bash",
+      [path.join(root, "dev/ci/full-suite-coverage.sh"), base, head],
+      { cwd: repo, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim().split("\n").sort();
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "ci@example.com");
+    git("config", "user.name", "CI");
+    git("config", "core.hooksPath", "/dev/null");
+    const main = commitFile("base");
+    git("checkout", "-qb", "pr-a");
+    const prA = commitFile("a");
+    git("checkout", "-qb", "pr-b", main);
+    const prB = commitFile("b");
+    git("checkout", "-qb", "merge-group/1", main);
+    git("merge", "-q", "--no-ff", "-m", "merge a", prA);
+    git("merge", "-q", "--no-ff", "-m", "merge b", prB);
+    const group = git("rev-parse", "HEAD");
+    assert.deepEqual(coverage(main, group), [group, prA, prB].sort());
+
+    // A plain commit on the group changes the tested tree for every PR.
+    const fixup = commitFile("fixup");
+    assert.deepEqual(coverage(main, fixup), [fixup]);
+
+    // So does a merge whose tree is not git's own merge of its parents.
+    const dirty = git(
+      "commit-tree",
+      `${fixup}^{tree}`,
+      "-p",
+      `${group}^1`,
+      "-p",
+      prB,
+      "-m",
+      "hand-resolved",
+    );
+    assert.deepEqual(coverage(main, dirty), [dirty]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 });
