@@ -54,6 +54,21 @@ impl Database {
         }
     }
 
+    /// An owned, metered read view of durable storage with the resident
+    /// staged writes layered over it, for IVM work that outlives `&self`.
+    fn owned_read_storage(
+        &self,
+    ) -> Rc<MeteredStorage<'static, StagedWriteOverlay<'static, LayoutStorage>>> {
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ))
+    }
+
     /// Describe one concrete input to an immutable query template. No source
     /// is installed, retained or authorized by this operation.
     pub fn describe_template_input(
@@ -105,14 +120,7 @@ impl Database {
         detach_cold: bool,
     ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let tick = if detach_cold {
             self.ivm_runtime
                 .replace_input_sources_detaching_cold(replacements, &storage)
@@ -122,34 +130,7 @@ impl Database {
                 .replace_input_sources(replacements, &storage)
                 .await
         };
-        let metrics = match tick {
-            Ok(metrics) => metrics,
-            // These are all preflight failures: record decoding, runtime
-            // ownership, and descriptor compatibility are checked before the
-            // first source refcount changes. They are ordinary recoverable
-            // caller errors, so a following valid replacement may proceed.
-            Err(
-                error @ (IvmRuntimeError::RecordEncoding(_)
-                | IvmRuntimeError::ForeignInputSource
-                | IvmRuntimeError::InputSourceRetired
-                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
-            ) => {
-                return Err(Error::IvmRuntime(error));
-            }
-            // A tick can have touched graph/operator state after inputs were
-            // installed. Database commits use the same fail-closed rule: do
-            // not expose a possibly half-evaluated runtime to later calls.
-            Err(error) => {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-        };
-        self.last_tick_metrics = Some(metrics.clone());
-        if let Err(error) = self.drive_resident_progress_now() {
-            self.poisoned = true;
-            return Err(error);
-        }
-        Ok(metrics)
+        self.finish_input_source_tick(tick, is_input_source_preflight_error)
     }
 
     /// Atomically apply set-like record additions and removals to
@@ -179,14 +160,7 @@ impl Database {
         detach_cold: bool,
     ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let tick = if detach_cold {
             self.ivm_runtime
                 .apply_input_source_deltas_detaching_cold(deltas, &storage)
@@ -196,25 +170,7 @@ impl Database {
                 .apply_input_source_deltas(deltas, &storage)
                 .await
         };
-        let metrics = match tick {
-            Ok(metrics) => metrics,
-            Err(
-                error @ (IvmRuntimeError::RecordEncoding(_)
-                | IvmRuntimeError::ForeignInputSource
-                | IvmRuntimeError::InputSourceRetired
-                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
-            ) => return Err(Error::IvmRuntime(error)),
-            Err(error) => {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-        };
-        self.last_tick_metrics = Some(metrics.clone());
-        if let Err(error) = self.drive_resident_progress_now() {
-            self.poisoned = true;
-            return Err(error);
-        }
-        Ok(metrics)
+        self.finish_input_source_tick(tick, is_input_source_preflight_error)
     }
 
     /// Retract and permanently retire runtime-local input identities. A
@@ -225,21 +181,30 @@ impl Database {
         ids: impl IntoIterator<Item = InputSourceId>,
     ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
-        let metrics = match self.ivm_runtime.retire_input_sources(ids, &storage).await {
+        let storage = self.owned_read_storage();
+        let tick = self.ivm_runtime.retire_input_sources(ids, &storage).await;
+        self.finish_input_source_tick(tick, |error| {
+            matches!(
+                error,
+                IvmRuntimeError::ForeignInputSource | IvmRuntimeError::InputSourceRetired
+            )
+        })
+    }
+
+    /// Record the outcome of a direct input-source tick. Errors accepted by
+    /// `is_preflight` were raised before the first source refcount changed:
+    /// they are ordinary recoverable caller errors, so a following valid call
+    /// may proceed. Any other failure can have touched graph/operator state
+    /// after inputs were installed. Database commits use the same fail-closed
+    /// rule: do not expose a possibly half-evaluated runtime to later calls.
+    fn finish_input_source_tick(
+        &mut self,
+        tick: Result<TickMetrics, IvmRuntimeError>,
+        is_preflight: impl FnOnce(&IvmRuntimeError) -> bool,
+    ) -> Result<TickMetrics, Error> {
+        let metrics = match tick {
             Ok(metrics) => metrics,
-            Err(
-                error @ (IvmRuntimeError::ForeignInputSource | IvmRuntimeError::InputSourceRetired),
-            ) => {
-                return Err(Error::IvmRuntime(error));
-            }
+            Err(error) if is_preflight(&error) => return Err(Error::IvmRuntime(error)),
             Err(error) => {
                 self.poisoned = true;
                 return Err(Error::IvmRuntime(error));
@@ -330,15 +295,7 @@ impl Database {
             return std::task::Poll::Ready(Err(error));
         }
         let progress = self.ivm_runtime.poll_pending_incremental(cx);
-        self.refresh_resident_writes();
-        match progress {
-            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
-            std::task::Poll::Ready(Err(error)) => {
-                self.poisoned = true;
-                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        self.finish_progress(progress)
     }
 
     /// Poll only explicitly runnable CPU continuations. This is the direct
@@ -353,15 +310,18 @@ impl Database {
             return std::task::Poll::Ready(Err(error));
         }
         let progress = self.ivm_runtime.poll_resident_incremental(cx);
+        self.finish_progress(progress)
+    }
+
+    fn finish_progress(
+        &mut self,
+        progress: std::task::Poll<Result<(), IvmRuntimeError>>,
+    ) -> std::task::Poll<Result<(), Error>> {
         self.refresh_resident_writes();
-        match progress {
-            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
-            std::task::Poll::Ready(Err(error)) => {
-                self.poisoned = true;
-                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        progress.map_err(|error| {
+            self.poisoned = true;
+            Error::IvmRuntime(error)
+        })
     }
 
     /// Await completion of all currently suspended incremental evaluation.
@@ -408,28 +368,31 @@ impl Database {
         }
     }
 
+    /// Poll a subscription's next event, driving suspended evaluation once
+    /// in between so a pending update can arrive within the same poll.
+    fn poll_subscription_event<T>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        mut poll_next_event: impl FnMut(
+            &mut std::task::Context<'_>,
+        ) -> std::task::Poll<SubscriptionEvent<T>>,
+    ) -> std::task::Poll<Result<PublicationUpdate<T>, Error>> {
+        if let std::task::Poll::Ready(event) = poll_next_event(cx) {
+            return std::task::Poll::Ready(subscription_event_result(event));
+        }
+        if let std::task::Poll::Ready(Err(error)) = self.poll_progress(cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        poll_next_event(cx).map(subscription_event_result)
+    }
+
     pub fn poll_subscription(
         &mut self,
         subscription: &Subscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<RecordDeltas, Error>> {
-        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
-            return std::task::Poll::Ready(match event {
-                SubscriptionEvent::Update(update) => Ok(update.deltas),
-                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-            });
-        }
-        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
-            && let Err(error) = result
-        {
-            return std::task::Poll::Ready(Err(error));
-        }
-        subscription.poll_next_event(cx).map(|event| match event {
-            SubscriptionEvent::Update(update) => Ok(update.deltas),
-            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-        })
+        self.poll_subscription_event(cx, |cx| subscription.poll_next_event(cx))
+            .map_ok(|update| update.deltas)
     }
 
     pub async fn next_subscription(
@@ -444,23 +407,7 @@ impl Database {
         subscription: &Subscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, Error>> {
-        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
-            return std::task::Poll::Ready(match event {
-                SubscriptionEvent::Update(update) => Ok(update),
-                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-            });
-        }
-        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
-            && let Err(error) = result
-        {
-            return std::task::Poll::Ready(Err(error));
-        }
-        subscription.poll_next_event(cx).map(|event| match event {
-            SubscriptionEvent::Update(update) => Ok(update),
-            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-        })
+        self.poll_subscription_event(cx, |cx| subscription.poll_next_event(cx))
     }
 
     pub async fn next_subscription_with_publication(
@@ -475,23 +422,8 @@ impl Database {
         subscription: &MultisinkSubscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<MultisinkDeltas, Error>> {
-        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
-            return std::task::Poll::Ready(match event {
-                SubscriptionEvent::Update(update) => Ok(update.deltas),
-                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-            });
-        }
-        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
-            && let Err(error) = result
-        {
-            return std::task::Poll::Ready(Err(error));
-        }
-        subscription.poll_next_event(cx).map(|event| match event {
-            SubscriptionEvent::Update(update) => Ok(update.deltas),
-            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-        })
+        self.poll_subscription_event(cx, |cx| subscription.poll_next_event(cx))
+            .map_ok(|update| update.deltas)
     }
 
     pub async fn next_multisink_subscription(
@@ -506,23 +438,7 @@ impl Database {
         subscription: &MultisinkSubscription,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, Error>> {
-        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
-            return std::task::Poll::Ready(match event {
-                SubscriptionEvent::Update(update) => Ok(update),
-                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-            });
-        }
-        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
-            && let Err(error) = result
-        {
-            return std::task::Poll::Ready(Err(error));
-        }
-        subscription.poll_next_event(cx).map(|event| match event {
-            SubscriptionEvent::Update(update) => Ok(update),
-            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
-            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
-        })
+        self.poll_subscription_event(cx, |cx| subscription.poll_next_event(cx))
     }
 
     pub async fn next_multisink_subscription_with_publication(
@@ -575,19 +491,11 @@ impl Database {
     /// ```
     pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let subscription = self
             .ivm_runtime
             .subscribe_one_sink_with_waker(graph, &storage, None)
-            .await
-            .map_err(Error::IvmRuntime)?;
+            .await?;
         // A direct async opening owns the immediately-resident continuation
         // chain, but it must not await a cold read with no durable owner to
         // resume it. Drain only self-scheduled cooperative slices here.
@@ -660,23 +568,14 @@ impl Database {
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
-        self.ivm_runtime
-            .subscribe_with_lifetime(
-                sinks,
-                &storage,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-            )
-            .map_err(Error::IvmRuntime)
+        let storage = self.owned_read_storage();
+        Ok(self.ivm_runtime.subscribe_with_lifetime(
+            sinks,
+            &storage,
+            lifetime,
+            root_indirect_values,
+            progress_waker,
+        )?)
     }
 
     /// Subscribe to a SQL-ish query by letting the planner lower it into an IVM
@@ -850,30 +749,19 @@ impl Database {
                 return Err(Error::UnknownParameter((*name).to_owned()));
             }
         }
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let live = self
             .ivm_runtime
             .prepare_live_attach(prepared.id, &values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_output_and_waker(
-                prepared.id,
-                &values,
-                prepared.output,
-                &storage,
-                None,
-                live,
-            )
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_output_and_waker(
+            prepared.id,
+            &values,
+            prepared.output,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -896,7 +784,8 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_one_sink(
                 graph,
                 binding_source_shape,
@@ -904,8 +793,7 @@ impl Database {
                 output_key_fields,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare a one-sink shape with separate public-output and route-carrying
@@ -927,7 +815,8 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_one_sink_with_routing(
                 output_graph,
                 routing_graph,
@@ -936,8 +825,7 @@ impl Database {
                 routing_key_fields,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare the canonical parameterized multisink shape.
@@ -959,15 +847,15 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare(
                 terminals,
                 binding_source_shape,
                 binding_descriptor,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Prepare a routed shape that callers with identical terminals share.
@@ -986,15 +874,15 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prepare_shared(
                 terminals,
                 binding_source_shape,
                 binding_descriptor,
                 &storage,
             )
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Retire a shared prepared shape that no retained binding holds, for a
@@ -1048,23 +936,18 @@ impl Database {
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let live = self
             .ivm_runtime
             .prepare_live_attach(shape, binding_values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None, live)
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_waker(
+            shape,
+            binding_values,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -1083,30 +966,19 @@ impl Database {
         public_output: RecordDescriptor,
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let live = self
             .ivm_runtime
             .prepare_live_attach(shape, binding_values, &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
-        let subscription = self
-            .ivm_runtime
-            .bind_shape_one_sink_with_output_and_waker(
-                shape,
-                binding_values,
-                public_output,
-                &storage,
-                None,
-                live,
-            )
-            .map_err(Error::IvmRuntime)?;
+            .await?;
+        let subscription = self.ivm_runtime.bind_shape_one_sink_with_output_and_waker(
+            shape,
+            binding_values,
+            public_output,
+            &storage,
+            None,
+            live,
+        )?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
     }
@@ -1149,23 +1021,6 @@ impl Database {
         Ok(subscription)
     }
 
-    /// Internal owner-loop binding entrypoint; see [`Self::subscribe_with_waker`].
-    #[doc(hidden)]
-    pub async fn bind_shape_with_waker(
-        &mut self,
-        shape: PreparedShapeId,
-        binding_values: &[Value],
-        progress_waker: Option<&std::task::Waker>,
-    ) -> Result<MultisinkSubscription, Error> {
-        self.bind_shape_with_lifetime(
-            shape,
-            binding_values,
-            SubscriptionLifetime::Retained,
-            progress_waker,
-        )
-        .await
-    }
-
     /// Bind a prepared graph for one initial result or continued maintenance.
     /// Lifetime is per consumer, not part of the reusable graph's identity.
     pub async fn bind_shape_with_lifetime(
@@ -1196,33 +1051,23 @@ impl Database {
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let storage = Rc::new(MeteredStorage::new_owned(
-            overlay,
-            Rc::clone(&self.storage_read_metrics),
-        ));
+        let storage = self.owned_read_storage();
         let live = if lifetime == SubscriptionLifetime::Retained {
             self.ivm_runtime
                 .prepare_live_attach(shape, binding_values, &storage)
-                .await
-                .map_err(Error::IvmRuntime)?
+                .await?
         } else {
             None
         };
-        self.ivm_runtime
-            .bind_shape_with_lifetime(
-                shape,
-                binding_values,
-                &storage,
-                lifetime,
-                root_indirect_values,
-                progress_waker,
-                live,
-            )
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.bind_shape_with_lifetime(
+            shape,
+            binding_values,
+            &storage,
+            lifetime,
+            root_indirect_values,
+            progress_waker,
+            live,
+        )?)
     }
 
     /// Bind a retained subscription and transfer the shape's ownership to
@@ -1343,10 +1188,10 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .query_snapshot_with_root_values(graph, &storage, root_indirect_values)
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
 
     /// Run several named graph outputs against the same current storage
@@ -1359,10 +1204,7 @@ impl Database {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
-            .query_snapshots(sinks, &storage)
-            .await
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.query_snapshots(sinks, &storage).await?)
     }
 
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
@@ -1374,9 +1216,7 @@ impl Database {
     /// callers must retire dynamically compiled shapes to release graph nodes.
     pub fn retire_prepared_shape(&mut self, shape: PreparedShapeId) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
-            .retire_prepared_shape(shape)
-            .map_err(Error::IvmRuntime)
+        Ok(self.ivm_runtime.retire_prepared_shape(shape)?)
     }
 
     /// Retire subscriptions whose receiving handles have already been
@@ -1384,9 +1224,31 @@ impl Database {
     /// notification channel.
     pub async fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
+        Ok(self
+            .ivm_runtime
             .prune_dropped_subscriptions_with_storage(&self.storage)
-            .await
-            .map_err(Error::IvmRuntime)
+            .await?)
     }
+}
+
+fn subscription_event_result<T>(
+    event: SubscriptionEvent<T>,
+) -> Result<PublicationUpdate<T>, Error> {
+    match event {
+        SubscriptionEvent::Update(update) => Ok(update),
+        SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+        SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+    }
+}
+
+/// Record decoding, runtime ownership and descriptor compatibility are all
+/// checked before an input-source replacement or delta touches a refcount.
+fn is_input_source_preflight_error(error: &IvmRuntimeError) -> bool {
+    matches!(
+        error,
+        IvmRuntimeError::RecordEncoding(_)
+            | IvmRuntimeError::ForeignInputSource
+            | IvmRuntimeError::InputSourceRetired
+            | IvmRuntimeError::BindingSourceDescriptorMismatch(_)
+    )
 }

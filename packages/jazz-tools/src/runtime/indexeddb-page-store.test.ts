@@ -622,12 +622,18 @@ describe("IndexedDbPageStore", () => {
 
   it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
     const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
-    const withoutLinearHistory = required.filter(
-      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.history-version-current.v4",
+    const withoutNodeFormat = required.filter(
+      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v1",
     );
     for (const [requiredCodecIds, missing, unknown] of [
-      [withoutLinearHistory, ["groove.durable-index.v2", "jazz.history-version-current.v4"], []],
+      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v1"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
+      [required.filter((codec) => codec !== "jazz.node-storage.v1"), ["jazz.node-storage.v1"], []],
+      [
+        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
+        [],
+        ["jazz.subscription-program-fact-key.v1"],
+      ],
     ] as const) {
       const name = databaseName();
       await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
