@@ -844,7 +844,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                                             {
                                               rowId: subscriptionRowId,
                                               raw: Uint8Array.from([
-                                                2,
+                                                0,
                                                 ...new TextEncoder().encode(
                                                   "subscription from foreground A",
                                                 ),
@@ -1439,7 +1439,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                       {
                         rowId: new Uint8Array(16).fill(0xee),
                         raw: Uint8Array.from([
-                          2,
+                          0,
                           ...new TextEncoder().encode(
                             wrongMatchesWrittenContent
                               ? "subscription from foreground A"
