@@ -20,22 +20,16 @@ example apps is [Examples & Benchmarks Program](../../EXAMPLES_AND_BENCHMARKS_PR
 - `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
 - `scenarios/r8_many_branches.json`: many linked branches on a single object
 
-### Scheduled coverage
+These definitions are run locally only. CI performance coverage lives in the
+hero examples' CodSpeed benches, which own these workloads (see the program
+plan above); the SQLite runs are StagePlan's nightly `_sqlite` cases.
 
-The self-hosted benchmark workflow schedules native `W1`/`W4`, browser
-`W1`/`W4`/`B1`–`B6`, and the catalogued core/simulation receipts. `W3` and
-browser `B7` are source-only scenarios: they remain runnable locally for
-investigation, but are not scheduled by the CI manifest. `W3` needs an
-explicit server endpoint; `B7` is intentionally excluded from the bounded
-browser suite. Add either to the manifest only with a maintained CI budget and
-artifact/history plan.
-
-## Native Runner (RocksDB)
+## Native Runner
 
 Run from workspace root:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench -- \
+RUST_LOG=warn cargo run --release -p jazz-native-transport --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w1_interactive.json
 ```
@@ -43,7 +37,7 @@ RUST_LOG=warn cargo run -p jazz --features client,rocksdb,transport-compression-
 `W3` requires a running server and `--server-url`:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench -- \
+RUST_LOG=warn cargo run --release -p jazz-native-transport --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
@@ -141,18 +135,6 @@ the database without closing. Lifecycle setup and close happen outside the
 measured window. The default remains `unclean`. See
 `dev/benchmarks/R3_JAZZ_OPEN_ATTRIBUTION.md` for the initial local receipt.
 
-Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
-
-```bash
-pnpm bench:realistic:export-criterion -- \
-  --out bench-out/native/criterion_realistic_phase1.json \
-  --summary-md bench-out/native/criterion_realistic_phase1.md
-```
-
-The `criterion_realistic_phase1.*` artifact filenames are retained for history
-ingestion compatibility. New Criterion output is filtered from the active
-`realistic_phase1/` prefix by default.
-
 ## Browser Runner (IndexedDB Worker)
 
 Run the browser benchmark test:
@@ -204,82 +186,10 @@ Current browser scenarios:
 - `B6`: hotspot deep-history update stress with storage usage sampling
 - `B7`: large relation-result hydration over the project-board dataset
 
-## CI / Runner
+## History
 
-The Realistic Benchmarks workflow (`.github/workflows/benchmarks.yml`) was
-retired on 2026-10-15: its self-hosted `jazz-bench` runner had been offline
-since late September. The benchmark code and scripts here remain runnable
-locally, and porting the useful suites to CodSpeed is tracked separately.
-Benchmark API compilation (`dev/gates/benchmark-smoke.sh --compile-ci`) now
-runs in the `benchmark-api` job of `.github/workflows/nightly-tests.yml`.
-
-- AWS runner setup (historical): `dev/benchmarks/realistic/aws_runner_setup.md`
-
-Artifacts include `manifest.json` as a stable ingestion entrypoint:
-
-- native RocksDB: `bench-out/native/rocksdb/manifest.json`
-- native SQLite: `bench-out/native/sqlite/manifest.json`
-- jazz-sim: `bench-out/native/jazz-sim/manifest.json`
-- browser: `bench-out/browser/manifest.json`
-
-The retired workflow:
-
-- runs on `main` pushes and nightly schedule
-- runs on PRs only when the PR has the `benchmark` label
-- runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
-- keeps a checked-in skip set at `dev/benchmarks/realistic/ci_skip_set.json`
-- only activates configured skips after 3 timed-out observations for the same benchmark id
-- records native example outputs (`W1`/`W4`) plus exported active direct Criterion results (`native-criterion`) when they complete within budget
-- records jazz-sim JSONL outputs and logs under `bench-out/native/jazz-sim`; `update_history.mjs` ingests passed JSONL outputs into history as suite `jazz-sim`, keyed by scenario plus phase/variant, and exposes numeric JSONL fields to the static site/report as per-phase metrics
-- records browser outputs per scenario when they complete within budget
-
-Its `site` job:
-
-- pulls the benchmark artifacts for that run
-- updates `history/bench_history.json` with absolute metrics
-- updates `ci_skip_set.json` with newly observed timed-out benchmarks
-- rebuilds `site/index.html` + `site/history.json`
-- uploads `site/` as an artifact
-- posts a markdown comparison report back to labeled PRs, including current-run status summaries
-- commits refreshed history/site/skip-set back to `main` when the workflow itself runs on `main`
-
-## Delta Rendering (Local)
-
-After downloading artifacts for two runs (e.g. `main` vs branch), render deltas:
-
-```bash
-pnpm bench:realistic:render -- \
-  --base ./artifacts/main \
-  --head ./artifacts/branch \
-  --kind all
-```
-
-Notes:
-
-- Script: `dev/benchmarks/realistic/render_deltas.mjs`
-- It auto-discovers `manifest.json` recursively under `--base` and `--head`.
-- It compares the newest native/browser manifests found in each tree.
-- For history-backed markdown reports in CI, use `dev/benchmarks/realistic/render_history_report.mjs`.
-
-## Static Site (Local + Vercel)
-
-Build locally from raw artifacts:
-
-```bash
-pnpm bench:realistic:update-history -- \
-  --history dev/benchmarks/realistic/history/bench_history.json \
-  --native ./site-input/native \
-  --browser ./site-input/browser
-
-pnpm bench:realistic:build-site -- \
-  --history dev/benchmarks/realistic/history/bench_history.json \
-  --out dev/benchmarks/realistic/site
-```
-
-For Vercel hosting:
-
-- set project root directory to `dev/benchmarks/realistic/site`
-- keep [vercel.json](site/vercel.json) in that directory so routing stays explicit
-- use no install command and no build command (prebuilt static files)
-- framework preset: `Other`
-- deploy from `main` so each benchmark CI run refreshes the dashboard automatically
+The Realistic Benchmarks workflow and its self-hosted `jazz-bench` runner were
+retired on 2026-10-15 (the runner had been offline since late September). Its
+CI harness, checked-in timing history, static site and runner provisioning
+scripts were removed with it; they remain in git history before the commit that
+removed them.
