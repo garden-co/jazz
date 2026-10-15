@@ -1069,30 +1069,34 @@ where
                 cells.extend(authored);
                 self.lock_for_transaction_operation(tx_id)
                     .await?
-                    .tx_write_in_schema_with_staged_large_values(
+                    .tx_write_with(
                         tx_id,
-                        self.schema_version_id,
                         table,
                         row,
                         cells,
                         None,
-                        Some(now_ms),
-                        staged.clone(),
+                        TxWriteOptions {
+                            schema_version: Some(self.schema_version_id),
+                            now_ms: Some(now_ms),
+                            staged_large_cells: staged.clone(),
+                            ..TxWriteOptions::default()
+                        },
                     )
                     .await?;
             } else {
                 self.lock_for_transaction_operation(tx_id)
                     .await?
-                    .tx_patch_mergeable_with_staged_large_values(
+                    .tx_patch_mergeable_with(
                         tx_id,
-                        self.schema_version_id,
                         table,
                         row,
                         authored,
-                        Some(now_ms),
-                        BranchSelector::default(),
-                        false,
-                        staged.clone(),
+                        TxWriteOptions {
+                            schema_version: Some(self.schema_version_id),
+                            now_ms: Some(now_ms),
+                            staged_large_cells: staged.clone(),
+                            ..TxWriteOptions::default()
+                        },
                     )
                     .await?;
             }

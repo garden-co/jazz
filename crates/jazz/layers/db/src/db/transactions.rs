@@ -224,17 +224,19 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        node.tx_write_mergeable_in_schema(
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            now_ms,
-            known_fresh_row,
-        )
-        .await?;
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                known_fresh_row,
+                ..TxWriteOptions::default()
+            },
+        )?;
         Ok(())
     }
 
@@ -283,19 +285,22 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        node.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            now_ms,
-            branch,
-            known_fresh_row,
-            verified_inherited_cells,
-            replace_pending_deletion,
-            branch_view_copy,
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                branch,
+                known_fresh_row,
+                replace_pending_deletion,
+                verified_inherited_cells,
+                branch_view_copy,
+                ..TxWriteOptions::default()
+            },
         )?;
         Ok(())
     }
@@ -324,9 +329,19 @@ where
         {
             return Err(row_already_deleted(row));
         }
-        node.tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
-            .await
-            .map_err(Into::into)
+        node.tx_patch_mergeable_with(
+            tx_id,
+            table,
+            row,
+            patch,
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                ..TxWriteOptions::default()
+            },
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(super) async fn stage_mergeable_update_in_branch_view(
@@ -355,15 +370,17 @@ where
         if head_cells.is_some() {
             self.lock_for_transaction_operation(tx_id)
                 .await?
-                .tx_patch_mergeable_in_schema_and_branch(
+                .tx_patch_mergeable_with(
                     tx_id,
-                    self.schema_version_id,
                     table,
                     row,
                     patch,
-                    now_ms,
-                    head,
-                    false,
+                    TxWriteOptions {
+                        schema_version: Some(self.schema_version_id),
+                        now_ms,
+                        branch: head,
+                        ..TxWriteOptions::default()
+                    },
                 )
                 .await?;
             return Ok(());
@@ -513,15 +530,18 @@ where
                 .node
                 .lock()
                 .await
-                .tx_patch_mergeable_in_schema_and_branch(
+                .tx_patch_mergeable_with(
                     tx_id,
-                    self.schema_version_id,
                     table,
                     row,
                     cells,
-                    now_ms,
-                    head,
-                    replace_pending_deletion,
+                    TxWriteOptions {
+                        schema_version: Some(self.schema_version_id),
+                        now_ms,
+                        branch: head,
+                        replace_pending_deletion,
+                        ..TxWriteOptions::default()
+                    },
                 )
                 .await?;
             return Ok(());
@@ -566,17 +586,18 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .tx_write_mergeable_in_schema(
+            .tx_write_mergeable_with(
                 tx_id,
-                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::new(),
                 Some(DeletionEvent::Deleted),
-                now_ms,
-                false,
+                TxWriteOptions {
+                    schema_version: Some(self.schema_version_id),
+                    now_ms,
+                    ..TxWriteOptions::default()
+                },
             )
-            .await
             .map_err(Into::into)
     }
 
@@ -605,16 +626,18 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .tx_write_mergeable_in_schema_and_branch(
+            .tx_write_mergeable_with(
                 tx_id,
-                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::new(),
                 Some(DeletionEvent::Deleted),
-                now_ms,
-                head,
-                false,
+                TxWriteOptions {
+                    schema_version: Some(self.schema_version_id),
+                    now_ms,
+                    branch: head,
+                    ..TxWriteOptions::default()
+                },
             )?;
         Ok(())
     }
@@ -631,28 +654,30 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        node.tx_write_mergeable_in_schema(
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            now_ms,
-            false,
-        )
-        .await?;
-        node.tx_write_mergeable_in_schema(
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                ..TxWriteOptions::default()
+            },
+        )?;
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            now_ms,
-            false,
-        )
-        .await?;
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                ..TxWriteOptions::default()
+            },
+        )?;
         Ok(())
     }
 
@@ -668,27 +693,31 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
-        node.tx_write_mergeable_in_schema_and_branch(
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            now_ms,
-            branch.clone(),
-            false,
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                branch: branch.clone(),
+                ..TxWriteOptions::default()
+            },
         )?;
-        node.tx_write_mergeable_in_schema_and_branch(
+        node.tx_write_mergeable_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            now_ms,
-            branch,
-            false,
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms,
+                branch,
+                ..TxWriteOptions::default()
+            },
         )?;
         Ok(())
     }
@@ -1205,27 +1234,16 @@ where
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut node = prepared.scoped_node(&mut node, author)?;
-        let mut snapshot = match authorization_mode {
-            QueryAuthorizationMode::ClientLocal => node
-                .tx_relation_snapshot_with_options(
-                    tx_id,
-                    &prepared.shape,
-                    &prepared.binding,
-                    opts.include_deleted,
-                )
-                .await
-                .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing => node
-                .tx_relation_snapshot_for_identity_with_options(
-                    tx_id,
-                    &prepared.shape,
-                    &prepared.binding,
-                    author,
-                    opts.include_deleted,
-                )
-                .await
-                .map_err(Error::from)?,
-        };
+        let mut snapshot = node
+            .tx_relation_snapshot_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                author,
+                opts.include_deleted,
+                authorization_mode,
+            )
+            .await?;
         node.hydrate_current_rows(&mut snapshot.rows).await?;
         Ok(snapshot)
     }
@@ -1241,27 +1259,16 @@ where
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut node = prepared.scoped_node(&mut node, author)?;
-        let mut rows = match authorization_mode {
-            QueryAuthorizationMode::ClientLocal => node
-                .tx_query_with_options(
-                    tx_id,
-                    &prepared.shape,
-                    &prepared.binding,
-                    opts.include_deleted,
-                )
-                .await
-                .map_err(Error::from)?,
-            QueryAuthorizationMode::TrustedServing => node
-                .tx_query_for_identity_with_options(
-                    tx_id,
-                    &prepared.shape,
-                    &prepared.binding,
-                    author,
-                    opts.include_deleted,
-                )
-                .await
-                .map_err(Error::from)?,
-        };
+        let mut rows = node
+            .tx_query_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                author,
+                opts.include_deleted,
+                authorization_mode,
+            )
+            .await?;
         node.hydrate_current_rows(&mut rows).await?;
         Ok(rows)
     }
@@ -1310,14 +1317,17 @@ where
         {
             return Err(row_already_deleted(row));
         }
-        node.tx_write_in_schema_at_ms(
+        node.tx_write_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            Some(now_ms),
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms: Some(now_ms),
+                ..TxWriteOptions::default()
+            },
         )
         .await
         .map_err(Into::into)
@@ -1339,14 +1349,17 @@ where
         cells.extend(patch);
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .tx_write_in_schema_at_ms(
+            .tx_write_with(
                 tx_id,
-                self.schema_version_id,
                 table,
                 row,
                 cells,
                 None,
-                Some(now_ms),
+                TxWriteOptions {
+                    schema_version: Some(self.schema_version_id),
+                    now_ms: Some(now_ms),
+                    ..TxWriteOptions::default()
+                },
             )
             .await?;
         Ok(())
@@ -1373,14 +1386,17 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .tx_write_in_schema_at_ms(
+            .tx_write_with(
                 tx_id,
-                self.schema_version_id,
                 table,
                 row,
                 cells,
                 None,
-                Some(now_ms),
+                TxWriteOptions {
+                    schema_version: Some(self.schema_version_id),
+                    now_ms: Some(now_ms),
+                    ..TxWriteOptions::default()
+                },
             )
             .await?;
         Ok(())
@@ -1460,14 +1476,17 @@ where
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .tx_write_in_schema_at_ms(
+            .tx_write_with(
                 tx_id,
-                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::<String, Value>::new(),
                 Some(DeletionEvent::Deleted),
-                Some(now_ms),
+                TxWriteOptions {
+                    schema_version: Some(self.schema_version_id),
+                    now_ms: Some(now_ms),
+                    ..TxWriteOptions::default()
+                },
             )
             .await
             .map_err(Into::into)
@@ -1488,24 +1507,30 @@ where
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write_in_schema_at_ms(
+        node.tx_write_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             cells,
             None,
-            Some(now_ms),
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms: Some(now_ms),
+                ..TxWriteOptions::default()
+            },
         )
         .await?;
-        node.tx_write_in_schema_at_ms(
+        node.tx_write_with(
             tx_id,
-            self.schema_version_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
-            Some(now_ms),
+            TxWriteOptions {
+                schema_version: Some(self.schema_version_id),
+                now_ms: Some(now_ms),
+                ..TxWriteOptions::default()
+            },
         )
         .await?;
         Ok(())

@@ -3560,25 +3560,12 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.tx_query_with_options(tx_id, shape, binding, false)
-            .await
-    }
-
-    /// Evaluate a validated query inside an open transaction using the local
-    /// client read boundary with explicit root-row deletion visibility.
-    pub async fn tx_query_with_options(
-        &mut self,
-        tx_id: OpenTransactionId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        include_deleted: bool,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.tx_query_in_authorization_mode(
+        self.tx_query_with_options(
             tx_id,
             shape,
             binding,
             AuthorSubject::SYSTEM,
-            include_deleted,
+            false,
             QueryAuthorizationMode::ClientLocal,
         )
         .await
@@ -3592,32 +3579,42 @@ where
         binding: &Binding,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.tx_query_for_identity_with_options(tx_id, shape, binding, identity, false)
-            .await
+        self.tx_query_with_options(
+            tx_id,
+            shape,
+            binding,
+            identity,
+            false,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
     }
 
     /// Evaluate a validated query inside an open transaction with explicit
-    /// root-row deletion visibility.
-    pub async fn tx_query_for_identity_with_options(
+    /// root-row deletion visibility. `ClientLocal` reads use the local client
+    /// read boundary and ignore `identity`; `TrustedServing` reads run as it.
+    pub async fn tx_query_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorSubject,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.tx_query_in_authorization_mode(
             tx_id,
             shape,
             binding,
-            identity,
+            tx_read_identity(identity, authorization_mode),
             include_deleted,
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
         )
         .await
     }
 
-    /// Evaluate a query and its relation payload inside an open transaction.
+    /// Evaluate a query and its relation payload inside an open transaction,
+    /// with the same reader as [`Self::tx_query_with_options`].
     ///
     /// This uses the same transaction snapshot and staged overlay as
     /// [`Self::tx_query_with_options`].  In particular, it must not fall back
@@ -3628,36 +3625,17 @@ where
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        include_deleted: bool,
-    ) -> Result<RelationSnapshot, Error> {
-        self.tx_relation_snapshot_in_authorization_mode(
-            tx_id,
-            shape,
-            binding,
-            AuthorSubject::SYSTEM,
-            include_deleted,
-            QueryAuthorizationMode::ClientLocal,
-        )
-        .await
-    }
-
-    /// Evaluate a relation payload inside an open transaction as its bound
-    /// serving identity.
-    pub async fn tx_relation_snapshot_for_identity_with_options(
-        &mut self,
-        tx_id: OpenTransactionId,
-        shape: &ValidatedQuery,
-        binding: &Binding,
         identity: AuthorSubject,
         include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         self.tx_relation_snapshot_in_authorization_mode(
             tx_id,
             shape,
             binding,
-            identity,
+            tx_read_identity(identity, authorization_mode),
             include_deleted,
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
         )
         .await
     }
@@ -4360,42 +4338,6 @@ where
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
     /// ordinary prepared query, a missing policy claim is a denied proof and
     /// is surfaced to the peer as an empty, settled authorization view.
-    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
-    pub async fn open_seeded_authorization_support_subscription_view(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        identity: AuthorSubject,
-        tier: DurabilityTier,
-        read_view: &ReadViewSpec,
-    ) -> Result<
-        (
-            MultisinkSubscription,
-            MaintainedSubscriptionView,
-            MaintainedTerminalSchemas,
-            super::maintained_subscription_view::ResultTransitions,
-            BTreeMap<String, TableSchema>,
-            bool,
-        ),
-        Error,
-    > {
-        self.open_seeded_authorization_support_subscription_view_with_waker(
-            shape,
-            binding,
-            identity,
-            tier,
-            read_view,
-            RegisterShapeOptions {
-                tier,
-                read_view: read_view.clone(),
-                ..RegisterShapeOptions::default()
-            }
-            .read_view_key(),
-            None,
-        )
-        .await
-    }
-
     #[doc(hidden)]
     pub async fn open_seeded_authorization_support_subscription_view_with_waker(
         &mut self,
@@ -5233,3 +5175,15 @@ fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Opt
 
 #[cfg(test)]
 mod tests;
+
+/// Client-local transaction reads run at the local client boundary as the
+/// system subject; a bound transaction substitutes its own identity later.
+fn tx_read_identity(
+    identity: AuthorSubject,
+    authorization_mode: QueryAuthorizationMode,
+) -> AuthorSubject {
+    match authorization_mode {
+        QueryAuthorizationMode::ClientLocal => AuthorSubject::SYSTEM,
+        QueryAuthorizationMode::TrustedServing => identity,
+    }
+}

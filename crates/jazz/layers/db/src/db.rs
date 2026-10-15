@@ -48,7 +48,7 @@ use crate::node::{
     CommitUnitIngestContext, CurrentRow, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationSnapshot, RowProvenance,
-    TransactionBranchRowState, TransactionInsertTargetState, ViewUpdateParts,
+    TransactionBranchRowState, TransactionInsertTargetState, TxWriteOptions, ViewUpdateParts,
 };
 use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::peer::{PeerRole, PeerState};
