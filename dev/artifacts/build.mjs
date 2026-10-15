@@ -33,12 +33,21 @@ const commands = {
     fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
     // Browser releases link the whole engine with fat LTO in one codegen unit.
     // That removes duplicate generic instantiations across crates: about 28%
-    // smaller raw and 22% smaller gzip, at unchanged opt-level 3 and no
-    // measured read/write slowdown. Native release builds are unaffected.
+    // smaller raw and 22% smaller gzip, with no measured read/write slowdown.
+    // jazz-wasm, the final crate, is built for size: its opt-level picks the
+    // whole LTO pipeline, which makes the bundle about 9% smaller gzip for
+    // IndexedDB reads up to 7% slower. Native release builds are unaffected.
     release: [
       "wasm-pack",
       ["build", "crates/jazz-wasm", "--target", "web", "--release"],
-      ["--config", 'profile.release.lto="fat"', "--config", "profile.release.codegen-units=1"],
+      [
+        "--config",
+        'profile.release.lto="fat"',
+        "--config",
+        "profile.release.codegen-units=1",
+        "--config",
+        'profile.release.package.jazz-wasm.opt-level="s"',
+      ],
     ],
     profiling: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--profiling"]],
   },

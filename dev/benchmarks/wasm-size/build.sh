@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the browser WASM exactly as releases do (fat LTO, one codegen unit,
-# wasm-opt -O -g --low-memory-unused, then dev/artifacts/wasm-names.mjs drops
+# jazz-wasm at opt-level "s", wasm-opt -O -g --low-memory-unused, then dev/artifacts/wasm-names.mjs drops
 # symbol hashes from function names) and print its raw, gzip and Brotli sizes.
 #
 # Usage: dev/benchmarks/wasm-size/build.sh OUT_DIR [--type-names]
@@ -20,7 +20,8 @@ if [[ $mode == --type-names ]]; then
 fi
 
 cargo build -p jazz-wasm --lib --target wasm32-unknown-unknown --release \
-  --config 'profile.release.lto="fat"' --config profile.release.codegen-units=1
+  --config 'profile.release.lto="fat"' --config profile.release.codegen-units=1 \
+  --config 'profile.release.package.jazz-wasm.opt-level="s"'
 wasm-bindgen --target web --out-dir "$out" \
   "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/jazz_wasm.wasm"
 wasm-opt "$out/jazz_wasm_bg.wasm" -O -g --low-memory-unused -o "$out/jazz_wasm_bg.wasm"
