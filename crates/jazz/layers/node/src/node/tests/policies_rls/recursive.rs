@@ -54,6 +54,66 @@ fn recursive_doc_policy_schema(select_policy: PublicPolicyExpr) -> JazzSchema {
     )
 }
 
+/// alice ──access row──► team ◄──gather── (nobody's claim)
+/// mallory ──read docs──► core ──► schema never compiles
+///
+/// A hand-written relation policy that puts the Gather on the right side of
+/// the access join used to lose the Gather entirely, leaving a plain
+/// `docs ◄─ doc_access ─► teams` join: any doc with an access row was readable
+/// by every session, mallory included. Such a policy is now rejected when the
+/// schema compiles, so it can never authorize a read.
+#[test]
+fn gather_on_the_right_of_the_access_join_is_rejected_instead_of_authorizing_everyone() {
+    let mut policy = recursive_doc_access_policy();
+    let PublicPolicyExpr::ExistsRel { rel } = &mut policy else {
+        unreachable!("seeded recursive policy is an ExistsRel");
+    };
+    let crate::model::public_schema::RelExpr::Filter { input, .. } = rel else {
+        unreachable!("seeded recursive policy correlates its access join");
+    };
+    let crate::model::public_schema::RelExpr::Join { left, right, on, .. } = input.as_mut() else {
+        unreachable!("seeded recursive policy joins its frontier to access");
+    };
+    std::mem::swap(left, right);
+    for condition in on.iter_mut() {
+        std::mem::swap(&mut condition.left, &mut condition.right);
+    }
+
+    let source = PublicSchemaBuilder::new()
+        .table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(policy)),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("teams")
+                .column("name", PublicColumnType::Text)
+                .policies(public_all_policies()),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("doc_access")
+                .fk_column("doc", "docs")
+                .fk_column("team", "teams")
+                .policies(public_all_policies()),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("team_edges")
+                .fk_column("member", "teams")
+                .fk_column("parent", "teams")
+                .policies(public_all_policies()),
+        )
+        .build();
+
+    let error = crate::schema::JazzSchema::new(&source)
+        .expect_err("a dropped Gather must not compile into a plain access join");
+    assert!(
+        error
+            .to_string()
+            .contains("Gather on the right side of a join is not supported in policies yet"),
+        "unexpected error: {error}"
+    );
+}
+
 fn recursive_doc_write_policy_schema() -> JazzSchema {
     recursive_doc_policy_schema(PublicPolicyExpr::True)
 }

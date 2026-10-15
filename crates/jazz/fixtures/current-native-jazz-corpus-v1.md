@@ -21,30 +21,20 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 33 entries in the linear row-history layout
-(`jazz.history-version-current.v4`, `groove.durable-index.v2`). The DAG-era
-families `jazz_deletion_history`, `jazz_global_changes`, `jazz_merge_heads`,
-`jazz_pending_edges` and the `*_register*` families no longer exist; per-tx
-touched rows live in `jazz_tx_touched_rows`.
-History records carry an empty `counter_signs` byte string after
-`authored_columns` (SPEC 4 §4.3), so the history bytes and every digest below
-were regenerated when that field was added.
-History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`
-and end with the merge fields `seq`, `base_seq` and `base_pending` (SPEC 4
-§4.6); no record carries column stamps any more. The
-corpus was regenerated again for that layout.
-Durability encoding v2 (`jazz.transaction-durability.v2`, Global stored as
-tag 2) joined the root's codec profile, so the manifest and every
-transaction's durability byte changed; the corpus was regenerated again with
-the same inputs.
+The logical pack has 31 entries in the current storage format. The active
+schema selection lives in `jazz_catalogue`; the redundant write-pointer table
+and retired scope-relay repair ledger are no longer registered.
+
+History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`.
+They include required `counter_signs`, `seq`, `base_seq`, and `base_pending`
+columns, with nullable base values where appropriate. The corpus also pins the
+unified catalogue encoding and kind-specific record descriptors.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
 | `__groove_large_values`             |       3 |
 | `jazz_authority_policy_bindings`    |       1 |
 | `jazz_catalogue`                    |       8 |
-| `jazz_catalogue_pointer`            |       2 |
-| `jazz_known_state_facts`            |       0 |
 | `jazz_nodes`                        |       1 |
 | `jazz_physical_1_ahead_current`     |       1 |
 | `jazz_physical_1_global_current`    |       1 |
@@ -56,7 +46,6 @@ the same inputs.
 | `jazz_physical_2_rejected_versions` |       0 |
 | `jazz_rejected_transactions`        |       0 |
 | `jazz_schema_versions`              |       2 |
-| `jazz_settled_program_facts`        |       0 |
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
 | `jazz_tx_touched_rows`              |       4 |
@@ -78,7 +67,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367` |
-| SQLite payload      | `f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379` |
-| gzip SQLite archive | `1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70` |
-| RocksDB archive     | `2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491` |
+| logical pack        | `4a9d9da67d88310433f6a96aa895090fef81f1d492ae09cf94a3a34fbc03ab1a` |
+| SQLite payload      | `85452bee0a7e42f953dee37e162d57fec0336fb6fce775e54668e41765da240f` |
+| gzip SQLite archive | `196eb5348d407e963cf919b8ec37abf8dc8a20ccb2f01c5b3a6e1c66495cec98` |
+| RocksDB archive     | `1a9a26c9f55bf80cb4d77295be2dfc57db135f8f143895a138fb38d8e2e5517b` |

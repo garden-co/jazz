@@ -334,7 +334,7 @@ ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
 starting at zero without gaps. Recovery scans the entire `account-command:`
 prefix and rejects other versions, malformed keys, and invalid commands.
 
-The `jazz.account-journal.v1` profile versions the root-local journal
+The `jazz.account-storage.v1` profile versions the root-local journal
 key and closed descriptor contract, not a new value codec. It uses canonical Groove
 records exclusively. Its one field, `command`, is an Enum named
 `jazz.account-command.v1` with fixed registry identity 1 in this isolated root.

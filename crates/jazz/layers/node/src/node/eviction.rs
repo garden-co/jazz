@@ -230,9 +230,7 @@ where
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {
-                let applied = self.apply_node_batch(batch).await?;
-                let persisted = self.database.persist_with_progress(&applied).await;
-                self.database.finish_persistence(persisted)?;
+                self.apply_and_persist_node_batch(batch).await?;
                 remaining_bytes = self
                     .client_cache_metered_bytes()
                     .await?
@@ -241,9 +239,7 @@ where
             }
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
-            let applied = self.apply_node_batch(batch).await?;
-            let persisted = self.database.persist_with_progress(&applied).await;
-            self.database.finish_persistence(persisted)?;
+            self.apply_and_persist_node_batch(batch).await?;
         }
 
         let after_bytes = self

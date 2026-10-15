@@ -5,18 +5,6 @@
 //! and row materialization remain separate stages.
 
 use super::*;
-#[derive(Clone, Copy)]
-enum ShapeReclamation {
-    One(ShapeId),
-}
-
-impl ShapeReclamation {
-    fn contains(self, shape_id: ShapeId) -> bool {
-        match self {
-            Self::One(reclaimed) => reclaimed == shape_id,
-        }
-    }
-}
 
 impl<S> NodeState<S>
 where
@@ -29,17 +17,7 @@ where
         opts: RegisterShapeOptions,
     ) -> Result<(), Error> {
         let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
-        self.query
-            .registered_shape_options
-            .insert((shape_id, opts.read_view_key()), opts.clone());
-        // Legacy/default subscriptions carry `ReadViewKey::default()` rather
-        // than recomputing the options key. Preserve the received options at
-        // that wire identity as well; this is an alias, not reconstruction.
-        if opts == RegisterShapeOptions::default() {
-            self.query
-                .registered_shape_options
-                .insert((shape_id, ReadViewKey::default()), opts.clone());
-        }
+        self.record_shape_options(shape_id, opts);
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.query.locally_registered_shapes.insert(shape_id);
         Ok(())
@@ -90,14 +68,7 @@ where
             }
         }
 
-        self.query
-            .registered_shape_options
-            .insert((shape_id, opts.read_view_key()), opts.clone());
-        if opts == RegisterShapeOptions::default() {
-            self.query
-                .registered_shape_options
-                .insert((shape_id, ReadViewKey::default()), opts);
-        }
+        self.record_shape_options(shape_id, opts);
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.query
             .peer_shape_owners
@@ -105,6 +76,20 @@ where
             .or_default()
             .insert(peer);
         Ok(())
+    }
+
+    fn record_shape_options(&mut self, shape_id: ShapeId, opts: RegisterShapeOptions) {
+        // Legacy/default subscriptions carry `ReadViewKey::default()` rather
+        // than recomputing the options key. Preserve the received options at
+        // that wire identity as well; this is an alias, not reconstruction.
+        if opts == RegisterShapeOptions::default() {
+            self.query
+                .registered_shape_options
+                .insert((shape_id, ReadViewKey::default()), opts.clone());
+        }
+        self.query
+            .registered_shape_options
+            .insert((shape_id, opts.read_view_key()), opts);
     }
 
     fn retain_validated_shape_registration(
@@ -237,14 +222,7 @@ where
                 "served subscription read-view does not match its registration options",
             ));
         }
-        self.query
-            .registered_shape_options
-            .insert((shape_id, opts.read_view_key()), opts.clone());
-        if opts == RegisterShapeOptions::default() {
-            self.query
-                .registered_shape_options
-                .insert((shape_id, ReadViewKey::default()), opts);
-        }
+        self.record_shape_options(shape_id, opts);
         self.retain_validated_shape_registration(shape_id, ast, shape)?;
         let subscription = subscribe.subscription;
         self.apply_subscribe_with_admitted_policy_binding(subscribe, policy_binding.clone())?;
@@ -326,37 +304,29 @@ where
         {
             return;
         }
-        self.reclaim_shapes(ShapeReclamation::One(shape_id));
-    }
-
-    fn reclaim_shapes(&mut self, reclaimed: ShapeReclamation) {
-        match reclaimed {
-            ShapeReclamation::One(shape_id) => {
-                self.parking.parked_shape_registrations.remove(&shape_id);
-                self.parking.parked_binding_deltas.remove(&shape_id);
-                self.query.registered_shapes.remove(&shape_id);
-                self.query
-                    .registered_shape_options
-                    .retain(|(registered_shape, _), _| *registered_shape != shape_id);
-                self.query.registered_bindings.remove(&shape_id);
-            }
-        }
+        self.parking.parked_shape_registrations.remove(&shape_id);
+        self.parking.parked_binding_deltas.remove(&shape_id);
+        self.query.registered_shapes.remove(&shape_id);
+        self.query
+            .registered_shape_options
+            .retain(|(registered_shape, _), _| *registered_shape != shape_id);
+        self.query.registered_bindings.remove(&shape_id);
         self.query
             .query_shape_cache
-            .retain(|(shape_id, _, _), _| !reclaimed.contains(*shape_id));
+            .retain(|(cached_shape, _, _), _| *cached_shape != shape_id);
         self.query.compiled_query_program_cache.clear();
         self.query.query_program_templates.clear();
         self.query.supported_query_program_requests.clear();
         self.query
             .applied_view_update_generations
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
+            .retain(|key, _| key.shape_id != shape_id);
         self.query
             .authority_results
-            .retain(|key, _| !reclaimed.contains(key.binding_view.shape_id));
+            .retain(|key, _| key.binding_view.shape_id != shape_id);
 
         self.query
             .outbound_binding_owners
-            .retain(|(subscription, _), _| !reclaimed.contains(subscription.shape_id));
+            .retain(|(subscription, _), _| subscription.shape_id != shape_id);
     }
 
     #[cfg(test)]
@@ -423,26 +393,7 @@ where
                 "admitted subscription referenced unregistered shape",
             ));
         };
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
-        self.apply_known_shape_subscribe_with_authority_result_key(
-            &shape,
-            subscribe,
-            AuthorityResultKey::policy_scoped(binding_view_key, policy_binding),
-        )
+        self.apply_known_shape_subscribe(&shape, subscribe, Some(policy_binding))
     }
 
     /// Whether this receiver's installed supporting set for `subscription`
@@ -555,52 +506,10 @@ where
         subscribe: Subscribe,
         policy_binding: Option<crate::protocol::PolicyBindingKey>,
     ) -> Result<(), Error> {
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
+        let binding_view_key = subscribe_binding_view_key(shape, &subscribe)?;
         let authority_result_key = policy_binding
             .map(|policy| AuthorityResultKey::policy_scoped(binding_view_key, policy))
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
-        self.apply_known_shape_subscribe_with_authority_result_key(
-            shape,
-            subscribe,
-            authority_result_key,
-        )
-    }
-
-    fn apply_known_shape_subscribe_with_authority_result_key(
-        &mut self,
-        shape: &ValidatedQuery,
-        subscribe: Subscribe,
-        authority_result_key: AuthorityResultKey,
-    ) -> Result<(), Error> {
-        if subscribe.values.len() != shape.params().len() {
-            return Err(Error::InvalidStoredValue("binding arity mismatch"));
-        }
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(subscribe.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        let binding_view_key = BindingViewKey {
-            shape_id: subscribe.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: subscribe.subscription.read_view,
-        };
         let options = self
             .query
             .registered_shape_options
@@ -624,11 +533,6 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "subscription referenced unregistered read-view options",
             ))?;
-        if authority_result_key.binding_view != binding_view_key {
-            return Err(Error::InvalidStoredValue(
-                "subscription authority result binding view disagrees with usage",
-            ));
-        }
         if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receipt binding={binding_view_key:?} delegated={:?} authority={authority_result_key:?}",
@@ -1209,27 +1113,6 @@ where
         Ok(None)
     }
 
-    #[allow(dead_code)]
-    #[doc(hidden)]
-    pub fn subscription_is_known_state_declared(
-        &self,
-        subscription: SubscriptionKey,
-    ) -> Result<bool, Error> {
-        let authority_result_key = match self.authority_result_key_for_subscription(subscription) {
-            Ok(authority_result_key) => authority_result_key,
-            Err(Error::InvalidStoredValue(
-                "subscription referenced unregistered shape"
-                | "subscription referenced unregistered binding",
-            )) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        Ok(self
-            .query
-            .authority_results
-            .get(&authority_result_key)
-            .is_some_and(|state| state.known_state_declared))
-    }
-
     #[doc(hidden)]
     pub fn binding_view_key_for_subscription(
         &self,
@@ -1254,24 +1137,28 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Option<&RegisteredBinding> {
-        let bindings = self.query.registered_bindings.get(&subscription.shape_id)?;
-        let mut matches = bindings.iter().filter_map(|(key, binding)| {
-            (key.0 == subscription.binding_id && key.1 == subscription.read_view).then_some(binding)
-        });
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
+        self.unique_registered_binding_entry(subscription)
+            .map(|(_, binding)| binding)
     }
 
     fn unique_registered_binding_usage_key(
         &self,
         subscription: SubscriptionKey,
     ) -> Option<RegisteredBindingUsageKey> {
+        self.unique_registered_binding_entry(subscription)
+            .map(|(key, _)| key.clone())
+    }
+
+    fn unique_registered_binding_entry(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<(&RegisteredBindingUsageKey, &RegisteredBinding)> {
         let bindings = self.query.registered_bindings.get(&subscription.shape_id)?;
         let mut matches = bindings
-            .keys()
-            .filter(|key| key.0 == subscription.binding_id && key.1 == subscription.read_view);
-        let key = matches.next()?.clone();
-        matches.next().is_none().then_some(key)
+            .iter()
+            .filter(|(key, _)| key.0 == subscription.binding_id && key.1 == subscription.read_view);
+        let entry = matches.next()?;
+        matches.next().is_none().then_some(entry)
     }
 
     fn canonical_whole_table_binding_view_key(
@@ -1287,6 +1174,29 @@ where
         }
         Ok(None)
     }
+}
+
+/// The binding view a subscribe names: its shape bound to its parameter
+/// values, read through its read view.
+fn subscribe_binding_view_key(
+    shape: &ValidatedQuery,
+    subscribe: &Subscribe,
+) -> Result<BindingViewKey, Error> {
+    if subscribe.values.len() != shape.params().len() {
+        return Err(Error::InvalidStoredValue("binding arity mismatch"));
+    }
+    let value_map = shape
+        .params()
+        .keys()
+        .cloned()
+        .zip(subscribe.values.iter().cloned())
+        .collect::<BTreeMap<_, _>>();
+    let binding = shape.bind(value_map)?;
+    Ok(BindingViewKey {
+        shape_id: subscribe.shape_id,
+        binding_id: binding.binding_id(),
+        read_view: subscribe.subscription.read_view,
+    })
 }
 
 fn registered_binding_usage_key(
