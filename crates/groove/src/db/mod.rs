@@ -20,7 +20,10 @@ use std::task::{Poll, Waker};
 use futures::lock::Mutex as AsyncMutex;
 use web_time::{Duration, Instant};
 
-use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
+use crate::ivm::runtime::{
+    IndexIdRegistry, SharedIndexIds, durable_index_key_prefix, encode_key_part,
+    split_durable_index_key,
+};
 use crate::ivm::{
     IvmRuntime, PlannerError, PublicationId, QueryParameter, RecordDelta, RecordDeltas,
     RuntimeStats, TableDelta, TickMetrics, plan_prepared_shape, plan_query,
@@ -1354,7 +1357,7 @@ pub struct Database {
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
-    storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
+    storage_read_metrics: Rc<ReadMetricsSink>,
     /// Dense record descriptors are invariant for one table variant. Keep the
     /// interned handles beside the database schema so scans do not rebuild and
     /// re-hash the same logical field list once per stored row.
@@ -1429,6 +1432,8 @@ pub struct AppliedBatch {
     notifications_deferred: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     abandoned_application: Rc<Cell<bool>>,
+    /// Names durable index ids for write metrics.
+    index_ids: SharedIndexIds,
 }
 
 impl AppliedBatch {
@@ -1487,7 +1492,8 @@ impl AppliedBatch {
             .flat_map(|block| block.iter())
             .map(OwnedWriteOperation::as_write_operation)
             .collect::<Vec<_>>();
-        let storage_writes = StorageWriteMetrics::from_operations(&operations);
+        let storage_writes =
+            StorageWriteMetrics::from_operations(&operations, &self.index_ids.borrow());
         let storage_start = Instant::now();
         let outcome = match turn {
             Ok(()) => {
