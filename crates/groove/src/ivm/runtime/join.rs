@@ -735,6 +735,15 @@ impl ArrangementState {
         self.probe_missed.replace(false)
     }
 
+    /// Fail a read that missed a bucket nobody probed, rather than let it
+    /// read as empty. Kernels that read a copy of the state check the copy.
+    pub(super) fn check_probed_reads(&self) -> Result<(), IvmRuntimeError> {
+        if self.take_probe_miss() {
+            return Err(IvmRuntimeError::StoredArrangementUnprobed);
+        }
+        Ok(())
+    }
+
     /// Drop everything a stored arrangement held for one evaluation; storage
     /// holds its contents between evaluations.
     fn forget_stored_contents(&mut self) {
@@ -1271,6 +1280,43 @@ pub(super) fn join_output_mapping(
 
 #[cfg(test)]
 mod tests {
+    use super::{ArrangementState, JoinKey, ProbedBucket};
+    use crate::ivm::runtime::IvmRuntimeError;
+    use crate::ivm::runtime::stored_arrangement::StoredArrangementPlan;
+
+    fn probed_state(keys: &[&[u8]]) -> ArrangementState {
+        let mut state = ArrangementState::stored(StoredArrangementPlan::reading_nothing());
+        state.insert_probed(
+            keys.iter()
+                .map(|key| (JoinKey::from_slice(key), None::<ProbedBucket>)),
+        );
+        state
+    }
+
+    // Aggregate and CollectBy read a copy of the state; the copy must carry
+    // the miss so their reads fail like everyone else's.
+    #[test]
+    fn a_copy_of_a_stored_arrangement_reports_its_own_unprobed_reads() {
+        let state = probed_state(&[b"a"]);
+        let copy = state.clone();
+        assert!(copy.records_for_key(b"a").is_empty());
+        assert!(copy.check_probed_reads().is_ok());
+        assert!(copy.records_for_key(b"b").is_empty());
+        assert!(matches!(
+            copy.check_probed_reads(),
+            Err(IvmRuntimeError::StoredArrangementUnprobed)
+        ));
+        assert!(state.check_probed_reads().is_ok());
+    }
+
+    #[test]
+    fn an_unprobed_read_counts_once() {
+        let state = probed_state(&[]);
+        assert!(state.records_for_key(b"\0").is_empty());
+        assert!(state.take_probe_miss());
+        assert!(state.check_probed_reads().is_ok());
+    }
+
     // Public delta tests cover the results; only a private test can distinguish
     // an empty journal from an empty journal retaining hydration-sized buckets.
     #[test]

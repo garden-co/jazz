@@ -3171,6 +3171,8 @@ impl TickEvaluator<'_> {
                 }
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -3305,6 +3307,8 @@ impl TickEvaluator<'_> {
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
 
         Ok(RecordDeltas {
             descriptor: output_desc,
