@@ -166,7 +166,7 @@ describe("Jazz session lifecycle", () => {
     await rejected;
     await close;
     expect(late.shutdown).toHaveBeenCalledOnce();
-    expect(session.getSnapshot()).toEqual({ status: "closed" });
+    expect(session.getSnapshot()).toEqual({ status: "closed", needsLogin: false });
     await expect(session.retry()).rejects.toThrow("closed");
   });
   it("release unblocks close while transition awaits detach", async () => {

@@ -26,6 +26,10 @@ export interface AuthProviderConnection {
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
 const releases = new WeakMap<object, Promise<void>>();
+/** @internal Whether an auth provider connection currently drives this session's logins. */
+export function hasAuthProviderConnection(session: object): boolean {
+  return owners.has(session);
+}
 const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
 
 /** Reconcile a provider with an externally owned Jazz session.
