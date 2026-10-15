@@ -1447,7 +1447,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 
     assert_eq!(
         converged, "bob-offline-edit",
-        "bob-offline-edit should win via LWW (bob edited last → highest timestamp)"
+        "bob-offline-edit wins: his write reaches Core last (SPEC 4 §4.6)"
     );
 
     Arc::try_unwrap(alice)
@@ -1463,15 +1463,14 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     server.shutdown().await;
 }
 
-/// Online user (Alice) wins: her edits happen after Bob's offline edit, so
-/// they carry higher timestamps and win via LWW.
+/// The offline edit wins on reconnect although it is older: Core applies
+/// writes in the order it accepts them, whatever their clocks.
 ///
-/// Bob goes offline, makes one stale edit, then reconnects. But Alice has
-/// been online making further updates — so Alice's latest commit has a higher
-/// timestamp and wins. Unlike `offline_reconnect_replays_local_edit_after_rejoin`,
-/// Alice's
-/// commits are already on the server when Bob reconnects, so this scenario
-/// does not exercise the "push offline Fjall commits" path.
+/// Bob goes offline and makes one stale edit, then Alice, online, makes
+/// further updates with later timestamps. Unlike
+/// `offline_reconnect_replays_local_edit_after_rejoin`, Bob edits before
+/// Alice does. Bob's write still reaches Core last, so its title wins
+/// (SPEC 4 §4.6); history derives that it was made over an older image.
 ///
 /// ```text
 ///  online:   create → alice-v1 ──► bob syncs, sees v1
@@ -1479,24 +1478,21 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 ///                                   ▼ bob.shutdown() (goes offline)
 ///
 ///  bob (offline): v1 → bob-offline-edit           (earlier ts — bob edits first in code)
-///  alice (online): v1 → alice-v2 → alice-v3 → alice-v4  (later ts — alice edits after bob)
+///  alice (online): v1 → alice-v2 → alice-v3 → alice-v4  (later ts, accepted first)
 ///
 ///                                   ▼ bob reconnects to server
 ///
-///  DAG after sync:
-///     v1 → alice-v2 → alice-v3 → alice-v4   (tip, ts=highest)
-///     v1 → bob-offline-edit                  (tip, ts=lower)
-///
-///  LWW winner: alice-v4 (higher timestamp — alice edited last)
+///  Core's order: alice-v2, alice-v3, alice-v4, bob-offline-edit
+///  winner: bob-offline-edit (accepted last)
 /// ```
 #[tokio::test]
-async fn online_user_wins_on_reconnect() {
+async fn older_offline_edit_wins_by_arrival_on_reconnect() {
     tokio::task::LocalSet::new()
-        .run_until(online_user_wins_on_reconnect_impl())
+        .run_until(older_offline_edit_wins_by_arrival_on_reconnect_impl())
         .await
 }
 
-async fn online_user_wins_on_reconnect_impl() {
+async fn older_offline_edit_wins_by_arrival_on_reconnect_impl() {
     let _suite_guard = lock_history_conflict_suite().await;
     let OfflineReconnectBaseline {
         server,
@@ -1544,7 +1540,7 @@ async fn online_user_wins_on_reconnect_impl() {
 
     bob_offline.shutdown().await.expect("bob offline shutdown");
 
-    // --- Phase 4: Alice makes 3 more updates (later timestamps — alice wins). ---
+    // --- Phase 4: Alice makes 3 more updates (later timestamps). ---
 
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
@@ -1575,30 +1571,22 @@ async fn online_user_wins_on_reconnect_impl() {
         .await
         .expect("bob reconnects online");
 
-    // --- Phase 6: Both converge on alice-v4 (alice edited last → highest ts). ---
+    // --- Phase 6: Both converge on bob's edit, which Core accepted last. ---
 
-    wait_for_query(
-        &bob_online,
-        query.clone(),
-        jazz::tools::ReadTier::Remote,
-        QUERY_TIMEOUT,
-        "bob sees alice-v4 after reconnect",
-        |rows| {
-            (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v4".to_string())).then_some(())
-        },
-    )
-    .await;
-
-    let alice_rows = alice
-        .query(query, jazz::tools::ReadTier::Remote)
-        .await
-        .map(jazz::tools::test_support::ordinary_rows)
-        .expect("alice final query");
-    assert_eq!(
-        alice_rows[0].1[0],
-        Value::Text("alice-v4".to_string()),
-        "alice still sees alice-v4"
-    );
+    for (client, who) in [(&bob_online, "bob"), (&alice, "alice")] {
+        wait_for_query(
+            client,
+            query.clone(),
+            jazz::tools::ReadTier::Remote,
+            QUERY_TIMEOUT,
+            &format!("{who} sees bob-offline-edit after bob reconnects"),
+            |rows| {
+                (rows.len() == 1 && rows[0].1[0] == Value::Text("bob-offline-edit".to_string()))
+                    .then_some(())
+            },
+        )
+        .await;
+    }
 
     alice.shutdown().await.expect("shutdown alice");
     bob_online.shutdown().await.expect("shutdown bob");

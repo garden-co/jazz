@@ -127,15 +127,11 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
 
   return {
-    client: new JazzClientCtor(runtime, context, "global"),
+    client: new JazzClientCtor(runtime, context),
     runtime,
     insertCalls,
     restoreCalls,

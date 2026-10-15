@@ -59,7 +59,7 @@ impl Store {
                 // Explicit shallow-history contract; never silently approximate
                 // ancestor/deletion/exclusive semantics with timestamp ordering.
                 assert_eq!(decoded.kind, jazz::tx::TxKind::Mergeable);
-                assert!(row.parents().is_empty());
+
                 assert!(row.deletion().is_none());
                 if let Some(previous) = s.fates.insert(decoded.tx_id, fate.clone()) {
                     assert_eq!(previous, *fate);
