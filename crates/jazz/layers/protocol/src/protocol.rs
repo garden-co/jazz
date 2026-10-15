@@ -985,8 +985,9 @@ mod version_record_wire_row {
     // enum registry/case schemas. Row bytes are produced by the encoder;
     // untrusted receipt admission is separate from this representation codec.
     //
-    // Every row of a view update repeats its descriptor, so a miss costs a
-    // full descriptor encode or canonical decode per row. Retain enough
+    // A message defines each descriptor once in its table, and rows encoded
+    // outside a message define theirs inline, so a miss costs a full
+    // descriptor encode or canonical decode per definition. Retain enough
     // distinct descriptors (tables x schema versions x nested shapes) that a
     // multi-table stream does not evict itself; lookups are hashed so the
     // larger bound does not turn each hit into a linear scan.
@@ -1699,7 +1700,7 @@ mod version_record_wire_row {
             type Value = OwnedRecord;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JVRR v2 row byte blob")
+                formatter.write_str("a JVRR v3 row byte blob")
             }
 
             fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
