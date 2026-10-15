@@ -90,6 +90,10 @@ fn frontier_team_rows() -> RelationExpr {
 /// Step form emitted by the TypeScript query builder: hop the parent FK back
 /// to a `teams` row and project that row.
 fn joined_parent_step(target_column: &str) -> RelationExpr {
+    joined_parent_step_projecting(target_column, "id")
+}
+
+fn joined_parent_step_projecting(target_column: &str, projected_column: &str) -> RelationExpr {
     RelationExpr::Project {
         input: Box::new(RelationExpr::Join {
             left: Box::new(frontier_team_rows()),
@@ -102,7 +106,7 @@ fn joined_parent_step(target_column: &str) -> RelationExpr {
         }),
         columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelationProjectExpr::Column(column("__recursive_hop_0", "id")),
+            expr: RelationProjectExpr::Column(column("__recursive_hop_0", projected_column)),
         }],
     }
 }
@@ -287,4 +291,90 @@ fn non_row_id_dedupe_key_is_rejected() {
         *dedupe_key = vec![RelationKeyRef::Column(column("teams", "owner_id"))];
     });
     assert_both_reject(&rel);
+}
+
+#[test]
+fn step_projecting_another_target_column_as_id_is_rejected() {
+    // Projecting `hop.parent` makes the next frontier the grandparent, which
+    // a one-hop parent edge cannot express.
+    assert_both_reject(&gather(joined_parent_step_projecting("id", "parent")));
+}
+
+/// Gather from a seed whose rows hop to `teams` before starting the frontier.
+fn gather_from_seed(seed: RelationExpr) -> RelationExpr {
+    let RelationExpr::Gather {
+        step,
+        frontier_key,
+        bound,
+        dedupe_key,
+        ..
+    } = gather(scalar_parent_step())
+    else {
+        unreachable!("gather builds a Gather");
+    };
+    RelationExpr::Gather {
+        seed: Box::new(seed),
+        step,
+        frontier_key,
+        bound,
+        dedupe_key,
+    }
+}
+
+fn hopped_seed(target_column: &str, join_kind: RelationJoinKind) -> RelationExpr {
+    RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(owned_teams_seed()),
+            right: Box::new(scan("teams", Some("hop"))),
+            on: vec![RelationJoinCondition {
+                left: column("teams", "parent"),
+                right: column("hop", target_column),
+            }],
+            join_kind,
+        }),
+        columns: vec![RelationProjectColumn {
+            alias: "id".to_owned(),
+            expr: RelationProjectExpr::Column(column("hop", "id")),
+        }],
+    }
+}
+
+#[test]
+fn policy_seed_hop_onto_the_target_id_starts_from_the_hop() {
+    let edge = policy_lowering(&gather_from_seed(hopped_seed(
+        "id",
+        RelationJoinKind::Inner,
+    )))
+    .expect("an inner seed hop onto the target id lowers");
+    assert_eq!(edge, expected_edge(RecursionBound::MaxDepth(4)));
+}
+
+#[test]
+fn policy_seed_hop_onto_a_non_id_target_column_is_rejected() {
+    let lowered = policy_lowering(&gather_from_seed(hopped_seed(
+        "owner_id",
+        RelationJoinKind::Inner,
+    )));
+    assert!(lowered.is_err(), "{lowered:#?}");
+}
+
+#[test]
+fn policy_left_seed_hop_is_rejected() {
+    let lowered = policy_lowering(&gather_from_seed(hopped_seed("id", RelationJoinKind::Left)));
+    assert!(lowered.is_err(), "{lowered:#?}");
+}
+
+#[test]
+fn policy_seed_claim_inequality_does_not_key_the_seed() {
+    // `owner_id != me` must not become the claim-keyed seed `owner_id = me`.
+    let seed = filter(
+        scan("teams", None),
+        RelationPredicate::Cmp {
+            left: column("teams", "owner_id"),
+            op: RelationCmpOp::Ne,
+            right: RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+        },
+    );
+    let lowered = policy_lowering(&gather_from_seed(seed));
+    assert!(lowered.is_err(), "{lowered:#?}");
 }
