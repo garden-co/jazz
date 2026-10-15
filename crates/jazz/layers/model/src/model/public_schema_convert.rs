@@ -2633,18 +2633,19 @@ fn lower_gather_step(
                     "Gather recursive hops other than an inner join from an edge FK to the output id are not supported in policies yet",
                 ));
             }
-            // The next frontier is the projected `id`; it must be the joined
-            // parent row's own id, or the step walks somewhere else.
-            let projects_output_id = columns.iter().any(|column| {
+            // The next frontier is the hop target's row id. A projection may
+            // carry target columns, but an `id` alias must still be that row's
+            // id or the step walks somewhere else.
+            let relabels_id = columns.iter().any(|column| {
                 column.alias == "id"
-                    && matches!(
+                    && !matches!(
                         &column.expr,
                         RelationProjectExpr::Column(RelationColumnRef { scope, column })
                             if column == "id"
                                 && scope.as_deref().is_none_or(|scope| scope == output_scope)
                     )
             });
-            if !projects_output_id {
+            if relabels_id {
                 return Err(err(
                     policy_path(table, path),
                     "Gather recursive hops projecting anything but the output row id as id are not supported in policies yet",
