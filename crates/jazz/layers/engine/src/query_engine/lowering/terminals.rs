@@ -4276,11 +4276,6 @@ struct VersionWitnessFieldRefs {
     pub(super) branch_or_prefix_field: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct CoverageFieldRefs {
-    pub(super) coverage_field: String,
-}
-
 fn version_witness_fields(row_shape: &SourceRowShape) -> CapabilityResult<VersionWitnessFieldRefs> {
     match row_shape
         .metadata
@@ -4312,17 +4307,6 @@ fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
             settle_position_field,
         }) => Some(settle_position_field.clone()),
         _ => None,
-    }
-}
-
-fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<CoverageFieldRefs> {
-    match row_shape.metadata.get(&SourceMetadataRequirement::Coverage) {
-        Some(SourceMetadataFields::Coverage { coverage_field }) => Ok(CoverageFieldRefs {
-            coverage_field: coverage_field.clone(),
-        }),
-        _ => Err(CapabilityReport::runtime(
-            "resolved source did not provide coverage fields",
-        )),
     }
 }
 

@@ -33,18 +33,6 @@ pub enum QueryAuthorizationMode {
     ClientLocal,
 }
 
-/// Normalizes every public query surface into the same row-set shape algebra.
-pub trait RowSetNormalizer {
-    /// Normalize ordinary table-rooted Jazz queries.
-    fn normalize_query(&self, query: &Query) -> CapabilityResult<NormalizedRowSetShape>;
-
-    /// Normalize output-changing relation queries such as `hopTo`/`gather`.
-    fn normalize_relation_query(
-        &self,
-        query: &RelationQuery,
-    ) -> CapabilityResult<NormalizedRowSetShape>;
-}
-
 /// Normalized row-set query plus this caller's binding values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowSetProgramInput {
