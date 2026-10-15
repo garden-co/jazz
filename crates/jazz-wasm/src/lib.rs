@@ -43,7 +43,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
-mod identity;
+use jazz::identity;
 
 #[cfg(feature = "bench-probes")]
 pub mod bench_probes;
