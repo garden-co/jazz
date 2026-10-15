@@ -275,18 +275,38 @@ where
         versions: &[VersionRecord],
     ) -> Result<Option<RejectionReason>, Error> {
         let batch = self.database.open_batch();
+        // Writes of the unit's node that applying it passes over, recorded
+        // once the unit passes every check here (`passed_over_predecessor`).
+        let mut passed_over = Vec::new();
         for version in versions {
             let schema_version = version.schema_version();
+            let (current_seq, current_writer) = self
+                .global_current_seq_and_writer_in_batch(
+                    &batch,
+                    schema_version,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                )
+                .await?
+                .unwrap_or((None, None));
+            if let Some(reason) = self
+                .late_write_refusal(
+                    &batch,
+                    schema_version,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                    version.base(),
+                    tx_id,
+                    current_seq,
+                    current_writer,
+                )
+                .await?
+            {
+                return Ok(Some(RejectionReason::MalformedCommit(reason)));
+            }
             if !version.base().is_empty() {
-                let current_seq = self
-                    .global_current_seq_in_batch(
-                        &batch,
-                        schema_version,
-                        version.table(),
-                        version.branch_key(),
-                        version.row_uuid(),
-                    )
-                    .await?;
                 if let Err(reason) = self
                     .validate_write_base(
                         &batch,
@@ -302,6 +322,12 @@ where
                 {
                     return Ok(Some(RejectionReason::MalformedCommit(reason)));
                 }
+            }
+            if let Some(through) = self
+                .passed_over_predecessor(version.base(), tx_id, current_writer)
+                .await?
+            {
+                passed_over.push((version, through));
             }
             let table_schema = self.table_in_schema(version.table(), schema_version)?;
             let authored = version.authored_columns();
@@ -402,6 +428,17 @@ where
                     ))));
                 }
             }
+        }
+        drop(batch);
+        for (version, through) in passed_over {
+            self.record_superseded_writes(
+                self.physical_table_id_for_schema(version.schema_version(), version.table())?,
+                version.branch_key(),
+                version.row_uuid(),
+                tx_id.node,
+                through,
+            )
+            .await?;
         }
         Ok(None)
     }
@@ -602,6 +639,29 @@ where
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<Option<GlobalTime>, Error> {
+        Ok(self
+            .global_current_seq_and_writer_in_batch(
+                batch,
+                schema_version,
+                table,
+                branch_key,
+                row_uuid,
+            )
+            .await?
+            .and_then(|(seq, _)| seq))
+    }
+
+    /// The row's current accepted seq and the transaction that wrote its
+    /// current image, read from the one global-current record. `None` when
+    /// the row has no global-current record.
+    pub(super) async fn global_current_seq_and_writer_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(Option<GlobalTime>, Option<TxId>)>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -621,11 +681,18 @@ where
         else {
             return Ok(None);
         };
+        let record = raw.record();
         // `global_time` is a nullable field: read it as one.
-        Ok(raw
-            .record()
+        let seq = record
             .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
-            .map(GlobalTime))
+            .map(GlobalTime);
+        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias =
+            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let writer = self
+            .node_for_alias(tx_node_alias)
+            .map(|node| TxId::new(tx_time, node));
+        Ok(Some((seq, writer)))
     }
 
     async fn query_global_winner_in_batch(
@@ -895,91 +962,6 @@ where
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
-        let overlay_key = self.ahead_overlay_key(version)?;
-        if self.ahead_current_keys.contains_key(&overlay_key) {
-            self.mark_ahead_shadow_dirty(schema_version, version, true);
-        }
-        Ok(())
-    }
-
-    /// `shadow_may_exist` is false only when the row just gained its overlay:
-    /// a row without an overlay has no shadow, so there is nothing to delete
-    /// if its synced image is also absent.
-    fn mark_ahead_shadow_dirty(
-        &mut self,
-        schema_version: SchemaVersionId,
-        version: &VersionRow,
-        shadow_may_exist: bool,
-    ) {
-        self.ahead_shadow_dirty.push((
-            schema_version,
-            version.table().to_owned(),
-            version.branch_key().clone(),
-            version.row_uuid(),
-            shadow_may_exist,
-        ));
-    }
-
-    /// Bring the shadow copy of every row touched in this batch in line:
-    /// a row with an overlay shadows its synced image (as the batch leaves
-    /// it), a row without one has no shadow.
-    pub(in crate::node) async fn flush_ahead_shadows(
-        &mut self,
-        batch: &mut DatabaseBatch,
-    ) -> Result<(), Error> {
-        if self.ahead_shadow_dirty.is_empty() {
-            return Ok(());
-        }
-        let mut dirty = std::mem::take(&mut self.ahead_shadow_dirty);
-        dirty.sort_by(|a, b| (&a.1, &a.2, a.3).cmp(&(&b.1, &b.2, b.3)));
-        dirty.dedup_by(|later, kept| {
-            let same_row = later.1 == kept.1 && later.2 == kept.2 && later.3 == kept.3;
-            if same_row {
-                kept.4 |= later.4;
-            }
-            same_row
-        });
-        for (schema_version, table, branch_key, row_uuid, shadow_may_exist) in dirty {
-            let table_id = self.physical_table_id_for_schema(schema_version, &table)?;
-            let primary_key = global_current_primary_key(&branch_key, row_uuid);
-            let shadow = self.physical_current_table_for_schema(
-                schema_version,
-                &table,
-                PhysicalCurrentClass::AheadShadow,
-            )?;
-            if !self
-                .ahead_current_keys
-                .contains_key(&(table_id, primary_key.clone().into_bytes()))
-            {
-                batch.delete(shadow, primary_key);
-                continue;
-            }
-            let global = self.physical_current_table_for_schema(
-                schema_version,
-                &table,
-                PhysicalCurrentClass::Global,
-            )?;
-            let raw = self
-                .database
-                .primary_key_get_raw_in_batch(
-                    batch,
-                    &global,
-                    &[
-                        Value::Bytes(branch_key.canonical_bytes()),
-                        Value::Uuid(row_uuid.0),
-                    ],
-                )
-                .await?;
-            match raw {
-                Some(raw) => {
-                    let (_, record) = raw.into_variant_parts();
-                    batch.update_raw(shadow, primary_key, record);
-                }
-                // No overlay before this batch means no shadow to remove.
-                None if !shadow_may_exist => {}
-                None => batch.delete(shadow, primary_key),
-            }
-        }
         Ok(())
     }
 
@@ -1021,9 +1003,7 @@ where
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
-        if self.ahead_current_keys.insert(overlay_key, tx_id).is_none() {
-            self.mark_ahead_shadow_dirty(schema_version, version, false);
-        }
+        self.ahead_current_keys.insert(overlay_key, tx_id);
         Ok(())
     }
 
@@ -1070,7 +1050,6 @@ where
         )?;
         batch.delete(table, primary_key);
         self.ahead_current_keys.remove(&overlay_key);
-        self.mark_ahead_shadow_dirty(schema_version, version, true);
         Ok(true)
     }
 
@@ -1140,15 +1119,8 @@ where
         }
         if let Some(image) = image {
             let key = self.ahead_overlay_key(&image)?;
-            let had_overlay = self.ahead_current_keys.remove(&key).is_some();
+            self.ahead_current_keys.remove(&key);
             self.write_ahead_current_insert(batch, &image)?;
-            if had_overlay {
-                // The replaced overlay may have left a shadow behind.
-                let image_schema_version = self
-                    .schema_version_for_alias(image.schema_version_alias())
-                    .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-                self.mark_ahead_shadow_dirty(image_schema_version, &image, true);
-            }
         }
         Ok(())
     }

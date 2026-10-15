@@ -2711,7 +2711,9 @@ impl OversizedSnapshotLink {
             let mut bytes = [0x78; 16];
             bytes[..2].copy_from_slice(&id.to_be_bytes());
             let row = RowUuid::from_bytes(bytes);
-            let title = format!("{id:04}-{}", "x".repeat(1500));
+            // Exceed the split threshold with payload bytes alone, independently
+            // of record-descriptor encoding overhead.
+            let title = format!("{id:04}-{}", "x".repeat(3000));
             server
                 .insert_with_id("todos", row, cells(&title, id % 2 == 0, alice))
                 .unwrap();
@@ -2737,6 +2739,7 @@ impl OversizedSnapshotLink {
     /// completes the final part: the client holds the earlier parts and the
     /// sequence is incomplete. Returns the withheld frame.
     fn deliver_all_but_the_final_frame(&self) -> Vec<Vec<u8>> {
+        let mut max_queued = 0;
         for _ in 0..16 {
             self.client.tick().unwrap();
             self.subscriber.borrow_mut().tick().unwrap();
@@ -2746,6 +2749,7 @@ impl OversizedSnapshotLink {
                 .iter()
                 .map(Vec::len)
                 .sum::<usize>();
+            max_queued = max_queued.max(queued);
             if queued > OVERSIZED_SNAPSHOT_LIMIT {
                 let mut frames = std::mem::take(&mut *self.client_inbound.borrow_mut());
                 let withheld = frames.split_off(frames.len() - 1);
@@ -2754,7 +2758,7 @@ impl OversizedSnapshotLink {
                 return withheld.into();
             }
         }
-        panic!("the server never sent the oversized snapshot");
+        panic!("the server never sent the oversized snapshot: at most {max_queued} bytes queued");
     }
 }
 

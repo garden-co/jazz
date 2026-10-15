@@ -1,4 +1,4 @@
-//! Authentication extractors and validation.
+//! Request authentication and validation.
 //!
 //! # Auth Methods
 //!
@@ -25,10 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::{
-    extract::FromRequestParts,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
-};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use base64::Engine;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation,
@@ -40,11 +37,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
 use tracing::warn;
 
-use crate::server::ServerState;
 use jazz::tools::AppId;
 use jazz::tools::Session;
 use jazz::tools::identity;
-use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
+use jazz::tools::transport_error::UnauthenticatedResponse;
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -731,145 +727,6 @@ fn read_auth_token_from_cookie<'a>(headers: &'a HeaderMap, config: &AuthConfig) 
         .get(axum::http::header::COOKIE)
         .and_then(|value| value.to_str().ok())?;
     extract_cookie_value(cookie_header, cookie_name).map(str::trim)
-}
-
-// ============================================================================
-// Extractors
-// ============================================================================
-
-/// Extracts and validates JWT from `Authorization: Bearer <token>` header.
-///
-/// Returns `Some(Session)` if a valid JWT is present, `None` if no auth header.
-/// Returns an error if the JWT is present but invalid.
-#[allow(dead_code)]
-pub struct JwtAuth(pub Option<Session>);
-
-impl FromRequestParts<Arc<ServerState>> for JwtAuth {
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<ServerState>,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-
-        let Some(auth_value) = auth_header else {
-            return Ok(JwtAuth(None));
-        };
-
-        let Some(token) = auth_value.strip_prefix("Bearer ") else {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "Invalid Authorization header format".to_string(),
-            ));
-        };
-
-        let jwt_result = if let Some(ref verifier) = state.jwt_verifier {
-            verifier
-                .validate_at(
-                    token,
-                    &state.auth_config,
-                    state.auth_config.clock.now_seconds(),
-                )
-                .await
-        } else {
-            Err(JwtError::NoKeyConfigured)
-        };
-
-        match jwt_result {
-            Ok(verified) => {
-                let session = resolve_verified_jwt_session(verified)
-                    .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
-                Ok(JwtAuth(Some(session)))
-            }
-            Err(JwtError::NoKeyConfigured) => Err((
-                StatusCode::UNAUTHORIZED,
-                "JWT auth is not enabled for this app".to_string(),
-            )),
-            Err(JwtError::Expired) => {
-                Err((StatusCode::UNAUTHORIZED, "JWT has expired".to_string()))
-            }
-            Err(JwtError::Invalid(message)) => Err((StatusCode::UNAUTHORIZED, message)),
-            Err(JwtError::Unavailable(message)) => Err((StatusCode::SERVICE_UNAVAILABLE, message)),
-        }
-    }
-}
-
-/// Extracts backend secret from `X-Jazz-Backend-Secret` header.
-#[allow(dead_code)]
-pub struct BackendAuth(pub Option<String>);
-
-impl<S> FromRequestParts<S> for BackendAuth
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, &'static str);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let secret = parts
-            .headers
-            .get("X-Jazz-Backend-Secret")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        Ok(BackendAuth(secret))
-    }
-}
-
-/// Extracts admin secret from `X-Jazz-Admin-Secret` header.
-#[allow(dead_code)]
-pub struct AdminAuth(pub Option<String>);
-
-impl<S> FromRequestParts<S> for AdminAuth
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, &'static str);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let secret = parts
-            .headers
-            .get("X-Jazz-Admin-Secret")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        Ok(AdminAuth(secret))
-    }
-}
-
-/// Resolved session from request headers.
-///
-/// Resolution priority:
-/// 1. Backend impersonation (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
-/// 2. JWT auth (`Authorization: Bearer`)
-/// 3. No session
-#[allow(dead_code)]
-pub struct RequestSession(pub Option<Session>);
-
-impl FromRequestParts<Arc<ServerState>> for RequestSession {
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<ServerState>,
-    ) -> Result<Self, Self::Rejection> {
-        let session = extract_session(
-            &parts.headers,
-            state.app_id,
-            &state.auth_config,
-            state.jwt_verifier.as_deref(),
-        )
-        .await
-        .map_err(|error| {
-            let status = match error.code {
-                UnauthenticatedCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                _ => StatusCode::UNAUTHORIZED,
-            };
-            (status, error.message)
-        })?;
-        Ok(RequestSession(session))
-    }
 }
 
 // ============================================================================

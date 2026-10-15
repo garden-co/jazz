@@ -443,7 +443,10 @@ async function ensureLocalSnapshot(
   return writeSnapshotSchema(schemaDir, migrationsDir, schema.hash, schema.schema);
 }
 
-function requireServerValue(value: string | undefined, kind: "serverUrl" | "adminSecret"): string {
+export function requireServerValue(
+  value: string | undefined,
+  kind: "serverUrl" | "adminSecret",
+): string {
   if (value) {
     return value;
   }
@@ -457,7 +460,7 @@ function requireServerValue(value: string | undefined, kind: "serverUrl" | "admi
   throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
 }
 
-function requireAppId(appId: string | undefined): string {
+export function requireAppId(appId: string | undefined): string {
   if (appId) {
     return appId;
   }

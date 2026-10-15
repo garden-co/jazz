@@ -737,6 +737,16 @@ fn relation_gather_step(
             "gather step must project only its forward-hop target",
         ));
     }
+    // The next frontier is the hop target's row id. An `id` alias must still
+    // be that row's id; relabeling another target column would walk elsewhere.
+    if columns.iter().any(|column| {
+        column.alias == "id"
+            && !matches!(&column.expr, RelationProjectExpr::Column(column) if column.column == "id")
+    }) {
+        return Err(relation_unification_error(
+            "gather step must not project another target column as id",
+        ));
+    }
 
     let filters = relation_gather_step_filters(left)?;
     let frontier_filter = filters.iter().find_map(|predicate| match predicate {

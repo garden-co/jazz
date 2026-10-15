@@ -296,7 +296,7 @@ patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
 `base_pending` (SPEC 4 §4.6). Beside them: a
 global-current record per row with `global_time` (the row's seq) and index
 `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
-`(branch_key, row_uuid)` with its `ahead_shadow` copy; and `_deletion` as an
+`(branch_key, row_uuid)`; and `_deletion` as an
 ordinary nullable cell. No row state carries a timestamp used for merging.
 The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
@@ -387,8 +387,8 @@ accepted/reopen/rebuild receipts for the same coordinate.
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
-  and branch mappings), `jazz_catalogue`, and
-  `jazz_catalogue_pointer`;
+  and branch mappings), and `jazz_catalogue` (including the required active
+  schema selection);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
@@ -416,19 +416,31 @@ by Groove's storage epoch; this section freezes logical record and transport
 bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
 **Transaction audit record.** `jazz_transactions` has permanent logical field
-positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+positions `0..=16`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
 made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
-view_scoped_cardinality_marker, fate, global_time, rejection_reason,
-cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+is_partial: bool, fate, global_time, rejection_reason, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
 `None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
-`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
-`view-scoped-cardinality` marker is exactly the internal string
-`"view-scoped-cardinality"` in retained position 12; it says only that the
-stored `n_total_writes` is view-redacted, and is cleared when a complete payload
-arrives. Fate/global time and durability remain separate lattice observations:
+`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
+
+Rejection reasons use a Groove payload enum. Cases 0–3 have empty payloads;
+`Cascade` has one required `root: Tuple<U64, Uuid>`, and `MalformedCommit`
+has one required `message: String` (an empty message is allowed).
+The audit row's reason is nullable and must be present when fate is rejected.
+The retry store `jazz_rejected_transactions` uses the same enum, required,
+with fields `(time, node_id, kind, made_by, rejection_reason, user_metadata)`.
+
+The `is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
+`jazz.transaction-record.v1`. True means the transaction was learned from
+selected fragments, so `n_total_writes` is not an authoritative total. A
+complete payload clears the flag; later fragments do not downgrade it.
+False does not guarantee that every row remains cached after eviction.
+This encoding receipt is covered by the `jazz.node-storage.v1` root profile.
+Roots with the former nullable string field lack that profile marker and are refused
+at manifest admission, without migration or a physical epoch/wire bump.
+Fate/global time and durability remain separate lattice observations:
 accepted/global uses an authority `GlobalTime`, rejection has no global winner,
 and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot

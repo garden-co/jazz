@@ -64,5 +64,11 @@ wasm-opt = ["-O", "-g"]
 # and it preserves the wasm `name` section so function names appear in profilers.
 # wasm-pack only recognizes the profile names `dev`/`profiling`/`release`; any other
 # name is silently ignored and wasm-pack falls back to its built-in defaults.
+# `--low-memory-unused` lets wasm-opt fold `ptr + constant` into load/store
+# offsets. The two forms differ only when `ptr + constant` wraps past 4 GiB into
+# the first 1 KiB, which no valid Rust access does: that address range is the
+# bottom of the shadow stack, reached only by a stack overflow, which then traps
+# instead of silently corrupting memory. It cuts gzip by 2.75% and measured
+# neutral-to-faster in the fresh-Chromium read/write benchmarks.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "-g"]
+wasm-opt = ["-O", "-g", "--low-memory-unused"]

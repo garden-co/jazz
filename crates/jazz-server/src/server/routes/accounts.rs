@@ -109,9 +109,7 @@ pub(super) async fn resolve_for_admin(
     Json(request): Json<RequestLink>,
 ) -> Result<Json<AccountResponse>, Failure> {
     crate::middleware::auth::validate_admin_secret(
-        headers
-            .get("x-jazz-admin-secret")
-            .and_then(|value| value.to_str().ok()),
+        super::http::admin_secret_header(&headers),
         &state.auth_config,
     )?;
     let assignment = owner(&state)?

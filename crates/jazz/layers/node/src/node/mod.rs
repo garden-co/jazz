@@ -56,8 +56,8 @@ use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
 };
 use crate::schema::{
-    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE,
-    SETTLED_PROGRAM_FACTS_STORE, TableSchema, registered_column_transform,
+    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, SUPERSEDED_WRITES_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{
@@ -314,6 +314,94 @@ fn hydrate_nested_payload_enum_cases(
         _ => {}
     }
     Ok(())
+}
+
+/// The local delta's rows, held in memory: overlay row key (physical table,
+/// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
+/// image it holds, plus how many rows each physical table holds under each
+/// branch key. No caller needs ordering, so the maps use the low-overhead
+/// deterministic hasher.
+///
+/// The per-branch-key count is what a read pays to mask origin by the
+/// delta's whole presence, known without reading storage (see
+/// `JazzSourceGraphPreparer::local_mask_read`). It is kept per branch key
+/// because that read covers only the read's own branch keys: a large draft
+/// branch's pending rows cost nothing to a read of another branch.
+#[derive(Debug, Default)]
+pub(in crate::node) struct AheadCurrentKeys {
+    keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
+    /// Physical table -> encoded branch-key part of the overlay key
+    /// ([`global_current_key_branch_prefix`]) -> rows. Holds no zero counts.
+    rows_per_branch: FxHashMap<PhysicalTableId, FxHashMap<Vec<u8>, usize>>,
+}
+
+impl AheadCurrentKeys {
+    pub(in crate::node) fn get(&self, key: &(PhysicalTableId, Vec<u8>)) -> Option<&TxId> {
+        self.keys.get(key)
+    }
+
+    pub(in crate::node) fn contains_key(&self, key: &(PhysicalTableId, Vec<u8>)) -> bool {
+        self.keys.contains_key(key)
+    }
+
+    pub(in crate::node) fn insert(
+        &mut self,
+        key: (PhysicalTableId, Vec<u8>),
+        tx_id: TxId,
+    ) -> Option<TxId> {
+        let table_id = key.0;
+        let branch = global_current_key_branch_prefix(&key.1).to_vec();
+        let previous = self.keys.insert(key, tx_id);
+        if previous.is_none() {
+            *self
+                .rows_per_branch
+                .entry(table_id)
+                .or_default()
+                .entry(branch)
+                .or_default() += 1;
+        }
+        previous
+    }
+
+    pub(in crate::node) fn remove(&mut self, key: &(PhysicalTableId, Vec<u8>)) -> Option<TxId> {
+        let removed = self.keys.remove(key);
+        if removed.is_some()
+            && let Some(branches) = self.rows_per_branch.get_mut(&key.0)
+        {
+            let branch = global_current_key_branch_prefix(&key.1);
+            if let Some(rows) = branches.get_mut(branch) {
+                *rows -= 1;
+                if *rows == 0 {
+                    branches.remove(branch);
+                }
+            }
+            if branches.is_empty() {
+                self.rows_per_branch.remove(&key.0);
+            }
+        }
+        removed
+    }
+
+    pub(in crate::node) fn clear(&mut self) {
+        self.keys.clear();
+        self.rows_per_branch.clear();
+    }
+
+    /// How many pending rows `table_id`'s local delta holds under
+    /// `branch_key`.
+    pub(in crate::node) fn branch_rows(
+        &self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+    ) -> usize {
+        self.rows_per_branch
+            .get(&table_id)
+            .and_then(|branches| {
+                branches.get(global_current_branch_key_prefix(branch_key).as_slice())
+            })
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 pub mod api_error;
@@ -599,15 +687,9 @@ pub struct NodeState<S = BoxedStorage> {
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
     absent_node_alias: Option<NodeUuid>,
-    /// Exact ahead-current keys used to make peer replay idempotent. No caller
-    /// needs ordering, so use the low-overhead deterministic hasher here.
-    /// Overlay row key -> the pending transaction whose image it holds.
-    ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
-    /// Rows whose overlay or synced image changed in the open batch; their
-    /// shadow copies are brought in line by `flush_ahead_shadows`. The flag
-    /// says whether the row may already hold a shadow (it had an overlay
-    /// before this batch touched it).
-    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
+    /// Exact ahead-current keys used to make peer replay idempotent, and
+    /// how many each physical table holds.
+    ahead_current_keys: AheadCurrentKeys,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
     /// the transaction's `jazz_tx_touched_rows` list.
@@ -948,6 +1030,9 @@ struct Parking {
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
+    /// The newest `now_ms` an authority commit ingest has seen: the clock a
+    /// write's wait behind a parked predecessor is bounded by.
+    newest_ingest_ms: u64,
 }
 
 /// Recently stored transaction versions with a row-addressable cache view.
@@ -2483,6 +2568,11 @@ pub struct QueryEngineReadMetrics {
     /// ids; they stay whole without an access path and inside a recursive
     /// step, where no lookup can run.
     pub source_branch_register_full_scans: u64,
+    /// Indexed `Local` reads whose choice of how the local delta masks
+    /// origin failed to count origin's candidates (a table or index mapping
+    /// mismatch, or a storage error) and fell back to reading the delta
+    /// whole. Exact either way; nonzero only signals a lost optimization.
+    pub local_mask_count_fallbacks: u64,
 }
 
 /// Wall-clock attribution for one synchronous query materialization.
@@ -2936,9 +3026,8 @@ struct CatalogueOpenState {
     active_catalogue_seq: u64,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
-    current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
-    recovered_active_schema: Option<ActiveSchema>,
+    active_schema: ActiveSchema,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

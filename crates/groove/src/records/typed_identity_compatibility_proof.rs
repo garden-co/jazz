@@ -215,21 +215,21 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         ),
     ]);
     let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
-    // Existing Jazz durable golden, unchanged from the contained implementation.
+    // Current kind-specific encoding; the historical universal-node codec is
+    // retained below to verify that schema semantics and row bytes agree.
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
-        "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
+        "93f42a44ed3c7851826440336a7c284a76efea4efeed20ea50aba29ce2d37fa0"
     );
-    assert_eq!(
-        encoded,
-        contained::encode_record_descriptor(&descriptor).unwrap()
-    );
+    let historical = contained::encode_record_descriptor(&descriptor).unwrap();
+    assert_ne!(encoded, historical);
+    assert!(decode_persisted_record_descriptor(&historical).is_err());
     assert_eq!(
         decode_persisted_record_descriptor(&encoded).unwrap(),
         descriptor
     );
     assert_eq!(
-        contained::decode_record_descriptor(&encoded).unwrap(),
+        contained::decode_record_descriptor(&historical).unwrap(),
         descriptor
     );
     let mut trailing = encoded.clone();
@@ -252,10 +252,9 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         ))])])
         .unwrap();
     let encoded = encode_persisted_record_descriptor(&parent).unwrap();
-    assert_eq!(
-        encoded,
-        contained::encode_record_descriptor(&parent).unwrap()
-    );
+    let historical = contained::encode_record_descriptor(&parent).unwrap();
+    assert_ne!(encoded, historical);
+    assert!(decode_persisted_record_descriptor(&historical).is_err());
     let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
     assert_ne!(decoded, parent); // executable bindings are deliberately absent
     assert_eq!(
@@ -269,7 +268,7 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         raw
     );
     assert_eq!(
-        contained::decode_record_descriptor(&encoded).unwrap(),
+        contained::decode_record_descriptor(&historical).unwrap(),
         decoded
     );
 }

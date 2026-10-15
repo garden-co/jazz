@@ -52,7 +52,8 @@ in `INV_INC_1_RECEIPT.md`.
 
 S1–S9 cover SaaS, canvas, permissions, order processing, durable streams, text
 traces, migrations, branch views, and durable execution. Their deterministic
-smokes run in ordinary CI tests; CodSpeed/realistic workflows own timing. S8
+smokes run in ordinary CI tests; CodSpeed owns timing (the realistic workflow
+was retired on 2026-10-15; its port is tracked separately). S8
 currently measures the local branch-view mechanism;
 transport reconnect/conflict/payload-reuse phases remain to be added.
 
