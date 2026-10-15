@@ -158,7 +158,9 @@ the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
 is decoded; a v5 envelope on a v6 link is rejected by its version field. The v6
 baseline, frozen fresh rather than appended to v5, is:
 
-- the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
+- the `JVRR` row blob is version `3` (no `parents`; `_deletion` cell; row
+  descriptors defined once per sync message in a descriptor table, SPEC 16),
+  and
   `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
   layout") then `counter_signs` (SPEC 4 §4.3). Every row version of a
   `CommitUnit` carries the base of the image its writer made it over (the
