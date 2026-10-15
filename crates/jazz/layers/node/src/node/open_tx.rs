@@ -187,6 +187,7 @@ where
                 source_narrowing: SourceNarrowing::default(),
                 narrowed_predicate_reads: BTreeSet::new(),
                 writes: Vec::new(),
+                write_positions: BTreeMap::new(),
                 superseded_large_values: Vec::new(),
                 user_metadata_json: None,
             },
@@ -230,10 +231,11 @@ where
         let snapshot_row = self
             .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
             .await?;
-        self.open_tx_mut(tx_id)?.base_snapshot_rows.insert(
-            (schema_version, table.to_owned(), row_uuid),
-            snapshot_row.clone(),
-        );
+        self.open_tx_mut(tx_id)?
+            .base_snapshot_rows
+            .entry((table.to_owned(), row_uuid))
+            .or_default()
+            .insert(schema_version, snapshot_row.clone());
         let result = self.overlay_pending_writes_in_schema(
             tx_id,
             schema_version,
@@ -313,7 +315,8 @@ where
         let cached = self
             .open_tx(tx_id)?
             .base_snapshot_rows
-            .get(&(schema_version, table.to_owned(), row_uuid))
+            .get(&(table.to_owned(), row_uuid))
+            .and_then(|by_schema| by_schema.get(&schema_version))
             .cloned();
         let snapshot_row = match cached {
             Some(snapshot_row) => snapshot_row,
@@ -325,9 +328,9 @@ where
         };
         let staged = self
             .open_tx(tx_id)?
-            .writes
-            .iter()
-            .any(|write| write.table == table && write.row_uuid == row_uuid);
+            .row_writes(table, row_uuid)
+            .next()
+            .is_some();
         Ok(
             if snapshot_row.content_cells.is_some() || snapshot_row.deleted || staged {
                 TransactionInsertTargetState::Deleted
@@ -479,9 +482,7 @@ where
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
             let pending_writes = open_tx
-                .writes
-                .iter()
-                .filter(|write| write.table == table && write.row_uuid == row_uuid)
+                .row_writes(table, row_uuid)
                 .cloned()
                 .collect::<Vec<_>>();
             let (cells, deleted) = self.overlay_pending_cells_and_deletion_with_table(
@@ -686,14 +687,11 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
             .base_snapshot_rows
-            .retain(|(_, cached_table, cached_row), _| {
-                cached_table != table || *cached_row != row_uuid
-            });
-        if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
-            write.table == pending.table
-                && write.row_uuid == pending.row_uuid
-                && write.deletion.is_some() == pending.deletion.is_some()
+            .remove(&(table.to_owned(), row_uuid));
+        if let Some(position) = open_tx.find_row_write(table, row_uuid, |write| {
+            write.deletion.is_some() == pending.deletion.is_some()
         }) {
+            let existing = &mut open_tx.writes[position];
             // A replacement usually carries the earlier staged descriptor
             // forward (it was read back through the transaction overlay), so
             // the earlier claim stays valid exactly while its cell is unchanged.
@@ -706,7 +704,7 @@ where
             existing.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
         } else {
             pending.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
-            open_tx.writes.push(pending);
+            open_tx.push_write(pending);
         }
         Ok(())
     }
@@ -977,9 +975,11 @@ where
             .await?;
         let mut pending_deletion = false;
         let mut staged_content = false;
-        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
-            write.table == table && write.row_uuid == row_uuid && &write.branch == branch
-        }) {
+        for write in self
+            .open_tx(tx_id)?
+            .row_writes(table, row_uuid)
+            .filter(|write| &write.branch == branch)
+        {
             match write.deletion {
                 Some(DeletionEvent::Deleted) => {
                     cells = None;
@@ -1037,26 +1037,23 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
             .base_snapshot_rows
-            .retain(|(_, table, row), _| table != &pending.table || *row != pending.row_uuid);
+            .remove(&(pending.table.clone(), pending.row_uuid));
         // A branch-view upsert may supersede a delete staged by this same
         // transaction. Reach this point only after validating the replacement,
         // then remove exactly that coordinate's pending tombstone atomically
         // with staging the visible content.
         if replace_pending_deletion {
-            open_tx.writes.retain(|write| {
-                write.table != pending.table
-                    || write.row_uuid != pending.row_uuid
-                    || write.branch != pending.branch
-                    || write.deletion != Some(DeletionEvent::Deleted)
+            open_tx.remove_row_writes(&pending.table, pending.row_uuid, |write| {
+                write.branch == pending.branch && write.deletion == Some(DeletionEvent::Deleted)
             });
         }
         if pending.deletion.is_none() {
-            if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
-                write.table == pending.table
-                    && write.row_uuid == pending.row_uuid
-                    && write.branch == pending.branch
-                    && write.deletion.is_none()
-            }) {
+            if let Some(position) =
+                open_tx.find_row_write(&pending.table, pending.row_uuid, |write| {
+                    write.branch == pending.branch && write.deletion.is_none()
+                })
+            {
+                let existing = &mut open_tx.writes[position];
                 pending.known_fresh_row |= existing.known_fresh_row;
                 // A patch extends a previously materialized branch-view
                 // replacement, so it keeps its engine-proven preimage. A
@@ -1097,27 +1094,25 @@ where
                 existing.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
             } else {
                 pending.retain_current_large_value_claims(&mut open_tx.superseded_large_values);
-                open_tx.writes.push(pending);
+                open_tx.push_write(pending);
             }
             return Ok(());
         }
 
-        let superseded = &mut open_tx.superseded_large_values;
-        open_tx.writes.retain(|existing| {
-            let keep = existing.table != pending.table
-                || existing.row_uuid != pending.row_uuid
-                || existing.branch != pending.branch
-                || match pending.deletion {
-                    Some(DeletionEvent::Deleted) => false,
-                    Some(DeletionEvent::Restored) => existing.deletion.is_none(),
-                    None => true,
-                };
-            if !keep {
-                superseded.extend(existing.staged_large_cells.values().map(|staged| staged.id));
-            }
-            keep
+        let removed = open_tx.remove_row_writes(&pending.table, pending.row_uuid, |existing| {
+            existing.branch == pending.branch
+                && match pending.deletion {
+                    Some(DeletionEvent::Deleted) => true,
+                    Some(DeletionEvent::Restored) => existing.deletion.is_some(),
+                    None => false,
+                }
         });
-        open_tx.writes.push(pending);
+        open_tx.superseded_large_values.extend(
+            removed
+                .iter()
+                .flat_map(|write| write.staged_large_cells.values().map(|staged| staged.id)),
+        );
+        open_tx.push_write(pending);
         Ok(())
     }
 
@@ -2193,12 +2188,7 @@ where
             .content_cells
             .map(|cells| cells_from_positional(table_schema, &cells));
         let mut deleted = snapshot_row.deleted;
-        for write in self
-            .open_tx(tx_id)?
-            .writes
-            .iter()
-            .filter(|write| write.table == table && write.row_uuid == row_uuid)
-        {
+        for write in self.open_tx(tx_id)?.row_writes(table, row_uuid) {
             match &write.cells {
                 PendingCells::Replace(replacement) if !replacement.is_empty() => {
                     cells = Some(replacement.clone());
@@ -2263,8 +2253,11 @@ pub(super) struct OpenTransaction {
     pub(super) provisional_author: AuthorSubject,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
-    /// Base snapshot row derivations observed by point reads in this transaction.
-    pub(super) base_snapshot_rows: BTreeMap<(SchemaVersionId, String, RowUuid), SnapshotRow>,
+    /// Base snapshot row derivations observed by point reads in this
+    /// transaction, per row and then per schema version, so a write can drop
+    /// every cached derivation of its row in one lookup.
+    pub(super) base_snapshot_rows:
+        BTreeMap<(String, RowUuid), BTreeMap<SchemaVersionId, SnapshotRow>>,
     /// Point reads recorded by the transaction.
     pub(super) row_reads: Vec<RowRead>,
     /// Absent-row reads recorded by the transaction.
@@ -2278,8 +2271,14 @@ pub(super) struct OpenTransaction {
     /// output alone decides whether a newer version of their table matters,
     /// so local serializability compares them like single-table reads.
     pub(super) narrowed_predicate_reads: BTreeSet<(crate::query::ShapeId, crate::query::BindingId)>,
-    /// Pending writes staged by the transaction.
+    /// Pending writes staged by the transaction, in staging order. Add and
+    /// remove them only through `push_write` and `remove_row_writes`, which
+    /// keep `write_positions` in step.
     pub(super) writes: Vec<PendingWrite>,
+    /// Positions in `writes` of each row's staged writes, ascending. Staging
+    /// consults it instead of scanning `writes`, so a transaction that stages
+    /// n rows does O(n log n) work rather than O(n²).
+    write_positions: BTreeMap<RowUuid, Vec<usize>>,
     /// Groove roots this transaction staged for a partial large-value update
     /// and later replaced (by another splice, or an ordinary write of the same
     /// column). No pending cell references them; commit evicts them.
@@ -2366,6 +2365,94 @@ pub(super) struct PendingWrite {
 }
 
 impl OpenTransaction {
+    /// The staged writes for one row, in staging order.
+    fn row_writes<'a>(
+        &'a self,
+        table: &'a str,
+        row_uuid: RowUuid,
+    ) -> impl Iterator<Item = &'a PendingWrite> + 'a {
+        self.write_positions
+            .get(&row_uuid)
+            .into_iter()
+            .flatten()
+            .map(|&position| &self.writes[position])
+            .filter(move |write| write.table == table)
+    }
+
+    /// Position in `writes` of the first staged write of one row that
+    /// `matches` selects.
+    fn find_row_write(
+        &self,
+        table: &str,
+        row_uuid: RowUuid,
+        mut matches: impl FnMut(&PendingWrite) -> bool,
+    ) -> Option<usize> {
+        self.write_positions
+            .get(&row_uuid)?
+            .iter()
+            .copied()
+            .find(|&position| {
+                let write = &self.writes[position];
+                write.table == table && matches(write)
+            })
+    }
+
+    /// Stage a write after every write already staged.
+    fn push_write(&mut self, write: PendingWrite) {
+        self.write_positions
+            .entry(write.row_uuid)
+            .or_default()
+            .push(self.writes.len());
+        self.writes.push(write);
+    }
+
+    /// Unstage the writes of one row that `remove` selects and return them.
+    /// Costs O(log n) when the row has nothing staged, and O(n) otherwise.
+    fn remove_row_writes(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        mut remove: impl FnMut(&PendingWrite) -> bool,
+    ) -> Vec<PendingWrite> {
+        let doomed = self
+            .write_positions
+            .get(&row_uuid)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&position| {
+                let write = &self.writes[position];
+                write.table == table && remove(write)
+            })
+            .collect::<Vec<_>>();
+        if doomed.is_empty() {
+            return Vec::new();
+        }
+        let mut removed = Vec::with_capacity(doomed.len());
+        for &position in doomed.iter().rev() {
+            removed.push(self.writes.remove(position));
+        }
+        removed.reverse();
+        self.write_positions.clear();
+        for (position, write) in self.writes.iter().enumerate() {
+            self.write_positions
+                .entry(write.row_uuid)
+                .or_default()
+                .push(position);
+        }
+        removed
+    }
+
+    /// Panic unless `write_positions` lists exactly each row's positions.
+    #[cfg(test)]
+    pub(super) fn assert_write_positions_consistent(&self) {
+        let mut expected = BTreeMap::<RowUuid, Vec<usize>>::new();
+        for (position, write) in self.writes.iter().enumerate() {
+            expected.entry(write.row_uuid).or_default().push(position);
+        }
+        assert_eq!(self.write_positions, expected);
+    }
+
     /// Every Groove root this transaction staged and has not yet released.
     fn staged_large_value_ids(&self) -> Vec<groove::large_values::StagedLargeValueId> {
         self.superseded_large_values
@@ -2449,14 +2536,23 @@ pub(super) struct SnapshotRow {
 /// Returns each merged write with whether it carries replacement content.
 fn coalesce_exclusive_writes(writes: Vec<PendingWrite>) -> Vec<(PendingWrite, bool)> {
     let mut merged: Vec<(PendingWrite, bool)> = Vec::with_capacity(writes.len());
+    let mut merged_positions =
+        BTreeMap::<(String, RowUuid, SchemaVersionId, BranchSelector), usize>::new();
     for write in writes {
         let has_content = write.deletion.is_none();
-        let existing = merged.iter_mut().find(|(candidate, _)| {
-            candidate.table == write.table
-                && candidate.row_uuid == write.row_uuid
-                && candidate.schema_version == write.schema_version
-                && candidate.branch == write.branch
-        });
+        let key = (
+            write.table.clone(),
+            write.row_uuid,
+            write.schema_version,
+            write.branch.clone(),
+        );
+        let existing = match merged_positions.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => Some(&mut merged[*entry.get()]),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(merged.len());
+                None
+            }
+        };
         match existing {
             Some((candidate, candidate_has_content)) => {
                 // Content staged after a delete resurrects the row.

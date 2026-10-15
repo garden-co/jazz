@@ -339,3 +339,70 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
         assert!(core.open_tx.open_transactions.contains_key(&batch));
     }
 }
+
+#[test]
+fn mergeable_open_staging_keeps_the_row_write_index_exact() {
+    // Staging looks rows up through an index instead of scanning every staged
+    // write; deletes that unstage earlier writes must keep it exact.
+    let (_dir, mut core) = open_node_with_schema(node(0x62), mergeable_open_test_schema());
+    let author = user(0x72);
+    let open_tx = OpenTransactionId::new();
+    core.open_mergeable(open_tx, author, Some(author)).unwrap();
+    for ordinal in 1..=40 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            mergeable_open_cells(format!("title-{ordinal}"), "note"),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    for ordinal in 10..=19 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            BTreeMap::new(),
+            Some(DeletionEvent::Deleted),
+            None,
+        )
+        .unwrap();
+        core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+    }
+    for ordinal in 10..=14 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            mergeable_open_cells(format!("again-{ordinal}"), "note"),
+            None,
+            None,
+        )
+        .unwrap();
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            None,
+        )
+        .unwrap();
+        core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+    }
+
+    let open = core.open_tx(open_tx).unwrap();
+    open.assert_write_positions_consistent();
+    let staged = |ordinal| {
+        open.writes
+            .iter()
+            .filter(|write| write.row_uuid == row(ordinal))
+            .map(|write| write.deletion)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(staged(1), vec![None]);
+    assert_eq!(staged(15), vec![Some(DeletionEvent::Deleted)]);
+    assert_eq!(staged(10), staged(14));
+}
