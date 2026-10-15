@@ -37,18 +37,14 @@ where
         let mut versions = Vec::new();
         for storage_table in self.version_storage_sources(table)? {
             let raws = self
-                .database
-                .primary_key_scan_raw(
+                .history_and_current_records(
                     &storage_table,
                     &[
                         Value::Bytes(branch_key.canonical_bytes()),
                         Value::Uuid(row_uuid.0),
                     ],
                 )
-                .await?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
+                .await?;
             for record in raws {
                 versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
@@ -78,12 +74,8 @@ where
         let mut versions = Vec::new();
         for (storage_table, prefix) in [(physical_history_table_name(table_id), content_prefix)] {
             let records = self
-                .database
-                .primary_key_scan_raw(&storage_table, &prefix)
-                .await?
-                .into_iter()
-                .map(|record| record.owned_record())
-                .collect::<Vec<_>>();
+                .history_and_current_records(&storage_table, &prefix)
+                .await?;
             for record in records {
                 // Keep the authoring name; the schema selected the physical
                 // identity before the scan, including after a table rename.
@@ -108,15 +100,11 @@ where
         let mut versions = Vec::new();
         for storage_table in self.version_storage_sources(table)? {
             let raws = self
-                .database
-                .primary_key_scan_raw(
+                .history_and_current_records(
                     &storage_table,
                     &[Value::Bytes(branch_key.canonical_bytes())],
                 )
-                .await?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
+                .await?;
             for raw in raws {
                 versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
             }
@@ -363,11 +351,13 @@ where
     }
 
     /// Global current stores the winner's full body, so the winner is read
-    /// from it rather than re-fetched from history by `(tx_time, node)`.
-    /// The two layouts differ only in the `global_time` cell and the
-    /// provenance timestamps: current stores whole milliseconds, history the
-    /// same instant as an HLC. Provenance HLCs are always minted from
-    /// milliseconds (logical counter zero), so the conversion is lossless.
+    /// from it rather than re-fetched from history by `(tx_time, node)`;
+    /// history holds only superseded images (SPEC 2 §2.7.1), so the row's
+    /// latest image is stored nowhere else. The two layouts differ only in
+    /// the `global_time` cell and the provenance timestamps: current stores
+    /// whole milliseconds, history the same instant as an HLC. Provenance
+    /// HLCs are always minted from milliseconds (logical counter zero), so
+    /// the conversion is lossless.
     ///
     /// The image is built in the history layout of the current row's own
     /// schema variant (`variant_tag`), not the physical table's widest
@@ -385,9 +375,28 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let history_table =
             physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
+        let Some(record) =
+            self.history_record_from_current(&history_table, variant_tag, current)?
+        else {
+            return Ok(None);
+        };
+        self.decode_history_owned_record(table, &history_table, record)
+            .map(Some)
+    }
+
+    /// The history record of `history_table` equal to a global-current
+    /// record of the same physical table: the record the row's latest write
+    /// would have in history. `None` when the current record's layout is not
+    /// a byte-for-byte image of the history variant's.
+    pub(super) fn history_record_from_current(
+        &self,
+        history_table: &str,
+        variant_tag: u32,
+        current: groove::records::BorrowedRecord<'_>,
+    ) -> Result<Option<OwnedRecord>, Error> {
         let Some(history_descriptor) = self
             .database
-            .table_schema(&history_table)?
+            .table_schema(history_table)?
             .record_schema_for_variant(variant_tag)
         else {
             return Ok(None);
@@ -397,26 +406,31 @@ where
         // Across a schema lineage the current table may be a different
         // physical projection than this schema's history table; only the
         // same-lineage layout is a byte-for-byte image of the history row.
-        // History also ends with `counter_signs` and the merge fields (after
-        // `authored_columns`), which current lacks: a settled image's signs
-        // are empty, its seq is the current row's, and the image carries no
-        // base of its own.
+        // After `authored_columns` history has `counter_signs`, `seq` and
+        // the base fields; current has only the base fields. A settled
+        // image's signs are empty, its seq is the current row's, and its
+        // base is the one current carries.
         let Some(signs_idx) = history_descriptor.field_index(crate::schema::COUNTER_SIGNS_FIELD)
         else {
             return Ok(None);
         };
-        let synthesized = signs_idx..history_descriptor.fields().len();
+        let seq_idx = signs_idx + 1;
+        if history_descriptor.field_index(crate::schema::SEQ_FIELD) != Some(seq_idx) {
+            return Ok(None);
+        }
         let source_of = |index: usize| {
-            if index >= global_time_idx {
+            if index > seq_idx {
+                // The base fields follow `authored_columns` in current.
+                index - 1
+            } else if index >= global_time_idx {
                 index + 1
             } else {
                 index
             }
         };
-        if current_descriptor.fields().len() + synthesized.len()
-            != history_descriptor.fields().len() + 1
+        if current_descriptor.fields().len() + 2 != history_descriptor.fields().len() + 1
             || (0..history_descriptor.fields().len()).any(|index| {
-                if synthesized.contains(&index) {
+                if index == signs_idx || index == seq_idx {
                     return false;
                 }
                 let source = source_of(index);
@@ -427,20 +441,19 @@ where
             return Ok(None);
         }
         let raw = history_descriptor.create_with_encoded_fields::<Error>(
-            current.raw().len(),
+            current.raw().len() + 16,
             |index, output| {
-                if synthesized.contains(&index) {
-                    let name = history_descriptor.fields()[index].name.as_deref();
-                    let value = match name {
-                        Some(crate::schema::SEQ_FIELD) => {
-                            Value::U64(current.get_nullable_u64(global_time_idx)?.unwrap_or(0))
-                        }
-                        Some(crate::schema::BASE_SEQ_FIELD | crate::schema::BASE_PENDING_FIELD) => {
-                            Value::Nullable(None)
-                        }
-                        _ => Value::Bytes(Vec::new()),
-                    };
-                    history_descriptor.encode_field_into(index, &value, output)?;
+                if index == signs_idx {
+                    history_descriptor.encode_field_into(
+                        index,
+                        &Value::Bytes(Vec::new()),
+                        output,
+                    )?;
+                    return Ok(());
+                }
+                if index == seq_idx {
+                    let seq = current.get_nullable_u64(global_time_idx)?.unwrap_or(0);
+                    history_descriptor.encode_field_into(index, &Value::U64(seq), output)?;
                     return Ok(());
                 }
                 let value = match index {
@@ -467,9 +480,173 @@ where
                 Ok(())
             },
         )?;
-        let record = OwnedRecord::new(raw, history_descriptor);
-        self.decode_history_owned_record(table, &history_table, record)
-            .map(Some)
+        Ok(Some(OwnedRecord::new(raw, history_descriptor)))
+    }
+
+    /// The row's stored image written by `(tx_time, tx_node_alias)` at one of
+    /// `seqs`, as a record of `history_table`. History holds only superseded
+    /// images; the row's latest accepted image is its global-current record
+    /// (SPEC 2 §2.7.1). So an accepted seq is read from current when current
+    /// is at that seq and written by that transaction, and from history
+    /// otherwise; seq 0 (a pending record) is read from history. Every read
+    /// is a point read.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn stored_image_record(
+        &self,
+        batch: Option<&DatabaseBatch>,
+        history_table: &str,
+        branch_key: &[u8],
+        row_uuid: RowUuid,
+        seqs: &[GlobalTime],
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<OwnedRecord>, Error> {
+        for seq in seqs {
+            if *seq != GlobalTime(0)
+                && let Some(record) = self
+                    .current_image_record_at(
+                        batch,
+                        history_table,
+                        branch_key,
+                        row_uuid,
+                        *seq,
+                        tx_time,
+                        tx_node_alias,
+                    )
+                    .await?
+            {
+                return Ok(Some(record));
+            }
+            let key = history_key_values(branch_key, row_uuid, *seq, tx_time, tx_node_alias);
+            let raw = match batch {
+                Some(batch) => self
+                    .database
+                    .primary_key_get_raw_in_batch(batch, history_table, &key)
+                    .await?
+                    .map(|raw| raw.owned_record()),
+                None => self
+                    .database
+                    .primary_key_get_raw(history_table, &key)
+                    .await?
+                    .map(|raw| raw.owned_record()),
+            };
+            if raw.is_some() {
+                return Ok(raw);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The row's global-current image as a record of `history_table`, when
+    /// current is at `seq` and was written by `(tx_time, tx_node_alias)`.
+    #[allow(clippy::too_many_arguments)]
+    async fn current_image_record_at(
+        &self,
+        batch: Option<&DatabaseBatch>,
+        history_table: &str,
+        branch_key: &[u8],
+        row_uuid: RowUuid,
+        seq: GlobalTime,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<OwnedRecord>, Error> {
+        let Some(table_id) = physical_version_table_id(history_table) else {
+            return Ok(None);
+        };
+        let current_table = physical_global_current_table_name(table_id);
+        let key = [Value::Bytes(branch_key.to_vec()), Value::Uuid(row_uuid.0)];
+        let raw = match batch {
+            Some(batch) => self
+                .database
+                .primary_key_get_raw_in_batch(batch, &current_table, &key)
+                .await?
+                .map(|raw| (raw.variant_tag(), raw.owned_record())),
+            None => self
+                .database
+                .primary_key_get_raw(&current_table, &key)
+                .await?
+                .map(|raw| (raw.variant_tag(), raw.owned_record())),
+        };
+        let Some((variant_tag, current)) = raw else {
+            return Ok(None);
+        };
+        let record = current.borrowed();
+        if record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)? != Some(seq.0)
+            || record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)? != tx_time.0
+            || record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)? != tx_node_alias.0
+        {
+            return Ok(None);
+        }
+        self.history_record_from_current(history_table, variant_tag, record)
+    }
+
+    /// The global-current images under `prefix` (`[]`, `[branch]` or
+    /// `[branch, row]`) as records of `history_table`: the latest accepted
+    /// image of each row, which history does not hold (SPEC 2 §2.7.1).
+    /// Scans of a row's or table's accepted images read these beside history.
+    pub(super) async fn current_image_records(
+        &self,
+        history_table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<OwnedRecord>, Error> {
+        let Some(table_id) = physical_version_table_id(history_table) else {
+            return Ok(Vec::new());
+        };
+        let current_table = physical_global_current_table_name(table_id);
+        if self.database.table_schema(&current_table).is_err() {
+            return Ok(Vec::new());
+        }
+        let raws = self
+            .database
+            .primary_key_scan_raw(&current_table, prefix)
+            .await?
+            .into_iter()
+            .map(|raw| (raw.variant_tag(), raw.owned_record()))
+            .collect::<Vec<_>>();
+        let mut records = Vec::with_capacity(raws.len());
+        for (variant_tag, current) in raws {
+            if current
+                .borrowed()
+                .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .is_none()
+            {
+                continue;
+            }
+            if let Some(record) =
+                self.history_record_from_current(history_table, variant_tag, current.borrowed())?
+            {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    /// History records of `history_table` under `prefix` followed by the
+    /// global-current images there: every image the node holds, superseded
+    /// and latest. A record history and current both hold (a layout current
+    /// cannot convert keeps its history copy) is returned once.
+    pub(super) async fn history_and_current_records(
+        &self,
+        history_table: &str,
+        prefix: &[Value],
+    ) -> Result<Vec<OwnedRecord>, Error> {
+        let mut records = self
+            .database
+            .primary_key_scan_raw(history_table, prefix)
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        let mut keys = records
+            .iter()
+            .map(history_record_identity)
+            .collect::<Result<BTreeSet<_>, Error>>()?;
+        for record in self.current_image_records(history_table, prefix).await? {
+            if keys.insert(history_record_identity(&record)?) {
+                records.push(record);
+            }
+        }
+        Ok(records)
     }
 
     pub(super) async fn query_winner_from_pk(
@@ -481,11 +658,12 @@ where
             .await
     }
 
-    /// The row's local winner in history: its newest pending write when it
-    /// has one, and otherwise its newest accepted write. History is keyed by
-    /// seq with pending writes at seq 0, so pending writes sort first in the
-    /// row's key range and the last key there is the newest accepted write,
-    /// never a pending one: the pending range is read first.
+    /// The row's local winner: its newest pending write when it has one, and
+    /// otherwise its newest accepted write. History is keyed by seq with
+    /// pending writes at seq 0, so the pending range is read first. The
+    /// newest accepted write is the row's global-current image (history
+    /// holds only superseded images), or history's last key when current
+    /// has none.
     pub(super) async fn query_winner_from_pk_in_branch(
         &mut self,
         table: &str,
@@ -502,17 +680,27 @@ where
             ];
             let mut pending_prefix = row_prefix.clone();
             pending_prefix.push(Value::U64(0));
-            let mut found = None;
-            for (pending, prefix) in [(true, &pending_prefix), (false, &row_prefix)] {
-                if let Some(raw) = self
-                    .database
-                    .primary_key_last_raw(&storage_table, prefix)
+            let mut found = self
+                .database
+                .primary_key_last_raw(&storage_table, &pending_prefix)
+                .await?
+                .map(|raw| (true, raw.owned_record()));
+            if found.is_none() {
+                // The row's newest accepted image is its global-current
+                // record; history holds only superseded ones (SPEC 2
+                // §2.7.1), so it is read only when current has no image.
+                found = self
+                    .current_image_records(&storage_table, &row_prefix)
                     .await?
-                    .map(|raw| raw.owned_record())
-                {
-                    found = Some((pending, raw));
-                    break;
-                }
+                    .pop()
+                    .map(|record| (false, record));
+            }
+            if found.is_none() {
+                found = self
+                    .database
+                    .primary_key_last_raw(&storage_table, &row_prefix)
+                    .await?
+                    .map(|raw| (false, raw.owned_record()));
             }
             let Some((pending, raw)) = found else {
                 continue;
@@ -554,19 +742,43 @@ where
         Ok(versions)
     }
 
+    /// Every image of the table this node holds: history's superseded and
+    /// pending records and each row's global-current image.
     pub(super) async fn query_table_versions(
         &mut self,
         table: &str,
     ) -> Result<Vec<VersionRow>, Error> {
+        self.query_table_versions_from(table, true).await
+    }
+
+    /// The table's history records only: superseded and pending images,
+    /// never a row's latest accepted image, which is its global-current
+    /// record (SPEC 2 §2.7.1).
+    pub(super) async fn query_table_history_versions(
+        &mut self,
+        table: &str,
+    ) -> Result<Vec<VersionRow>, Error> {
+        self.query_table_versions_from(table, false).await
+    }
+
+    async fn query_table_versions_from(
+        &mut self,
+        table: &str,
+        include_current: bool,
+    ) -> Result<Vec<VersionRow>, Error> {
         let mut versions_by_key = BTreeMap::new();
         for storage_table in self.version_storage_sources(table)? {
-            let raws = self
-                .database
-                .primary_key_scan_raw(&storage_table, &[])
-                .await?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
+            let raws = if include_current {
+                self.history_and_current_records(&storage_table, &[])
+                    .await?
+            } else {
+                self.database
+                    .primary_key_scan_raw(&storage_table, &[])
+                    .await?
+                    .into_iter()
+                    .map(|raw| raw.owned_record())
+                    .collect()
+            };
             for record in raws {
                 let version = self.decode_history_owned_record(table, &storage_table, record)?;
                 let tx_id = self.version_tx_id(&version)?;
@@ -615,20 +827,17 @@ where
         let seqs = history_seq_candidates(tx.global_time);
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
-            let mut found = None;
-            for seq in &seqs {
-                found = self
-                    .database
-                    .primary_key_get_raw(
-                        &storage_table,
-                        &history_key_values(branch_key, row_uuid, *seq, tx_id.time, tx.node_alias),
-                    )
-                    .await?
-                    .map(|raw| raw.owned_record());
-                if found.is_some() {
-                    break;
-                }
-            }
+            let found = self
+                .stored_image_record(
+                    None,
+                    &storage_table,
+                    branch_key,
+                    row_uuid,
+                    &seqs,
+                    tx_id.time,
+                    tx.node_alias,
+                )
+                .await?;
             let Some(record) = found else {
                 continue;
             };
@@ -1277,24 +1486,17 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let _ = schema_version;
         let seqs = history_seq_candidates(self.history_tx_seq(None, tx_time, tx_node_alias).await?);
-        let mut raw = None;
-        for seq in seqs {
-            let key = history_key_values(
+        let raw = self
+            .stored_image_record(
+                None,
+                storage_table,
                 &branch_key.canonical_bytes(),
                 row_uuid,
-                seq,
+                &seqs,
                 tx_time,
                 tx_node_alias,
-            );
-            raw = self
-                .database
-                .primary_key_get_raw(storage_table, &key)
-                .await?
-                .map(|raw| raw.owned_record());
-            if raw.is_some() {
-                break;
-            }
-        }
+            )
+            .await?;
         let Some(record) = raw else {
             return Ok(None);
         };

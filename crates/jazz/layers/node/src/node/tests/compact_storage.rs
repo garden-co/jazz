@@ -62,6 +62,26 @@ fn compact_storage_commit_accepted(state: &mut NodeState, now_ms: u64) -> TxId {
     tx_id
 }
 
+/// Supersede the row `compact_storage_commit_accepted` wrote with a second
+/// accepted write at seq 2, so the first image moves into history (history
+/// holds only superseded images; SPEC 2 §2.7.1).
+fn compact_storage_supersede(state: &mut NodeState, now_ms: u64) -> TxId {
+    let tx_id = state
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x5a), now_ms)
+                .cells(BTreeMap::from([("title".to_owned(), Value::String("compact 2".to_owned()))])),
+        )
+        .unwrap();
+    state.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalTime(2)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    tx_id
+}
+
 /// Contract: transaction, history and global-current rows store the writer's
 /// node alias as exactly 4 bytes (key and payload), and history and
 /// global-current rows store `created_at` / `updated_at` as exactly 6
@@ -71,6 +91,7 @@ fn stored_rows_keep_node_aliases_in_four_bytes_and_provenance_in_six() {
     let (temp_dir, mut state) = open_node();
     let now_ms = 0x0102_0304_0506;
     let tx_id = compact_storage_commit_accepted(&mut state, now_ms);
+    let latest = compact_storage_supersede(&mut state, now_ms);
     let alias = *state.node_aliases.get(&tx_id.node).unwrap();
     let physical_table = state
         .physical_table_id_for_schema(state.catalogue.local_schema_version_id, "todos")
@@ -87,12 +108,16 @@ fn stored_rows_keep_node_aliases_in_four_bytes_and_provenance_in_six() {
 
     // jazz_transactions key: tx_time (03 + 8 BE bytes), node alias (02 + 4).
     let transactions = compact_storage_raw_entries(temp_dir.path(), "jazz_transactions");
-    assert_eq!(transactions.len(), 1);
-    let (key, _) = &transactions[0];
+    assert_eq!(transactions.len(), 2);
+    let tx_time_bytes = [&[0x03][..], &tx_id.time.0.to_be_bytes()].concat();
+    let (key, _) = transactions
+        .iter()
+        .find(|(key, _)| key.starts_with(&tx_time_bytes))
+        .expect("the first transaction is stored");
     assert_eq!(key.len(), 1 + 8 + 1 + 4);
-    assert_eq!(key[..9], [&[0x03][..], &tx_id.time.0.to_be_bytes()].concat()[..]);
     assert_eq!(key[9..], alias_bytes[..]);
 
+    // History holds the superseded first image; current holds the second.
     let history = compact_storage_raw_entries(temp_dir.path(), &history_name);
     assert_eq!(history.len(), 1);
     let (key, value) = &history[0];
@@ -120,10 +145,15 @@ fn stored_rows_keep_node_aliases_in_four_bytes_and_provenance_in_six() {
     // same transaction id.
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema());
     let versions = reopened.query_table_versions("todos").unwrap();
-    assert_eq!(versions.len(), 1);
-    assert_eq!(reopened.version_tx_id(&versions[0]).unwrap(), tx_id);
-    assert_eq!(versions[0].created_at().physical_ms(), now_ms);
-    assert_eq!(versions[0].updated_at().physical_ms(), now_ms);
+    let tx_ids = versions
+        .iter()
+        .map(|version| reopened.version_tx_id(version).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(tx_ids, [tx_id, latest]);
+    for version in &versions {
+        assert_eq!(version.created_at().physical_ms(), now_ms);
+        assert_eq!(version.updated_at().physical_ms(), now_ms);
+    }
 }
 
 /// Contract: a history or global-current row whose provenance timestamp does
@@ -132,6 +162,7 @@ fn stored_rows_keep_node_aliases_in_four_bytes_and_provenance_in_six() {
 fn provenance_timestamps_above_the_six_byte_slot_are_refused() {
     let (_temp_dir, mut state) = open_node();
     compact_storage_commit_accepted(&mut state, 1_000);
+    compact_storage_supersede(&mut state, 1_000);
     let physical_table = state
         .physical_table_id_for_schema(state.catalogue.local_schema_version_id, "todos")
         .unwrap();

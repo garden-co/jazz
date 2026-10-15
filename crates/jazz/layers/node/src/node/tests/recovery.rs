@@ -2551,15 +2551,15 @@ fn author_columns_store_dictionary_codes() {
             vec![alice_code],
         ])
     );
+    // History holds only superseded images: alice's first image of 0x40
+    // (bob's edit is current) and alice's pending 0x42 at seq 0.
     assert_eq!(
         sorted(codes.remove(tables[1].0.as_str()).unwrap()),
         sorted(vec![
             vec![alice_code, alice_code],
-            vec![bob_code, bob_code],
-            vec![alice_code, bob_code],
             vec![alice_code, alice_code],
         ]),
-        "history: created_by, updated_by of every image"
+        "history: created_by, updated_by of every stored image"
     );
     assert_eq!(
         sorted(codes.remove(tables[2].0.as_str()).unwrap()),

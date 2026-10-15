@@ -141,7 +141,8 @@ mod variant_case_tests {
 
     // The durable history layout of `jazz.history-version-current.v4` (SPEC 4
     // §4.6, "Durable layout"): a record ends with the merge fields (seq and base) and
-    // is keyed by seq; no row state carries a merge timestamp.
+    // is keyed by seq; global current ends with the same base fields; no row
+    // state carries a merge timestamp.
     #[test]
     fn history_record_ends_with_merge_fields_and_is_keyed_by_seq() {
         use groove::schema::{ColumnType as GrooveColumnType, IntegerKeyType, PrimaryKeyColumn};
@@ -171,12 +172,25 @@ mod variant_case_tests {
             ["branch_key", "row_uuid", "seq", "tx_time", "tx_node_id"]
         );
         assert_eq!(key.columns[2], PrimaryKeyColumn::integer("seq", IntegerKeyType::U64));
-        for current in [table.global_current_storage_table(), table.rejected_versions_storage_table()] {
-            assert!(current.columns.iter().all(|column| {
-                !["seq", "base_seq", "base_pending"].contains(&column.name.as_str())
-                    && !column.name.starts_with("_ts_")
-            }));
-        }
+        // Global current carries the base with history's encoding, so the
+        // latest image moves into history byte for byte when superseded; its
+        // seq is the current row's global_time.
+        let current = table.global_current_storage_table();
+        let current_trailing = current.columns[current.columns.len() - 3..]
+            .iter()
+            .map(|column| (column.name.as_str(), column.column_type.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(current_trailing[0], trailing[0]);
+        assert_eq!(current_trailing[1..], trailing[3..]);
+        assert!(current.columns.iter().all(|column| {
+            !["seq", "counter_signs"].contains(&column.name.as_str())
+                && !column.name.starts_with("_ts_")
+        }));
+        let rejected = table.rejected_versions_storage_table();
+        assert!(rejected.columns.iter().all(|column| {
+            !["seq", "base_seq", "base_pending"].contains(&column.name.as_str())
+                && !column.name.starts_with("_ts_")
+        }));
     }
 
     #[test]

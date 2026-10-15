@@ -24,6 +24,35 @@ fn system_authority_reset(
     .expect("authority reset must be available")
 }
 
+/// Accept a second write of `row_uuid` at Core and deliver `table` to
+/// `reader` again, so the reader's first image of the row is superseded.
+/// History holds only superseded images (SPEC 2 §2.7.1): the latest image is
+/// the row's global-current record, which eviction never removes, so the
+/// eviction tests below evict the superseded one.
+fn supersede_cached_row<S>(
+    writer: &mut NodeState,
+    core: &mut NodeState,
+    reader: &mut NodeState<S>,
+    table: &str,
+    row_uuid: RowUuid,
+    made_at: u64,
+    cells: BTreeMap<String, Value>,
+) -> TxId
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let tx_id = commit_mergeable_global(
+        writer,
+        core,
+        MergeableCommit::new(table, row_uuid, made_at).cells(cells),
+    );
+    let (shape, binding) = core.whole_table_shape_binding(table).unwrap();
+    let subscription = core.whole_table_subscription_key(table).unwrap();
+    let update = system_authority_reset(core, &shape, &binding, subscription);
+    reader.apply_sync_message_settled(update).unwrap();
+    tx_id
+}
+
 fn receiver_rows(
     node: &mut NodeState,
     shape: &ValidatedQuery,
@@ -1253,6 +1282,15 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
         .unwrap()
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
+    supersede_cached_row(
+        &mut writer,
+        &mut core,
+        &mut reader,
+        "todos",
+        row_uuid,
+        14,
+        title_cells("persisted again"),
+    );
 
     assert!(matches!(
         reader
@@ -1361,6 +1399,17 @@ fn two_table_client_cache_budget_counts_shared_physical_history_once_without_evi
             .unwrap()
             .expect("expected view update");
         reader.apply_sync_message_settled(update).unwrap();
+        // Give the reader a superseded image of the row: history holds only
+        // superseded images, the latest one is the row's current record.
+        supersede_cached_row(
+            &mut writer,
+            &mut core,
+            &mut reader,
+            table,
+            *row_uuid,
+            19,
+            cells.clone(),
+        );
     }
 
     let physical_history_bytes = reader
@@ -1382,7 +1431,7 @@ fn two_table_client_cache_budget_counts_shared_physical_history_once_without_evi
     for (table, row_uuid, _) in rows {
         assert_eq!(
             reader.row_history(table, row_uuid).unwrap().len(),
-            1,
+            2,
             "a non-triggering physical budget must retain the cached {table} row"
         );
     }
@@ -1436,7 +1485,17 @@ fn assert_eviction_failure_contract(
         .unwrap()
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
+    supersede_cached_row(
+        &mut writer,
+        &mut core,
+        &mut reader,
+        "todos",
+        row_uuid,
+        global_time + 1,
+        title_cells("superseding"),
+    );
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
+    assert_eq!(persisted_history.len(), 2);
     let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
     assert_eq!(persisted_versions.len(), 1);
     let persisted_version = persisted_versions
@@ -1526,7 +1585,8 @@ fn assert_eviction_failure_contract(
             assert_eq!(reopened_history, persisted_history);
         }
         EvictionPersistenceOutcome::WriteThroughThenError => {
-            assert!(reopened_history.is_empty());
+            // The superseded body is gone; the latest image is current.
+            assert_eq!(reopened_history, persisted_history[1..]);
         }
     }
     let declaration = reopened
@@ -1626,6 +1686,15 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         .unwrap()
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
+    supersede_cached_row(
+        &mut writer,
+        &mut core,
+        &mut reader,
+        "todos",
+        row_uuid,
+        19,
+        title_cells("clear failure again"),
+    );
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
     let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
     reader.cache_tx_versions(tx_id, persisted_versions);
@@ -2125,6 +2194,16 @@ fn fresh_delivery_generation_advances_after_live_body_eviction() {
             .unwrap()
             .expect("authority reset");
         reader.apply_sync_message_settled(update.clone()).unwrap();
+        supersede_cached_row(
+            &mut writer,
+            &mut core,
+            &mut reader,
+            "todos",
+            row_uuid,
+            20,
+            title_cells("refresh after eviction again"),
+        );
+        let latest = reader.row_history("todos", row_uuid).unwrap()[1..].to_vec();
         let key = reader
             .authority_result_key_for_subscription(subscription)
             .unwrap();
@@ -2138,9 +2217,10 @@ fn fresh_delivery_generation_advances_after_live_body_eviction() {
         } else {
             reader.evict_cold().resolve().unwrap();
         }
-        assert!(
-            reader.row_history("todos", row_uuid).unwrap().is_empty(),
-            "actual body eviction occurred"
+        assert_eq!(
+            reader.row_history("todos", row_uuid).unwrap(),
+            latest,
+            "actual body eviction occurred: only the current image is left"
         );
         assert!(!reader.has_settled_authority_result(&key));
         assert!(
@@ -2168,6 +2248,6 @@ fn fresh_delivery_generation_advances_after_live_body_eviction() {
             reader.applied_authority_result_generation(&key) > required_after,
             "fresh delivery must release a read waiting across eviction"
         );
-        assert!(reader.row_history("todos", row_uuid).unwrap().is_empty());
+        assert_eq!(reader.row_history("todos", row_uuid).unwrap(), latest);
     }
 }

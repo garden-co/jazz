@@ -143,7 +143,8 @@ where
             // The row's current image is its accepted write at that seq.
             return Ok(Ok(()));
         }
-        // The base seq must name an accepted write of this row.
+        // The base seq must name an accepted write of this row. Below the
+        // current seq that write was superseded, and history holds it.
         let history_table =
             physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
         let found = !self
@@ -250,7 +251,10 @@ where
 
     /// Whether the row holds an accepted record of `writer`'s node newer
     /// than `writer` at a seq in `after+1..=through`. One range read per
-    /// history table of the row's table; only key fields are read.
+    /// history table of the row's table; only key fields are read. History
+    /// holds only superseded writes: the write at `through` is the row's
+    /// current image, whose writer the caller has already compared (it is
+    /// another node's here), so the range covers every write that matters.
     #[allow(clippy::too_many_arguments)]
     async fn own_write_accepted_between(
         &mut self,
@@ -476,8 +480,8 @@ where
     }
 
     /// [`Self::write_conflict`] for every accepted write of a row this node
-    /// holds, in seq order: one walk of the row's history records, derived
-    /// on demand and never stored.
+    /// holds, in seq order: one walk of the row's history records and its
+    /// global-current image, derived on demand and never stored.
     #[cfg_attr(not(test), allow(dead_code))] // Derived on demand; tests read it.
     pub(in crate::node) async fn row_write_conflicts(
         &mut self,
@@ -492,13 +496,11 @@ where
         // The row's accepted writes: seq, transaction, base, authored columns.
         let mut history = Vec::new();
         for history_table in self.version_storage_sources(table)? {
+            // History holds the superseded writes; the latest is the row's
+            // global-current image, which carries its base too.
             let records = self
-                .database
-                .primary_key_scan_raw(&history_table, &prefix)
-                .await?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
+                .history_and_current_records(&history_table, &prefix)
+                .await?;
             for record in records {
                 let version = self.decode_history_owned_record("", &history_table, record)?;
                 let seq = version.seq()?;

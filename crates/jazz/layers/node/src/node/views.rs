@@ -497,11 +497,29 @@ where
         })
     }
 
-    /// Subscribe to the raw history storage table.
+    /// Subscribe to the raw history storage table. History holds pending
+    /// images (seq 0) and superseded accepted images; a row's latest accepted
+    /// image is its global-current record (SPEC 2 §2.7.1).
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
         let schema_version = self.catalogue.local_schema_version_id;
         let source = self.physical_history_source_graph(schema_version, table)?;
+        self.database
+            .subscribe_one_sink(source)
+            .await
+            .map_err(Error::Groove)
+    }
+
+    /// Subscribe to the raw global-current storage table.
+    #[cfg(test)]
+    pub async fn subscribe_global_current(&mut self, table: &str) -> Result<Subscription, Error> {
+        self.table(table)?;
+        let schema_version = self.catalogue.local_schema_version_id;
+        let source = self.physical_current_source_graph(
+            schema_version,
+            table,
+            crate::node::physical::PhysicalCurrentClass::Global,
+        )?;
         self.database
             .subscribe_one_sink(source)
             .await

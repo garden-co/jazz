@@ -56,9 +56,12 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 /// lacks it and is refused with [`Error::UnsupportedStorageCodecs`].
 ///
 /// `jazz.history-version-current.v4` is the linear row-state layout: one
-/// history record per accepted transaction holding the merged row state,
+/// record per accepted transaction holding the merged row state,
 /// `_deletion` as a cell, history keyed by seq with each write's base and lost
-/// cells, a `by_seq` current index and a per-row ahead overlay. History and ahead-current tables carry
+/// cells, a `by_seq` current index and a per-row ahead overlay. History holds
+/// only superseded images; a row's latest image, with its write's base, is its
+/// global-current record (the version bump for that layout rides the
+/// alpha.60 storage epoch). History and ahead-current tables carry
 /// no `by_tx` secondary index; the node-local `jazz_tx_touched_rows` record of
 /// each transaction lists the rows it touched instead. Every history image
 /// stores its `updated_by`.

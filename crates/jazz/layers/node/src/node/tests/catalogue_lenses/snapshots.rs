@@ -130,12 +130,15 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         .unwrap();
 
     let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base.clone());
+    // The receiver accepts the authored write, so its image lands in global
+    // current (history holds only superseded images, SPEC 2 §2.7.1): the
+    // pre-import stream watches the physical global-current table.
     let subscription = receiver
-        .subscribe_history("todos")
+        .subscribe_global_current("todos")
         .expect("subscribe before historical snapshot import");
     assert!(subscription
         .recv()
-        .expect("initial history snapshot")
+        .expect("initial current snapshot")
         .is_empty());
     let runtime_before_snapshot = receiver.groove_runtime_token();
     let history_table = physical_history_table_name(
@@ -215,8 +218,8 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     receiver.apply_sync_message_settled(authored).unwrap();
     assert_eq!(
         subscription
-            .recv()
-            .expect("the pre-import history stream receives the new authored variant")
+            .try_recv()
+            .expect("the pre-import current stream receives the new authored variant")
             .iter()
             .filter(|(_, weight)| *weight > 0)
             .count(),

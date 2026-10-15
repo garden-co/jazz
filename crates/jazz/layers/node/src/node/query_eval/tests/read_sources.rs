@@ -388,7 +388,9 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
                 .filter(
                     PredicateExpr::And(vec![
                         PredicateExpr::eq("row_uuid", Value::Uuid(row(11).0)),
-                        PredicateExpr::eq("tx_time", Value::U64(second.time.0)),
+                        // History holds only superseded images: the
+                        // second write is current, the first is in history.
+                        PredicateExpr::eq("tx_time", Value::U64(first.time.0)),
                     ])
                     .canonicalize(),
                 ),
@@ -410,8 +412,12 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .collect::<Vec<_>>();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
-        current_rows[0], history_rows[0],
+        current_rows[0].0, history_rows[0].0,
         "history and current rows both store provenance as Unix milliseconds"
+    );
+    assert_eq!(
+        history_rows[0].0, history_rows[0].1,
+        "the superseded insert was created and last updated by the same write"
     );
     assert_ne!(
         current_rows[0].0, 0,

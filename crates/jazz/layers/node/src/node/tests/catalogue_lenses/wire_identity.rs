@@ -245,6 +245,15 @@ fn migration_owner_follower_cases(kind: &str) {
                             .unwrap()
                     };
                     alice.accept_global_for_test(tx).unwrap();
+                    // Bob and Carol learn the write at the seq Alice accepted
+                    // it at: a transaction has one seq, and a row's current
+                    // image is found by it.
+                    let accepted_at = alice
+                        .query_transaction(tx)
+                        .unwrap()
+                        .unwrap()
+                        .global_time
+                        .unwrap();
                     let canonical = alice.commit_unit_for(tx).unwrap();
                     let owner_schema = if owner_uses_new_schema {
                         evolved.clone()
@@ -268,7 +277,7 @@ fn migration_owner_follower_cases(kind: &str) {
                         header,
                         versions.clone(),
                         Fate::Accepted,
-                        Some(GlobalTime(1)),
+                        Some(accepted_at),
                         DurabilityTier::Global,
                     )
                     .unwrap();
@@ -294,7 +303,7 @@ fn migration_owner_follower_cases(kind: &str) {
                             header,
                             original,
                             Fate::Accepted,
-                            Some(GlobalTime(1)),
+                            Some(accepted_at),
                             DurabilityTier::Global,
                         )
                         .unwrap();

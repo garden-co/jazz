@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST apply the write as written over the row's current image, as it does after rejecting the predecessor. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives.
+- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted write of the same row at that seq (the row's current image, or a superseded image in history), and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST apply the write as written over the row's current image, as it does after rejecting the predecessor. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives.
 - `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and an accepted record of the row that is not of the writer's own chain (the accepted writes of its pending predecessor's node with a transaction time at most the predecessor's) lies after its seen seq and before it. The seen seq is the larger of its base seq and its chain root's settled base seq (followed through accepted predecessors, and through a rejected predecessor to that one's own predecessor), never a predecessor's later accepted seq. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the seen seq and before the write, outside its own chain, whose authored columns overlap the write's.
 - `INV-HIST-23`: One writer node's commit units MUST reach the fate authority in the order they were written, on every link, and Core MUST decide them in arrival order. The order a writer's writes were written in is their `TxId` order: a writer MUST mint a write's `TxId` when the write takes its place in the writer's order (its owner's mutation queue, which publishes one write at a time in that order), never later, so `TxId` order, local commit order, upload order and recovery's `TxId`-sorted replay agree. A writer's link MUST NOT upload a write ahead of an earlier write of the same node that it holds back (for example while a large value waits out a rate limit); other writers' uploads are not held back. A write that reaches Core after Core accepted a newer write of the same node to the same row is a protocol violation: Core MUST reject it with a `MalformedCommit` reason and MUST NOT apply it.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
@@ -291,9 +291,11 @@ predecessor receives its fate nothing is rewritten on the client.
 **Validating the base at Core.** For an incoming write `W` from node `N` with
 base `{seq: S, pending: P}` Core checks the base exactly or refuses the write
 with a `MalformedCommit` reason saying the base is not supported yet
-(`INV-HIST-20`): when `S` is `0` or names no accepted history record of the
-row (for example a seq above the row's current seq, or a seq of another
-row's write; one exact point read of the row's history at `S`), when `P`'s
+(`INV-HIST-20`): when `S` is `0` or names no accepted write of the row (for
+example a seq above the row's current seq, or a seq of another row's write;
+the row's current seq answers `S` equal to it, and one exact point read of the
+row's history at `S` answers a lower one, since history holds the superseded
+images), when `P`'s
 node is not `N`, and when `P` is not older than `W`. Core never substitutes
 another base.
 
@@ -332,9 +334,10 @@ reached Core already or never will:
   - It reads nothing more when the row's current image was written by `N`
     (compare its transaction time) or is `P`'s base.
   - When `P` has a base seq `B` and the row's current seq is `C`, it reads
-    the key fields of the row's history records at seqs `B+1..=C`: one range
-    read per history table, since history is keyed
-    `(branch, row, seq, tx_time, node)`. `N` had seen `B` when it wrote `P`,
+    the writer of the row's current record (the write at `C`) and the key
+    fields of the row's history records at seqs `B+1..C`: one point read and
+    one range read per history table, since history is keyed
+    `(branch, row, seq, tx_time, node)` and holds the superseded writes. `N` had seen `B` when it wrote `P`,
     so a later write of `N` lies there if anywhere.
   - When `P` has no base seq (an insert, upsert or restore made over no
     image of the row), it reads one per-row marker of `N`. When Core decides
@@ -536,14 +539,21 @@ no stamp fields. A history record carries, after
 - `base_pending` (nullable record `{time: U64, node: UUID}`, which costs a null byte and an offset when null) — the base's pending
   predecessor.
 
-History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row
-at seq `S`" is one prefix read, and "the row's writes after `S`" is one range
-read. Pending writes (a node's own uploads, and foreign writes a relay holds
+History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)` and holds
+only superseded images; the row's latest accepted image is its global-current
+record, which also carries the latest write's `base_seq` and `base_pending`
+(SPEC 2 §2.7.1, `INV-DATA-28`). "The row at seq `S`" is one point read of
+current when `S` is at or above the row's current seq and one prefix read of
+history otherwise, and "the row's writes after `S`" is one range read of
+history plus the current record. Pending writes (a node's own uploads, and foreign writes a relay holds
 before their fate) are held in the same table with the same record layout and
 `seq = 0`, so they sort before every accepted write of the row and never fall
 in a range after a base seq. An accepted fate moves each of the transaction's
 records from its `seq = 0` key to its key at the transaction's seq in the batch
-that stores the fate; a rejected fate deletes them (SPEC 2 §2.7.1).
+that stores the fate, or drops it when the image becomes the row's current
+image; a rejected fate deletes them (SPEC 2 §2.7.1). An accepted write that
+supersedes the row's current image first moves that image, base included,
+into history at its own seq.
 
 **Wire layout.** The wire `VersionRecord` carries, after `authored_columns`,
 the version's `base` (`{ seq: Option<GlobalTime>, pending: Option<TxId> }`),
@@ -554,8 +564,9 @@ repeated per record. The byte receipt is the protocol test of the
 `VersionRecord` postcard layout.
 
 **Per-row cost.** A history record costs its `seq` (8 bytes) and its two
-nullable base fields over the former stamp-free layout, and nothing on
-current rows.
+nullable base fields over the former stamp-free layout. A current row costs
+the same two base fields (14 bytes when both are null), which lets history
+skip the latest image: a row stores its latest image once, in current.
 
 ### 4.7 Refs: local work over origin
 

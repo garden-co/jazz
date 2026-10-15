@@ -421,9 +421,17 @@ where
                     }
                 }
                 // A current row has `global_time` where history has none,
-                // and ends at `authored_columns`, before history's
-                // `counter_signs` and merge fields.
-                let source = if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
+                // and after `authored_columns` carries only the base fields
+                // of history's `counter_signs`, `seq` and base.
+                let base_field = match field.name.as_deref() {
+                    Some(
+                        name @ (crate::schema::BASE_SEQ_FIELD | crate::schema::BASE_PENDING_FIELD),
+                    ) if current => history_descriptor.field_index(name),
+                    _ => None,
+                };
+                let source = if let Some(source) = base_field {
+                    source
+                } else if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
                     index - 1
                 } else {
                     index

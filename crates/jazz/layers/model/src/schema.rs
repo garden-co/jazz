@@ -1147,6 +1147,18 @@ impl TableSchema {
 
     /// Return the global-current table: one settled row image per row.
     pub fn global_current_storage_table(&self) -> GrooveTableSchema {
+        self.global_current_table(true)
+    }
+
+    /// The global-current row as reads project it: the stored layout without
+    /// `base_seq` and `base_pending`. Only the move into history and the
+    /// write-conflict check read a current row's base; a read publishes the
+    /// current layout (SPEC 2 §2.7.1).
+    pub fn global_current_read_table(&self) -> GrooveTableSchema {
+        self.global_current_table(false)
+    }
+
+    fn global_current_table(&self, with_base: bool) -> GrooveTableSchema {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1176,6 +1188,13 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        // The latest write's base, as its history record would carry it:
+        // history holds only superseded images, so the row's latest image
+        // lives here alone and moves into history whole when a later write
+        // supersedes it (SPEC 2 §2.7.1).
+        if with_base {
+            push_current_base_columns(&mut content_columns);
+        }
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -1231,6 +1250,8 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        // Same layout as global current.
+        push_current_base_columns(&mut content_columns);
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
@@ -1428,6 +1449,16 @@ pub const BASE_SEQ_FIELD: &str = "base_seq";
 /// History field holding the pending predecessor of a write's base.
 #[doc(hidden)]
 pub const BASE_PENDING_FIELD: &str = "base_pending";
+
+/// The current tables' trailing base columns: `base_seq` and `base_pending`
+/// with history's encoding, after `authored_columns`.
+fn push_current_base_columns(columns: &mut Vec<groove::schema::ColumnSchema>) {
+    columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
+    columns.push(column(
+        BASE_PENDING_FIELD,
+        history_base_pending_storage_type(),
+    ));
+}
 
 /// Physical type of the history `base_pending` field: a nullable record of the
 /// predecessor's `(time, node)`. A record is variable-width, so the common

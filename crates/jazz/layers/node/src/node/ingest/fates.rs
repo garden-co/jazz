@@ -102,10 +102,11 @@ where
         )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
-                self.write_global_current_update(&mut batch, version, global_time)?;
-                // History holds the row's post-image at this seq, which is
-                // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version)?;
+                // Current holds the row's post-image at this seq, which is
+                // what peers receive for this transaction; the image it
+                // supersedes moves into history.
+                self.write_global_current_update(&mut batch, version, global_time)
+                    .await?;
             }
             let mut moved = !global_current_updates.is_empty();
             if matches!(stored.fate, Fate::Accepted) {
@@ -119,7 +120,8 @@ where
                     });
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
-                        self.write_history_post_image(&mut batch, &at_seq)?;
+                        self.write_superseded_history_record(&mut batch, &at_seq)
+                            .await?;
                         moved = true;
                     }
                 }

@@ -34,6 +34,7 @@ Invariant digest:
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 - `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical native author records and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
 - `INV-DATA-27`: History, global-current and ahead-current rows MUST store `created_at` and `updated_at` as Unix milliseconds in a Groove U64-stored-as-U48 column (exactly 6 bytes, `INV-STORAGE-39`), exposed as `U64` above storage; a value above `2^48 - 1` MUST be refused with a typed error, never truncated.
+- `INV-DATA-28`: History MUST hold only superseded accepted images and pending (`seq = 0`) records: a row's latest accepted image MUST be stored only in its global-current record, which carries the image's `base_seq` and `base_pending` with history's encoding. An accepted write that supersedes the row's current image MUST first move that image into history at the image's own seq, base included, then overwrite current. The row at seq `S` MUST be read from current when `S` is at or above the row's current seq and from history otherwise; both are point reads.
 
 ## Details
 
@@ -288,18 +289,31 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 history (Core, relay and client stores on every adapter) declares the codec
 family `jazz.history-version-current.v4` in its storage manifest, in addition
 to the shared Jazz epoch-one profile. That family is the linear row-state
-layout: one history record per accepted transaction holding the row state after
+layout: one record per accepted transaction holding the row state after
 Core's merge, keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)` where
 `seq` is the transaction's accepted `GlobalTime`, with no secondary index.
+**History holds only superseded images** (`INV-DATA-28`): a row's latest
+accepted image lives only in its global-current record, and an accepted write
+first moves the previous current image into history at that image's own seq,
+then overwrites current, so an update costs the same two writes as before and
+a row stores its latest image once. Current therefore also carries the latest
+write's `base_seq` and `base_pending` (history's encoding, after
+`authored_columns`), which the move copies over verbatim: about 14 bytes per
+current row, against one full history image saved per row. Reads project
+current without the base fields; only the move into history and the
+write-conflict check read them. Client-cache eviction removes superseded
+history images only: a row's latest image is its current record.
 Pending records (a node's own uploads, and foreign writes a relay holds before
 their fate) live in the same table with the same record layout and `seq = 0`,
 so they sort before every accepted write of the row and are found by their
 `(tx_time, tx_node_id)`; the batch that stores an accepted fate moves each of
 the transaction's pending records to its key at the transaction's seq, and a
-rejected fate deletes them. A history record ends, after `authored_columns` and the `counter_signs` bytes of a
+rejected fate deletes them; when the accepted image becomes the row's
+current image, its pending record is dropped instead. A history record ends, after `authored_columns` and the `counter_signs` bytes of a
 patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
 `base_pending` (SPEC 4 §4.6). Beside them: a
-global-current record per row with `global_time` (the row's seq) and index
+global-current record per row with `global_time` (the row's seq), the latest
+write's `base_seq` and `base_pending`, and index
 `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)`; and `_deletion` as an
 ordinary nullable cell. No row state carries a timestamp used for merging.
@@ -307,8 +321,11 @@ The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
 forwarding and materialization read the listed `(table, branch, row)` keys at
 the transaction's seq (from its `jazz_transactions` record) and its
-`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
-and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
+`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate; a
+listed key at the row's current seq is read from global current. "The row at
+seq `S`" is a point read of global current when `S` is at or above the row's
+current seq, and of history otherwise; "the row's writes after `S`" is a range
+read of history plus the row's current record (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. Every history image,
 global-current record and ahead-overlay record stores all four provenance
 fields. `created_at` and `updated_at` are public Unix milliseconds in all three
