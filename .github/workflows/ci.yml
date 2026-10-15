@@ -114,10 +114,11 @@ jobs:
   # `test-rust` passes on ready PRs even though they only run the fast scope, so
   # it cannot prove full-suite coverage (#4091). `full-suite` is a commit status
   # posted only after the full suite passed: on the run's own head, and for a
-  # merge-group/* PR also on every PR head the group merged along its
-  # first-parent chain. A PR head no green full run covered carries no
-  # `full-suite` status, so a ruleset requiring it blocks that merge. A new push
-  # to a covered PR moves its head off the covered SHA and so voids coverage.
+  # merge-group/* PR also on every PR head the group cleanly merged along its
+  # first-parent chain (dev/ci/full-suite-coverage.sh). A PR head no green full
+  # run covered carries no `full-suite` status, so a ruleset requiring it blocks
+  # that merge. A new push to a covered PR moves its head off the covered SHA
+  # and so voids coverage.
   report-full-suite:
     if: >-
       always() && needs.test-rust.result == 'success' && (
@@ -128,11 +129,16 @@ jobs:
       )
     needs: [trusted, test-rust]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       statuses: write
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          filter: blob:none
       - name: Report full-suite on covered heads
         env:
           GH_TOKEN: ${{ github.token }}
@@ -144,21 +150,12 @@ jobs:
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          covered="${HEAD_SHA}"
-          description="Full suite passed on this commit"
           if [ "${IS_GROUP}" = true ]; then
             description="Full suite passed in merge group #${PR_NUMBER}"
-            # One "sha parent1 [parent2]" line per commit the group adds to main.
-            gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=250" \
-              --jq '.commits[] | ([.sha] + [.parents[].sha]) | join(" ")' > group-commits.txt
-            # Walk the group branch's first-parent chain back to main; each merge
-            # on it brought in one PR head as its second parent.
-            sha="${HEAD_SHA}"
-            while line=$(grep -m1 "^${sha} " group-commits.txt); do
-              read -r _ first second _ <<< "${line}"
-              if [ -n "${second:-}" ]; then covered="${covered} ${second}"; fi
-              sha="${first}"
-            done
+            covered="$(dev/ci/full-suite-coverage.sh "${BASE_SHA}" "${HEAD_SHA}")"
+          else
+            description="Full suite passed on this commit"
+            covered="${HEAD_SHA}"
           fi
           for sha in ${covered}; do
             echo "full-suite success on ${sha}"
