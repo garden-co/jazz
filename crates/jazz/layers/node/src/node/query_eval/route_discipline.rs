@@ -663,17 +663,28 @@ fn program_binding_source_names(program: &QueryProgram) -> BTreeSet<String> {
     names
 }
 
+type RewrittenNodes = HashMap<*const GraphBuilder, (Arc<GraphBuilder>, Arc<GraphBuilder>)>;
+
 /// Renames every binding source `graph` reads by appending `suffix`.
-pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> GraphBuilder {
-    rewrite_graph(graph, &mut |node| {
-        let GraphBuilder::BindingSource { shape, output } = node else {
-            return None;
-        };
-        Some(GraphBuilder::BindingSource {
-            shape: format!("{shape}{suffix}"),
-            output: *output,
-        })
-    })
+/// The memo belongs to one program and one suffix.
+pub(super) fn isolate_binding_sources(
+    graph: &GraphBuilder,
+    suffix: &str,
+    rewritten: &mut RewrittenNodes,
+) -> GraphBuilder {
+    rewrite_graph(
+        graph,
+        &mut |node| {
+            let GraphBuilder::BindingSource { shape, output } = node else {
+                return None;
+            };
+            Some(GraphBuilder::BindingSource {
+                shape: format!("{shape}{suffix}"),
+                output: *output,
+            })
+        },
+        rewritten,
+    )
 }
 
 /// `graph` with every typed template replaced by the declarative operators
@@ -681,21 +692,32 @@ pub(super) fn isolate_binding_sources(graph: &GraphBuilder, suffix: &str) -> Gra
 /// the route check sees each operator a template runs. A template that
 /// cannot be expanded stays, and the check treats it as opaque.
 fn expand_templates(graph: &GraphBuilder) -> GraphBuilder {
-    rewrite_graph(graph, &mut |node| match node {
-        GraphBuilder::TypedTemplate {
-            program,
-            inputs,
-            predicates,
-            scalars,
-        } => program
-            .bind_declarative_with_arguments(inputs, predicates, scalars)
-            .ok()
-            .map(|expanded| expand_templates(&expanded)),
-        GraphBuilder::TemplateInput {
-            input: Some(input), ..
-        } => Some(input.as_ref().clone()),
-        _ => None,
-    })
+    expand_templates_with_memo(graph, &mut HashMap::new())
+}
+
+fn expand_templates_with_memo(
+    graph: &GraphBuilder,
+    rewritten: &mut RewrittenNodes,
+) -> GraphBuilder {
+    rewrite_graph(
+        graph,
+        &mut |node| match node {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                scalars,
+            } => program
+                .bind_declarative_with_arguments(inputs, predicates, scalars)
+                .ok()
+                .map(|expanded| expand_templates(&expanded)),
+            GraphBuilder::TemplateInput {
+                input: Some(input), ..
+            } => Some(input.as_ref().clone()),
+            _ => None,
+        },
+        rewritten,
+    )
 }
 
 /// Applies `map` bottom-up, copying only changed nodes and their ancestors.
@@ -703,15 +725,15 @@ fn expand_templates(graph: &GraphBuilder) -> GraphBuilder {
 fn rewrite_graph(
     graph: &GraphBuilder,
     map: &mut impl FnMut(&GraphBuilder) -> Option<GraphBuilder>,
+    rewritten: &mut RewrittenNodes,
 ) -> GraphBuilder {
-    let mut rewritten = HashMap::new();
-    rewrite_node(graph, map, &mut rewritten).into_owned()
+    rewrite_node(graph, map, rewritten).into_owned()
 }
 
 fn rewrite_node<'g>(
     node: &'g GraphBuilder,
     map: &mut impl FnMut(&GraphBuilder) -> Option<GraphBuilder>,
-    rewritten: &mut HashMap<*const GraphBuilder, Arc<GraphBuilder>>,
+    rewritten: &mut RewrittenNodes,
 ) -> Cow<'g, GraphBuilder> {
     let mut mapped = None;
     let mut changed_inputs = false;
@@ -722,14 +744,16 @@ fn rewrite_node<'g>(
                 Cow::Borrowed(_) => Arc::clone(child),
                 Cow::Owned(done) => Arc::new(done),
             };
-            rewritten.insert(key, done);
+            // Other terminal roots can be replaced while this memo lives.
+            // Keep the original allocation alive so its address stays valid.
+            rewritten.insert(key, (Arc::clone(child), done));
         }
-        changed_inputs |= !Arc::ptr_eq(child, &rewritten[&key]);
+        changed_inputs |= !Arc::ptr_eq(child, &rewritten[&key].1);
     }
     if changed_inputs {
         let updated = mapped.get_or_insert_with(|| node.clone());
         rewrite_inputs(updated, &mut |child| {
-            Arc::clone(&rewritten[&Arc::as_ptr(child)])
+            Arc::clone(&rewritten[&Arc::as_ptr(child)].1)
         });
     }
     if let Some(replacement) = map(mapped.as_ref().unwrap_or(node)) {
@@ -867,11 +891,14 @@ where
                 self.isolated_binding_suffix(&program.request)
             }
         };
+        // One suffix applies to the whole program. Preserve shared inputs
+        // across its terminal roots while retaining the originals in the memo.
+        let mut rewritten = HashMap::new();
         for terminal in &mut program.lowered.terminals {
-            terminal.graph = isolate_binding_sources(&terminal.graph, &suffix);
+            terminal.graph = isolate_binding_sources(&terminal.graph, &suffix, &mut rewritten);
         }
         if let Some(graph) = program.lowered.internal_app_rows_graph.as_mut() {
-            *graph = isolate_binding_sources(graph, &suffix);
+            *graph = isolate_binding_sources(graph, &suffix, &mut rewritten);
         }
         let scoped = format!("{source_shape}{suffix}");
         #[cfg(test)]
@@ -885,17 +912,19 @@ where
     ) -> Result<(), RouteViolation> {
         let parameters = &program.lowered.parameters;
         let route_params = prepared_route_param_names(parameters);
+        // Expansion depends only on each immutable input, not its terminal.
+        let mut expanded_inputs = HashMap::new();
         let expanded = program
             .lowered
             .terminals
             .iter()
-            .map(|terminal| expand_templates(&terminal.graph))
+            .map(|terminal| expand_templates_with_memo(&terminal.graph, &mut expanded_inputs))
             .collect::<Vec<_>>();
         let expanded_app_rows = program
             .lowered
             .internal_app_rows_graph
             .as_ref()
-            .map(expand_templates);
+            .map(|graph| expand_templates_with_memo(graph, &mut expanded_inputs));
         let mut terminals = Vec::new();
         for (terminal, graph) in program.lowered.terminals.iter().zip(&expanded) {
             let eligible = terminal_route_eligible_fields(&terminal.output)
