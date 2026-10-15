@@ -2160,15 +2160,20 @@ test("main pushes skip the full suite only for trees a green merge group tested"
     git("commit", "-qm", name);
     return git("rev-parse", "HEAD");
   };
-  // Stands in for `gh api repos/<repo>/commits/<sha>/status --jq ...`: answers
-  // "success" for the SHAs listed in GREEN_SHAS.
+  // Stands in for `gh api repos/<repo>/commits/<sha>/statuses --jq <expr>`:
+  // applies the script's own jq filter to the statuses STATUSES gives that SHA.
   fs.writeFileSync(
     path.join(bin, "gh"),
-    '#!/usr/bin/env bash\nsha="$(sed -E "s#.*/commits/([0-9a-f]+)/status#\\1#" <<<"$2")"\n' +
-      'case " ${GREEN_SHAS} " in *" ${sha} "*) echo success ;; *) echo "" ;; esac\n',
+    '#!/usr/bin/env bash\nsha="$(sed -E "s#.*/commits/([0-9a-f]+)/statuses.*#\\1#" <<<"$2")"\n' +
+      'jq -c --arg sha "${sha}" \'.[$sha] // []\' <<<"${STATUSES}" | jq -r "$4"\n',
     { mode: 0o755 },
   );
-  const coverage = (head, greenShas = []) =>
+  const status = (state, login = "github-actions[bot]") => ({
+    context: "full-suite",
+    state,
+    creator: { login },
+  });
+  const coverage = (head, statuses = {}) =>
     spawnSync("bash", [path.join(root, "dev/ci/main-push-coverage.sh"), head], {
       cwd: repo,
       encoding: "utf8",
@@ -2176,7 +2181,7 @@ test("main pushes skip the full suite only for trees a green merge group tested"
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         REPO: "garden-co/jazz",
-        GREEN_SHAS: greenShas.join(" "),
+        STATUSES: JSON.stringify(statuses),
       },
     });
   try {
@@ -2202,19 +2207,27 @@ test("main pushes skip the full suite only for trees a green merge group tested"
     git("merge", "-q", "--no-ff", "-m", "Merge pull request b", prB);
     const mainB = git("rev-parse", "HEAD");
 
+    const green = { [tip]: [status("success")] };
     for (const head of [mainA, mainB]) {
-      const result = coverage(head, [tip]);
+      const result = coverage(head, green);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout.trim(), `merge-group/4 ${tip}`);
     }
-    // Without a green full-suite status on the group's tip, nothing is covered.
-    assert.equal(coverage(mainB, []).status, 1);
-    assert.equal(coverage(mainB, [prA, prB]).status, 1);
+    // Without a green full-suite status from Actions on the group's tip,
+    // nothing is covered.
+    assert.equal(coverage(mainB).status, 1);
+    assert.equal(
+      coverage(mainB, { [prA]: [status("success")], [prB]: [status("success")] }).status,
+      1,
+    );
+    assert.equal(coverage(mainB, { [tip]: [status("success", "aeplay")] }).status, 1);
+    // The latest status from Actions decides.
+    assert.equal(coverage(mainB, { [tip]: [status("failure"), status("success")] }).status, 1);
 
     // A main commit with any other tree runs the suite.
     git("checkout", "-q", "main");
     const other = commitFile("hotfix");
-    assert.equal(coverage(other, [tip]).status, 1);
+    assert.equal(coverage(other, green).status, 1);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(bin, { recursive: true, force: true });

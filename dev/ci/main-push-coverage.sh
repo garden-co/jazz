@@ -5,12 +5,15 @@
 # The Review Loop merges a green merge-group/* branch's PRs into main one by
 # one, in the branch's order, each with its own merge commit. While main does
 # not move in between, each of those main commits has the same tree as one
-# commit on the branch's first-parent chain: a prefix of what the group's full
-# run tested at its tip.
+# commit on the branch's first-parent chain. Only the tip's tree was tested;
+# the earlier commits are prefixes of it that the queue is about to complete,
+# so their main pushes skip the suite too. If the queue stops before merging
+# the whole group, it must dispatch CI on main (AGENTS.md).
 #
 # Prints "<branch> <tip-sha>" and exits 0 when <main-sha>'s tree equals the tree
 # of a commit on a merge-group branch whose tip carries a successful
-# `full-suite` status. Exits 1 otherwise, and on any error, so the caller then
+# `full-suite` status posted by GitHub Actions, the only creator the main
+# ruleset accepts for it. Exits 1 otherwise, and on any error, so the caller then
 # runs the full suite. Needs the merge-group branches fetched as
 # refs/remotes/origin/merge-group/*, plus GH_TOKEN and REPO for `gh api`.
 set -euo pipefail
@@ -28,8 +31,9 @@ while read -r ref; do
   # was cut from main.
   trees="$(git log --first-parent --max-count="${max_group_length}" --format=%T "${tip}" --not "${head}")"
   grep -qx "${tree}" <<<"${trees}" || continue
-  state="$(gh api "repos/${REPO}/commits/${tip}/status" \
-    --jq '[.statuses[] | select(.context == "full-suite")][0].state // ""' </dev/null)"
+  # Statuses are listed newest first; the latest one from Actions decides.
+  state="$(gh api "repos/${REPO}/commits/${tip}/statuses?per_page=100" \
+    --jq '[.[] | select(.context == "full-suite" and .creator.login == "github-actions[bot]")][0].state // ""' </dev/null)"
   if [ "${state}" = success ]; then
     echo "${ref#refs/remotes/origin/} ${tip}"
     exit 0

@@ -52,7 +52,10 @@ passes. The queue merges approved heads together on a `merge-group/<n>` branch,
 whose push runs the full suite once (its PR into main runs only lint); on green
 it merges each PR in order with its own merge commit. A main push whose tree
 equals a commit on a green group's first-parent chain skips the suite, so those
-merges don't rerun it. A green full run posts a `full-suite` commit status on
+merges don't rerun it. Only the group's tip was tested, so if the queue stops
+before merging every PR of a group, it dispatches CI on main. Group pushes run
+trusted with repository secrets and write the shared compile cache, so only
+admins may push `merge-group/**`, and only approved PRs go into a group. A green full run posts a `full-suite` commit status on
 its head and, for a merge group, on each PR head the group merged cleanly;
 branch protection requires it on main, so every PR into main (Dependabot,
 docs-only and hotfixes included) goes through a merge group or a dispatched
