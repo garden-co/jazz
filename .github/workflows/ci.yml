@@ -70,7 +70,12 @@ jobs:
         env:
           UNTRUSTED_RESULT: ${{ needs.untrusted.result }}
           TRUSTED_RESULT: ${{ needs.trusted.result }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
         run: |
+          # A draft's suite runs no jobs, so its invocation reports skipped.
+          if [ "${DRAFT}" = true ]; then
+            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:skipped" && exit 0
+          fi
           test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
             test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
 

@@ -246,7 +246,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["report-dispatched-test-rust", "test-rust", "trusted", "untrusted"],
+    ["report-dispatched-test-rust", "report-full-suite", "test-rust", "trusted", "untrusted"],
     "the credential boundary must account for every entry-workflow job",
   );
   const {
@@ -254,6 +254,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     trusted,
     "test-rust": aggregate,
     "report-dispatched-test-rust": dispatchedStatus,
+    "report-full-suite": fullSuiteStatus,
   } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
@@ -319,6 +320,29 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(dispatchedStatus.steps.length, 1);
   assert.equal(dispatchedStatus.steps[0].uses, undefined);
   assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
+
+  // full-suite coverage (#4091) is posted only after test-rust passed, and only
+  // by runs that executed the full suite with a write-capable token.
+  assert.deepEqual(Object.keys(fullSuiteStatus).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' &&\s+\(startsWith\(github\.head_ref, 'merge-group\/'\) \|\| github\.base_ref == 'release'\)/,
+  );
+  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
+  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
+  assert.equal(fullSuiteStatus.steps.length, 1);
+  assert.equal(fullSuiteStatus.steps[0].uses, undefined);
+  assert.match(fullSuiteStatus.steps[0].run, /-f context=full-suite /);
+  assert.match(fullSuiteStatus.steps[0].run, /-f state=success /);
   assert.equal(document.on.pull_request_target, undefined);
   assert.deepEqual(
     document.on.pull_request,
