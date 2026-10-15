@@ -12,8 +12,9 @@ on:
     branches: [main]
   # The nightly suite: only the workloads' nightly extras (the `nightly` bench
   # targets and the Groove reference-engine sweep), listed in
-  # dev/benchmarks/codspeed-artifact.mjs. It never re-measures a merge case,
-  # so each case gets one perf-timeline point per commit.
+  # dev/benchmarks/codspeed-artifact.mjs, and the example apps' load times.
+  # It never re-measures a merge case, so each case gets one perf-timeline
+  # point per commit.
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -219,10 +220,11 @@ jobs:
           # Features were fixed at build time; cargo-codspeed rejects them on run.
           run: ${{ steps.install.outputs.run-command }}
 
+  # Both suites need this runtime: the text editor's cases in the merge suite,
+  # the example apps' load times in the nightly suite.
   text-editor-browser-build:
     name: Build text editor browser benchmark runtime
     needs: native-workloads-plan
-    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 60
     steps:
@@ -270,6 +272,7 @@ jobs:
   text-editor-browser-walltime:
     name: Text editor browser wall time
     needs: text-editor-browser-build
+    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
     runs-on: codspeed-macro
     timeout-minutes: 20
     steps:
@@ -304,13 +307,14 @@ jobs:
           retention-days: 14
 
   # The example apps' load times, from their production builds: the
-  # benchmark's README is in dev/benchmarks/example-load-times. The apps are
-  # built here against the text editor job's runtime, so the macro runner only
-  # installs, unpacks and measures.
+  # benchmark's README is in dev/benchmarks/example-load-times. Nightly suite
+  # only (the schedule, or a dispatch with suite=nightly), never on PRs or
+  # main merges. The apps are built here against the text editor job's
+  # runtime, so the macro runner only installs, unpacks and measures.
   example-load-times-build:
     name: Build example apps for load-time benchmarks
     needs: text-editor-browser-build
-    if: github.event_name != 'schedule' && inputs.suite != 'nightly'
+    if: github.event_name == 'schedule' || inputs.suite == 'nightly'
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 40
     steps:
@@ -344,6 +348,7 @@ jobs:
   example-load-times-walltime:
     name: Example app load times wall time
     needs: [text-editor-browser-build, example-load-times-build]
+    if: github.event_name == 'schedule' || inputs.suite == 'nightly'
     runs-on: codspeed-macro
     timeout-minutes: 45
     steps:

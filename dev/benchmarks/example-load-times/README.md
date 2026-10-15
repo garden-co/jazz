@@ -76,16 +76,37 @@ process groups in `.generated/pids`. The next run kills anything a crashed run l
 
 ## CI
 
-The CodSpeed workflow has three jobs:
+The cases belong to the **nightly suite** of `.github/workflows/codspeed.yml`. They run on the
+scheduled nightly run on main, and on a manual dispatch with `suite: nightly`. They never run on
+pull requests or on main merges, so they add nothing to a PR's checks or to a merge's CodSpeed
+report. They take about 17 min on `codspeed-macro`.
 
-1. **Text editor build** (Blacksmith, already present). It builds the release runtime.
+The nightly suite runs three jobs for them:
+
+1. **Text editor build** (Blacksmith). It builds the release runtime. The merge suite runs it too,
+   for the text editor's own browser cases.
 2. **Example apps build** (Blacksmith). It builds the ten apps against that runtime and
    precompresses their assets. Both runtime and builds are uploaded as artifacts.
 3. **Measurement** (`codspeed-macro`). It installs dependencies, unpacks both artifacts, verifies
    the runtime's fingerprints and runs these cases. Nothing is compiled there.
 
-The cases belong to the merge suite. They run on every main merge and on pull requests with the
-`benchmark` label.
+### Measuring a pull request on demand
+
+CodSpeed compares a branch's results with main's newest results for the same cases, so measure
+both at the same point:
+
+1. Bring the branch up to date with main (merge main into it).
+2. Dispatch the workflow with `suite: nightly` on main, unless tonight's scheduled run already
+   measured main's current commit.
+3. Dispatch it with `suite: nightly` on the branch.
+
+```sh
+gh workflow run codspeed.yml --ref main -f suite=nightly
+gh workflow run codspeed.yml --ref <branch> -f suite=nightly
+```
+
+The dispatch on the branch also runs the native workloads' nightly extras. Its CodSpeed report
+compares the load-time cases with main's run.
 
 Descriptions shown on the docs page come from `metadata.ts` through
 [../metadata](../metadata/README.md).
