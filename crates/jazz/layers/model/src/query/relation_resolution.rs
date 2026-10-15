@@ -1079,67 +1079,54 @@ pub fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> 
     })
 }
 
+/// A comparison, null, membership or containment leaf, with `column` turning
+/// the leaf's column into an operand; `None` for any other predicate.
+fn relation_leaf_predicate(
+    predicate: &RelationPredicate,
+    mut column: impl FnMut(&RelationColumnRef) -> Result<Operand, QueryError>,
+) -> Result<Option<Predicate>, QueryError> {
+    Ok(Some(match predicate {
+        RelationPredicate::Cmp { left, op, right } => {
+            let (left, right) = (column(left)?, relation_value_to_operand(right)?);
+            match op {
+                RelationCmpOp::Eq => Predicate::Eq(left, right),
+                RelationCmpOp::Ne => Predicate::Ne(left, right),
+                RelationCmpOp::Lt => Predicate::Lt(left, right),
+                RelationCmpOp::Le => Predicate::Lte(left, right),
+                RelationCmpOp::Gt => Predicate::Gt(left, right),
+                RelationCmpOp::Ge => Predicate::Gte(left, right),
+            }
+        }
+        RelationPredicate::IsNull { column: target } => Predicate::IsNull(column(target)?),
+        RelationPredicate::IsNotNull { column: target } => {
+            Predicate::Not(Box::new(Predicate::IsNull(column(target)?)))
+        }
+        RelationPredicate::In { left, values } => Predicate::In(
+            column(left)?,
+            values
+                .iter()
+                .map(relation_value_to_operand)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        RelationPredicate::Contains { left, right } => {
+            Predicate::Contains(column(left)?, relation_value_to_operand(right)?)
+        }
+        _ => return Ok(None),
+    }))
+}
+
 fn relation_predicate_to_query_predicate(
     predicate: &RelationPredicate,
 ) -> Result<Option<(String, Predicate)>, QueryError> {
+    let mut scope = String::new();
+    let leaf = relation_leaf_predicate(predicate, |column| {
+        scope = relation_scope(column)?;
+        Ok(Operand::Column(column.column.clone()))
+    })?;
+    if let Some(leaf) = leaf {
+        return Ok(Some((scope, leaf)));
+    }
     match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            let scope = relation_scope(left)?;
-            let predicate = match op {
-                RelationCmpOp::Eq => Predicate::Eq(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ne => Predicate::Ne(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Lt => Predicate::Lt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Le => Predicate::Lte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Gt => Predicate::Gt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ge => Predicate::Gte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-            };
-            Ok(Some((scope, predicate)))
-        }
-        RelationPredicate::IsNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::IsNull(Operand::Column(column.column.clone())),
-        ))),
-        RelationPredicate::IsNotNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
-                column.column.clone(),
-            )))),
-        ))),
-        RelationPredicate::In { left, values } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::In(
-                Operand::Column(left.column.clone()),
-                values
-                    .iter()
-                    .map(relation_value_to_operand)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ))),
-        RelationPredicate::Contains { left, right } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::Contains(
-                Operand::Column(left.column.clone()),
-                relation_value_to_operand(right)?,
-            ),
-        ))),
         RelationPredicate::EnumMatch {
             column,
             case,
@@ -1165,48 +1152,29 @@ fn relation_predicate_to_query_predicate(
         }
         RelationPredicate::True => Ok(None),
         RelationPredicate::False => Ok(Some((String::new(), Predicate::Any(Vec::new())))),
+        RelationPredicate::Cmp { .. }
+        | RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::In { .. }
+        | RelationPredicate::Contains { .. } => unreachable!("leaf predicates are converted above"),
     }
 }
 
 fn relation_payload_predicate_to_predicate(
     predicate: &RelationPredicate,
 ) -> Result<Predicate, QueryError> {
-    let unscoped_column = |column: &RelationColumnRef| {
+    let leaf = relation_leaf_predicate(predicate, |column| {
         if column.scope.is_some() {
             return Err(relation_unification_error(
                 "payload enum predicate fields must be unscoped",
             ));
         }
         Ok(Operand::Column(column.column.clone()))
-    };
+    })?;
+    if let Some(leaf) = leaf {
+        return Ok(leaf);
+    }
     match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            let left = unscoped_column(left)?;
-            let right = relation_value_to_operand(right)?;
-            Ok(match op {
-                RelationCmpOp::Eq => Predicate::Eq(left, right),
-                RelationCmpOp::Ne => Predicate::Ne(left, right),
-                RelationCmpOp::Lt => Predicate::Lt(left, right),
-                RelationCmpOp::Le => Predicate::Lte(left, right),
-                RelationCmpOp::Gt => Predicate::Gt(left, right),
-                RelationCmpOp::Ge => Predicate::Gte(left, right),
-            })
-        }
-        RelationPredicate::IsNull { column } => Ok(Predicate::IsNull(unscoped_column(column)?)),
-        RelationPredicate::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
-            unscoped_column(column)?,
-        )))),
-        RelationPredicate::In { left, values } => Ok(Predicate::In(
-            unscoped_column(left)?,
-            values
-                .iter()
-                .map(relation_value_to_operand)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Contains { left, right } => Ok(Predicate::Contains(
-            unscoped_column(left)?,
-            relation_value_to_operand(right)?,
-        )),
         RelationPredicate::And(children) => Ok(Predicate::All(
             children
                 .iter()
@@ -1227,6 +1195,11 @@ fn relation_payload_predicate_to_predicate(
         RelationPredicate::EnumMatch { .. } => Err(relation_unification_error(
             "nested payload enum matches are not supported",
         )),
+        RelationPredicate::Cmp { .. }
+        | RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::In { .. }
+        | RelationPredicate::Contains { .. } => unreachable!("leaf predicates are converted above"),
     }
 }
 
