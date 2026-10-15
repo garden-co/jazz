@@ -1,0 +1,1042 @@
+{
+  "types-protocol": [
+    {
+      "rust": "crates/jazz-compression/src/lib.rs",
+      "rust_loc": 78
+    },
+    {
+      "rust": "crates/jazz-compression/src/stream.rs",
+      "rust_loc": 460
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/authorization_scope.rs",
+      "rust_loc": 341
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/lib.rs",
+      "rust_loc": 24
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/protocol.rs",
+      "rust_loc": 2246
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/protocol_limits.rs",
+      "rust_loc": 54
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+      "rust_loc": 19
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/wire.rs",
+      "rust_loc": 638
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/wire/channel_credit.rs",
+      "rust_loc": 362
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/wire/channels.rs",
+      "rust_loc": 336
+    },
+    {
+      "rust": "crates/jazz/layers/protocol/src/wire/stream_backend.rs",
+      "rust_loc": 517
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/account_registry.rs",
+      "rust_loc": 301
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/account_registry/codec.rs",
+      "rust_loc": 174
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/account_registry/storage.rs",
+      "rust_loc": 150
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/app_id.rs",
+      "rust_loc": 33
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/debug_env.rs",
+      "rust_loc": 21
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/delivery_diagnostics.rs",
+      "rust_loc": 44
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/identity.rs",
+      "rust_loc": 298
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/ids.rs",
+      "rust_loc": 730
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/lib.rs",
+      "rust_loc": 34
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/local_executor.rs",
+      "rust_loc": 14
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/object.rs",
+      "rust_loc": 314
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/postcard_exact.rs",
+      "rust_loc": 38
+    },
+    {
+      "rust": "crates/jazz/layers/types/src/time.rs",
+      "rust_loc": 145
+    }
+  ],
+  "groove-records": [
+    {
+      "rust": "crates/groove/src/chunks.rs",
+      "rust_loc": 1327
+    },
+    {
+      "rust": "crates/groove/src/large_values.rs",
+      "rust_loc": 4613
+    },
+    {
+      "rust": "crates/groove/src/large_values/json_syntax.rs",
+      "rust_loc": 449
+    },
+    {
+      "rust": "crates/groove/src/lib.rs",
+      "rust_loc": 11
+    },
+    {
+      "rust": "crates/groove/src/queries.rs",
+      "rust_loc": 432
+    },
+    {
+      "rust": "crates/groove/src/records/macros.rs",
+      "rust_loc": 849
+    },
+    {
+      "rust": "crates/groove/src/records/mod.rs",
+      "rust_loc": 1854
+    },
+    {
+      "rust": "crates/groove/src/records/values.rs",
+      "rust_loc": 2476
+    },
+    {
+      "rust": "crates/groove/src/schema.rs",
+      "rust_loc": 453
+    }
+  ],
+  "groove-db-storage": [
+    {
+      "rust": "crates/groove/src/db/batch.rs",
+      "rust_loc": 339
+    },
+    {
+      "rust": "crates/groove/src/db/commit.rs",
+      "rust_loc": 771
+    },
+    {
+      "rust": "crates/groove/src/db/encoding.rs",
+      "rust_loc": 845
+    },
+    {
+      "rust": "crates/groove/src/db/facade.rs",
+      "rust_loc": 1811
+    },
+    {
+      "rust": "crates/groove/src/db/mod.rs",
+      "rust_loc": 1753
+    },
+    {
+      "rust": "crates/groove/src/db/primary_storage.rs",
+      "rust_loc": 581
+    },
+    {
+      "rust": "crates/groove/src/db/query.rs",
+      "rust_loc": 712
+    },
+    {
+      "rust": "crates/groove/src/db/schema_admission.rs",
+      "rust_loc": 511
+    },
+    {
+      "rust": "crates/groove/src/db/storage_helpers.rs",
+      "rust_loc": 945
+    },
+    {
+      "rust": "crates/groove/src/storage/idb.rs",
+      "rust_loc": 485
+    },
+    {
+      "rust": "crates/groove/src/storage/key_codec.rs",
+      "rust_loc": 43
+    },
+    {
+      "rust": "crates/groove/src/storage/manifest.rs",
+      "rust_loc": 317
+    },
+    {
+      "rust": "crates/groove/src/storage/memory.rs",
+      "rust_loc": 479
+    },
+    {
+      "rust": "crates/groove/src/storage/mod.rs",
+      "rust_loc": 2153
+    }
+  ],
+  "groove-ivm-plan": [
+    {
+      "rust": "crates/groove/src/ivm/activation.rs",
+      "rust_loc": 160
+    },
+    {
+      "rust": "crates/groove/src/ivm/execution_layout.rs",
+      "rust_loc": 166
+    },
+    {
+      "rust": "crates/groove/src/ivm/graph.rs",
+      "rust_loc": 2347
+    },
+    {
+      "rust": "crates/groove/src/ivm/graph/join_chains.rs",
+      "rust_loc": 196
+    },
+    {
+      "rust": "crates/groove/src/ivm/mod.rs",
+      "rust_loc": 17
+    },
+    {
+      "rust": "crates/groove/src/ivm/op_types.rs",
+      "rust_loc": 659
+    },
+    {
+      "rust": "crates/groove/src/ivm/planner.rs",
+      "rust_loc": 1505
+    },
+    {
+      "rust": "crates/groove/src/ivm/routes.rs",
+      "rust_loc": 134
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/compilation.rs",
+      "rust_loc": 2060
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/compilation_cache.rs",
+      "rust_loc": 129
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/index_ids.rs",
+      "rust_loc": 280
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/key_encoding.rs",
+      "rust_loc": 702
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/record_projection.rs",
+      "rust_loc": 2083
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/schema.rs",
+      "rust_loc": 903
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/typed_projection.rs",
+      "rust_loc": 105
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/typed_template.rs",
+      "rust_loc": 475
+    },
+    {
+      "rust": "crates/groove/src/ivm/template.rs",
+      "rust_loc": 241
+    },
+    {
+      "rust": "crates/groove/src/ivm/template/arguments.rs",
+      "rust_loc": 125
+    },
+    {
+      "rust": "crates/groove/src/ivm/template/sources.rs",
+      "rust_loc": 132
+    }
+  ],
+  "groove-ivm-tick": [
+    {
+      "rust": "crates/groove/src/ivm/runtime/mod.rs",
+      "rust_loc": 642
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/persist.rs",
+      "rust_loc": 237
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/runtime_tick.rs",
+      "rust_loc": 3653
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/state.rs",
+      "rust_loc": 298
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/subscriptions.rs",
+      "rust_loc": 4932
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/terminal.rs",
+      "rust_loc": 294
+    }
+  ],
+  "groove-ivm-ops": [
+    {
+      "rust": "crates/groove/src/ivm/runtime/aggregate.rs",
+      "rust_loc": 327
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/counted_map.rs",
+      "rust_loc": 238
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/evaluation_memo.rs",
+      "rust_loc": 169
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/evaluation_session.rs",
+      "rust_loc": 712
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/evaluator.rs",
+      "rust_loc": 150
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/evaluator/kernels.rs",
+      "rust_loc": 383
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/evaluator/lookup.rs",
+      "rust_loc": 272
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/graph_lifecycle.rs",
+      "rust_loc": 315
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/join.rs",
+      "rust_loc": 978
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/operator_updates.rs",
+      "rust_loc": 940
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/pipeline.rs",
+      "rust_loc": 410
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/pipeline/fields.rs",
+      "rust_loc": 182
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/rank_index.rs",
+      "rust_loc": 201
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/recursion.rs",
+      "rust_loc": 1786
+    },
+    {
+      "rust": "crates/groove/src/ivm/runtime/windows.rs",
+      "rust_loc": 1394
+    }
+  ],
+  "model-core": [
+    {
+      "rust": "crates/jazz/layers/model/src/lib.rs",
+      "rust_loc": 26
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/admin_catalogue_row_format.rs",
+      "rust_loc": 0
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/branch.rs",
+      "rust_loc": 269
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/json_schema.rs",
+      "rust_loc": 92
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/metadata.rs",
+      "rust_loc": 168
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/mod.rs",
+      "rust_loc": 17
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/policy_claims.rs",
+      "rust_loc": 165
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/policy_directory.rs",
+      "rust_loc": 302
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/mod.rs",
+      "rust_loc": 4
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/policy.rs",
+      "rust_loc": 205
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/relation_ir.rs",
+      "rust_loc": 146
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/session.rs",
+      "rust_loc": 200
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/branch.rs",
+      "rust_loc": 296
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/mod.rs",
+      "rust_loc": 13
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/policy.rs",
+      "rust_loc": 731
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/row.rs",
+      "rust_loc": 175
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/schema.rs",
+      "rust_loc": 580
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_api/types/value.rs",
+      "rust_loc": 376
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_schema.rs",
+      "rust_loc": 98
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/public_schema_convert.rs",
+      "rust_loc": 3182
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/schema_lens/lens.rs",
+      "rust_loc": 177
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/schema_lens/mod.rs",
+      "rust_loc": 2
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/model/transaction.rs",
+      "rust_loc": 93
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/schema.rs",
+      "rust_loc": 1500
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/tx.rs",
+      "rust_loc": 779
+    }
+  ],
+  "model-query": [
+    {
+      "rust": "crates/jazz/layers/model/src/query.rs",
+      "rust_loc": 17
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/ast.rs",
+      "rust_loc": 266
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/builders.rs",
+      "rust_loc": 520
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/canonical_request.rs",
+      "rust_loc": 862
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/combinators.rs",
+      "rust_loc": 48
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/policy_and_request_contracts.rs",
+      "rust_loc": 612
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/policy_limits.rs",
+      "rust_loc": 53
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/relation_codec.rs",
+      "rust_loc": 1197
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/relation_resolution.rs",
+      "rust_loc": 1336
+    },
+    {
+      "rust": "crates/jazz/layers/model/src/query/validation.rs",
+      "rust_loc": 2353
+    }
+  ],
+  "engine": [
+    {
+      "rust": "crates/jazz/layers/engine/src/lib.rs",
+      "rust_loc": 21
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/binding_values.rs",
+      "rust_loc": 70
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/fields.rs",
+      "rust_loc": 150
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/input.rs",
+      "rust_loc": 438
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering.rs",
+      "rust_loc": 989
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/arguments.rs",
+      "rust_loc": 241
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/closure.rs",
+      "rust_loc": 691
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/collect_layout.rs",
+      "rust_loc": 633
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/graph_lowering.rs",
+      "rust_loc": 3852
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/planning.rs",
+      "rust_loc": 1291
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/requirements.rs",
+      "rust_loc": 437
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/templates.rs",
+      "rust_loc": 280
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/lowering/terminals.rs",
+      "rust_loc": 2614
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/mod.rs",
+      "rust_loc": 39
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/output.rs",
+      "rust_loc": 87
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/policy.rs",
+      "rust_loc": 24
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/publication.rs",
+      "rust_loc": 76
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/read.rs",
+      "rust_loc": 240
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/resolver.rs",
+      "rust_loc": 210
+    },
+    {
+      "rust": "crates/jazz/layers/engine/src/query_engine/schemas.rs",
+      "rust_loc": 309
+    }
+  ],
+  "node-qe-a": [
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/local_authority_reconciliation.rs",
+      "rust_loc": 22
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/local_availability_receipts.rs",
+      "rust_loc": 306
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/narrowed_reads.rs",
+      "rust_loc": 572
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/normalization.rs",
+      "rust_loc": 3440
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/policy_factoring.rs",
+      "rust_loc": 134
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/read_sources.rs",
+      "rust_loc": 5794
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/route_discipline.rs",
+      "rust_loc": 834
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/unavailable_inputs.rs",
+      "rust_loc": 293
+    }
+  ],
+  "node-qe-b": [
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval.rs",
+      "rust_loc": 4647
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/authorization.rs",
+      "rust_loc": 1484
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/bindings.rs",
+      "rust_loc": 1015
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/lowering.rs",
+      "rust_loc": 1468
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/maintained_views.rs",
+      "rust_loc": 1329
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/materialization.rs",
+      "rust_loc": 1333
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/prepared_bindings.rs",
+      "rust_loc": 171
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/query_read_sets.rs",
+      "rust_loc": 176
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/query_result_rows.rs",
+      "rust_loc": 216
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/subscription_watermarks.rs",
+      "rust_loc": 161
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/query_eval/subscriptions.rs",
+      "rust_loc": 1031
+    }
+  ],
+  "node-state": [
+    {
+      "rust": "crates/jazz/layers/node/src/node/api_error.rs",
+      "rust_loc": 76
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/database_slot.rs",
+      "rust_loc": 35
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/eviction.rs",
+      "rust_loc": 200
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/global_state.rs",
+      "rust_loc": 266
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/layer_stack.rs",
+      "rust_loc": 93
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/merge_ops.rs",
+      "rust_loc": 262
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/mod.rs",
+      "rust_loc": 2512
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/node_aliases.rs",
+      "rust_loc": 86
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/open_tx.rs",
+      "rust_loc": 2323
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/recovery.rs",
+      "rust_loc": 269
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/refs.rs",
+      "rust_loc": 26
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/catalogue.rs",
+      "rust_loc": 1312
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/commit.rs",
+      "rust_loc": 1389
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/contribution_merge.rs",
+      "rust_loc": 78
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/durable.rs",
+      "rust_loc": 672
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/lifecycle.rs",
+      "rust_loc": 2357
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/state/read_payload.rs",
+      "rust_loc": 510
+    }
+  ],
+  "node-physical-ingest": [
+    {
+      "rust": "crates/jazz/layers/node/src/node/codec.rs",
+      "rust_loc": 1201
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest.rs",
+      "rust_loc": 73
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/catalogue.rs",
+      "rust_loc": 972
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/commit_bundles.rs",
+      "rust_loc": 978
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/fates.rs",
+      "rust_loc": 963
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/validation.rs",
+      "rust_loc": 666
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/view_updates.rs",
+      "rust_loc": 1075
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/ingest/write_base.rs",
+      "rust_loc": 487
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical.rs",
+      "rust_loc": 51
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/bindings.rs",
+      "rust_loc": 629
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/catalogue.rs",
+      "rust_loc": 509
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/descriptors.rs",
+      "rust_loc": 1237
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/enum_lookup.rs",
+      "rust_loc": 330
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/names.rs",
+      "rust_loc": 57
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/projections.rs",
+      "rust_loc": 1466
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/physical/storage.rs",
+      "rust_loc": 899
+    }
+  ],
+  "node-views": [
+    {
+      "rust": "crates/jazz/layers/node/src/node/currency.rs",
+      "rust_loc": 1257
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/maintained_subscription_view.rs",
+      "rust_loc": 3280
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/oracle.rs",
+      "rust_loc": 957
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/supporting_frontier.rs",
+      "rust_loc": 100
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/terminal_record.rs",
+      "rust_loc": 263
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/terminal_root.rs",
+      "rust_loc": 177
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/views.rs",
+      "rust_loc": 2755
+    }
+  ],
+  "node-policy-peer": [
+    {
+      "rust": "crates/jazz/layers/node/src/lib.rs",
+      "rust_loc": 28
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/catalogue_ingest.rs",
+      "rust_loc": 796
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/descriptor_roles.rs",
+      "rust_loc": 551
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+      "rust_loc": 369
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/migration_validation.rs",
+      "rust_loc": 244
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/policy.rs",
+      "rust_loc": 1330
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/relay_scope.rs",
+      "rust_loc": 58
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/row_availability.rs",
+      "rust_loc": 190
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/node/source_resolution.rs",
+      "rust_loc": 695
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer.rs",
+      "rust_loc": 128
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer/delivery.rs",
+      "rust_loc": 15
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer/known_state.rs",
+      "rust_loc": 166
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer/publication.rs",
+      "rust_loc": 2530
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer/repair.rs",
+      "rust_loc": 100
+    },
+    {
+      "rust": "crates/jazz/layers/node/src/peer/subscription_state.rs",
+      "rust_loc": 235
+    }
+  ],
+  "db-core": [
+    {
+      "rust": "crates/jazz/layers/db/src/binding_args.rs",
+      "rust_loc": 67
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/binding_codec.rs",
+      "rust_loc": 252
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/binding_codec/publication_type.rs",
+      "rust_loc": 173
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db.rs",
+      "rust_loc": 5806
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/catalogue.rs",
+      "rust_loc": 168
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/config.rs",
+      "rust_loc": 72
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/mutation_errors.rs",
+      "rust_loc": 151
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/mutations.rs",
+      "rust_loc": 3406
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/read_barrier.rs",
+      "rust_loc": 142
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/reads.rs",
+      "rust_loc": 1117
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/transactions.rs",
+      "rust_loc": 1436
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/foreground_node_lease.rs",
+      "rust_loc": 74
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/lib.rs",
+      "rust_loc": 33
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/positional_order.rs",
+      "rust_loc": 281
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/result_tree.rs",
+      "rust_loc": 45
+    }
+  ],
+  "db-runtime": [
+    {
+      "rust": "crates/jazz/layers/db/src/db/node_runtime.rs",
+      "rust_loc": 5481
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/peer_connection.rs",
+      "rust_loc": 6154
+    }
+  ],
+  "db-rest-wasm": [
+    {
+      "rust": "crates/jazz/layers/db/src/db/channel_endpoint.rs",
+      "rust_loc": 418
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/first_load.rs",
+      "rust_loc": 502
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/lifecycle.rs",
+      "rust_loc": 1349
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/routed_messages.rs",
+      "rust_loc": 233
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/row_availability.rs",
+      "rust_loc": 457
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/subscriptions.rs",
+      "rust_loc": 1347
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/view_update_parts.rs",
+      "rust_loc": 310
+    },
+    {
+      "rust": "crates/jazz/layers/db/src/db/wire_transport.rs",
+      "rust_loc": 672
+    },
+    {
+      "rust": "crates/idb-tree/src/lib.rs",
+      "rust_loc": 1310
+    },
+    {
+      "rust": "crates/idb-tree/src/page.rs",
+      "rust_loc": 332
+    },
+    {
+      "rust": "crates/idb-tree/src/store.rs",
+      "rust_loc": 139
+    },
+    {
+      "rust": "crates/idb-tree/src/web.rs",
+      "rust_loc": 220
+    },
+    {
+      "rust": "crates/jazz-wasm/src/identity.rs",
+      "rust_loc": 77
+    },
+    {
+      "rust": "crates/jazz-wasm/src/lib.rs",
+      "rust_loc": 2999
+    },
+    {
+      "rust": "crates/wasm-tracing/src/config.rs",
+      "rust_loc": 54
+    },
+    {
+      "rust": "crates/wasm-tracing/src/layer.rs",
+      "rust_loc": 402
+    },
+    {
+      "rust": "crates/wasm-tracing/src/lib.rs",
+      "rust_loc": 36
+    },
+    {
+      "rust": "crates/wasm-tracing/src/recorder.rs",
+      "rust_loc": 59
+    }
+  ]
+}
