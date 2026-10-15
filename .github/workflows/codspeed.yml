@@ -345,7 +345,7 @@ jobs:
     name: Example app load times wall time
     needs: [text-editor-browser-build, example-load-times-build]
     runs-on: codspeed-macro
-    timeout-minutes: 45
+    timeout-minutes: 75 # TEMPORARY for the diagnostic step, back to 45 before review.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -369,8 +369,16 @@ jobs:
           tar -xzf example-load-times-apps.tar.gz
           node dev/artifacts/verify-starter-e2e-artifacts.mjs
       - run: pnpm --filter jazz-example-load-times-benchmark exec playwright install --with-deps chromium
+      - name: "TEMPORARY diagnostic: world-tour with the SwiftShader GL flags"
+        working-directory: dev/benchmarks/example-load-times
+        env:
+          BENCH_TRACE: "1"
+          BENCH_SWIFTSHADER: "1"
+        run: timeout 900 pnpm bench benches/world-tour.bench.mjs || true
       - name: Measure example app load times
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        env:
+          BENCH_TRACE: "1" # TEMPORARY diagnostic, removed before review.
         with:
           mode: walltime
           run: pnpm --filter jazz-example-load-times-benchmark bench
