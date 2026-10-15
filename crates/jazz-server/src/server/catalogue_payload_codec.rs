@@ -51,12 +51,16 @@ macro_rules! wire_struct {
 ///
 /// With a context string the table is complete: it implements [`Wire`] and an
 /// unknown tag decodes to `InvalidTypeTag` with that context. With `partial`
-/// it covers only the listed variants: `put_variant` returns `false` and
-/// `get_variant` returns `None` for the rest, which the caller codes by hand.
+/// it covers only the listed variants, and `get_variant` returns `None` for the
+/// rest, which the caller codes by hand. The caller's encoder matches every
+/// variant exhaustively and names the listed ones in the arm that calls
+/// `put_variant`, so a new variant fails to build until it is placed.
 /// An optional `(param: Type)` makes the codec a value carrying a parameter
 /// that the field codecs can use.
 macro_rules! wire_enum {
-    (partial $($rest:tt)*) => { wire_enum!(@impl [_ => return false,] $($rest)*); };
+    (partial $($rest:tt)*) => {
+        wire_enum!(@impl [_ => unreachable!("encoder arm names a variant missing from the table"),] $($rest)*);
+    };
     (@impl [$($fallback:tt)*] $name:ident $(($param:ident: $param_ty:ty))?: $ty:ident
         $(, $context:literal)? {
         $($tag:tt => $variant:ident $(($binding:ident: $codec:expr))?
@@ -65,7 +69,7 @@ macro_rules! wire_enum {
         struct $name$(($param_ty))?;
 
         impl $name {
-            fn put_variant(&self, buf: &mut Vec<u8>, value: &$ty) -> bool {
+            fn put_variant(&self, buf: &mut Vec<u8>, value: &$ty) {
                 $(let $param: $param_ty = self.0;)?
                 match value {
                     $($ty::$variant $(($binding))? $({ $($field),* })? => {
@@ -75,7 +79,6 @@ macro_rules! wire_enum {
                     })+
                     $($fallback)*
                 }
-                true
             }
 
             #[allow(unused_variables)]
@@ -804,7 +807,7 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
     while let Some(task) = tasks.pop() {
         match task {
             RelationEncodeTask::Expr(leaf @ RelExpr::TableScan { .. }) => {
-                assert!(RelationLeafWire.put_variant(buf, leaf))
+                RelationLeafWire.put_variant(buf, leaf)
             }
             RelationEncodeTask::Expr(RelExpr::Filter { input, predicate }) => {
                 buf.push(REL_FILTER);
@@ -1247,7 +1250,13 @@ fn encode_relation_predicate_task<'a>(
             buf.push(REL_PREDICATE_NOT);
             tasks.push(RelationEncodeTask::Pred(expression));
         }
-        leaf => assert!(PredicateLeafWire.put_variant(buf, leaf)),
+        leaf @ (RelPredicateExpr::Cmp { .. }
+        | RelPredicateExpr::IsNull { .. }
+        | RelPredicateExpr::IsNotNull { .. }
+        | RelPredicateExpr::In { .. }
+        | RelPredicateExpr::Contains { .. }
+        | RelPredicateExpr::True
+        | RelPredicateExpr::False) => PredicateLeafWire.put_variant(buf, leaf),
     }
 }
 
@@ -1569,7 +1578,20 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(POLICY_EXPR_NOT);
             encode_policy_expr(buf, expr);
         }
-        leaf => assert!(PolicyLeafWire.put_variant(buf, leaf)),
+        leaf @ (PolicyExpr::Cmp { .. }
+        | PolicyExpr::IsNull { .. }
+        | PolicyExpr::IsNotNull { .. }
+        | PolicyExpr::In { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Contains { .. }
+        | PolicyExpr::InList { .. }
+        | PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }) => PolicyLeafWire.put_variant(buf, leaf),
     }
 }
 
