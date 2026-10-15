@@ -40,7 +40,10 @@ tempfile = "3.27.0"
 # TLS exhausts glibc's static TLS reserve ("cannot allocate memory in static
 # TLS block") once enough other libraries load first. Dynamic TLS is the
 # supported mode for shared libraries; see dev/CI_NOTES.md (2026-07-19).
-mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls"] }
+# no_opt_arch: libmimalloc-sys2 otherwise compiles mimalloc with
+# -march=armv8.1-a on arm64, so the addon faults with SIGILL on ARMv8.0 hosts
+# (#4049). GCC's outline atomics still pick LSE at runtime where present.
+mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls", "no_opt_arch"] }
 
 [build-dependencies]
 napi-build = "2"
