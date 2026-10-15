@@ -3,8 +3,8 @@
 //! This module provides deterministic binary serialization for Schema and LensTransform,
 //! enabling content-addressed storage in the catalogue.
 //!
-//! Storage-epoch-one schema and lens payloads retain their frozen `v1` bytes.
-//! Their `v2` form adds ordered composite indexes only when needed.
+//! Schema and lens payloads use version 2, including an empty composite-index
+//! list for tables without composite indexes. Version 1 payloads are rejected.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -112,11 +112,9 @@ macro_rules! wire_enum {
     ($($rest:tt)*) => { wire_enum!(@impl [] $($rest)*); };
 }
 
-/// Frozen storage-epoch-one outer envelope versions.
-const SCHEMA_VERSION: u8 = 1;
-const SCHEMA_COMPOSITE_VERSION: u8 = 2;
-const LENS_VERSION: u8 = 1;
-const LENS_COMPOSITE_VERSION: u8 = 2;
+/// Current catalogue payload encoding versions.
+const SCHEMA_VERSION: u8 = 2;
+const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
 const PERMISSIONS_HEAD_VERSION: u8 = 1;
@@ -183,16 +181,7 @@ impl From<PolicyExpressionLimitError> for CatalogueEncodingError {
 /// Tables are sorted by name for deterministic encoding. Column order within a
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
-    let version = if schema
-        .values()
-        .any(|table| !table.composite_indexes.is_empty())
-    {
-        SCHEMA_COMPOSITE_VERSION
-    } else {
-        SCHEMA_VERSION
-    };
-    let table = schema_table(version);
-    let mut buf = vec![version];
+    let mut buf = vec![SCHEMA_VERSION];
 
     // Sort tables by name for deterministic ordering
     let mut tables: Vec<_> = schema.iter().collect();
@@ -200,17 +189,10 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
 
     write_seq(&mut buf, &tables, |buf, (name, table_schema)| {
         write_string(buf, name.as_str());
-        table.put(buf, table_schema);
+        SCHEMA_TABLE.put(buf, table_schema);
     });
 
     buf
-}
-
-fn schema_table(schema_version: u8) -> TableWire {
-    TableWire {
-        indexed: true,
-        composite: schema_version >= SCHEMA_COMPOSITE_VERSION,
-    }
 }
 
 /// Read a top-level payload's leading format-version byte. `accepted` lists
@@ -234,19 +216,21 @@ fn read_format_version(data: &[u8], accepted: &[u8]) -> Result<u8, CatalogueEnco
 
 /// Decode a Schema from binary format.
 pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    read_format_version(data, &[SCHEMA_VERSION, SCHEMA_COMPOSITE_VERSION])?;
+    read_format_version(data, &[SCHEMA_VERSION])?;
     let schema = decode_current_schema(data)?;
     ensure_canonical_payload(data, &encode_schema(&schema), "schema")?;
     Ok(schema)
 }
 
 /// A table's schema as catalogue payloads store it. Schema payloads also carry
-/// the indexed-column set, and version-2 payloads append composite indexes,
-/// validated against the columns decoded before them.
+/// the indexed-column set. Composite indexes follow, validated against the
+/// columns decoded before them.
 struct TableWire {
     indexed: bool,
-    composite: bool,
 }
+
+/// A schema payload's table schema carries its indexed-column set.
+const SCHEMA_TABLE: TableWire = TableWire { indexed: true };
 
 impl Wire<TableSchema> for TableWire {
     fn put(&self, buf: &mut Vec<u8>, table: &TableSchema) {
@@ -255,9 +239,7 @@ impl Wire<TableSchema> for TableWire {
             encode_indexed_columns(buf, table.indexed_columns.as_deref());
         }
         BRANCH_BINDINGS.put(buf, &table.branch_by);
-        if self.composite {
-            encode_composite_indexes(buf, &table.composite_indexes);
-        }
+        encode_composite_indexes(buf, &table.composite_indexes);
     }
 
     fn get(&self, data: &[u8], offset: &mut usize) -> Result<TableSchema, CatalogueEncodingError> {
@@ -268,11 +250,7 @@ impl Wire<TableSchema> for TableWire {
             None
         };
         let branch_by = BRANCH_BINDINGS.get(data, offset)?;
-        let composite_indexes = if self.composite {
-            decode_composite_indexes(data, offset, &columns)?
-        } else {
-            Vec::new()
-        };
+        let composite_indexes = decode_composite_indexes(data, offset, &columns)?;
         Ok(TableSchema {
             columns,
             indexed_columns,
@@ -390,14 +368,13 @@ fn decode_indexed_columns(
 }
 
 fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    let table = schema_table(data[0]);
     let mut offset = 1;
     let table_count = read_count(data, &mut offset, "schema_tables")?;
 
     let mut schema = Schema::new();
     for _ in 0..table_count {
         let name = Str("table_name").get(data, &mut offset)?;
-        schema.insert(name, table.get(data, &mut offset)?);
+        schema.insert(name, SCHEMA_TABLE.get(data, &mut offset)?);
     }
 
     ensure_consumed(data, offset)?;
@@ -501,40 +478,30 @@ impl Wire<EnumCaseDescriptor> for CaseWire {
 /// [version: u8][op_count: u32][ops...][draft_count: u32][draft_indices...]
 /// ```
 pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
-    let version = if transform.ops.iter().any(|op| {
-        matches!(op,
-            LensOp::AddTable { schema, .. } | LensOp::RemoveTable { schema, .. }
-                if !schema.composite_indexes.is_empty()
-        )
-    }) {
-        LENS_COMPOSITE_VERSION
-    } else {
-        LENS_VERSION
-    };
-    let mut buf = vec![version];
-    LensWire(version).put(&mut buf, transform);
+    let mut buf = vec![LENS_VERSION];
+    LensWire.put(&mut buf, transform);
     buf
 }
 
 /// Decode a LensTransform from binary format.
 pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
-    let version = read_format_version(data, &[LENS_VERSION, LENS_COMPOSITE_VERSION])?;
+    read_format_version(data, &[LENS_VERSION])?;
     let mut offset = 1;
-    let transform = LensWire(version).get(data, &mut offset)?;
+    let transform = LensWire.get(data, &mut offset)?;
     ensure_consumed(data, offset)?;
     ensure_canonical_payload(data, &encode_lens_transform(&transform), "lens")?;
     Ok(transform)
 }
 
 wire_struct! {
-    LensWire(version: u8): LensTransform {
-        ops: Seq("lens_ops", LensOpWire(version)),
+    LensWire: LensTransform {
+        ops: Seq("lens_ops", LensOpWire),
         draft_ops: Seq("lens_draft_ops", U32),
     }
 }
 
 wire_enum! {
-    LensOpWire(version: u8): LensOp, "lens_op" {
+    LensOpWire: LensOp, "lens_op" {
         1 => AddColumn {
             table: Str("table"),
             column: Str("column"),
@@ -552,20 +519,14 @@ wire_enum! {
             old_name: Str("old_name"),
             new_name: Str("new_name"),
         },
-        4 => AddTable { table: Str("table"), schema: lens_table(version) },
-        5 => RemoveTable { table: Str("table"), schema: lens_table(version) },
+        4 => AddTable { table: Str("table"), schema: LENS_TABLE },
+        5 => RemoveTable { table: Str("table"), schema: LENS_TABLE },
         6 => RenameTable { old_name: Str("old_name"), new_name: Str("new_name") },
     }
 }
 
-/// A lens op's table schema: no indexed-column set, and composite indexes
-/// only in version-2 lens payloads.
-fn lens_table(lens_version: u8) -> TableWire {
-    TableWire {
-        indexed: false,
-        composite: lens_version >= LENS_COMPOSITE_VERSION,
-    }
-}
+/// A lens op's table schema carries no indexed-column set.
+const LENS_TABLE: TableWire = TableWire { indexed: false };
 
 // ============================================================================
 // Canonical nested payload codec
@@ -2490,7 +2451,7 @@ mod tests {
     // This stays internal because it verifies the exact restart-authoritative
     // byte contract below the public catalogue API.
     #[test]
-    fn nested_catalogue_payload_v1_goldens_are_exact() {
+    fn nested_catalogue_payload_goldens_are_exact() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("docs").column(
                 "payload",
@@ -2502,12 +2463,12 @@ mod tests {
         let schema_bytes = encode_schema(&schema);
         assert_eq!(
             hex(&schema_bytes),
-            "010100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff00000000"
+            "020100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff0000000000000000"
         );
         assert_eq!(decode_schema(&schema_bytes).unwrap(), schema);
 
         let lens = LensTransform::new();
-        assert_eq!(hex(&encode_lens_transform(&lens)), "010000000000000000");
+        assert_eq!(hex(&encode_lens_transform(&lens)), "020000000000000000");
         let decoded_lens = decode_lens_transform(&encode_lens_transform(&lens)).unwrap();
         assert!(decoded_lens.ops.is_empty());
         assert!(decoded_lens.draft_ops.is_empty());
@@ -2753,7 +2714,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_preserves_composite_indexes_without_changing_v1_payloads() {
+    fn schema_roundtrip_preserves_composite_indexes() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("documents")
@@ -2766,7 +2727,7 @@ mod tests {
             .build();
 
         let encoded = encode_schema(&schema);
-        assert_eq!(encoded[0], SCHEMA_COMPOSITE_VERSION);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
         let decoded = decode_schema(&encoded).unwrap();
         assert_eq!(encode_schema(&decoded), encoded);
         assert_eq!(
@@ -2782,7 +2743,7 @@ mod tests {
         );
     }
 
-    // Internal for the same reason as the v1 goldens: this pins the exact
+    // Internal for the same reason as the nested-value goldens: this pins the exact
     // restart-authoritative v2 bytes below the public catalogue API.
     #[test]
     fn composite_catalogue_payload_v2_goldens_are_exact() {
@@ -2817,14 +2778,17 @@ mod tests {
             "composite indexes encode in canonical order"
         );
 
-        // Neither label is an alias for the other.
+        // Retired version 1 is rejected even when the table has no indexes.
         let mut as_v1 = schema_bytes.clone();
-        as_v1[0] = SCHEMA_VERSION;
+        as_v1[0] = 1;
         assert!(decode_schema(&as_v1).is_err());
-        let mut plain_as_v2 = encode_schema(&SchemaBuilder::new().table(table()).build());
-        assert_eq!(plain_as_v2[0], SCHEMA_VERSION);
-        plain_as_v2[0] = SCHEMA_COMPOSITE_VERSION;
-        assert!(decode_schema(&plain_as_v2).is_err());
+        let plain = SchemaBuilder::new().table(table()).build();
+        let plain_bytes = encode_schema(&plain);
+        assert_eq!(plain_bytes[0], SCHEMA_VERSION);
+        assert_eq!(decode_schema(&plain_bytes).unwrap(), plain);
+        let mut plain_as_v1 = plain_bytes;
+        plain_as_v1[0] = 1;
+        assert!(decode_schema(&plain_as_v1).is_err());
 
         let mut lens = LensTransform::new();
         lens.push(
@@ -2844,7 +2808,7 @@ mod tests {
             lens_bytes
         );
         let mut lens_as_v1 = lens_bytes.clone();
-        lens_as_v1[0] = LENS_VERSION;
+        lens_as_v1[0] = 1;
         assert!(decode_lens_transform(&lens_as_v1).is_err());
     }
 
@@ -3482,7 +3446,7 @@ mod tests {
         );
 
         let encoded = encode_lens_transform(&transform);
-        assert_eq!(encoded[0], LENS_COMPOSITE_VERSION);
+        assert_eq!(encoded[0], LENS_VERSION);
         let decoded = decode_lens_transform(&encoded).unwrap();
         assert_eq!(encode_lens_transform(&decoded), encoded);
         let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
@@ -3732,19 +3696,33 @@ mod tests {
     }
 
     #[test]
-    fn storage_epoch_one_catalogue_envelopes_reject_pre_freeze_outer_labels() {
+    fn catalogue_payloads_reject_unsupported_versions() {
+        assert_eq!(
+            decode_schema(&[1, 0, 0, 0, 0]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        );
+        assert_eq!(
+            decode_lens_transform(&[1, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        );
         assert!(matches!(
             decode_schema(&[12]),
             Err(CatalogueEncodingError::UnsupportedVersion {
                 found: 12,
-                expected: 1
+                expected: 2
             })
         ));
         assert!(matches!(
             decode_lens_transform(&[5]),
             Err(CatalogueEncodingError::UnsupportedVersion {
                 found: 5,
-                expected: 1
+                expected: 2
             })
         ));
 

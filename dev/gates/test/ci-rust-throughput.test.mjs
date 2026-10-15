@@ -231,6 +231,10 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     turbo: credentialedCache,
   };
 };
+// Ready PRs get the fast lint partition; the full suite runs on pushes,
+// dispatches, release PRs and the Review Loop's merge-group/* PRs.
+const ciScope =
+  "${{ github.event_name != 'pull_request' && 'full' || startsWith(github.head_ref, 'merge-group/') && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}";
 const workflowDocumentFor = (source) => {
   const document = parse(source);
   assert.equal(typeof document, "object", "CI entry workflow must be a YAML mapping");
@@ -242,7 +246,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["report-dispatched-test-rust", "test-rust", "trusted", "untrusted"],
+    ["report-dispatched-test-rust", "report-full-suite", "test-rust", "trusted", "untrusted"],
     "the credential boundary must account for every entry-workflow job",
   );
   const {
@@ -250,6 +254,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     trusted,
     "test-rust": aggregate,
     "report-dispatched-test-rust": dispatchedStatus,
+    "report-full-suite": fullSuiteStatus,
   } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
@@ -264,6 +269,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(untrusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(untrusted.with, {
+    scope: ciScope,
     "sccache-write": false,
     "trusted-cache": false,
   });
@@ -282,6 +288,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
     "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    scope: ciScope,
     "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
   });
   assert.equal(trusted.secrets, "inherit");
@@ -313,8 +320,40 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(dispatchedStatus.steps.length, 1);
   assert.equal(dispatchedStatus.steps[0].uses, undefined);
   assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
+
+  // full-suite coverage (#4091) is posted only after test-rust passed, and only
+  // by runs that executed the full suite with a write-capable token.
+  assert.deepEqual(Object.keys(fullSuiteStatus).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' &&\s+\(startsWith\(github\.head_ref, 'merge-group\/'\) \|\| github\.base_ref == 'release'\)/,
+  );
+  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
+  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
+  assert.equal(fullSuiteStatus.steps.length, 2);
+  assert.equal(
+    fullSuiteStatus.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+  );
+  assert.equal(fullSuiteStatus.steps[1].uses, undefined);
+  assert.match(fullSuiteStatus.steps[1].run, /dev\/ci\/full-suite-coverage\.sh /);
+  assert.match(fullSuiteStatus.steps[1].run, /-f context=full-suite /);
+  assert.match(fullSuiteStatus.steps[1].run, /-f state=success /);
   assert.equal(document.on.pull_request_target, undefined);
-  assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
+  assert.deepEqual(
+    document.on.pull_request,
+    { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+    "stacked PR bases must not be branch-filtered, and marking a draft ready must run CI",
+  );
   assert.deepEqual(document.on.push, { branches: ["main", "release"] });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
@@ -2504,4 +2543,93 @@ test("CI rejects inherited live-log timing overrides", () => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /JAZZ_TEST_LOG_INTERVAL_SECONDS.*forbidden/);
+});
+
+test("ready PRs run only the lint partition and drafts run nothing", () => {
+  const suite = parse(workflowSuite);
+  assert.deepEqual(suite.on.workflow_call.inputs.scope, {
+    description: "Which partitions to run, full, fast or none.",
+    required: false,
+    type: "string",
+    default: "full",
+  });
+  assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
+  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+    assert.equal(
+      suite.jobs[name].if,
+      "inputs.scope == 'full'",
+      `${name} must run only in the full scope`,
+    );
+  assert.equal(suite.jobs["test-rust"].if, "always() && inputs.scope == 'full'");
+  assert.deepEqual(
+    Object.keys(suite.jobs).sort(),
+    [
+      "lint",
+      "test-react-native",
+      "test-rust",
+      "test-rust-workspace",
+      "test-storage-compat",
+      "test-ts",
+    ],
+    "a new suite job must declare which scope runs it",
+  );
+});
+
+test("full-suite coverage credits merge-group PR heads only through clean merges", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "full-suite-coverage-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commitFile = (name) => {
+    fs.writeFileSync(path.join(repo, name), `${name}\n`);
+    git("add", name);
+    git("commit", "-qm", name);
+    return git("rev-parse", "HEAD");
+  };
+  const coverage = (base, head) => {
+    const result = spawnSync(
+      "bash",
+      [path.join(root, "dev/ci/full-suite-coverage.sh"), base, head],
+      { cwd: repo, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim().split("\n").sort();
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "ci@example.com");
+    git("config", "user.name", "CI");
+    git("config", "core.hooksPath", "/dev/null");
+    const main = commitFile("base");
+    git("checkout", "-qb", "pr-a");
+    const prA = commitFile("a");
+    git("checkout", "-qb", "pr-b", main);
+    const prB = commitFile("b");
+    git("checkout", "-qb", "merge-group/1", main);
+    git("merge", "-q", "--no-ff", "-m", "merge a", prA);
+    git("merge", "-q", "--no-ff", "-m", "merge b", prB);
+    const group = git("rev-parse", "HEAD");
+    assert.deepEqual(coverage(main, group), [group, prA, prB].sort());
+
+    // A plain commit on the group changes the tested tree for every PR.
+    const fixup = commitFile("fixup");
+    assert.deepEqual(coverage(main, fixup), [fixup]);
+
+    // So does a merge whose tree is not git's own merge of its parents.
+    const dirty = git(
+      "commit-tree",
+      `${fixup}^{tree}`,
+      "-p",
+      `${group}^1`,
+      "-p",
+      prB,
+      "-m",
+      "hand-resolved",
+    );
+    assert.deepEqual(coverage(main, dirty), [dirty]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 });

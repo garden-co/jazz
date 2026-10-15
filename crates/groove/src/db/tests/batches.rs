@@ -1577,6 +1577,18 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
         );
     }
 
+    assert_eq!(
+        storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_receipt_key(receipt.id),
+            )
+            .await
+            .unwrap(),
+        Some(vec![0xa6; 16]),
+        "the reverse binding stores only the upload ID, not another chunk journal"
+    );
+
     // Now lose the successful promotion response itself. Both finalizer
     // surfaces must recover the exact receipt after reopen, while a descriptor
     // mismatch fails closed instead of borrowing that claim.
@@ -6326,7 +6338,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(raw_value, b"\x02one");
+        assert_eq!(raw_value, b"\x00one");
 
         store
             .delete(&[

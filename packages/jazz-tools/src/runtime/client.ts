@@ -93,7 +93,7 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
     case "Text": {
       const text = new TextEncoder().encode(value.value);
       const payload = new Uint8Array(1 + text.length);
-      payload[0] = 2; // Groove stored-scalar Primitive case
+      payload[0] = 0; // Groove stored-scalar Primitive case
       payload.set(text, 1);
       return envelope(6, payload); // Groove String
     }

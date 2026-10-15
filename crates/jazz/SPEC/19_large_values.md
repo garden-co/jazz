@@ -81,7 +81,7 @@ lowered to the same bounded byte-edit tail as all other large scalars; Jazz
 must not add an object-like patch, merge, or locator API at this boundary.
 
 The descriptor's V1 format selector jointly governs its root, nested edit
-records, and schema-known `Chunked = 3` physical scalar arm before Groove
+records, and schema-known `Chunked = 1` physical scalar arm before Groove
 interprets any of them. Groove reads only the outer enum tag and fixed version
 byte before dispatch, so a future version with malformed current-layout nested
 bytes fails `UnsupportedFormat` without being decoded as V1. The permanent V1 FastCDC/content-defined-grouping
