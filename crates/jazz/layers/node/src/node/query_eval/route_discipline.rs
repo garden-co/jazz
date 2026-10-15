@@ -53,7 +53,7 @@ pub(super) fn binding_slot_routes(domain: &ParameterDomain) -> BTreeMap<String, 
 pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
     terminals: impl IntoIterator<Item = (&'g str, &'g GraphBuilder, BTreeSet<String>)>,
     slot_routes: &BTreeMap<String, String>,
-    infer: impl Fn(&GraphBuilder) -> Result<RecordDescriptor, E>,
+    infer: impl Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
 ) -> Result<(), RouteViolation> {
     let terminals = terminals.into_iter().collect::<Vec<_>>();
     let aliases = slot_aliases(
@@ -71,6 +71,7 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
         masks: HashMap::new(),
         equivalents: HashMap::new(),
         checked: BTreeSet::new(),
+        graphs: std::marker::PhantomData,
     };
     for (sink, graph, delivered) in terminals {
         let depends = checker.depends(graph);
@@ -97,7 +98,7 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
 fn slot_aliases<'g, E>(
     graphs: impl IntoIterator<Item = &'g GraphBuilder>,
     slot_routes: &BTreeMap<String, String>,
-    infer: &impl Fn(&GraphBuilder) -> Result<RecordDescriptor, E>,
+    infer: &impl Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
 ) -> BTreeMap<String, String> {
     let mut stored = BTreeSet::new();
     let mut seen = BTreeSet::new();
@@ -130,7 +131,7 @@ fn slot_aliases<'g, E>(
         .collect()
 }
 
-struct RouteChecker<'a, F> {
+struct RouteChecker<'a, 'g, F> {
     slot_routes: &'a BTreeMap<String, String>,
     aliases: BTreeMap<String, String>,
     routes: BTreeSet<String>,
@@ -140,16 +141,17 @@ struct RouteChecker<'a, F> {
     masks: HashMap<*const GraphBuilder, BTreeSet<String>>,
     equivalents: HashMap<*const GraphBuilder, BTreeMap<String, String>>,
     checked: BTreeSet<*const GraphBuilder>,
+    graphs: std::marker::PhantomData<&'g GraphBuilder>,
 }
 
-impl<F, E> RouteChecker<'_, F>
+impl<'g, F, E> RouteChecker<'_, 'g, F>
 where
-    F: Fn(&GraphBuilder) -> Result<RecordDescriptor, E>,
+    F: Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
     E: std::fmt::Debug,
 {
     /// Binding routes whose values can decide which rows `node` outputs:
     /// every slot of every binding source it reads.
-    fn depends(&mut self, node: &GraphBuilder) -> BTreeSet<String> {
+    fn depends(&mut self, node: &'g GraphBuilder) -> BTreeSet<String> {
         let key = std::ptr::from_ref(node);
         if let Some(depends) = self.deps.get(&key) {
             return depends.clone();
@@ -175,7 +177,7 @@ where
     }
 
     /// Binding route fields present in `node`'s output records.
-    fn carried(&mut self, node: &GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
+    fn carried(&mut self, node: &'g GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
         let key = std::ptr::from_ref(node);
         if let Some(carried) = self.carried.get(&key) {
             return Ok(carried.clone());
@@ -196,7 +198,7 @@ where
     /// pair them with their route only on the lookup's own key, which this
     /// check cannot yet tell from the table's other columns, so a program
     /// that reads one is not shared.
-    fn masked(&mut self, node: &GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
+    fn masked(&mut self, node: &'g GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
         let key = std::ptr::from_ref(node);
         if let Some(masked) = self.masks.get(&key) {
             return Ok(masked.clone());
@@ -215,7 +217,7 @@ where
         Ok(masked)
     }
 
-    fn output_names(&self, node: &GraphBuilder) -> Result<Vec<String>, RouteViolation> {
+    fn output_names(&self, node: &'g GraphBuilder) -> Result<Vec<String>, RouteViolation> {
         let output = (self.infer)(node).map_err(|error| {
             RouteViolation(format!(
                 "cannot describe a binding-dependent input: {error:?}"
@@ -232,7 +234,7 @@ where
     /// route an earlier join pinned that field to.
     fn key_route(
         &mut self,
-        input: &GraphBuilder,
+        input: &'g GraphBuilder,
         field: &FieldRef,
     ) -> Result<String, RouteViolation> {
         let name = self.raw_field_name(input, field)?;
@@ -248,7 +250,7 @@ where
     /// a field keys on the route itself.
     fn equivalents(
         &mut self,
-        node: &GraphBuilder,
+        node: &'g GraphBuilder,
     ) -> Result<BTreeMap<String, String>, RouteViolation> {
         let key = std::ptr::from_ref(node);
         if let Some(equivalents) = self.equivalents.get(&key) {
@@ -324,14 +326,18 @@ where
     }
 
     /// The name of `field` in `input`, as the route it aliases if any.
-    fn field_name(&self, input: &GraphBuilder, field: &FieldRef) -> Result<String, RouteViolation> {
+    fn field_name(
+        &self,
+        input: &'g GraphBuilder,
+        field: &FieldRef,
+    ) -> Result<String, RouteViolation> {
         let name = self.raw_field_name(input, field)?;
         Ok(self.route_name(name))
     }
 
     fn raw_field_name(
         &self,
-        input: &GraphBuilder,
+        input: &'g GraphBuilder,
         field: &FieldRef,
     ) -> Result<String, RouteViolation> {
         Ok(match field {
@@ -344,7 +350,7 @@ where
         })
     }
 
-    fn check(&mut self, root: &GraphBuilder) -> Result<(), RouteViolation> {
+    fn check(&mut self, root: &'g GraphBuilder) -> Result<(), RouteViolation> {
         let mut pending = vec![root];
         while let Some(node) = pending.pop() {
             if !self.checked.insert(std::ptr::from_ref(node)) {
@@ -356,7 +362,7 @@ where
         Ok(())
     }
 
-    fn check_node(&mut self, node: &GraphBuilder) -> Result<(), RouteViolation> {
+    fn check_node(&mut self, node: &'g GraphBuilder) -> Result<(), RouteViolation> {
         match node {
             GraphBuilder::Join {
                 left,
@@ -950,8 +956,12 @@ where
                     .collect(),
             ));
         }
+        // The expanded graphs remain alive and immutable until the proof ends.
+        // Descriptor inference can therefore share one memo across its nodes
+        // and terminal roots, without retaining results across source/schema changes.
+        let descriptors = std::cell::RefCell::new(self.database.graph_output_descriptors());
         check_route_discipline(terminals, &binding_slot_routes(parameters), |graph| {
-            self.database.graph_output_descriptor(graph)
+            descriptors.borrow_mut().describe(graph)
         })
     }
 
