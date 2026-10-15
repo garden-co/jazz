@@ -3,9 +3,6 @@ use super::*;
 /// Requested read set selected before source resolution.
 pub type RequestedReadSet = QueryReadSet<RequestedSourceStage>;
 
-/// Resolved read identity used by shared maintained work.
-pub type ResolvedReadSet = QueryReadSet<ResolvedSourceStage>;
-
 /// All read views a lowered program may use.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QueryReadSet<R: SourceResolution> {
@@ -38,9 +35,6 @@ pub enum FactReadRole {
 /// Requested read view selected before source resolution.
 pub type RequestedReadView = ReadView<RequestedSourceStage>;
 
-/// Resolved read identity used by shared maintained work.
-pub type ResolvedReadKey = ReadView<ResolvedSourceStage>;
-
 /// Concrete read view at a particular source-resolution stage.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReadView<R: SourceResolution> {
@@ -70,29 +64,8 @@ impl RequestedReadView {
     }
 }
 
-/// Resolves protocol/API read options into the source graph used by lowering.
-///
-/// Unsupported historic, branch, partition, lens, or overlay requests should
-/// fail here as `CapabilityReport::Source` instead of being rejected by ad-hoc
-/// facade gates. Runtime propagation and callback lifecycles stay outside this
-/// resolver; they consume the facts emitted by the lowered program.
-pub trait ReadViewResolver {
-    /// Translate unresolved API options into a requested read view.
-    fn requested_read_view(
-        &self,
-        opts: &RegisterShapeOptions,
-        shape: &NormalizedRowSetShape,
-    ) -> CapabilityResult<RequestedReadSet>;
-
-    /// Resolve requested schema/source choices into cache/shareable identities.
-    fn resolve_read_view(&mut self, read: &RequestedReadSet) -> CapabilityResult<ResolvedReadSet>;
-}
-
 /// Requested read expression for one logical source.
 pub type RequestedSourceExpr = SourceExpr<RequestedSourceStage>;
-
-/// Resolved read expression for one logical source.
-pub type ResolvedSourceExpr = SourceExpr<ResolvedSourceStage>;
 
 /// Canonical source-expression set at a particular resolution stage.
 pub type SourceGraph<R> = BTreeMap<SourceId, SourceExpr<R>>;

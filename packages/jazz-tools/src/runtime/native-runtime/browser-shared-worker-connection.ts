@@ -26,6 +26,7 @@ import type {
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 /**
  * The only place the broker SharedWorker is constructed.
@@ -422,7 +423,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     try {
       port.postMessage(message);
     } catch (error) {
-      this.failFinish(error instanceof Error ? error : new Error(String(error)));
+      this.failFinish(toError(error));
     }
     return this.finishPromise;
   }
@@ -508,7 +509,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     ).then(
       () => undefined,
       (error: unknown) => {
-        this.readyError = error instanceof Error ? error : new Error(String(error));
+        this.readyError = toError(error);
         callbacks.onFailure(this.readyError);
       },
     );
@@ -704,7 +705,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             if (this.worker === worker) this.worker = null;
             settle({
               connected: false,
-              error: error instanceof Error ? error : new Error(String(error)),
+              error: toError(error),
             });
           },
         );
@@ -742,7 +743,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         if (this.worker === worker) this.worker = null;
         settle({
           connected: false,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: toError(error),
         });
       }
     });

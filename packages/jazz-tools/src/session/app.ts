@@ -10,7 +10,9 @@ import {
   type JazzSessionActions,
   type JazzSessionSnapshot,
   type JazzSessionConsumer,
+  type NeedsLoginState,
 } from "./state.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
@@ -21,7 +23,7 @@ export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind"
   kind: "jwt",
   ...options,
 });
-export interface JazzAppSnapshot<Client> {
+export interface JazzAppSnapshot<Client> extends NeedsLoginState {
   readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
   readonly client?: Client;
   readonly account?: JazzSessionSnapshot<Client>["account"];
@@ -41,7 +43,6 @@ export interface JazzApp<Client> {
   /** Acknowledge only after the rendered view has detached its old subscriptions. */
   attachConsumer(): { acknowledge(snapshot: JazzAppSnapshot<Client>): void; release(): void };
 }
-const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
 
 /** Host-independent owner. Configuration is captured once; auth state may update in place. */
 export function createJazzAppOwner<Config, Client>(
@@ -72,9 +73,12 @@ export function createJazzAppOwner<Config, Client>(
   let manualActionPending = false;
   let pendingLogouts = 0;
   let retrying: Promise<void> | undefined;
-  let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
+  let snapshot: JazzAppSnapshot<Client> = Object.freeze({
+    status: "starting",
+    needsLogin: false,
+  });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
-  const listeners = new Set<() => void>();
+  const listeners = createListeners("Jazz app observer failed");
   const consumers = new Set<{ lease?: JazzSessionConsumer<Client> }>();
   function publish(force = false) {
     if (disposed && !force) return;
@@ -102,6 +106,7 @@ export function createJazzAppOwner<Config, Client>(
       recovery,
       client: status === "ready" ? current?.client : undefined,
       account: current?.account,
+      needsLogin: !!current?.needsLogin,
       error,
     };
     // Keep the raw snapshot version even when a provider hides a still-ready client.
@@ -109,6 +114,7 @@ export function createJazzAppOwner<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.account === next.account &&
+      snapshot.needsLogin === next.needsLogin &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
       (!current || versions.get(snapshot) === current)
@@ -116,13 +122,7 @@ export function createJazzAppOwner<Config, Client>(
       return;
     snapshot = Object.freeze(next);
     if (current) versions.set(snapshot, current);
-    for (const listener of [...listeners]) {
-      try {
-        listener();
-      } catch (cause) {
-        console.error("Jazz app observer failed", cause);
-      }
-    }
+    listeners.notify();
   }
   function disconnect() {
     unsubscribeConnection?.();
@@ -197,12 +197,7 @@ export function createJazzAppOwner<Config, Client>(
   }
   const app: JazzApp<Client> = {
     getSnapshot: () => snapshot,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     start() {
       if (disposed) return Promise.reject(new Error("Jazz app is disposed"));
       if (pending) return pending;
@@ -223,7 +218,7 @@ export function createJazzAppOwner<Config, Client>(
           publish();
         })
         .catch((cause) => {
-          failure = asError(cause);
+          failure = toError(cause);
           publish();
           throw cause;
         })
@@ -268,7 +263,7 @@ export function createJazzAppOwner<Config, Client>(
               manualRetry = undefined;
             }
           } catch (cause) {
-            if (generation === actionGeneration) failure = asError(cause);
+            if (generation === actionGeneration) failure = toError(cause);
             throw cause;
           } finally {
             publish();
@@ -297,7 +292,7 @@ export function createJazzAppOwner<Config, Client>(
         if (generation === actionGeneration) manualRetry = undefined;
       } catch (cause) {
         if (!connection && generation === actionGeneration) manualRetry = app.logout;
-        if (generation === actionGeneration) failure = asError(cause);
+        if (generation === actionGeneration) failure = toError(cause);
         throw cause;
       } finally {
         --pendingLogouts;
@@ -316,7 +311,7 @@ export function createJazzAppOwner<Config, Client>(
           await pending;
           await session?.close();
         } catch (cause) {
-          failure = asError(cause);
+          failure = toError(cause);
           publish(true);
           throw cause;
         } finally {

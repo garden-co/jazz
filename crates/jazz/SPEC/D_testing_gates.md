@@ -31,7 +31,7 @@ For ordinary Rust/core work, the full gate set is:
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
 3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
-4. `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
+4. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
 5. `dev/gates/ts-wire-codec.sh`
 6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
@@ -44,15 +44,16 @@ compile check. The standalone `dev/gates/benchmark-smoke.sh --ci` executes the
 deterministic core and jazz-sim scenario assertions for callers that need it.
 The ordinary PR workspace partition runs those same named cases in its broad
 Nextest selection with CI's feature set, first failing closed if the selected
-inventory omits either smoke binary or any named scenario case. The realistic
-benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
-all maintained benchmark APIs on same-repository benchmark-labeled PRs,
-non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
+inventory omits either smoke binary or any named scenario case. The nightly
+`benchmark-api` job (`.github/workflows/nightly-tests.yml`) runs
+`dev/gates/benchmark-smoke.sh --compile-ci` to check all maintained benchmark
+APIs on the default branch each night and on manual runs. CodSpeed evaluates the
 example benchmark crates on benchmark-labeled PRs and on every default-branch
 push, coalescing bursts to the running and latest commit, so each PR compares
-against its exact main baseline or one at most a burst older (#3488); native `jazz`
-and `jazz-sim` timing remains in the realistic benchmark workflow until it is
-ported. No local omnibus benchmark script is a push gate. A change to a public
+against its exact main baseline or one at most a burst older (#3488). Native
+`jazz` and `jazz-sim` timing has no CI home since the realistic benchmark
+workflow was retired on 2026-10-15; its CodSpeed port is tracked separately.
+No local omnibus benchmark script is a push gate. A change to a public
 `jazz` type additionally gates the full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
@@ -61,10 +62,10 @@ replacing the former fixed `-j 2` guidance.
 ### D.2 The tiers
 
 - **Crate tests** — integration and crate tests for `jazz` and `groove`.
-- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs on the
-  realistic benchmark workflow (same-repository benchmark-labeled PRs,
-  non-bot default-branch pushes, manual runs, and nightly), where it catches
-  benchmark API rot without extending every ordinary PR's critical path.
+- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs in the
+  nightly `benchmark-api` job (default branch, nightly and manual runs), where
+  it catches benchmark API rot without extending every ordinary PR's critical
+  path.
 - **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
@@ -89,10 +90,10 @@ cargo test -p jazz-node --lib node::tests::harness::m3_maintained_one_shot_diffe
   customer-specific fixture names, domains, and ids out of the public
   repository.
 - **Benchmark API and scenario smoke** — Ordinary CI runs deterministic
-  scenario assertions. The realistic benchmark workflow compiles all
+  scenario assertions. The nightly `benchmark-api` job compiles all
   maintained benchmark targets; CodSpeed compares example benchmark crates;
-  native `jazz` and `jazz-sim` timing stays in the realistic workflow until
-  migrated.
+  native `jazz` and `jazz-sim` timing awaits its CodSpeed port (the realistic
+  workflow was retired on 2026-10-15).
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package

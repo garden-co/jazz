@@ -101,22 +101,6 @@ retained transaction time nor a discarded subscription cursor is promoted to
 a complete-history frontier. Only history-complete nodes have that guarantee;
 remote query settlement remains an exact live subscription claim.
 
-The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
-are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
-keys and cursors are not interpreted as authority evidence, including malformed
-retired payloads. No new scope writer, encoder or decoder exists. The closed
-storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
-legacy family ID so old roots open; this does not introduce a new encoding or
-reuse that ID for new values. Native storage encodings and manifests remain
-unchanged. Shared policy/availability metadata has independent consumers and
-is not discarded with the scope cache.
-
-`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
-pins both retired byte generations and native/pending retention;
-`retired_scope_payloads_never_restore_authority` covers malformed retired
-payloads. Cleanup must finish successfully before open returns; partial cleanup
-is safe to retry because no durable cursor or scope is ever recovered.
-
 Active subscriptions still maintain exact physical membership and predecessor
 revisions in memory. A retained process may use its own valid unevicted cursor
 for native-body dedup on reconnect, but a new process starts without one.

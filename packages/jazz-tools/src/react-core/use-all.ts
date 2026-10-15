@@ -2,6 +2,7 @@ import { type Usable, use, useCallback, useMemo, useRef, useSyncExternalStore } 
 import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 type UseAllOptions = {
   suspense?: boolean;
@@ -41,10 +42,6 @@ type UseAllNoQueryResult = {
 // its fallback meanwhile). Distinct from a pending real query, which suspends on
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
-
-function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
-}
 
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,

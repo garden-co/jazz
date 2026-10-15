@@ -161,11 +161,11 @@ or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
 IDs, and sorted decode-relevant adapter parameters. Groove contributes the
-mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v1`, and
-`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
-contain all three before an adapter may mutate. `groove.large-value.v1` covers
+mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v2`, and
+`groove.ordered-chunk-storage.v2`; every profile and decoded manifest MUST
+contain all three before an adapter may mutate. `groove.large-value.v2` covers
 the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
-envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+envelopes; `groove.ordered-chunk-storage.v2` covers that adapter's independent
 install-receipt wrapper. The caller composes this closed base with its own
 persistent codec profile before opening the adapter. The adapter treats
 higher-layer IDs as opaque and never learns their semantics. A Jazz root, for
@@ -583,13 +583,22 @@ rejection is the graph-validation rule in ch. 3.
 
 ### Canonical persisted descriptor values
 
-The existing v1 persisted descriptor contract is an ordinary Groove record with
-one field `nodes: Array<Record<Node>>`. In declaration order `Node` contains
-`tag: U8`, `name: Nullable<RawString>`, `registry_id: U64`, `children: U32`, and
-`strings: Array<RawString>`. Raw-string, array, nullable and record framing are
-exactly §2.7; there is no serializer-defined payload. The enclosing durable
-value/key contract selects this v1 grammar; it has no additional magic or version
-byte and must not be replaced in place with a different node layout.
+The persisted descriptor v2 contract is an ordinary Groove record with one
+field `nodes: Array<Enum<Node>>`. Each node's permanent tag selects its payload:
+
+| Node kind                          | Stored payload                                                     |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| Descriptor, tuple                  | `children: U32`                                                    |
+| Field                              | `name: Nullable<RawString>`                                        |
+| Scalar enum                        | `name: RawString`, `registry_id: U64`, `strings: Array<RawString>` |
+| Payload enum                       | `name: RawString`, `registry_id: U64`, `children: U32`             |
+| Enum case                          | `name: RawString`                                                  |
+| Primitive, array, nullable, record | Empty                                                              |
+
+Enum tags and payloads use the canonical Groove enum/record framing in §2.7.
+A field, array, nullable, record, or enum case has exactly one child; that count
+is implicit. Primitive and scalar-enum nodes have no child nodes. Names are
+required for enums and cases; only field names remain optional.
 
 Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
 
@@ -609,10 +618,9 @@ name and one type child. Tuple nodes declare their type-child count; Array and
 Nullable have one type child, Record one descriptor child. Payload enums retain
 their name, registry identity and ordered case children; each named case has one
 descriptor child. Scalar enums retain name, registry identity and ordered variant
-names in `strings`. Unused names are absent, unused registry/count fields are
-zero, and unused string arrays are empty. The reader rejects inconsistent
-metadata, trailing nodes/bytes, invalid types, and any tree whose canonical
-re-encoding differs.
+names in `strings`. Irrelevant metadata has no field in the selected payload.
+The reader rejects unknown tags, malformed payloads, trailing nodes/bytes,
+invalid types, and any tree whose canonical re-encoding differs.
 
 `encode_persisted_record_descriptor` and its matching reader implement this
 contract. They preserve exact durable field names and nested enum registry

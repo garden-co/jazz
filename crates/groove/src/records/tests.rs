@@ -162,6 +162,108 @@ fn descriptor_fields_remain_in_declaration_order() {
     assert_eq!(names, ["name", "age", "payload", "active"]);
 }
 
+/// Alice's persisted schemas retain every type and enum identity while omitting
+/// execution bindings. This codec-level test covers malformed bytes that the
+/// database API cannot construct.
+#[test]
+fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees() {
+    let child = RecordDescriptor::new([("value", ValueType::U48)]);
+    let types = vec![
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::U48,
+        ValueType::I32,
+        ValueType::I64,
+        ValueType::F64,
+        ValueType::Bool,
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::raw_string(),
+        ValueType::raw_bytes(),
+        ValueType::Uuid,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ValueType::EnumTag(
+            ScalarEnumSchema::new("state", ["open", "closed"])
+                .unwrap()
+                .with_system_registry(SystemVariantRegistry::deletion_state()),
+        ),
+        ValueType::Tuple(vec![ValueType::U8, ValueType::U64]),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new("empty", RecordDescriptor::default()),
+                    EnumCase::new("value", child),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(42),
+        )),
+    ];
+    for original in [RecordDescriptor::default(), descriptor(types)] {
+        let encoded = encode_persisted_record_descriptor(&original).unwrap();
+        let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(
+            encode_persisted_record_descriptor(&decoded).unwrap(),
+            encoded
+        );
+        for length in 0..encoded.len() {
+            assert!(decode_persisted_record_descriptor(&encoded[..length]).is_err());
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_persisted_record_descriptor(&trailing).is_err());
+    }
+    let bound_child = RecordDescriptor::new_with_fields([
+        DescriptorField::new("stored_name", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "runtime_name".into(),
+                slot: 7,
+            },
+        ),
+        DescriptorField {
+            name: None,
+            identity: Some(FieldIdentity::Slot(8)),
+            value_type: ValueType::Bool,
+        },
+    ]);
+    let expected_child =
+        RecordDescriptor::new_with_fields(bound_child.fields().iter().cloned().map(|mut field| {
+            field.identity = None;
+            field
+        }));
+    let bound = RecordDescriptor::new([("child", ValueType::Record(Box::new(bound_child)))]);
+    let expected = RecordDescriptor::new([("child", ValueType::Record(Box::new(expected_child)))]);
+    let encoded = encode_persisted_record_descriptor(&bound).unwrap();
+    assert_eq!(
+        decode_persisted_record_descriptor(&encoded).unwrap(),
+        expected
+    );
+    assert_eq!(
+        encode_persisted_record_descriptor(&expected).unwrap(),
+        encoded
+    );
+    let child_bytes = bound_child
+        .create(&[Value::U64(42), Value::Bool(true)])
+        .unwrap();
+    let row = bound
+        .create(&[Value::Record(OwnedRecord::new(child_bytes, bound_child))])
+        .unwrap();
+    assert_eq!(
+        expected
+            .create(&expected.bind(&row).to_values().unwrap())
+            .unwrap(),
+        row
+    );
+}
+
 #[test]
 fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     // A descriptor can cross a durable engine boundary (for example, inside a
@@ -222,7 +324,7 @@ fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
-        "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
+        "54151d5d6d5d06f759624b321a0c42472afdbab061bf5e899d7c98dfcc47617c"
     );
     let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
     assert_eq!(
@@ -989,7 +1091,7 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
 
     let mut expected = Vec::new();
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([1, 2]);
+    expected.extend([1, 0]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1579,9 +1681,9 @@ fn encodes_record_offsets_relative_to_record_start() {
 
     let mut expected = vec![9];
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"abc");
-    expected.extend([2, 4, 5]);
+    expected.extend([0, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1608,10 +1710,10 @@ const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
     0x00, 0x00, // fixed nullable U8: null flag + canonical zero payload
     0xab, 0xcd, 0x01, // tuple U16 (big-endian) + Bool
     0x0e, 0x00, 0x00, 0x00, // first variable field ends at record byte 14
-    0x02, b'h', b'i', // String primitive StoredScalar arm tag + payload
+    0x00, b'h', b'i', // String primitive StoredScalar arm tag + payload
     0x02, 0x00, 0x00, 0x00, // variable array count
     0x0a, 0x00, 0x00, 0x00, // first array item ends at array-relative byte 10
-    0x02, b'a', 0x02, b'b', b'c',
+    0x00, b'a', 0x00, b'b', b'c',
 ];
 
 // Scalar and envelope goldens deliberately keep both sides of the codec
@@ -1720,11 +1822,11 @@ fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_clo
         ]),
         Value::Enum(EnumValue::create(1, case, &[Value::U8(0x7e)]).unwrap()),
     ];
-    // Four record offsets, then StoredScalar primitive arms (02), array offsets,
+    // Four record offsets, then StoredScalar primitive arms (00), array offsets,
     // and the canonical payload-enum tag 1 as a one-byte u32 varint.
     let frozen: &[u8] = &[
-        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x02, b'h', b'i', 0x02, 0x00,
-        0xff, 0x01, 0x02, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x02, b'a', 0x02, b'b', b'c',
+        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x00, b'h', b'i', 0x00, 0x00,
+        0xff, 0x01, 0x00, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x00, b'a', 0x00, b'b', b'c',
         0x01, 0x7e,
     ];
     assert_eq!(descriptor.create(&values).unwrap(), frozen);
@@ -1880,9 +1982,9 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
     expected.extend(11_u32.to_le_bytes());
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"hi");
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);
@@ -2113,7 +2215,7 @@ fn prepared_multi_input_copy_preserves_record_bytes_and_rejects_bad_spans() {
         .create(&[Value::String("bc".into()), Value::U64(9)])
         .unwrap();
     let expected = [
-        7, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 23, 0, 0, 0, 2, b'b', b'c', 2, b'a',
+        7, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 23, 0, 0, 0, 0, b'b', b'c', 0, b'a',
     ];
     let mut bytes = BytesMut::from(&b"prefix"[..]);
     let range = plan.project_into(&[&l, &r], &mut bytes).unwrap();
@@ -2559,7 +2661,7 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[2, 1, 0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[0, 1, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
     );
 }
@@ -3120,7 +3222,7 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
         (
             nullable_string,
             Value::Nullable(Some(Box::new(Value::String("abc".into())))),
-            vec![1, 2, b'a', b'b', b'c'],
+            vec![1, 0, b'a', b'b', b'c'],
         ),
         (
             ValueType::Array(Box::new(ValueType::String)),
@@ -3130,7 +3232,7 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
                 Value::String(String::new()),
             ]),
             vec![
-                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 2, b'a', 2, b'b', b'c', 2,
+                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 0, b'a', 0, b'b', b'c', 0,
             ],
         ),
         (
@@ -3143,13 +3245,13 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
                 Value::Array(vec![]),
             ]),
             vec![
-                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 2, b'a', 0, 0, 0, 0, 0,
+                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 0, b'a', 0, 0, 0, 0, 0,
             ],
         ),
         (
             ValueType::Bytes,
             Value::Bytes(vec![0, 255]),
-            vec![2, 0, 255],
+            vec![0, 0, 255],
         ),
         (
             ValueType::Array(Box::new(ValueType::String)),
@@ -3236,7 +3338,7 @@ const U48_RECORD_FIXTURE: &[u8] = &[
     0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // maybe: Some(U48_MAX)
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // none: null + 6 zero bytes
     0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, // pair: Tuple(U48) big-endian
-    0x02, b'h', b'i', // name: String primitive StoredScalar arm tag + payload
+    0x00, b'h', b'i', // name: String primitive StoredScalar arm tag + payload
 ];
 
 fn u48_record_descriptor() -> RecordDescriptor {

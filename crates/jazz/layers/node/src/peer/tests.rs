@@ -5497,7 +5497,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
         panic!("expected view update");
     };
 
-    let rehydrated = peer.reset_current_rows(&mut core, "todos").unwrap();
+    let rehydrated = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     assert_view_update_rows(
         &mut expected_snapshots,
         rehydrated.clone(),

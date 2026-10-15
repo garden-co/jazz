@@ -719,6 +719,115 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     assert_eq!(core.read(&core.table("todos")).unwrap().len(), 1);
 }
 
+/// A rate-limited large value holds back its writer's later writes on the
+/// link (SPEC 14: one writer's units go up in order). alice's edit, chained
+/// on her insert whose large value Core rate-limits, is not uploaded while
+/// the insert waits, so Core never decides the edit first.
+///
+/// ```text
+/// alice ══ insert (large title), edit (chained on it)
+/// alice ── chunks ──► core   RateLimited: insert waits 1s
+/// alice    edit held behind the insert   (Core knows neither)
+/// (1s)  alice ── chunks, insert, edit ──► core   accepted in order
+/// ```
+#[test]
+fn rate_limited_large_value_holds_back_its_writers_later_writes() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let core = open_core(0xe5, AuthorSubject::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xe4, author, &schema);
+    let clock = Rc::new(Cell::new(10_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let scheduler = Rc::new(RecordingScheduler::default());
+    writer.set_tick_scheduler(Some(scheduler.clone()));
+    let (writer_transport, core_transport, _writer_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            NodeUuid::from_bytes([0xe4; 16]),
+            1,
+            NodeUuid::from_bytes([0xe5; 16]),
+            1,
+        );
+    let _upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let insert = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("held-back/".repeat(8_000)),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    let edit = writer
+        .update(
+            "todos",
+            insert.row_uuid(),
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    let core_state =
+        |tx_id| crate::local_executor::block_on(core.node().borrow_mut().transaction_state(tx_id));
+
+    // Start, requested frontier, then the first batch Core rate-limits.
+    for _ in 0..4 {
+        writer.tick().unwrap();
+        core.tick().unwrap();
+    }
+    assert!(
+        scheduler.take_delays().contains(&1_000),
+        "Core rate-limited the insert's large value"
+    );
+    // Before the deadline, further passes upload neither write.
+    for _ in 0..4 {
+        writer.tick().unwrap();
+        core.tick().unwrap();
+    }
+    assert_eq!(core_state(insert.tx_id), None);
+    assert_eq!(
+        core_state(edit.tx_id),
+        None,
+        "the edit must not overtake the rate-limited insert it is chained on"
+    );
+
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default());
+    clock.set(11_000);
+    let global = |tx_id| writer.write_state(tx_id).unwrap().durability == DurabilityTier::Global;
+    for _ in 0..128 {
+        if global(insert.tx_id) && global(edit.tx_id) {
+            break;
+        }
+        writer.tick().unwrap();
+        core.tick().unwrap();
+    }
+    assert!(global(insert.tx_id) && global(edit.tx_id));
+    let seq = |tx_id| core_state(tx_id).and_then(|(_, seq, _)| seq).unwrap();
+    assert!(
+        seq(insert.tx_id) < seq(edit.tx_id),
+        "Core decided them in order"
+    );
+    let rows = core.read(&core.table("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
 /// Unauthenticated links retain the bounded admission deadline but never a
 /// receiver-specific frontier; expiry still independently reclaims staging.
 #[test]

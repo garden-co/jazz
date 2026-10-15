@@ -20,6 +20,7 @@ use jazz::{
     tx::DurabilityTier,
 };
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_sqlite::SqliteStorage;
 use serde_json::json;
 thread_local! { static REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -449,6 +450,31 @@ impl Fixture<RocksDbStorage> {
     }
     pub fn loaded(count: usize) -> Self {
         let mut fixture = Self::rocksdb(count);
+        fixture.reopen();
+        fixture
+    }
+}
+/// The mobile store: the native relay keeps its durable database in SQLite with
+/// WAL and `synchronous=NORMAL`, the counterpart of RocksDB's WAL without fsync.
+impl Fixture<SqliteStorage> {
+    pub fn sqlite(count: usize) -> Self {
+        if !REPORT.get() {
+            jazz_benchmark_guard::refuse_contaminated_measurement();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema().column_families();
+        Self::seeded("sqlite_wal", count, move || {
+            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+            SqliteStorage::open_with_durability(
+                dir.path().join("tasks.sqlite"),
+                &refs,
+                jazz_storage_sqlite::Durability::WalNoSync,
+            )
+            .unwrap()
+        })
+    }
+    pub fn loaded_sqlite(count: usize) -> Self {
+        let mut fixture = Self::sqlite(count);
         fixture.reopen();
         fixture
     }

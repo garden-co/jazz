@@ -876,7 +876,7 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { values: { branch: [1, 6, 2, 100, 114, 97, 102, 116] } },
+            head: { values: { branch: [1, 6, 0, 100, 114, 97, 102, 116] } },
           },
         },
       },
