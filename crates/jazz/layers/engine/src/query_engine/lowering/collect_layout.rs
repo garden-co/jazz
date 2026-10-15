@@ -119,9 +119,9 @@ pub(super) fn collect_layout(
                 .map(|claim| claim.ty.clone())
         }
         .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
+            CapabilityReport::runtime(format!(
                 "collector route field {route_field:?} has no parameter type"
-            )))
+            ))
         })?;
         root_fields.push(CollectFlatField {
             input: route_field.clone(),
@@ -200,19 +200,14 @@ fn collect_slot_layouts(
     next_slot: &mut usize,
 ) -> CapabilityResult<Vec<CollectSlotLayout>> {
     if depth > MAX_COLLECT_BY_TREE_DEPTH {
-        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+        return Err(CapabilityReport::operator(format!(
             "association projection depth {depth} exceeds Groove MAX_COLLECT_BY_TREE_DEPTH ({MAX_COLLECT_BY_TREE_DEPTH})"
-        ))));
+        )));
     }
     paths
         .iter()
         .map(|path| {
-            let source = resolved_sources.get(&path.path.child).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
-                    "app projection path child source {:?} was not resolved",
-                    path.path.child
-                )))
-            })?;
+            let source = ResolvedSource::lookup(resolved_sources, &path.path.child, "app projection path child")?;
             let slot_id = *next_slot;
             *next_slot += 1;
             let prefix = format!("__collect_path_{slot_id}");
@@ -245,10 +240,10 @@ fn collect_slot_layouts(
                 .filter(|source_field| selected.contains(source_field))
                 .map(|source_field| {
                     let source_value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
-                        single_gap_report(UnsupportedReason::Operator(format!(
+                        CapabilityReport::operator(format!(
                             "association projection source {:?} does not provide field {source_field:?}",
                             source.row_shape.source
-                        )))
+                        ))
                     })?;
                     let is_row_id = source_field == source.row_shape.row_uuid_field;
                     let output_value_type =
@@ -434,12 +429,8 @@ pub(super) fn lower_collect_slot_graphs(
     )
     .map_err(single_gap_report)?
     .graph;
-    let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
-        single_gap_report(UnsupportedReason::Runtime(format!(
-            "collector child source {:?} was not resolved",
-            slot.path.child
-        )))
-    })?;
+    let child_source =
+        ResolvedSource::lookup(resolved_sources, &slot.path.child, "collector child")?;
     let association = joined.clone().project_fields(collect_flat_projection(
         layout,
         Some((slot, child_source)),
@@ -459,10 +450,10 @@ pub(super) fn lower_collect_slot_graphs(
     for nested_slot in &slot.children {
         let nested_path =
             find_nested_correlated_path(path, &nested_slot.path).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Operator(format!(
+                CapabilityReport::operator(format!(
                     "app projection path {:?} is not nested below {:?}",
                     nested_slot.path, slot.path
-                )))
+                ))
             })?;
         graphs.extend(lower_collect_slot_graphs(
             nested_slot,

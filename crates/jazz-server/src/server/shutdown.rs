@@ -49,6 +49,13 @@ pub struct ActiveWebSocketGuard {
     controller: ShutdownController,
 }
 
+/// Why [`ShutdownController::try_enter_websocket_within`] refused a socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebSocketEntryRefused {
+    ShuttingDown,
+    AtCapacity,
+}
+
 impl ShutdownController {
     pub fn new(timeout: Duration) -> Self {
         let (phase_tx, _) = watch::channel(ShutdownPhase::Running);
@@ -153,18 +160,35 @@ impl ShutdownController {
     }
 
     pub fn try_enter_websocket(&self) -> Option<ActiveWebSocketGuard> {
+        self.try_enter_websocket_within(usize::MAX).ok()
+    }
+
+    /// Admit one WebSocket unless the server is shutting down or already
+    /// holds `max_websockets` live connections.
+    ///
+    /// The slot is reserved atomically, so concurrent upgrades can never
+    /// overshoot the cap between the check and the increment.
+    pub fn try_enter_websocket_within(
+        &self,
+        max_websockets: usize,
+    ) -> Result<ActiveWebSocketGuard, WebSocketEntryRefused> {
         if self.is_shutting_down() {
-            return None;
+            return Err(WebSocketEntryRefused::ShuttingDown);
         }
 
-        self.inner.active_websockets.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .active_websockets
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+                (active < max_websockets).then_some(active + 1)
+            })
+            .map_err(|_| WebSocketEntryRefused::AtCapacity)?;
         if self.is_shutting_down() {
             self.inner.active_websockets.fetch_sub(1, Ordering::SeqCst);
             self.inner.drain_notify.notify_waiters();
-            return None;
+            return Err(WebSocketEntryRefused::ShuttingDown);
         }
 
-        Some(ActiveWebSocketGuard {
+        Ok(ActiveWebSocketGuard {
             controller: self.clone(),
         })
     }
@@ -361,6 +385,34 @@ mod tests {
             .expect("websocket drain should complete after guard drop")
             .expect("wait task");
         assert!(drained);
+    }
+
+    #[test]
+    fn websocket_entry_is_refused_at_capacity_and_freed_on_drop() {
+        let controller = ShutdownController::new(std::time::Duration::from_secs(30));
+        let first = controller
+            .try_enter_websocket_within(2)
+            .expect("first slot");
+        let _second = controller
+            .try_enter_websocket_within(2)
+            .expect("second slot");
+        assert_eq!(
+            controller.try_enter_websocket_within(2).err(),
+            Some(WebSocketEntryRefused::AtCapacity)
+        );
+        assert_eq!(controller.active_websockets(), 2);
+
+        drop(first);
+        let _third = controller
+            .try_enter_websocket_within(2)
+            .expect("a dropped socket frees its slot");
+        assert_eq!(controller.active_websockets(), 2);
+
+        controller.request_shutdown();
+        assert_eq!(
+            controller.try_enter_websocket_within(usize::MAX).err(),
+            Some(WebSocketEntryRefused::ShuttingDown)
+        );
     }
 
     #[tokio::test]

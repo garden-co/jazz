@@ -211,9 +211,6 @@ impl SyncBench {
         let row_uuid = row((self.rng.usize(48) + 1) as u8);
         let mut commit =
             MergeableCommit::new(TABLE, row_uuid, 10 + step as u64).made_by(self.ui_author);
-        if let Some(parent) = self.parents.get(&row_uuid).copied() {
-            commit = commit.parents(vec![parent]);
-        }
         let (publication, unit) = self
             .ui
             .commit_mergeable_unit(commit.cells(cells(format!("merge-{step}"), self.ui_owner)))

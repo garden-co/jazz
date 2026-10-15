@@ -86,7 +86,7 @@ export type BrowserWebSocket = {
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
-export const WIRE_PROTOCOL_VERSION = 5;
+export const WIRE_PROTOCOL_VERSION = 6;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
@@ -636,14 +636,6 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
 
 function canonicalAuthorSubjectPart(author: string): string | null {
   return parseCanonicalAuthorSubject(author)?.user_id ?? null;
-}
-
-export async function connectWebSocketCarrier(
-  options: WebSocketCarrierOptions,
-): Promise<WebSocketCarrier> {
-  const carrier = new WebSocketCarrier(options);
-  await carrier.ready();
-  return carrier;
 }
 
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {

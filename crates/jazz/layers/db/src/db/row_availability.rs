@@ -398,6 +398,9 @@ pub(super) async fn receive_current_rows<S: OrderedKvStorage + ReopenableStorage
         return Ok(());
     }
     if receipt.core.0.is_nil() || receipt.core_epoch == 0 || receipt.authorization_progress == 0 {
+        // Unusable evidence answers nothing: release the route now so its
+        // owner retries instead of waiting out a timeout (INV-SYNC-48).
+        router.borrow_mut().finish(id, None);
         return Ok(());
     }
     let key = (receipt.core, receipt.core_epoch, receipt.context.clone());

@@ -94,9 +94,11 @@ import {
   encodeNativeColumnValue,
   encodeNativeNullValue,
   logicalStorageColumns,
+  namedValues,
   nativeFixedValueSize,
   storageColumnTypeToValueType,
   storageColumnValueType,
+  withValuesByColumn,
   writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
@@ -6099,15 +6101,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
   });
 }
 
-function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
-}
-
 export function decodeSubscriptionDelta(
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
@@ -6348,22 +6341,14 @@ export function decodeNestedRowBytes(
             ),
       );
     }
-    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
-      id,
-      values: columns.map(
-        (column) =>
-          valuesByColumn.get(column.name) ??
-          (column.column_type.type === "Array"
-            ? ({ type: "Array", value: [] } satisfies Value)
-            : ({ type: "Null" } satisfies Value)),
-      ),
-    };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
+    const values = columns.map(
+      (column) =>
+        valuesByColumn.get(column.name) ??
+        (column.column_type.type === "Array"
+          ? ({ type: "Array", value: [] } satisfies Value)
+          : ({ type: "Null" } satisfies Value)),
+    );
+    return withValuesByColumn({ id, values }, valuesByColumn);
   }
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
@@ -6589,12 +6574,7 @@ function runtimeSubscriptionRow(
   const values = valuesForNativeFrame(row, columns).map((value, index) =>
     runtimeSubscriptionValue(value, columns[index]!.column_type),
   );
-  const result: WasmRow = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
@@ -6636,12 +6616,7 @@ function runtimeSubscriptionNestedRow(
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
     return runtimeSubscriptionValue(resolved, column.column_type);
   });
-  const result = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[]): Value[] {

@@ -43,7 +43,43 @@ The retained constants are `MAX_FRAGMENT_REASSEMBLY_IDLE_MS` and
 channel-message reassembly. Recovery uses reconnect and normal known-state
 replay, not late fragments restarting an expired assembly.
 
-Wire v5 carries messages only through channels. The old whole-message and
+### Oversized view updates
+
+`D` is a transport budget, but a `ViewUpdate` is semantically atomic and its
+size grows with the subscription (a whole-table snapshot of ~110k small rows
+already exceeds 256 MiB). The wire adapter therefore sends a `ViewUpdate`
+whose semantic payload exceeds the routed payload limit (`D` minus the routed
+envelope allowance) as a sequence of bounded parts rather than rejecting it:
+
+- The sender splits the update at supporting-row and transaction-bundle
+  granularity. Every part repeats the header (subscription, `settled_through`,
+  transition kind and revisions). All parts but the last are
+  `SyncMessage::ViewUpdatePart` (tag 28); the last is an ordinary `ViewUpdate`
+  and alone carries the real `peer_payload_inventory`. Concatenating the parts'
+  lists and carriers in order reproduces the update.
+- A single supporting row or transaction bundle that does not fit one part,
+  or a header that alone exceeds the limit, is unsupported: the send fails with
+  an explicit error. Nothing is sent, and there is no whole-table fallback and
+  no per-version body fetch.
+- The adapter owns the accepted update's remaining parts and admits them to
+  the subscription's delivery stream as channel credit allows. Until the last
+  part is admitted it refuses every later canonical offer with backpressure,
+  so it retains at most the one logical update it accepted, and the parts are
+  contiguous on their stream.
+- The receiving adapter buffers parts by subscription, releases each part's
+  receive credit immediately, and yields only the reassembled `ViewUpdate`
+  when the final part arrives. Every part must match the final update's
+  header, and a supporting row repeated across parts is rejected; either
+  violation terminates the link. Open part sequences are bounded by the
+  number of delivery streams. No layer above the adapter sees a part.
+- A subscription unsubscribed or replaced mid-sequence does not cut the
+  sequence short: its remaining parts are already on the stream, so the update
+  is reassembled and then handled as any late update for a view the link no
+  longer serves (including its pending-transaction bookkeeping). A reconnect
+  drops the adapter and every buffered part with it; the new link's subscribe
+  or resume produces a fresh, complete update.
+
+Wire v6, like v5, carries messages only through channels. The old whole-message and
 fragment frames, per-message compression wrappers, and digest-based fragment
 reassembler are removed. Removing unused wrappers and limits does not change
 channel bytes, codec selection, wire version, or storage encodings.

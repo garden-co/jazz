@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
@@ -34,10 +35,10 @@ import {
 } from "../web/create-jazz-client.js";
 import {
   JazzContext,
-  deterministicBytes,
   type BackendContextConfig,
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 
 export type JazzSessionConfig = Omit<
   BackendContextConfig,
@@ -180,14 +181,10 @@ export async function createJazzSession(
       mintLocalFirstToken(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
       async admitBackend({ backendSecret }) {
-        const response = await fetch(`${registry.slice(0, -"/accounts".length)}/backend/admit`, {
-          method: "POST",
-          headers: { "X-Jazz-Backend-Secret": backendSecret },
-          redirect: "error",
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (response.status !== 204)
-          throw new Error(`Backend admission failed (${response.status})`);
+        await admitBackendSecret(
+          `${registry.slice(0, -"/accounts".length)}/backend/admit`,
+          backendSecret,
+        );
         return { nodeId: backendNodeId(config) };
       },
     },

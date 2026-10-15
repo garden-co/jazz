@@ -18,6 +18,7 @@ import {
 import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
@@ -113,7 +114,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onRemoteLinkChange: (state) => this.setWorkerRemoteLink(connection, state),
-      onFailure: (error) => this.observeConnectionFailure(connection, asError(error)),
+      onFailure: (error) => this.observeConnectionFailure(connection, toError(error)),
       onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
@@ -161,7 +162,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.workerRecoveryDelayMs = 250;
       },
       (error: unknown) => {
-        this.observeConnectionFailure(connection, asError(error));
+        this.observeConnectionFailure(connection, toError(error));
         if (this.connection !== connection) return;
         // `connectionReady` is also observed by passive readiness consumers
         // (for example the initial offline-state probe). Keep it a settled
@@ -221,7 +222,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.reopenFailedFollower();
         await this.connectionReady;
       }).catch((error: unknown) => {
-        this.connectionError ??= asError(error);
+        this.connectionError ??= toError(error);
         this.notifyWorkerRemoteLink();
       });
     }, delay);
@@ -383,7 +384,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     void connection
       .updateAuth(JSON.stringify(runtimeAuth(nextConfig)), runtimeSessionClaims(nextConfig))
       .catch((error: unknown) => {
-        this.observeConnectionFailure(connection, asError(error));
+        this.observeConnectionFailure(connection, toError(error));
       });
   }
 
@@ -445,7 +446,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     // A reset received by another tab has no direct promise consumer yet.
     // Retain its failure for subsequent synchronous client access/readiness.
     void reset.catch((error: unknown) => {
-      this.storageResetError ??= asError(error);
+      this.storageResetError ??= toError(error);
     });
   }
 
@@ -677,8 +678,4 @@ function runtimeSessionClaims(config: DbForConnection["config"]): Record<string,
       trustedReservedSession: getTrustedReservedSession(config),
     })?.claims ?? {}
   );
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use jazz_server::AuthConfig;
 use jazz_server::profiling::DiagnosticsConfig;
+use jazz_server::resources::ServerResourceLimits;
 
 /// Run the Jazz server.
 #[allow(clippy::too_many_arguments)]
@@ -16,6 +17,7 @@ pub async fn run(
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
+    limits: ServerResourceLimits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     jazz_server::run(
         app_id_str,
@@ -26,6 +28,7 @@ pub async fn run(
         bound_port_file,
         shutdown_timeout,
         diagnostics,
+        limits,
     )
     .await
 }

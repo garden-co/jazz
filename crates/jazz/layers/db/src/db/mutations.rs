@@ -1,7 +1,6 @@
 //! Row insertion, update, deletion, restoration, and authorization.
 
 use super::*;
-use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +186,59 @@ fn owned_utf16_range(text: &str, range: std::ops::Range<u64>) -> Result<String, 
         ));
     };
     Ok(text[start..end].to_owned())
+}
+
+/// One in-place edit of a bytes or UTF-8 string cell.
+enum CellEdit {
+    Append(Vec<u8>),
+    Splice {
+        offset: u64,
+        delete_length: u64,
+        insert: Vec<u8>,
+    },
+}
+
+impl CellEdit {
+    fn apply_inline(self, bytes: &mut Vec<u8>) -> Result<(), Error> {
+        match self {
+            Self::Append(suffix) => {
+                bytes.extend(suffix);
+                Ok(())
+            }
+            Self::Splice {
+                offset,
+                delete_length,
+                insert,
+            } => splice_owned_bytes(bytes, offset, delete_length, insert),
+        }
+    }
+}
+
+impl LargeValueUpdate {
+    fn column(&self) -> &str {
+        match self {
+            Self::Splice { column, .. } | Self::JsonSet { column, .. } => column,
+        }
+    }
+}
+
+/// A descriptor's next cell value, the staged root it produced (if any), and
+/// the intermediate staged roots it superseded.
+type LargeValueEdit = (
+    Value,
+    Option<groove::large_values::StagedLargeValue>,
+    Vec<groove::large_values::StagedLargeValueId>,
+);
+
+/// Map a UTF-16 coordinate lowering failure to the splice error callers see.
+fn utf16_splice_byte(result: Result<u64, crate::node::Error>) -> Result<u64, Error> {
+    result.map_err(|error| {
+        if is_utf16_coordinate_lowering_error(&error) {
+            Error::new(ErrorCode::Query, "UTF-16 splice splits a surrogate pair")
+        } else {
+            error.into()
+        }
+    })
 }
 
 fn splice_owned_bytes(
@@ -506,24 +558,16 @@ where
         cells: RowCells,
         mut options: InsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        // Reject a bad provenance time before consuming a row id.
         validate_updated_at_ms(options.updated_at_ms)?;
         let row = options
             .row_id
             .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
         options.row_id = Some(row);
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.insert(&table, cells, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.insert(&table, cells, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -534,9 +578,7 @@ where
         patch: RowCells,
         mut options: UpdateOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let db = self.clone_for_reserved_transaction(tx_id);
         let empty_patch = patch.is_empty();
@@ -570,22 +612,11 @@ where
         cells: RowCells,
         mut options: UpsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db
-                    .upsert_with_insert_validation(&table, row, cells, options, true)
-                    .await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.upsert_with_insert_validation(&table, row, cells, options, true)
+                .await
+        })
     }
 
     #[doc(hidden)]
@@ -595,20 +626,10 @@ where
         row: RowUuid,
         mut options: DeleteOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.delete(&table, row, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.delete(&table, row, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -619,20 +640,10 @@ where
         cells: Option<RowCells>,
         mut options: RestoreOptions,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(options.updated_at_ms)?;
-        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        options.updated_at_ms = Some(now_ms);
-        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
-        let status = self.node.enqueue_mutation(
-            tx_id,
-            Box::pin(async move {
-                let write = db.restore(&table, row, cells, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
-                Ok(())
-            }),
-        );
-        Ok(self.queued_write_handle(row, tx_id, status, None))
+        let now_ms = self.queued_now_ms(&mut options.updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.restore(&table, row, cells, options).await
+        })
     }
 
     #[doc(hidden)]
@@ -642,18 +653,41 @@ where
         row: RowUuid,
         patch: RowCells,
         mutations: Vec<LargeValueUpdate>,
-        updated_at_ms: Option<u64>,
+        mut updated_at_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
-        validate_updated_at_ms(updated_at_ms)?;
+        let now_ms = self.queued_now_ms(&mut updated_at_ms)?;
+        self.enqueue_write(row, now_ms, move |db| async move {
+            db.update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
+                .await
+        })
+    }
+
+    /// Validate a queued write's provenance time and pin it (defaulting to
+    /// now), so the reserved transaction id and the queued write agree.
+    fn queued_now_ms(&self, updated_at_ms: &mut Option<u64>) -> Result<u64, Error> {
+        validate_updated_at_ms(*updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        *updated_at_ms = Some(now_ms);
+        Ok(now_ms)
+    }
+
+    /// Reserve a queued write's final transaction id at `now_ms` and queue
+    /// `write`, run on a facade bound to that id, behind earlier owner work.
+    fn enqueue_write<F>(
+        &self,
+        row: RowUuid,
+        now_ms: u64,
+        write: impl FnOnce(Self) -> F,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        F: Future<Output = Result<WriteHandle<S>, Error>> + 'static,
+    {
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
-        let db = self.clone_for_reserved_transaction(tx_id);
+        let write = write(self.clone_for_reserved_transaction(tx_id));
         let status = self.node.enqueue_mutation(
             tx_id,
             Box::pin(async move {
-                let write = db
-                    .update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
-                    .await?;
+                let write = write.await?;
                 debug_assert_eq!(write.mergeable_tx_id(), tx_id);
                 Ok(())
             }),
@@ -761,51 +795,8 @@ where
         column: &str,
         bytes: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_mutation_operation_admitted()?;
-        let (value, nullable) =
-            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
-        match value {
-            Value::Bytes(mut current) => {
-                current.extend(bytes);
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::Bytes(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
-            }
-            Value::String(mut current) => {
-                let suffix = String::from_utf8(bytes).map_err(|_| {
-                    Error::new(ErrorCode::Schema, "string append is not valid UTF-8")
-                })?;
-                current.push_str(&suffix);
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::String(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
-            }
-            Value::Large(value_ref) => {
-                let staged = self
-                    .node
-                    .lock_for_large_value_staging()
-                    .await?
-                    .append_and_stage_large_value(*value_ref, bytes)
-                    .await?;
-                self.write_staged_large_value_update(table, row, column, staged, nullable)
-                    .await
-            }
-            _ => Err(large_value_cell_type_error(table, column)),
-        }
+        self.edit_value_cell(table, row, column, CellEdit::Append(bytes))
+            .await
     }
 
     /// Apply a byte-coordinate splice to an ordinary bytes or UTF-8 string
@@ -819,52 +810,66 @@ where
         delete_length: u64,
         insert: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        let edit = CellEdit::Splice {
+            offset,
+            delete_length,
+            insert,
+        };
+        self.edit_value_cell(table, row, column, edit).await
+    }
+
+    /// Apply `edit` to an inline bytes/string cell (as an ordinary update) or
+    /// to an indirect large value (by staging only the touched chunks).
+    async fn edit_value_cell(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        edit: CellEdit,
+    ) -> Result<WriteHandle<S>, Error> {
         self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
-        match value {
+        let next = match value {
             Value::Bytes(mut current) => {
-                splice_owned_bytes(&mut current, offset, delete_length, insert)?;
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::Bytes(current), nullable),
-                    )]),
-                    Default::default(),
-                )
-                .await
+                edit.apply_inline(&mut current)?;
+                Value::Bytes(current)
             }
             Value::String(current) => {
+                let invalid = match edit {
+                    CellEdit::Append(_) => "string append is not valid UTF-8",
+                    CellEdit::Splice { .. } => "string splice is not valid UTF-8",
+                };
                 let mut bytes = current.into_bytes();
-                splice_owned_bytes(&mut bytes, offset, delete_length, insert)?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    Error::new(ErrorCode::Schema, "string splice is not valid UTF-8")
-                })?;
-                self.update(
-                    table,
-                    row,
-                    BTreeMap::from([(
-                        column.to_owned(),
-                        preserve_nullable(Value::String(text), nullable),
-                    )]),
-                    Default::default(),
+                edit.apply_inline(&mut bytes)?;
+                Value::String(
+                    String::from_utf8(bytes).map_err(|_| Error::new(ErrorCode::Schema, invalid))?,
                 )
-                .await
             }
             Value::Large(value_ref) => {
-                let staged = self
-                    .node
-                    .lock_for_large_value_staging()
-                    .await?
-                    .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
-                    .await?;
-                self.write_staged_large_value_update(table, row, column, staged, nullable)
-                    .await
+                let node = self.node.lock_for_large_value_staging().await?;
+                let staged = match edit {
+                    CellEdit::Append(bytes) => {
+                        node.append_and_stage_large_value(*value_ref, bytes).await?
+                    }
+                    CellEdit::Splice {
+                        offset,
+                        delete_length,
+                        insert,
+                    } => {
+                        node.edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
+                            .await?
+                    }
+                };
+                drop(node);
+                return self
+                    .write_staged_large_value_update(table, row, column, staged, nullable)
+                    .await;
             }
-            _ => Err(large_value_cell_type_error(table, column)),
-        }
+            _ => return Err(large_value_cell_type_error(table, column)),
+        };
+        let patch = BTreeMap::from([(column.to_owned(), preserve_nullable(next, nullable))]);
+        self.update(table, row, patch, Default::default()).await
     }
 
     /// Apply typed partial large-value descriptors together with an ordinary
@@ -925,48 +930,18 @@ where
                 )
                 .await;
         }
-        let (mut cells, parent, mut authored_columns) =
+        let (mut cells, _parent, mut authored_columns) =
             self.merge_existing_cells(table, row, patch).await?;
         let mut staged = Vec::<(String, groove::large_values::StagedLargeValue)>::new();
         let mut cleanup = Vec::<groove::large_values::StagedLargeValueId>::new();
         let result = async {
             let mut touched = BTreeSet::new();
             for mutation in mutations {
-                let column = match &mutation {
-                    LargeValueUpdate::Splice { column, .. }
-                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
-                };
-                if !touched.insert(column.clone()) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field may have one descriptor per update",
-                    ));
-                }
-                if authored_columns.contains(&column) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field cannot be both patched and partially updated",
-                    ));
-                }
-                let current = cells.get(&column).cloned().ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Schema,
-                        format!("unknown column {table}.{column}"),
-                    )
-                })?;
-                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
-                let (next, column_staged, obsolete) = match mutation {
-                    LargeValueUpdate::Splice {
-                        within, splices, ..
-                    } => {
-                        self.apply_large_value_splices(current, column_kind, &within, &splices)
-                            .await?
-                    }
-                    LargeValueUpdate::JsonSet { edits, .. } => {
-                        self.apply_large_value_json_set(current, column_kind, &edits)
-                            .await?
-                    }
-                };
+                let (column, (next, column_staged, obsolete)) = self
+                    .apply_large_value_update(table, mutation, &cells, &mut touched, |column| {
+                        authored_columns.contains(column)
+                    })
+                    .await?;
                 cleanup.extend(obsolete);
                 if let Some(staged_value) = column_staged {
                     cleanup.push(staged_value.id);
@@ -978,7 +953,6 @@ where
             let commit =
                 MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
                     .made_by(self.identity.author)
-                    .parents(parent.into_iter().collect())
                     .cells(cells)
                     .authored_columns(authored_columns);
             let published = {
@@ -990,17 +964,7 @@ where
                     node.seal_large_value_updates(commit, &staged, self.schema_version_id)
                         .await?
                 };
-                if let Some(reserved) = self.reserved_tx_id {
-                    node.commit_mergeable_many_in_schema_at(
-                        self.schema_version_id,
-                        vec![commit],
-                        reserved,
-                    )
-                    .await?
-                } else {
-                    node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                        .await?
-                }
+                self.commit_mergeable_batch(&mut node, vec![commit]).await?
             };
             Ok::<_, Error>(published)
         }
@@ -1062,41 +1026,11 @@ where
         let result = async {
             let mut touched = BTreeSet::new();
             for mutation in mutations {
-                let column = match &mutation {
-                    LargeValueUpdate::Splice { column, .. }
-                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
-                };
-                if !touched.insert(column.clone()) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field may have one descriptor per update",
-                    ));
-                }
-                if authored.contains_key(&column) {
-                    return Err(Error::new(
-                        ErrorCode::Query,
-                        "a large-value field cannot be both patched and partially updated",
-                    ));
-                }
-                let current = target.get(&column).cloned().ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Schema,
-                        format!("unknown column {table}.{column}"),
-                    )
-                })?;
-                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
-                let (mut next, column_staged, obsolete) = match mutation {
-                    LargeValueUpdate::Splice {
-                        within, splices, ..
-                    } => {
-                        self.apply_large_value_splices(current, column_kind, &within, &splices)
-                            .await?
-                    }
-                    LargeValueUpdate::JsonSet { edits, .. } => {
-                        self.apply_large_value_json_set(current, column_kind, &edits)
-                            .await?
-                    }
-                };
+                let (column, (mut next, column_staged, obsolete)) = self
+                    .apply_large_value_update(table, mutation, &target, &mut touched, |column| {
+                        authored.contains_key(column)
+                    })
+                    .await?;
                 self.evict_staged_large_values(obsolete).await;
                 // An inline result that outgrew the inline limit is lowered
                 // now rather than at commit, so a later splice in this
@@ -1187,20 +1121,59 @@ where
         }
     }
 
+    /// Validate one descriptor against the row's `current` cells (at most one
+    /// descriptor per column, never a column the plain patch also authors)
+    /// and apply it, returning its column and edit.
+    async fn apply_large_value_update(
+        &self,
+        table: &str,
+        mutation: LargeValueUpdate,
+        current: &RowCells,
+        touched: &mut BTreeSet<String>,
+        is_patched: impl FnOnce(&str) -> bool,
+    ) -> Result<(String, LargeValueEdit), Error> {
+        let column = mutation.column().to_owned();
+        if !touched.insert(column.clone()) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "a large-value field may have one descriptor per update",
+            ));
+        }
+        if is_patched(&column) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "a large-value field cannot be both patched and partially updated",
+            ));
+        }
+        let value = current.get(&column).cloned().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("unknown column {table}.{column}"),
+            )
+        })?;
+        let (column_kind, _) = self.large_value_column_kind(table, &column)?;
+        let edit = match mutation {
+            LargeValueUpdate::Splice {
+                within, splices, ..
+            } => {
+                self.apply_large_value_splices(value, column_kind, &within, &splices)
+                    .await?
+            }
+            LargeValueUpdate::JsonSet { edits, .. } => {
+                self.apply_large_value_json_set(value, column_kind, &edits)
+                    .await?
+            }
+        };
+        Ok((column, edit))
+    }
+
     async fn apply_large_value_splices(
         &self,
         value: Value,
         expected_kind: groove::large_values::LargeValueKind,
         page: &LargeValueUpdatePage,
         splices: &[LargeValueUpdateSplice],
-    ) -> Result<
-        (
-            Value,
-            Option<groove::large_values::StagedLargeValue>,
-            Vec<groove::large_values::StagedLargeValueId>,
-        ),
-        Error,
-    > {
+    ) -> Result<LargeValueEdit, Error> {
         let (value, nullable) = unwrap_present_nullable(value);
         if !matches!(
             expected_kind,
@@ -1312,32 +1285,14 @@ where
                         Error::new(ErrorCode::Query, "UTF-16 splice range overflows")
                     })?;
                     let node = self.node.node.lock().await;
-                    let offset = match node
-                        .large_text_utf16_offset_to_byte(&current, offset_utf16)
-                        .await
-                    {
-                        Ok(offset) => offset,
-                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
-                            return Err(Error::new(
-                                ErrorCode::Query,
-                                "UTF-16 splice splits a surrogate pair",
-                            ));
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
-                    let end = match node
-                        .large_text_utf16_offset_to_byte(&current, end_utf16)
-                        .await
-                    {
-                        Ok(end) => end,
-                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
-                            return Err(Error::new(
-                                ErrorCode::Query,
-                                "UTF-16 splice splits a surrogate pair",
-                            ));
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
+                    let offset = utf16_splice_byte(
+                        node.large_text_utf16_offset_to_byte(&current, offset_utf16)
+                            .await,
+                    )?;
+                    let end = utf16_splice_byte(
+                        node.large_text_utf16_offset_to_byte(&current, end_utf16)
+                            .await,
+                    )?;
                     let inserted = std::str::from_utf8(&splice.insert).map_err(|_| {
                         Error::new(ErrorCode::Query, "text splice insert is not valid UTF-8")
                     })?;
@@ -1375,14 +1330,7 @@ where
         value: Value,
         expected_kind: groove::large_values::LargeValueKind,
         edits: &[JsonSetEdit],
-    ) -> Result<
-        (
-            Value,
-            Option<groove::large_values::StagedLargeValue>,
-            Vec<groove::large_values::StagedLargeValueId>,
-        ),
-        Error,
-    > {
+    ) -> Result<LargeValueEdit, Error> {
         if expected_kind != groove::large_values::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -1497,14 +1445,8 @@ where
                 column.to_owned(),
                 preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             );
-            let parents = node
-                .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
-                .await?
-                .into_iter()
-                .collect();
             let commit = MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(self.identity.author)
-                .parents(parents)
                 .cells(cells)
                 .authored_columns(BTreeSet::from([column.to_owned()]));
             let commit = node
@@ -1514,57 +1456,9 @@ where
                     self.schema_version_id,
                 )
                 .await?;
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
-    }
-
-    /// Calculate and commit novel contributions from one exact branch key into
-    /// another. This requires a history-complete database and emits an ordinary
-    /// mergeable transaction when the target does not already represent every
-    /// selected contribution.
-    pub async fn merge_branch_contributions(
-        &self,
-        source: BranchSelector,
-        target: BranchSelector,
-        rows: impl IntoIterator<Item = ContributionMergeRow>,
-    ) -> Result<Option<TxId>, Error> {
-        let rows = rows.into_iter().collect::<Vec<_>>();
-        let representative_row = rows.first().map(|row| row.row_uuid);
-        let tx_id = self
-            .node
-            .node
-            .lock()
-            .await
-            .merge_branch_contributions(ContributionMergeRequest {
-                source,
-                target,
-                rows,
-                made_by: self.identity.author,
-                permission_subject: Some(self.identity.author),
-                now_ms: self.next_now_ms(),
-            })
-            .await?;
-        let Some(published) = tx_id else {
-            return Ok(None);
-        };
-        let tx_id = published.tx_id;
-        self.finish_published_write(
-            representative_row.expect("a published contribution merge has at least one row"),
-            published,
-        )
-        .await?;
-        Ok(Some(tx_id))
     }
 
     /// Insert a row locally.
@@ -1624,10 +1518,7 @@ where
 
         if supplied_row_id {
             match target {
-                ExactWriteTarget::Root => {
-                    self.ensure_row_absent(table, row, permission_subject.unwrap_or(made_by))
-                        .await?
-                }
+                ExactWriteTarget::Root => self.ensure_row_absent(table, row).await?,
                 ExactWriteTarget::Branch(_) => {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?
@@ -2093,18 +1984,13 @@ where
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle<S>, Error> {
         let branch = head.clone().unwrap_or_default();
-        let (mut cells, parents, authored_columns, inserting) = match mutation {
+        let (mut cells, _parents, authored_columns, inserting) = match mutation {
             StreamingMutationKind::Insert => {
                 if head.is_some() {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?;
                 } else {
-                    self.ensure_row_absent(
-                        table,
-                        row,
-                        permission_subject.unwrap_or(self.identity.author),
-                    )
-                    .await?;
+                    self.ensure_row_absent(table, row).await?;
                 }
                 (cells, Vec::new(), None, true)
             }
@@ -2267,7 +2153,6 @@ where
             MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
                 .branch(branch)
                 .made_by(made_by)
-                .parents(parents)
                 .cells(cells);
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
@@ -2285,17 +2170,7 @@ where
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
                 .staged_large_cell(column, staged, nullable);
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
     }
@@ -2368,20 +2243,22 @@ where
         match target {
             WriteTarget::Root => {
                 if patch.is_empty() {
-                    return match identity {
+                    self.ensure_row_not_deleted(table, row).await?;
+                    let existing = match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
-                            self.no_op_update_handle_for_client(
+                            self.local_row_for_client_identity(
                                 table,
                                 row,
                                 permission_subject.unwrap_or(made_by),
                             )
-                            .await
+                            .await?
                         }
                         WriteIdentity::Session(author) => {
-                            self.no_op_update_handle_for_identity(table, row, author)
-                                .await
+                            self.local_row_for_trusted_identity(table, row, author)
+                                .await?
                         }
                     };
+                    return self.no_op_update_handle(table, row, existing).await;
                 }
                 let (cells, parent, authored_columns) = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => {
@@ -2907,10 +2784,9 @@ where
         let cells = cells
             .map(|cells| self.apply_insert_defaults(table, cells))
             .transpose()?;
-        let (content_parents, deletion_parents) = match target {
+        let (_content_parents, _deletion_parents) = match target {
             ExactWriteTarget::Root => {
-                self.ensure_row_deleted(table, row, permission_subject.unwrap_or(made_by))
-                    .await?;
+                self.ensure_row_deleted(table, row).await?;
                 self.row_layer_parents(table, row).await?
             }
             ExactWriteTarget::Branch(_) => {
@@ -2943,7 +2819,6 @@ where
                 MergeableCommit::new(table, row, now_ms)
                     .branch(branch.clone())
                     .made_by(made_by)
-                    .parents(content_parents)
                     .cells(cells),
             ));
         }
@@ -2951,7 +2826,6 @@ where
             MergeableCommit::new(table, row, now_ms)
                 .branch(branch)
                 .made_by(made_by)
-                .parents(deletion_parents)
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ));
@@ -2964,13 +2838,7 @@ where
             } else {
                 self.node.node.lock().await
             };
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
-                    .await?
-            } else {
-                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, commits).await?
         };
         self.finish_published_write(row, published).await
     }
@@ -3041,7 +2909,6 @@ where
         let mut commit = MergeableCommit::new(table, row, now_ms)
             .branch(branch)
             .made_by(made_by)
-            .parents(parents)
             .cells(cells);
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
@@ -3070,19 +2937,28 @@ where
                     allow_inherited_descriptors,
                 )
                 .await?;
-            if let Some(reserved) = self.reserved_tx_id {
-                node.commit_mergeable_many_in_schema_at(
-                    self.schema_version_id,
-                    vec![commit],
-                    reserved,
-                )
-                .await?
-            } else {
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
-                    .await?
-            }
+            self.commit_mergeable_batch(&mut node, vec![commit]).await?
         };
         self.finish_published_write(row, published).await
+    }
+
+    /// Commit `commits` as one local transaction, into this handle's reserved
+    /// transaction slot when it has one.
+    async fn commit_mergeable_batch(
+        &self,
+        node: &mut NodeState<S>,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<PublishedTransaction, Error> {
+        Ok(match self.reserved_tx_id {
+            Some(reserved) => {
+                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
+                    .await?
+            }
+            None => {
+                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
+                    .await?
+            }
+        })
     }
 
     async fn finish_published_write(
@@ -3091,15 +2967,7 @@ where
         published: PublishedTransaction,
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
-        let local_tier = if self.node.defer_local_persistence.get() {
-            self.finish_deferred_local_publication(published, None)
-                .await?;
-            DurabilityTier::None
-        } else {
-            self.finish_publication_outcome(PublicationOutcome::published((), published))
-                .await?;
-            self.finalize_local_commit(tx_id)?
-        };
+        let local_tier = self.settle_local_publication(published, None).await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.node.node),
             row_uuid: row,
@@ -3108,6 +2976,32 @@ where
             queued_status: None,
             queued_alias: None,
         })
+    }
+
+    /// Hand a published transaction to deferred local persistence, or settle
+    /// its publication now and queue its upload (`unit` is an exclusive
+    /// commit's bound sync unit). Returns the authored commit's local tier;
+    /// `None` while deferred and for exclusive commits, which report only ids.
+    pub(super) async fn settle_local_publication(
+        &self,
+        published: PublishedTransaction,
+        unit: Option<SyncMessage>,
+    ) -> Result<DurabilityTier, Error> {
+        if self.node.defer_local_persistence.get() {
+            self.finish_deferred_local_publication(published, unit)
+                .await?;
+            return Ok(DurabilityTier::None);
+        }
+        let tx_id = published.tx_id;
+        self.finish_publication_outcome(PublicationOutcome::published((), published))
+            .await?;
+        match unit {
+            None => self.finalize_local_commit(tx_id),
+            Some(unit) => {
+                self.node.queue_pending_upload(tx_id, Some(unit));
+                Ok(DurabilityTier::None)
+            }
+        }
     }
 
     /// Transfer a published ordered slot into node ownership before resident
@@ -3256,9 +3150,7 @@ where
     }
 
     pub(super) fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
+        self.next_now_ms.next_now_ms()
     }
 
     pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {
@@ -3478,12 +3370,7 @@ where
             .await?)
     }
 
-    async fn ensure_row_absent(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorSubject,
-    ) -> Result<(), Error> {
+    async fn ensure_row_absent(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.table_schema(table)?;
         let (content_parent, deletion_parent) = {
             let mut node = self.node.node.lock().await;
@@ -3532,12 +3419,7 @@ where
         Ok(())
     }
 
-    async fn ensure_row_deleted(
-        &self,
-        table: &str,
-        row: RowUuid,
-        _identity: AuthorSubject,
-    ) -> Result<(), Error> {
+    async fn ensure_row_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
             .node
@@ -3738,49 +3620,16 @@ where
             }))
     }
 
-    async fn no_op_update_handle_for_client(
+    /// Handle for an empty root update: the write is a no-op that reports
+    /// the transaction of the row's current version, once `existing` (the
+    /// caller's identity-scoped view of the row) proves it may target it.
+    async fn no_op_update_handle(
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorSubject,
+        existing: Option<CurrentRow>,
     ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row).await?;
-        let Some(existing) = self
-            .local_row_for_client_identity(table, row, identity)
-            .await?
-        else {
-            return Err(self.update_target_missing(table, row).await?);
-        };
-        let tx_id = self
-            .node
-            .node
-            .lock()
-            .await
-            .current_row_tx_id(&existing)
-            .await
-            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
-        let local_tier = self.write_state(tx_id)?.durability;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-            queued_status: None,
-            queued_alias: None,
-        })
-    }
-
-    async fn no_op_update_handle_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        identity: AuthorSubject,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.ensure_row_not_deleted(table, row).await?;
-        let Some(existing) = self
-            .local_row_for_trusted_identity(table, row, identity)
-            .await?
-        else {
+        let Some(existing) = existing else {
             return Err(self.update_target_missing(table, row).await?);
         };
         let tx_id = self

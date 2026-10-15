@@ -197,14 +197,6 @@ impl StoredCatalogue {
         Ok(store)
     }
 
-    #[cfg(any(test, feature = "embedded-server"))]
-    #[allow(dead_code)]
-    pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), CatalogueError> {
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.add_schema(schema);
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn local_durability_tiers_for_test(
         &self,

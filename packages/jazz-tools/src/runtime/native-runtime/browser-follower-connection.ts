@@ -18,6 +18,7 @@ import {
   inspectorControlAbortError,
   waitForInspectorOpening,
 } from "./inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -148,7 +149,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           );
         },
         (error) => {
-          const failure = asError(error);
+          const failure = toError(error);
           // Retirement can itself fail after the causal transport failure.
           // Preserve the first error and notify remote waiters before teardown.
           if (this.failed || this.closed) return;
@@ -167,7 +168,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
     })();
     this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
-    void this.readyPromise.catch((error: unknown) => this.fail(asError(error)));
+    void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
   }
 
   async ready(): Promise<void> {
@@ -239,7 +240,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       );
     } catch (error) {
       channel.port2.close();
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
     try {
       await promise;
@@ -277,7 +278,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           sessionClaims,
         } satisfies BrowserFollowerPortRequest);
       })
-      .catch((error: unknown) => this.fail(asError(error)));
+      .catch((error: unknown) => this.fail(toError(error)));
   }
 
   async shutdown(releaseContext = false): Promise<void> {
@@ -316,7 +317,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     try {
       this.port.postMessage(message satisfies BrowserFollowerPortRequest);
     } catch (error) {
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
     return promise;
   }
@@ -371,7 +372,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         nonce,
       } satisfies BrowserFollowerPortRequest);
     } catch (error) {
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
   }
 
@@ -521,8 +522,4 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }
