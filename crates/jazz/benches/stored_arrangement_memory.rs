@@ -47,7 +47,7 @@ fn main() {
     let budget = std::env::var("JAZZ_BUDGET")
         .ok()
         .map(|value| value.parse::<usize>().expect("JAZZ_BUDGET is a byte count"));
-    jazz::groove::ivm::set_process_arrangement_budget(budget);
+    jazz::groove::ivm::set_process_cache_budget(budget);
     assert!(routes * docs_per_route <= projects || shared);
 
     let db = open_db();

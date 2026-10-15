@@ -653,9 +653,9 @@ impl Database {
 
     /// Bound the memory the buckets of stored arrangements keep resident;
     /// `None` (the default) is unbounded. See
-    /// `IvmRuntime::set_arrangement_memory_budget`.
-    pub fn set_arrangement_memory_budget(&mut self, budget: Option<usize>) {
-        self.ivm_runtime.set_arrangement_memory_budget(budget);
+    /// `IvmRuntime::set_cache_memory_budget`.
+    pub fn set_cache_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_cache_memory_budget(budget);
     }
 
     /// Enable or disable generic root positions (insert indices and moves in

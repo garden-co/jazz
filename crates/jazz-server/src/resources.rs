@@ -15,7 +15,7 @@ const ROCKSDB_CACHE_MIN_BYTES: u64 = 32 * 1024 * 1024;
 const ROCKSDB_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Share of the process memory limit the resident buckets of stored
 /// arrangements may use while memory is plentiful.
-const ARRANGEMENT_CEILING_SHARE_PERCENT: u64 = 25;
+const CACHE_CEILING_SHARE_PERCENT: u64 = 25;
 /// Resident set size the arrangement budget governor steers toward, as a
 /// share of the process memory limit.
 const RSS_TARGET_SHARE_PERCENT: u64 = 80;
@@ -60,13 +60,13 @@ impl ServerResourceLimits {
 }
 
 /// Steers the process-wide budget of stored arrangement buckets (see
-/// `groove::ivm::set_process_arrangement_budget`) from the process's
+/// `groove::ivm::set_process_cache_budget`) from the process's
 /// resident set: over the target, the budget drops by the overshoot, so
 /// queries read more buckets from storage; under it, the budget grows back
 /// towards its ceiling a step at a time. The trade between memory and
 /// storage reads is continuous, with no switch between modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ArrangementBudgetGovernor {
+pub struct CacheBudgetGovernor {
     target_rss_bytes: u64,
     ceiling_bytes: usize,
 }
@@ -74,17 +74,17 @@ pub struct ArrangementBudgetGovernor {
 impl ServerResourceLimits {
     /// The governor for this process's limit, or `None` when nothing limits
     /// memory and arrangements keep every bucket they read.
-    pub fn arrangement_budget_governor(&self) -> Option<ArrangementBudgetGovernor> {
+    pub fn cache_budget_governor(&self) -> Option<CacheBudgetGovernor> {
         let limit = self.memory_limit_bytes?;
-        Some(ArrangementBudgetGovernor {
+        Some(CacheBudgetGovernor {
             target_rss_bytes: limit / 100 * RSS_TARGET_SHARE_PERCENT,
-            ceiling_bytes: usize::try_from(limit / 100 * ARRANGEMENT_CEILING_SHARE_PERCENT)
+            ceiling_bytes: usize::try_from(limit / 100 * CACHE_CEILING_SHARE_PERCENT)
                 .unwrap_or(usize::MAX),
         })
     }
 }
 
-impl ArrangementBudgetGovernor {
+impl CacheBudgetGovernor {
     /// The budget while memory is plentiful.
     pub fn ceiling_bytes(&self) -> usize {
         self.ceiling_bytes
@@ -192,15 +192,13 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_budget_follows_memory_pressure_smoothly() {
+    fn cache_budget_follows_memory_pressure_smoothly() {
         let limits = |limit: Option<u64>| ServerResourceLimits {
             memory_limit_bytes: limit,
             ..ServerResourceLimits::default()
         };
-        assert_eq!(limits(None).arrangement_budget_governor(), None);
-        let governor = limits(Some(1000 * MIB))
-            .arrangement_budget_governor()
-            .unwrap();
+        assert_eq!(limits(None).cache_budget_governor(), None);
+        let governor = limits(Some(1000 * MIB)).cache_budget_governor().unwrap();
         let ceiling = governor.ceiling_bytes();
         assert_eq!(ceiling as u64, 1000 * MIB / 100 * 25);
         let target = 1000 * MIB / 100 * 80;

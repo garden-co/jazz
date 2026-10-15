@@ -70,12 +70,12 @@ pub async fn run(
         );
     }
     // Serves until this function returns.
-    let _arrangement_budget_task = limits.arrangement_budget_governor().map(|governor| {
+    let _cache_budget_task = limits.cache_budget_governor().map(|governor| {
         info!(
             "Query cache budget: {} MiB, lowered under memory pressure",
             governor.ceiling_bytes() / (1024 * 1024)
         );
-        AbortOnDrop(tokio::spawn(govern_arrangement_budget(governor)))
+        AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))
     });
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
@@ -272,27 +272,26 @@ impl Drop for AbortOnDrop {
 }
 
 /// How often the arrangement budget follows the resident set.
-const ARRANGEMENT_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
+const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Keep the process-wide arrangement budget in step with memory pressure.
-async fn govern_arrangement_budget(governor: resources::ArrangementBudgetGovernor) {
+async fn govern_cache_budget(governor: resources::CacheBudgetGovernor) {
     use jazz::groove::ivm::{
-        process_arrangement_budget, process_arrangement_resident_bytes,
-        set_process_arrangement_budget,
+        process_cache_budget, process_cache_resident_bytes, set_process_cache_budget,
     };
-    set_process_arrangement_budget(Some(governor.ceiling_bytes()));
-    let mut interval = tokio::time::interval(ARRANGEMENT_BUDGET_INTERVAL);
+    set_process_cache_budget(Some(governor.ceiling_bytes()));
+    let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
         let Some(rss) = resources::process_rss_bytes() else {
             return;
         };
-        let current = process_arrangement_budget().unwrap_or(governor.ceiling_bytes());
-        let next = governor.next_budget(rss, process_arrangement_resident_bytes(), current);
+        let current = process_cache_budget().unwrap_or(governor.ceiling_bytes());
+        let next = governor.next_budget(rss, process_cache_resident_bytes(), current);
         if next != current {
             tracing::debug!(rss, current, next, "arrangement budget");
-            set_process_arrangement_budget(Some(next));
+            set_process_cache_budget(Some(next));
         }
     }
 }

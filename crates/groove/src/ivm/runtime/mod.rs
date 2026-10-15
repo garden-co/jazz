@@ -59,9 +59,7 @@ mod recursion;
 mod residency;
 mod state;
 mod stored_arrangement;
-pub use residency::{
-    process_arrangement_budget, process_arrangement_resident_bytes, set_process_arrangement_budget,
-};
+pub use residency::{process_cache_budget, process_cache_resident_bytes, set_process_cache_budget};
 mod terminal;
 mod typed_template;
 
@@ -264,7 +262,7 @@ pub struct IvmRuntime {
     /// Bytes the resident buckets of this runtime's stored arrangements may
     /// hold after an install; `None` follows the process budget
     /// (`residency`).
-    arrangement_budget: Option<usize>,
+    cache_budget: Option<usize>,
     /// Shared with every stored arrangement plan: whether reads record the
     /// buckets they use, which only a finite budget needs.
     arrangement_use_tracking: Arc<std::sync::atomic::AtomicBool>,
@@ -395,9 +393,9 @@ impl IvmRuntime {
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
             stored_arrangements_enabled: true,
-            arrangement_budget: None,
+            cache_budget: None,
             arrangement_use_tracking: Arc::new(std::sync::atomic::AtomicBool::new(
-                residency::process_arrangement_budget().is_some(),
+                residency::process_cache_budget().is_some(),
             )),
             resident_share: residency::ResidentShare::default(),
             plain_output_root_positions: true,

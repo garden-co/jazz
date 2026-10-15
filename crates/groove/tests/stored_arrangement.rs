@@ -83,7 +83,7 @@ async fn open_db(stored: bool) -> Database {
 
 async fn open_budgeted(budget: Option<usize>) -> Database {
     let mut db = open_db(true).await;
-    db.set_arrangement_memory_budget(budget);
+    db.set_cache_memory_budget(budget);
     db
 }
 
@@ -474,7 +474,7 @@ async fn lowering_the_budget_evicts_resident_buckets() {
     add(&mut live, sub.recv().unwrap().to_values().unwrap());
     let before = db.runtime_stats().stored_arrangement_resident_bytes;
     assert!(before > 10_000, "{before}");
-    db.set_arrangement_memory_budget(Some(1_000));
+    db.set_cache_memory_budget(Some(1_000));
     let after = db.runtime_stats().stored_arrangement_resident_bytes;
     assert!(after <= 1_000, "{after}");
     apply(&mut db, |b| {
