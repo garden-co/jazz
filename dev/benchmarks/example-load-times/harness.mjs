@@ -62,7 +62,8 @@ async function startProcess(name, { command, args, cwd, env = {}, ready, timeout
         timeout,
       );
       const poll = setInterval(() => {
-        if (ready.test(output)) {
+        // CI forces colour, which splits e.g. Vite's "Local:" with escape codes.
+        if (ready.test(output.replace(/\x1b\[[0-9;]*m/g, ""))) {
           clearInterval(poll);
           clearTimeout(timer);
           resolve();
