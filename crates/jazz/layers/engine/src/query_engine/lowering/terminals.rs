@@ -3922,13 +3922,6 @@ fn aggregate_carrier_field_type<'a>(
         .map(|field| &field.value_type)
 }
 
-fn version_witness_fields_for_tagged_rows(
-    source: &ResolvedSource,
-    event_kind: &str,
-) -> CapabilityResult<Vec<ProjectField>> {
-    prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")
-}
-
 fn unprefixed_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
