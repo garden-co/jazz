@@ -144,25 +144,25 @@ Core sequences keeps it.
 
 ### Durable codec profile
 
-Every persistent Jazz root supplies one closed epoch-one codec profile when it
-opens its ordered-KV adapter. It contains Groove's mandatory base codecs:
-generic ordered-KV, V1 large-value descriptor/immutable-node envelopes, and
-the ordered-chunk-storage install-receipt wrapper; plus the Jazz-owned byte
-families for branch keys; catalogue schemas, mappings, lineages, bootstrap
-receipts, lenses, activations, and write pointers; and persisted
-result-member, result-row-source, and program-fact keys. The profile is sorted, pinned by the adapter manifest,
-and checked before any ordinary record is decoded or mutated. Groove carries
-these identifiers as opaque metadata: it does not import or interpret Jazz
-schemas. A missing, duplicate, substituted, or future ID therefore fails open
-admission rather than leaving a `Bytes` field to a codec-specific fallback.
+Each persistent Jazz root declares one complete Jazz storage format:
+`jazz.node-storage.v1` for clients, relays and Core; `jazz.catalogue-storage.v1`
+for the independent server catalogue; `jazz.account-storage.v1` for the account
+journal. All compose Groove's mandatory base codecs; node roots additionally
+require `groove.durable-index.v2`. Auxiliary roots do not inherit node formats.
 
-This inventory names encoding families, not user tables or individual values.
-Ordinary scalar/record representation remains Groove's one typed record codec;
-a distinct durable root composes this base with its own root-local codec family
-before opening. Adding a new Jazz-owned durable byte family requires a new
-storage epoch, golden fixtures, and an explicit decoder/migration decision.
+The manifest requires an exact inventory match before any ordinary record is
+decoded or mutated. Groove treats Jazz identifiers as opaque metadata. Each
+individual encoding still has a named byte contract, golden fixtures, and
+rejection/reopen receipts in the encoding registry, but no separate persisted
+Jazz marker. A change incompatible with a released root layout versions that
+root's marker; changes within this unreleased storage-breaking batch are
+consolidated into the same v1 contract. There is no physical epoch change.
+Earlier per-family profiles are refused without migration. Some of these
+encodings also change wire bytes; the wire version bump for them ships with
+the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
-`server-catalogue-entry.v1` is an existing member of this profile. Its outer
+`jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
+`jazz.catalogue-storage.v1`. Its outer
 `JCAT` entry and all catalogue payload outer version bytes remain v1. Within
 the existing nested relation-tree grammar, a public `UNION ALL` is the
 explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in

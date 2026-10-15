@@ -8,12 +8,12 @@ on:
         required: true
         type: boolean
       sccache-write:
-        description: Use the main-only sccache writer role instead of the trusted PR reader role.
+        description: Use the sccache writer role (main and merge-group/** pushes) instead of the trusted PR reader role.
         required: true
         type: boolean
       scope:
-        # full: every partition (main and release pushes, dispatches, release
-        # PRs and the Review Loop's merge-group/* PRs). fast: lint and
+        # full: every partition (main, release and merge-group/** pushes,
+        # dispatches and release PRs). fast: lint and
         # typecheck only (ready PRs). none: nothing (draft PRs).
         description: Which partitions to run, full, fast or none.
         required: false

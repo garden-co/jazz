@@ -209,6 +209,17 @@ enum TypedLiteralTarget {
     PublicEnum,
 }
 
+/// Literal-coercion target of every column, by table then column name.
+type ColumnTypes = BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>;
+
+fn column_target<'a>(
+    column_types: &'a ColumnTypes,
+    table: &str,
+    column: &str,
+) -> Option<&'a TypedLiteralTarget> {
+    column_types.get(table)?.get(column)
+}
+
 fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
     let column_types = tables
         .iter()
@@ -243,19 +254,13 @@ fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
     }
 }
 
-fn coerce_optional_query_typed_literals(
-    query: &mut Option<Query>,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_optional_query_typed_literals(query: &mut Option<Query>, column_types: &ColumnTypes) {
     if let Some(query) = query {
         coerce_query_typed_literals(query, column_types);
     }
 }
 
-fn coerce_query_typed_literals(
-    query: &mut Query,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_query_typed_literals(query: &mut Query, column_types: &ColumnTypes) {
     coerce_predicates_typed_literals(&query.table, &mut query.filters, column_types);
     for join in &mut query.joins {
         coerce_join_typed_literals(join, column_types);
@@ -272,7 +277,7 @@ fn coerce_query_typed_literals(
 
 fn coerce_reachable_typed_literals(
     reachable: &mut [crate::query::ReachableVia],
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) {
     for reachable in reachable {
         coerce_predicates_typed_literals(
@@ -291,10 +296,7 @@ fn coerce_reachable_typed_literals(
     }
 }
 
-fn coerce_join_typed_literals(
-    join: &mut JoinVia,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_join_typed_literals(join: &mut JoinVia, column_types: &ColumnTypes) {
     coerce_predicates_typed_literals(&join.table, &mut join.filters, column_types);
     for nested in &mut join.nested_joins {
         coerce_join_typed_literals(nested, column_types);
@@ -304,7 +306,7 @@ fn coerce_join_typed_literals(
 fn coerce_predicates_typed_literals(
     table: &str,
     predicates: &mut [Predicate],
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) {
     for predicate in predicates {
         coerce_predicate_typed_literals(table, predicate, column_types);
@@ -314,7 +316,7 @@ fn coerce_predicates_typed_literals(
 fn coerce_predicate_typed_literals(
     table: &str,
     predicate: &mut Predicate,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) {
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => {
@@ -358,7 +360,7 @@ fn coerce_operand_pair_typed_literal(
     table: &str,
     column_operand: &Operand,
     literal_operand: &mut Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> bool {
     let Operand::Column(column) = column_operand else {
         return false;
@@ -389,7 +391,7 @@ fn coerce_operand_pair_typed_literal(
 fn column_type_for_operand(
     table: &str,
     column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> Option<TypedLiteralTarget> {
     if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
         return Some(TypedLiteralTarget::Core(ty.clone()));
@@ -397,10 +399,7 @@ fn column_type_for_operand(
     match column {
         "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
         "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
-        _ => column_types
-            .get(table)
-            .and_then(|columns| columns.get(column))
-            .cloned(),
+        _ => column_target(column_types, table, column).cloned(),
     }
 }
 
@@ -467,7 +466,7 @@ fn column_enum_literal_discriminant(
     table: &str,
     column: &str,
     literal_operand: &Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> Option<u8> {
     let Operand::Literal(GrooveValue::String(value)) = literal_operand else {
         return None;
@@ -476,25 +475,17 @@ fn column_enum_literal_discriminant(
         .and_then(|schema| schema.discriminant(value).ok())
 }
 
-fn column_is_enum(
-    table: &str,
-    column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> bool {
+fn column_is_enum(table: &str, column: &str, column_types: &ColumnTypes) -> bool {
     column_enum_schema(table, column, column_types).is_some()
 }
 
 fn column_enum_schema<'a>(
     table: &str,
     column: &str,
-    column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &'a ColumnTypes,
 ) -> Option<&'a ScalarEnumSchema> {
-    let column_type = match column_types
-        .get(table)
-        .and_then(|columns| columns.get(column))?
-    {
-        TypedLiteralTarget::Core(column_type) => column_type,
-        TypedLiteralTarget::PublicEnum => return None,
+    let TypedLiteralTarget::Core(column_type) = column_target(column_types, table, column)? else {
+        return None;
     };
     groove_column_type_enum_schema(column_type)
 }
@@ -507,18 +498,11 @@ fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&Sca
     }
 }
 
-fn column_is_string(
-    table: &str,
-    column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> bool {
-    let Some(TypedLiteralTarget::Core(column_type)) = column_types
-        .get(table)
-        .and_then(|columns| columns.get(column))
-    else {
-        return false;
-    };
-    groove_column_type_is_string(column_type)
+fn column_is_string(table: &str, column: &str, column_types: &ColumnTypes) -> bool {
+    matches!(
+        column_target(column_types, table, column),
+        Some(TypedLiteralTarget::Core(column_type)) if groove_column_type_is_string(column_type)
+    )
 }
 
 fn groove_column_type_is_string(column_type: &GrooveColumnType) -> bool {
@@ -1548,6 +1532,16 @@ struct LoweredRelPredicate {
     value: Option<LoweredRelValue>,
 }
 
+impl LoweredRelPredicate {
+    fn bare(predicate: Predicate) -> Self {
+        Self {
+            predicate,
+            column: None,
+            value: None,
+        }
+    }
+}
+
 use crate::query::RelationOperand as LoweredRelValue;
 
 #[derive(Clone)]
@@ -1775,11 +1769,7 @@ fn root_exists_rel_at_correlation(
         lowered.filters = next
             .filters
             .into_iter()
-            .map(|predicate| LoweredRelPredicate {
-                predicate,
-                column: None,
-                value: None,
-            })
+            .map(LoweredRelPredicate::bare)
             .chain(
                 next.correlated_filters
                     .into_iter()
