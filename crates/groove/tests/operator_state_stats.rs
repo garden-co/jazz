@@ -55,23 +55,23 @@ async fn grouped_operator_state_is_counted() {
     })
     .await;
     let empty = db.runtime_stats();
-    assert_eq!(empty.operator_state_count, 0);
+    assert_eq!(empty.grouped_operator_state_count, 0);
 
     let latest = GraphBuilder::arg_max_by(GraphBuilder::table("albums"), ["artist_id"], ["id"]);
     let sub = db.subscribe_one_sink(latest).await.unwrap();
     sub.recv().unwrap();
     let held = db.runtime_stats();
-    assert_eq!(held.operator_state_count, 1);
-    assert_eq!(held.operator_state_groups, 2);
-    assert_eq!(held.operator_state_rows, 3);
-    assert!(held.operator_state_encoded_bytes > 0);
+    assert_eq!(held.grouped_operator_state_count, 1);
+    assert_eq!(held.grouped_operator_state_groups, 2);
+    assert_eq!(held.grouped_operator_state_rows, 3);
+    assert!(held.grouped_operator_state_encoded_bytes > 0);
 
     apply(&mut db, |b| b.delete("albums", key(10, 1))).await;
     let after = db.runtime_stats();
-    assert_eq!(after.operator_state_groups, 2);
-    assert_eq!(after.operator_state_rows, 2);
-    assert!(after.operator_state_encoded_bytes < held.operator_state_encoded_bytes);
+    assert_eq!(after.grouped_operator_state_groups, 2);
+    assert_eq!(after.grouped_operator_state_rows, 2);
+    assert!(after.grouped_operator_state_encoded_bytes < held.grouped_operator_state_encoded_bytes);
 
     apply(&mut db, |b| b.delete("albums", key(20, 3))).await;
-    assert_eq!(db.runtime_stats().operator_state_groups, 1);
+    assert_eq!(db.runtime_stats().grouped_operator_state_groups, 1);
 }

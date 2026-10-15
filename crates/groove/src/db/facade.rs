@@ -2063,6 +2063,11 @@ impl Database {
         self.ivm_runtime.stats()
     }
 
+    /// Live subscriptions, without the state walk of `runtime_stats()`.
+    pub fn active_subscription_count(&self) -> usize {
+        self.ivm_runtime.active_subscription_count()
+    }
+
     /// Lifetime topology-cache counters, independent of transactional state.
     pub fn execution_layout_stats(&self) -> crate::ivm::ExecutionLayoutStats {
         self.ivm_runtime.execution_layout_stats()
