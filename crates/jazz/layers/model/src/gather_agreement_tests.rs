@@ -271,6 +271,21 @@ fn joined_parent_step_lowers_identically() {
 }
 
 #[test]
+fn joined_step_without_an_id_projection_keeps_the_target_row_id() {
+    // An empty projection passes the hop target row through, so its row id is
+    // still the next frontier.
+    let RelationExpr::Project { input, .. } = joined_parent_step("id") else {
+        unreachable!("joined_parent_step returns a projection");
+    };
+    let step = RelationExpr::Project {
+        input,
+        columns: Vec::new(),
+    };
+    let edge = assert_both_accept(&gather(step));
+    assert_eq!(edge, expected_edge(RecursionBound::MaxDepth(4)));
+}
+
+#[test]
 fn step_joining_a_non_row_id_target_column_is_rejected() {
     // `teams.parent = hop.owner_id` does not name the parent row, so it cannot
     // be lowered as a parent-id reachability edge.
