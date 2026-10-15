@@ -148,9 +148,14 @@ const assertIntegrationCheckIsGating = (lintJob) => {
 };
 const trustedCachePullRequest =
   'github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)';
+// merge-group/** pushes are trusted: a ruleset limits who can push them.
 const trustedCacheCondition =
-  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || " +
-  trustedCachePullRequest;
+  "(github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) || " +
+  trustedCachePullRequest +
+  ")";
+// A main push a green merge group already covered skips the trusted suite.
+const trustedCallerCondition =
+  "!cancelled() && needs.main-coverage.outputs.covered != 'true' && " + trustedCacheCondition;
 const untrustedCacheCondition = "github.event_name != 'push' && !(" + trustedCachePullRequest + ")";
 const sccacheWriter =
   "inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''";
@@ -207,25 +212,29 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     eventName === "pull_request" &&
     sameRepository &&
     ["OWNER", "MEMBER", "COLLABORATOR"].includes(authorAssociation);
+  const mergeGroupPush = eventName === "push" && ref.startsWith("refs/heads/merge-group/");
   const trusted =
     (eventName === "push" && ["refs/heads/main", "refs/heads/release"].includes(ref)) ||
+    mergeGroupPush ||
     trustedPullRequest;
-  const credentialedCache = trusted && (eventName !== "push" || ref === "refs/heads/main");
+  const credentialedCache =
+    trusted && (eventName !== "push" || ref === "refs/heads/main" || mergeGroupPush);
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
     sccache: credentialedCache
-      ? eventName === "push" && ref === "refs/heads/main"
+      ? (eventName === "push" && ref === "refs/heads/main") || mergeGroupPush
         ? "writer"
         : "reader"
       : "none",
     turbo: credentialedCache,
   };
 };
-// Ready PRs get the fast lint partition; the full suite runs on pushes,
-// dispatches, release PRs and the Review Loop's merge-group/* PRs.
+// Ready PRs get the fast lint partition; the full suite runs on pushes
+// (main, release and the Review Loop's merge-group/**), dispatches and release
+// PRs.
 const ciScope =
-  "${{ github.event_name != 'pull_request' && 'full' || startsWith(github.head_ref, 'merge-group/') && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}";
+  "${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}";
 const workflowDocumentFor = (source) => {
   const document = parse(source);
   assert.equal(typeof document, "object", "CI entry workflow must be a YAML mapping");
@@ -237,7 +246,14 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["report-dispatched-test-rust", "report-full-suite", "test-rust", "trusted", "untrusted"],
+    [
+      "main-coverage",
+      "report-dispatched-test-rust",
+      "report-full-suite",
+      "test-rust",
+      "trusted",
+      "untrusted",
+    ],
     "the credential boundary must account for every entry-workflow job",
   );
   const {
@@ -246,6 +262,7 @@ const assertEntryCacheTrustBoundary = (source) => {
     "test-rust": aggregate,
     "report-dispatched-test-rust": dispatchedStatus,
     "report-full-suite": fullSuiteStatus,
+    "main-coverage": mainCoverage,
   } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
@@ -267,10 +284,11 @@ const assertEntryCacheTrustBoundary = (source) => {
 
   assert.deepEqual(
     Object.keys(trusted).sort(),
-    ["if", "permissions", "secrets", "uses", "with"],
+    ["if", "needs", "permissions", "secrets", "uses", "with"],
     "trusted caller credential surface must stay explicit",
   );
-  assert.equal(trusted.if, trustedCacheCondition);
+  assert.equal(trusted.if, trustedCallerCondition);
+  assert.deepEqual(trusted.needs, ["main-coverage"]);
   assert.deepEqual(trusted.permissions, {
     contents: "read",
     "id-token": "write",
@@ -278,9 +296,11 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
-    "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    "sccache-write":
+      "${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/')) }}",
     scope: ciScope,
-    "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
+    "trusted-cache":
+      "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/') }}",
   });
   assert.equal(trusted.secrets, "inherit");
 
@@ -293,8 +313,41 @@ const assertEntryCacheTrustBoundary = (source) => {
     "timeout-minutes",
   ]);
   assert.equal(aggregate.if, "always()");
-  assert.deepEqual(aggregate.needs, ["untrusted", "trusted"]);
+  assert.deepEqual(aggregate.needs, ["main-coverage", "untrusted", "trusted"]);
   assert.deepEqual(aggregate.permissions, { contents: "read" });
+  // Both callers may be skipped only for drafts and covered main pushes.
+  assert.match(
+    aggregate.steps[0].run,
+    /if \[ "\$\{DRAFT\}" = true \] \|\| \[ "\$\{COVERED\}" = true \]; then\n\s+test "\$\{UNTRUSTED_RESULT\}:\$\{TRUSTED_RESULT\}" = "skipped:skipped" && exit 0/,
+  );
+  assert.equal(
+    aggregate.steps[0].env.COVERED,
+    "${{ needs.main-coverage.outputs.covered == 'true' }}",
+  );
+
+  // The main-push skip reads git and commit statuses, nothing more, and runs
+  // only for main pushes.
+  assert.deepEqual(Object.keys(mainCoverage).sort(), [
+    "if",
+    "outputs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.equal(mainCoverage.if, "github.event_name == 'push' && github.ref == 'refs/heads/main'");
+  assert.deepEqual(mainCoverage.permissions, {
+    contents: "read",
+    statuses: "read",
+  });
+  assert.equal(mainCoverage.steps.length, 2);
+  assert.equal(
+    mainCoverage.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+  );
+  assert.equal(mainCoverage.steps[0].with["persist-credentials"], false);
+  assert.match(mainCoverage.steps[1].run, /dev\/ci\/main-push-coverage\.sh /);
+  assert.match(mainCoverage.steps[1].run, /echo "covered=true" >> "\$\{GITHUB_OUTPUT\}"/);
 
   // Only dispatched runs may write a commit status, and only test-rust's own.
   assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
@@ -325,8 +378,9 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
   assert.match(
     fullSuiteStatus.if,
-    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' &&\s+\(startsWith\(github\.head_ref, 'merge-group\/'\) \|\| github\.base_ref == 'release'\)/,
+    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
   );
+  assert.doesNotMatch(fullSuiteStatus.if, /head_ref/);
   assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
   assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
   assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
@@ -336,7 +390,11 @@ const assertEntryCacheTrustBoundary = (source) => {
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
   );
   assert.equal(fullSuiteStatus.steps[1].uses, undefined);
-  assert.match(fullSuiteStatus.steps[1].run, /dev\/ci\/full-suite-coverage\.sh /);
+  assert.match(fullSuiteStatus.steps[1].run, /dev\/ci\/full-suite-coverage\.sh origin\/main /);
+  assert.equal(
+    fullSuiteStatus.steps[1].env.IS_GROUP,
+    "${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') }}",
+  );
   assert.match(fullSuiteStatus.steps[1].run, /-f context=full-suite /);
   assert.match(fullSuiteStatus.steps[1].run, /-f state=success /);
   assert.equal(document.on.pull_request_target, undefined);
@@ -345,7 +403,9 @@ const assertEntryCacheTrustBoundary = (source) => {
     { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
     "stacked PR bases must not be branch-filtered, and marking a draft ready must run CI",
   );
-  assert.deepEqual(document.on.push, { branches: ["main", "release"] });
+  assert.deepEqual(document.on.push, {
+    branches: ["main", "release", "merge-group/**"],
+  });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
   assert.doesNotMatch(
@@ -788,7 +848,7 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
     );
 });
 
-test("shared Rust cache writes are main-only while trusted PRs receive read access", () => {
+test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
   for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
@@ -805,7 +865,7 @@ test("shared Rust cache writes are main-only while trusted PRs receive read acce
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("entry workflow grants credentialed cross-ref caches only to main and trusted stacked PRs", () => {
+test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
@@ -825,6 +885,16 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         idToken: "write",
         sccache: "none",
         turbo: false,
+      },
+    ],
+    [
+      "merge-group push",
+      { eventName: "push", ref: "refs/heads/merge-group/4" },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "writer",
+        turbo: true,
       },
     ],
     [
@@ -2073,5 +2143,80 @@ test("full-suite coverage credits merge-group PR heads only through clean merges
     assert.deepEqual(coverage(main, dirty), [dirty]);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("main pushes skip the full suite only for trees a green merge group tested", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "main-push-coverage-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "main-push-coverage-bin-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commitFile = (name) => {
+    fs.writeFileSync(path.join(repo, name), `${name}\n`);
+    git("add", name);
+    git("commit", "-qm", name);
+    return git("rev-parse", "HEAD");
+  };
+  // Stands in for `gh api repos/<repo>/commits/<sha>/status --jq ...`: answers
+  // "success" for the SHAs listed in GREEN_SHAS.
+  fs.writeFileSync(
+    path.join(bin, "gh"),
+    '#!/usr/bin/env bash\nsha="$(sed -E "s#.*/commits/([0-9a-f]+)/status#\\1#" <<<"$2")"\n' +
+      'case " ${GREEN_SHAS} " in *" ${sha} "*) echo success ;; *) echo "" ;; esac\n',
+    { mode: 0o755 },
+  );
+  const coverage = (head, greenShas = []) =>
+    spawnSync("bash", [path.join(root, "dev/ci/main-push-coverage.sh"), head], {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        REPO: "garden-co/jazz",
+        GREEN_SHAS: greenShas.join(" "),
+      },
+    });
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "ci@example.com");
+    git("config", "user.name", "CI");
+    git("config", "core.hooksPath", "/dev/null");
+    const base = commitFile("base");
+    git("checkout", "-qb", "pr-a");
+    const prA = commitFile("a");
+    git("checkout", "-qb", "pr-b", base);
+    const prB = commitFile("b");
+    git("checkout", "-qb", "group", base);
+    git("merge", "-q", "--no-ff", "-m", "merge a", prA);
+    git("merge", "-q", "--no-ff", "-m", "merge b", prB);
+    const tip = git("rev-parse", "HEAD");
+    git("update-ref", "refs/remotes/origin/merge-group/4", tip);
+
+    // The queue then merges each PR into main on its own.
+    git("checkout", "-q", "main");
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request a", prA);
+    const mainA = git("rev-parse", "HEAD");
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request b", prB);
+    const mainB = git("rev-parse", "HEAD");
+
+    for (const head of [mainA, mainB]) {
+      const result = coverage(head, [tip]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), `merge-group/4 ${tip}`);
+    }
+    // Without a green full-suite status on the group's tip, nothing is covered.
+    assert.equal(coverage(mainB, []).status, 1);
+    assert.equal(coverage(mainB, [prA, prB]).status, 1);
+
+    // A main commit with any other tree runs the suite.
+    git("checkout", "-q", "main");
+    const other = commitFile("hotfix");
+    assert.equal(coverage(other, [tip]).status, 1);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
   }
 });
