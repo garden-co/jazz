@@ -49,8 +49,7 @@ use super::query_engine::{
     UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
     aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
     claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
-    right_field, route_param_field, route_param_from_field, table_user_column_field,
-    user_column_field,
+    right_field, route_param_field, table_user_column_field, user_column_field,
 };
 use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
