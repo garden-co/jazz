@@ -1,5 +1,6 @@
 use super::*;
 use crate::records::ValidatedVariantRecord;
+use crate::records::ordered_key;
 
 pub(super) fn resolve_record_input(
     table: &TableSchema,
@@ -421,56 +422,8 @@ pub(super) fn ensure_primary_key_value_type(
 
 pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Error> {
     match value {
-        Value::U8(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::U16(value) => {
-            key.push(1);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            key.push(2);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            key.push(3);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U48(value) => {
-            key.push(16);
-            key.extend(records::u48_be_bytes(*value)?);
-        }
-        Value::I32(value) => {
-            key.push(14);
-            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
-        }
-        Value::I64(value) => {
-            key.push(13);
-            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
-        }
-        Value::Bool(value) => {
-            key.push(5);
-            key.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            key.push(6);
-            encode_ordered_bytes(key, value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::Bytes(value) => {
-            key.push(7);
-            encode_ordered_bytes(key, value);
-        }
-        Value::Uuid(value) => {
-            key.push(10);
-            key.extend_from_slice(value.as_bytes());
-        }
         Value::Tuple(values) => {
-            key.push(11);
+            key.push(ordered_key::TAG_TUPLE);
             for value in values {
                 encode_primary_key_part(key, value)?;
             }
@@ -486,27 +439,12 @@ pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Resul
                 "unsupported direct record store key type".to_owned(),
             ));
         }
-    }
-    Ok(())
-}
-
-pub(super) fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
-    for byte in value {
-        if *byte == 0 {
-            key.extend([0, 0xff]);
-        } else {
-            key.push(*byte);
+        value => {
+            let scalar = ordered_key::put_scalar(key, value)?;
+            debug_assert!(scalar, "composite key values are handled above");
         }
     }
-    key.extend([0, 0]);
-}
-
-pub(super) fn order_preserving_i64_bits(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
-}
-
-pub(super) fn order_preserving_i32_bits(value: i32) -> u32 {
-    (value as u32) ^ (1_u32 << 31)
+    Ok(())
 }
 
 pub(super) fn decode_primary_key_part(
@@ -562,7 +500,7 @@ pub(super) fn decode_primary_key_part(
                     .try_into()
                     .expect("slice has i32 length"),
             );
-            Ok(Value::I32((value ^ (1_u32 << 31)) as i32))
+            Ok(Value::I32(ordered_key::i32_from_order_bits(value)))
         }
         records::ValueType::I64 => {
             expect_key_tag(bytes, 13)?;
@@ -571,7 +509,7 @@ pub(super) fn decode_primary_key_part(
                     .try_into()
                     .expect("slice has i64 length"),
             );
-            Ok(Value::I64((value ^ (1_u64 << 63)) as i64))
+            Ok(Value::I64(ordered_key::i64_from_order_bits(value)))
         }
         records::ValueType::Bool => {
             expect_key_tag(bytes, 5)?;
@@ -671,23 +609,23 @@ pub(super) fn decode_index_key_part(
         }
         ColumnType::I32 => {
             expect_persisted_index_key_tag(bytes, index_name, 14)?;
-            Ok(Value::I32(
-                (u32::from_be_bytes(
+            Ok(Value::I32(ordered_key::i32_from_order_bits(
+                u32::from_be_bytes(
                     take_persisted_index_key_bytes(bytes, index_name, 4)?
                         .try_into()
                         .expect("slice has i32 length"),
-                ) ^ (1_u32 << 31)) as i32,
-            ))
+                ),
+            )))
         }
         ColumnType::I64 => {
             expect_persisted_index_key_tag(bytes, index_name, 13)?;
-            Ok(Value::I64(
-                (u64::from_be_bytes(
+            Ok(Value::I64(ordered_key::i64_from_order_bits(
+                u64::from_be_bytes(
                     take_persisted_index_key_bytes(bytes, index_name, 8)?
                         .try_into()
                         .expect("slice has i64 length"),
-                ) ^ (1_u64 << 63)) as i64,
-            ))
+                ),
+            )))
         }
         ColumnType::F64 => {
             expect_persisted_index_key_tag(bytes, index_name, 4)?;
@@ -696,12 +634,7 @@ pub(super) fn decode_index_key_part(
                     .try_into()
                     .expect("slice has u64 length"),
             );
-            let bits = if ordered & (1 << 63) != 0 {
-                ordered ^ (1 << 63)
-            } else {
-                !ordered
-            };
-            let value = f64::from_bits(bits);
+            let value = ordered_key::f64_from_order_bits(ordered);
             if value.is_nan() {
                 return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
             }
@@ -816,35 +749,13 @@ pub(super) fn decode_persisted_index_ordered_bytes(
     bytes: &mut &[u8],
     index_name: &str,
 ) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
-    loop {
-        let byte = take_persisted_index_key_bytes(bytes, index_name, 1)?[0];
-        if byte != 0 {
-            out.push(byte);
-            continue;
-        }
-        match take_persisted_index_key_bytes(bytes, index_name, 1)?[0] {
-            0 => return Ok(out),
-            0xff => out.push(0),
-            _ => return Err(Error::InvalidPersistedIndex(index_name.to_owned())),
-        }
-    }
+    ordered_key::decode_ordered_bytes(bytes)
+        .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))
 }
 
 pub(super) fn decode_ordered_bytes(bytes: &mut &[u8]) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
-    loop {
-        let byte = take_key_bytes(bytes, 1)?[0];
-        if byte != 0 {
-            out.push(byte);
-            continue;
-        }
-        match take_key_bytes(bytes, 1)?[0] {
-            0 => return Ok(out),
-            0xff => out.push(0),
-            _ => return Err(Error::InvalidDirectRecordStoreKey("bytes".to_owned())),
-        }
-    }
+    ordered_key::decode_ordered_bytes(bytes)
+        .ok_or_else(|| Error::InvalidDirectRecordStoreKey("bytes".to_owned()))
 }
 
 pub(crate) fn index_record_descriptor() -> RecordDescriptor {
@@ -880,7 +791,7 @@ pub(super) fn encode_index_prefix_part(
             let mut encoded = Vec::new();
             encode_index_prefix_part(&mut encoded, value, inner)?;
             let mut wrapped = Vec::new();
-            wrapped.push(9);
+            wrapped.push(ordered_key::TAG_SOME);
             wrapped.extend(encoded);
             key.extend(wrapped);
             Ok(())
