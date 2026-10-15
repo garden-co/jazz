@@ -111,7 +111,8 @@ fn collect_binding_source_descriptor_fields(
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. } => {
+        | GraphBuilder::StreamingChecksum { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => {
             collect_binding_source_descriptor_fields(input, descriptors_by_shape);
         }
         GraphBuilder::Union { inputs } => {
@@ -181,7 +182,8 @@ fn collect_binding_source_projected_fields(
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. } => {
+        | GraphBuilder::StreamingChecksum { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => {
             collect_binding_source_projected_fields(input, projected_by_shape);
         }
         GraphBuilder::Union { inputs } => {

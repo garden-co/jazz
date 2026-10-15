@@ -4088,6 +4088,26 @@ pub(super) fn global_current_primary_key(
     ])
 }
 
+/// The encoded branch-key part that leads every [`global_current_primary_key`]
+/// of `branch_key`: the bytes [`global_current_key_branch_prefix`] recovers.
+pub(super) fn global_current_branch_key_prefix(branch_key: &BranchKey) -> Vec<u8> {
+    PrimaryKeyValue::Bytes(branch_key.canonical_bytes()).into_bytes()
+}
+
+/// Encoded length of the `row_uuid` that ends a
+/// [`global_current_primary_key`]: a one-byte type tag and the 16 uuid bytes.
+const GLOBAL_CURRENT_KEY_ROW_UUID_LEN: usize = 1 + 16;
+
+/// The branch-key part of an encoded [`global_current_primary_key`]: the key
+/// without its fixed-width trailing `row_uuid`.
+pub(super) fn global_current_key_branch_prefix(key: &[u8]) -> &[u8] {
+    debug_assert!(
+        key.len() > GLOBAL_CURRENT_KEY_ROW_UUID_LEN,
+        "a global current key holds a branch key and a row uuid"
+    );
+    &key[..key.len().saturating_sub(GLOBAL_CURRENT_KEY_ROW_UUID_LEN)]
+}
+
 #[cfg(test)]
 fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Error> {
     Ok(vec![
@@ -4192,16 +4212,17 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     // The global-current table carries every user cell, so current rows
     // resolve directly from it in O(current rows). Deletion is a cell of the
     // winning image: select the winner first, then drop deleted images.
+    let layers = layer_stack::ref_layers(settled, |r| {
+        let table_name = match r {
+            Ref::Local => ahead_current_table_name(&table.name),
+            Ref::Remote(Remote::Origin) => global_current_table_name(&table.name),
+        };
+        layer_stack::Layer::new(GraphBuilder::table(table_name).project(content_fields.clone()))
+    });
     let current = if settled == DurabilityTier::Global {
-        GraphBuilder::table(global_current_table_name(&table.name)).project(content_fields.clone())
+        layer_stack::compose(layers)
     } else {
-        pending_overlay_over(
-            GraphBuilder::table(global_current_table_name(&table.name))
-                .project(content_fields.clone()),
-            GraphBuilder::table(ahead_current_table_name(&table.name))
-                .project(content_fields.clone()),
-        )
-        .project(content_fields)
+        layer_stack::compose(layers).project(content_fields)
     };
     current.filter(not_deleted_predicate()).project_fields(
         std::iter::once(ProjectField::named("row_uuid"))
@@ -4685,20 +4706,6 @@ pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
 }
 
-/// A row's pending overlay, when present, is what the client sees: it is
-/// already the synced image with every pending patch folded on top, so it
-/// wins regardless of how its stamp compares with the synced row.
-pub(in crate::node) fn pending_overlay_over(
-    global: GraphBuilder,
-    ahead: GraphBuilder,
-) -> GraphBuilder {
-    let overlaid = ahead.clone().project(["row_uuid"]);
-    GraphBuilder::union([
-        ahead,
-        GraphBuilder::anti_join(global, overlaid, ["row_uuid"], ["row_uuid"]),
-    ])
-}
-
 pub(super) fn ahead_current_table_name(table: &str) -> String {
     format!("jazz_{table}_ahead_current")
 }
@@ -4927,5 +4934,37 @@ mod active_schema_tests {
         let mut unsupported = golden.clone();
         unsupported[0] = 2;
         assert!(decode_active_schema(&unsupported).is_err());
+    }
+}
+
+#[cfg(test)]
+mod global_current_key_tests {
+    use super::*;
+
+    // Internal because the overlay keys' encoding is not a public API.
+    #[test]
+    fn global_current_key_branch_prefix_recovers_the_branch_key_part() {
+        let main = BranchKey::default();
+        let draft = BranchKey {
+            values: vec![(
+                "branch_id".to_owned(),
+                crate::protocol::BranchColumnValue::from(Value::Uuid(uuid::Uuid::from_bytes(
+                    [0x5a; 16],
+                ))),
+            )],
+        };
+        for branch_key in [&main, &draft] {
+            for row_uuid in [RowUuid(uuid::Uuid::nil()), RowUuid(uuid::Uuid::max())] {
+                let key = global_current_primary_key(branch_key, row_uuid).into_bytes();
+                assert_eq!(
+                    global_current_key_branch_prefix(&key),
+                    global_current_branch_key_prefix(branch_key).as_slice()
+                );
+            }
+        }
+        assert_ne!(
+            global_current_branch_key_prefix(&main),
+            global_current_branch_key_prefix(&draft)
+        );
     }
 }

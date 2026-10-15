@@ -70,6 +70,144 @@ async fn table_existence_rejects_poisoned_storage_after_failed_persistence() {
     ));
 }
 
+fn tracks_by_album_title_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "tracks",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("album", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new(
+        "tracks_by_album_title",
+        ["album", "title"],
+    ))])
+}
+
+/// `index_prefix_entries_up_to` counts exactly the entries an index prefix
+/// scan of the same values reads (a sibling value, or a longer string that
+/// shares the bytes, is outside the prefix), stops at `max_items`, reads
+/// only index keys, and observes the applied resident state.
+#[futures_test::test]
+async fn index_prefix_entry_count_is_exact_under_the_prefix_and_capped() {
+    let storage = MemoryStorage::new(&["tracks", "indices"]).unwrap();
+    let mut database = Database::new(tracks_by_album_title_schema(), storage)
+        .await
+        .unwrap();
+    let rows = [
+        (1, 1, "t0"),
+        (2, 1, "t1"),
+        (3, 1, "t10"),
+        (4, 1, "t2"),
+        (5, 1, "t3"),
+        (6, 2, "t0"),
+        (7, 2, "t1"),
+        (8, 11, "t0"),
+    ];
+    let mut batch = database.open_batch();
+    for (id, album, title) in rows {
+        batch.insert(
+            "tracks",
+            vec![
+                Value::U64(id),
+                Value::U64(album),
+                Value::String(title.to_owned()),
+            ],
+        );
+    }
+    async fn count(
+        database: &Database,
+        prefix: Vec<Value>,
+        max_items: usize,
+    ) -> Result<usize, Error> {
+        database
+            .index_prefix_entries_up_to("tracks", "tracks_by_album_title", &prefix, max_items)
+            .await
+    }
+    assert_eq!(
+        count(&database, vec![Value::U64(1)], 100).await.unwrap(),
+        0,
+        "an unapplied batch is not resident"
+    );
+    let mut applied = Some(database.apply_batch(batch).await.unwrap());
+
+    for persisted in [false, true] {
+        if persisted {
+            let persisted = applied.take().unwrap().persist().await;
+            database.finish_persistence(persisted).unwrap();
+        }
+        for (prefix, expected) in [
+            (vec![], 8),
+            (vec![Value::U64(1)], 5),
+            (vec![Value::U64(2)], 2),
+            (vec![Value::U64(11)], 1),
+            (vec![Value::U64(3)], 0),
+            (vec![Value::U64(1), Value::String("t1".to_owned())], 1),
+            (vec![Value::U64(1), Value::String("t".to_owned())], 0),
+        ] {
+            database.reset_storage_read_metrics();
+            assert_eq!(
+                count(&database, prefix.clone(), 100).await.unwrap(),
+                expected,
+                "prefix {prefix:?}, persisted {persisted}"
+            );
+            let reads = database.storage_read_metrics();
+            assert_eq!(
+                (reads.total.reads, reads.total.ranges),
+                (expected, 1),
+                "one range of index keys, no rows: prefix {prefix:?}"
+            );
+        }
+        for max_items in [1, 3, 5, 6] {
+            database.reset_storage_read_metrics();
+            assert_eq!(
+                count(&database, vec![Value::U64(1)], max_items)
+                    .await
+                    .unwrap(),
+                max_items.min(5)
+            );
+            assert!(
+                database.storage_read_metrics().total.reads <= max_items,
+                "the cap bounds the keys read"
+            );
+        }
+        database.reset_storage_read_metrics();
+        assert_eq!(count(&database, vec![Value::U64(1)], 0).await.unwrap(), 0);
+        assert_eq!(
+            database.storage_read_metrics().total,
+            Default::default(),
+            "a zero cap reads nothing"
+        );
+    }
+
+    let too_long = vec![Value::U64(1), Value::String("t0".to_owned()), Value::U64(0)];
+    assert!(matches!(
+        count(&database, too_long, 100).await,
+        Err(Error::IndexKeyArity {
+            expected: 2,
+            actual: 3,
+            ..
+        })
+    ));
+    assert!(
+        database
+            .index_prefix_entries_up_to("tracks", "missing", &[], 100)
+            .await
+            .is_err()
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("tracks", PrimaryKeyValue::U64(3));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        count(&database, vec![Value::U64(1)], 100).await.unwrap(),
+        4,
+        "a delete removes its entry"
+    );
+}
+
 #[futures_test::test]
 async fn database_creation_dedups_schema_indices_as_durable_nodes() {
     let storage =

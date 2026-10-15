@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { E2eeConfig } from "../e2ee/lifecycle.js";
 import { createNativeCrypto } from "../e2ee/native.js";
+import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
@@ -184,14 +185,10 @@ export async function createJazzSession(
       mintLocalFirstToken(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
       async admitBackend({ backendSecret }) {
-        const response = await fetch(`${registry.slice(0, -"/accounts".length)}/backend/admit`, {
-          method: "POST",
-          headers: { "X-Jazz-Backend-Secret": backendSecret },
-          redirect: "error",
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (response.status !== 204)
-          throw new Error(`Backend admission failed (${response.status})`);
+        await admitBackendSecret(
+          `${registry.slice(0, -"/accounts".length)}/backend/admit`,
+          backendSecret,
+        );
         return { nodeId: backendNodeId(config) };
       },
     },
