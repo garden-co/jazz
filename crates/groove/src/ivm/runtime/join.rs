@@ -10,7 +10,8 @@
 use bytes::{Bytes, BytesMut};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
-use std::ops::Range;
+use std::borrow::{Borrow, Cow};
+use std::ops::{Deref, Range};
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 
@@ -23,6 +24,7 @@ use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, RecordDeltas, SubTick,
     consolidate_deltas, encode_key_part,
     record_projection::{resolve_field_name, resolve_field_ref},
+    spill::{SpillContext, SpilledRun},
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -107,7 +109,7 @@ impl<V> JoinBucketMap<V> {
 }
 
 #[derive(Clone, Debug, Default)]
-struct JoinBucket {
+pub(super) struct JoinBucket {
     base: Rc<JoinBucketMap<i64>>,
     overlay: Rc<JoinBucketMap<Option<i64>>>,
     total_weight: i64,
@@ -157,7 +159,7 @@ impl JoinBucket {
         next
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
         self.base
             .iter()
             .filter_map(|(record, weight)| {
@@ -190,6 +192,37 @@ impl JoinBucket {
         }
     }
 
+    /// A committed bucket holding exactly these non-zero weights.
+    pub(super) fn from_entries(records: Vec<(Bytes, i64)>) -> Self {
+        let records = records
+            .into_iter()
+            .filter(|(_, weight)| *weight != 0)
+            .collect::<HashMap<_, _>>();
+        let base = match records.len() {
+            0 => JoinBucketMap::Empty,
+            1 => {
+                let (record, weight) = records.into_iter().next().expect("one record");
+                return Self {
+                    total_weight: weight,
+                    record_count: 1,
+                    base: Rc::new(JoinBucketMap::One(record, weight)),
+                    overlay: Rc::default(),
+                };
+            }
+            _ => JoinBucketMap::Many(records),
+        };
+        let (total_weight, record_count) = match &base {
+            JoinBucketMap::Many(records) => (records.values().sum(), records.len()),
+            _ => (0, 0),
+        };
+        Self {
+            total_weight,
+            record_count,
+            base: Rc::new(base),
+            overlay: Rc::default(),
+        }
+    }
+
     #[cfg(test)]
     fn from_records(records: HashMap<Bytes, i64>) -> Self {
         Self {
@@ -201,6 +234,38 @@ impl JoinBucket {
     }
 }
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
+
+/// Re-spill an arrangement only once its resident part reaches this
+/// fraction (one in N) of its existing run.
+const RESPILL_MIN_SHARE: usize = 4;
+
+/// What [`ArrangementState::spill`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SpillOutcome {
+    Spilled,
+    /// Nothing worth writing: not committed, empty, or too little changed
+    /// since the last spill.
+    Skipped,
+    /// Kept in memory because the run would pass the scratch storage cap.
+    AtDiskCap,
+}
+
+/// A bucket borrowed from memory or read from a spilled run.
+pub(super) enum BucketRef<'a> {
+    Resident(&'a JoinBucket),
+    Spilled(Rc<JoinBucket>),
+}
+
+impl Deref for BucketRef<'_> {
+    type Target = JoinBucket;
+
+    fn deref(&self) -> &JoinBucket {
+        match self {
+            Self::Resident(bucket) => bucket,
+            Self::Spilled(bucket) => bucket,
+        }
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -294,6 +359,11 @@ pub(super) struct ArrangementState {
     /// Any content mutation invalidates this proof. A Weak keeps the Arc
     /// allocation identity from being reused without retaining its row vector.
     snapshot: Weak<RecordDeltas>,
+    /// Committed buckets moved to scratch storage (see [`super::spill`]).
+    /// When present, `index` and `overlay` hold only keys touched since the
+    /// spill and override the run key by key; an empty bucket in `index`
+    /// marks a key removed since the spill.
+    spilled: Option<Rc<SpilledRun>>,
 }
 
 /// A delta slice may optionally prove the identity of a complete snapshot.
@@ -325,13 +395,10 @@ enum JoinLookup<'a> {
 }
 
 impl JoinLookup<'_> {
-    fn bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
+    fn bucket(&self, key: &JoinKey) -> Option<BucketRef<'_>> {
         match self {
-            Self::Arrangement(arrangement) => match arrangement.overlay.get(key) {
-                Some(bucket) => bucket.as_ref(),
-                None => arrangement.index.get(key),
-            },
-            Self::Index(index) => index.get(key),
+            Self::Arrangement(arrangement) => arrangement.bucket_by_key(key),
+            Self::Index(index) => index.get(key).map(BucketRef::Resident),
         }
     }
 }
@@ -499,8 +566,7 @@ fn threshold_transition(
     let mut affected = HashSet::default();
     if replace {
         *published = VisibilityState::default();
-        affected.extend(left.current.index.keys().cloned());
-        affected.extend(left.current.overlay.keys().cloned());
+        left.current.extend_keys(&mut affected);
     } else {
         affected.extend(left.changed_keys().cloned());
         affected.extend(right.changed_keys().cloned());
@@ -513,11 +579,11 @@ fn threshold_transition(
         match (before, after) {
             (true, true) => append_bucket(&mut output, left.delta_bucket(&key), 1),
             (false, false) => {}
-            (false, true) => append_bucket(&mut output, left.current.bucket(&key), 1),
+            (false, true) => append_bucket(&mut output, left.current.bucket(&key).as_deref(), 1),
             (true, false) => {
                 // -L_before = -L_after + delta_L. This also handles simultaneous
                 // additions/retractions on both sides without retaining L_before.
-                append_bucket(&mut output, left.current.bucket(&key), -1);
+                append_bucket(&mut output, left.current.bucket(&key).as_deref(), -1);
                 append_bucket(&mut output, left.delta_bucket(&key), 1);
             }
         }
@@ -671,16 +737,120 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
-    fn buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
-        self.index
+    /// Every logical bucket. Borrowed from memory unless the arrangement is
+    /// spilled, in which case the run is read in full.
+    fn buckets(&self) -> Box<dyn Iterator<Item = (Cow<'_, JoinKey>, BucketRef<'_>)> + '_> {
+        let resident = self
+            .index
             .iter()
-            .filter(|(key, _)| !self.overlay.contains_key(*key))
-            .chain(
-                self.overlay
-                    .iter()
-                    .filter_map(|(key, bucket)| bucket.as_ref().map(|bucket| (key, bucket))),
-            )
+            .filter(|(key, bucket)| !self.overlay.contains_key(*key) && !bucket.is_empty())
+            .chain(self.overlay.iter().filter_map(|(key, bucket)| {
+                bucket
+                    .as_ref()
+                    .filter(|bucket| !bucket.is_empty())
+                    .map(|bucket| (key, bucket))
+            }))
+            .map(|(key, bucket)| (Cow::Borrowed(key), BucketRef::Resident(bucket)));
+        let Some(spilled) = &self.spilled else {
+            return Box::new(resident);
+        };
+        let from_run = spilled
+            .buckets()
+            .into_iter()
+            .filter(|(key, _)| !self.is_resident(key))
+            .map(|(key, bucket)| (Cow::Owned(key), BucketRef::Spilled(bucket)));
+        Box::new(resident.chain(from_run))
     }
+
+    /// Whether `key` is decided in memory (present, or removed since a spill).
+    fn is_resident(&self, key: &[u8]) -> bool {
+        let key = JoinKey::from_slice(key);
+        self.overlay.contains_key(&key) || self.index.contains_key(&key)
+    }
+
+    /// Add every key with a bucket to `keys`.
+    fn extend_keys(&self, keys: &mut HashSet<JoinKey>) {
+        keys.extend(self.index.keys().cloned());
+        keys.extend(self.overlay.keys().cloned());
+        if let Some(spilled) = &self.spilled {
+            keys.extend(spilled.buckets().into_iter().map(|(key, _)| key));
+        }
+    }
+
+    /// The committed bucket for `key` before this tick's overlay, read from
+    /// the spilled run when memory does not decide it.
+    fn base_bucket(
+        index: &JoinIndex,
+        spilled: Option<&Rc<SpilledRun>>,
+        key: &JoinKey,
+    ) -> Option<JoinBucket> {
+        match index.get(key) {
+            Some(bucket) => Some(bucket.clone()),
+            None => spilled?.bucket(key).map(|bucket| (*bucket).clone()),
+        }
+    }
+
+    fn bucket_by_key(&self, key: &JoinKey) -> Option<BucketRef<'_>> {
+        if let Some(bucket) = self.overlay.get(key) {
+            return bucket
+                .as_ref()
+                .filter(|bucket| !bucket.is_empty())
+                .map(BucketRef::Resident);
+        }
+        if let Some(bucket) = self.index.get(key) {
+            return (!bucket.is_empty()).then_some(BucketRef::Resident(bucket));
+        }
+        self.spilled.as_ref()?.bucket(key).map(BucketRef::Spilled)
+    }
+
+    /// Move the committed buckets to a new run on scratch storage, keeping
+    /// nothing resident.
+    ///
+    /// Only a committed arrangement (no overlay, no pending transition) is
+    /// spilled. The spill changes representation, not contents: snapshots
+    /// and staged copies sharing the previous state stay valid.
+    ///
+    /// Re-spilling rewrites the whole previous run, so an arrangement that
+    /// already has one is only re-spilled once its resident part is at least
+    /// a `1 / RESPILL_MIN_SHARE` of that run; below that the rewrite would
+    /// cost far more disk traffic than the memory it returns.
+    pub(super) fn spill(&mut self, context: &Rc<SpillContext>) -> Result<SpillOutcome, String> {
+        if !self.overlay.is_empty() || self.changes.is_some() || self.index.is_empty() {
+            return Ok(SpillOutcome::Skipped);
+        }
+        let resident_bytes: usize = self
+            .index
+            .iter()
+            .map(|(key, bucket)| {
+                key.len() + bucket.iter().map(|(record, _)| record.len()).sum::<usize>()
+            })
+            .sum();
+        let previous_bytes = self.spilled.as_ref().map_or(0, |run| run.bytes());
+        if resident_bytes.saturating_mul(RESPILL_MIN_SHARE) < previous_bytes {
+            return Ok(SpillOutcome::Skipped);
+        }
+        // The previous run stays live until the new one replaces it, so the
+        // peak is both of them.
+        if !context.has_room_for(previous_bytes + resident_bytes) {
+            return Ok(SpillOutcome::AtDiskCap);
+        }
+        let index = &self.index;
+        let run = SpilledRun::write_merged(
+            context,
+            self.spilled.as_deref(),
+            index.iter().filter(|(_, bucket)| !bucket.is_empty()),
+            |key| index.contains_key(&JoinKey::from_slice(key)),
+        )?;
+        self.spilled = Some(run);
+        self.index = Rc::default();
+        Ok(SpillOutcome::Spilled)
+    }
+
+    /// The spilled run, if this arrangement has one.
+    pub(super) fn spilled_run(&self) -> Option<&Rc<SpilledRun>> {
+        self.spilled.as_ref()
+    }
+
     /// Drop the producer's transition for its tick, keeping the overlay
     /// layered on the shared base.
     pub(super) fn release_changes(&mut self) {
@@ -701,11 +871,18 @@ impl ArrangementState {
         if Rc::strong_count(&self.index) > 1 {
             SHARED_INDEX_FOLDS.with(|folds| folds.set(folds.get() + 1));
         }
+        let spilled = self.spilled.is_some();
         let index = Rc::make_mut(&mut self.index);
         for (key, bucket) in overlay {
             // Release the previous bucket's ownership before checking whether
             // the new bucket can fold its record deltas without copying history.
             index.remove(&key);
+            // Over a spilled run, absence means "read the run": a removed key
+            // must stay in memory as an empty bucket.
+            let bucket = match bucket {
+                None if spilled => Some(JoinBucket::default()),
+                bucket => bucket,
+            };
             if let Some(mut bucket) = bucket {
                 // A retained evaluator/publication snapshot may still own
                 // either map. Preserve sharing rather than copy a full base
@@ -735,7 +912,7 @@ impl ArrangementState {
         for key in keys {
             let key = JoinKey::from_slice(key);
             if let Some(bucket) = self.bucket(&key) {
-                index.insert(key, bucket.clone());
+                index.insert(key, (*bucket).clone());
             }
         }
         Self {
@@ -743,6 +920,7 @@ impl ArrangementState {
             overlay: Rc::default(),
             changes: None,
             snapshot: Weak::new(),
+            spilled: None,
         }
     }
 
@@ -756,25 +934,40 @@ impl ArrangementState {
         let overlay = Rc::make_mut(&mut self.overlay);
         for key in keys {
             let key = JoinKey::from_slice(key);
-            overlay.insert(key.clone(), replacement.bucket(&key).cloned());
+            overlay.insert(
+                key.clone(),
+                replacement.bucket(&key).map(|bucket| (*bucket).clone()),
+            );
         }
     }
 
+    /// The bucket memory decides for `key`, without reading a spilled run.
+    fn resident_bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
+        match self.overlay.get(key) {
+            Some(bucket) => bucket.as_ref(),
+            None => self.index.get(key),
+        }
+    }
+
+    /// Rows held in memory (a spilled run's rows are not counted).
     pub(super) fn row_count(&self) -> usize {
         let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
         keys.extend(self.overlay.keys().cloned());
         keys.into_iter()
-            .filter_map(|key| self.bucket(&key))
+            .filter_map(|key| self.resident_bucket(&key))
             .map(|bucket| bucket.iter().filter(|(_, weight)| **weight != 0).count())
             .sum()
     }
 
+    /// Encoded key and record bytes held in memory, including buckets cached
+    /// from a spilled run.
     pub(super) fn encoded_bytes(&self) -> usize {
         let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
         keys.extend(self.overlay.keys().cloned());
-        keys.into_iter()
+        let resident: usize = keys
+            .into_iter()
             .filter_map(|key| {
-                self.bucket(&key).map(|bucket| {
+                self.resident_bucket(&key).map(|bucket| {
                     (
                         key.len(),
                         bucket.iter().map(|(record, _)| record.len()).sum::<usize>(),
@@ -782,7 +975,12 @@ impl ArrangementState {
                 })
             })
             .map(|(key_len, record_bytes)| key_len + record_bytes)
-            .sum()
+            .sum();
+        resident
+            + self
+                .spilled
+                .as_ref()
+                .map_or(0, |spilled| spilled.cached_bytes())
     }
 
     fn apply_update(
@@ -800,6 +998,7 @@ impl ArrangementState {
                     return;
                 }
                 let index = &self.index;
+                let spilled = self.spilled.as_ref();
                 let overlay = Rc::make_mut(&mut self.overlay);
                 for delta in deltas {
                     // A present None is an overlay tombstone, not permission
@@ -807,7 +1006,7 @@ impl ArrangementState {
                     // first touch; an already-owned overlay can mutate in place.
                     let slot = overlay
                         .entry(delta.key.clone())
-                        .or_insert_with(|| index.get(&delta.key).cloned());
+                        .or_insert_with(|| Self::base_bucket(index, spilled, &delta.key));
                     let bucket = slot.get_or_insert_with(JoinBucket::default);
                     bucket.add_weight(&delta.delta.record, delta.delta.weight);
                     if bucket.is_empty() {
@@ -818,6 +1017,7 @@ impl ArrangementState {
             ArrangementUpdateMode::Replace => {
                 self.index = self.changes.clone().unwrap_or_default();
                 self.overlay = Rc::default();
+                self.spilled = None;
             }
         }
     }
@@ -828,12 +1028,8 @@ impl ArrangementState {
             .unwrap_or_default()
     }
 
-    fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
-        let key = JoinKey::from_slice(key);
-        match self.overlay.get(&key) {
-            Some(bucket) => bucket.as_ref(),
-            None => self.index.get(&key),
-        }
+    fn bucket(&self, key: &[u8]) -> Option<BucketRef<'_>> {
+        self.bucket_by_key(&JoinKey::from_slice(key))
     }
 
     pub(super) fn apply_record_deltas(
@@ -849,9 +1045,11 @@ impl ArrangementState {
     }
 
     pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Bytes, i64)> {
-        self.bucket(key)
-            .into_iter()
-            .flat_map(|bucket| bucket.iter())
+        let Some(bucket) = self.bucket(key) else {
+            return Vec::new();
+        };
+        bucket
+            .iter()
             .filter_map(|(record, weight)| (*weight > 0).then_some((record.clone(), *weight)))
             .collect()
     }
@@ -966,16 +1164,20 @@ enum JoinProbeSide {
     RightDelta,
 }
 
-fn append_join_index_deltas<'a>(
+fn append_join_index_deltas<K, B>(
     output: &mut JoinOutputBuffer,
     projection: &crate::records::PreparedRecordCopy,
-    changes: impl Iterator<Item = (&'a JoinKey, &'a JoinBucket)>,
+    changes: impl Iterator<Item = (K, B)>,
     stored: &JoinLookup<'_>,
     side: JoinProbeSide,
     sign: i64,
-) -> Result<(), IvmRuntimeError> {
+) -> Result<(), IvmRuntimeError>
+where
+    K: Borrow<JoinKey>,
+    B: Deref<Target = JoinBucket>,
+{
     for (key, changed) in changes {
-        let Some(bucket) = stored.bucket(key) else {
+        let Some(bucket) = stored.bucket(key.borrow()) else {
             continue;
         };
         for (changed_record, changed_weight) in changed.iter() {
@@ -1342,6 +1544,216 @@ mod tests {
             join_keys(&u32, &u32_record, &fields, ValueComparison::Exact).unwrap(),
             join_keys(&i64, &i64_record, &fields, ValueComparison::Exact).unwrap(),
             "ordinary arrangement keys retain their exact typed encoding"
+        );
+    }
+
+    /// Spilling between ticks changes where buckets live, never what the
+    /// join, semi-join and anti-join emit. Drives one in-memory and one
+    /// spilled copy of each arrangement through the same random inserts and
+    /// retractions and compares every tick's output.
+    #[test]
+    fn spilled_arrangements_match_in_memory_join_results() {
+        use super::super::spill::{MemorySpillStorage, SpillContext, take_spill_error};
+
+        let left_descriptor =
+            RecordDescriptor::new([("id", ValueType::U64), ("key", ValueType::U64)]);
+        let right_descriptor =
+            RecordDescriptor::new([("key", ValueType::U64), ("value", ValueType::U64)]);
+        let output_descriptor =
+            RecordDescriptor::new([("left.id", ValueType::U64), ("right.value", ValueType::U64)]);
+        let on = ["key".to_owned()];
+        let mapping = [(0, 0), (1, 1)];
+        let storage = Rc::new(MemorySpillStorage::new());
+        let context = Rc::new(SpillContext::new(storage.clone(), usize::MAX, 0));
+
+        #[derive(Default)]
+        struct Copy {
+            left: AsOf<ArrangementState, SubTick>,
+            right: AsOf<ArrangementState, SubTick>,
+            semi: SemiJoinState,
+            anti: AntiJoinState,
+            semi_left: AsOf<ArrangementState, SubTick>,
+            semi_right: AsOf<ArrangementState, SubTick>,
+            anti_left: AsOf<ArrangementState, SubTick>,
+            anti_right: AsOf<ArrangementState, SubTick>,
+        }
+        let mut memory = Copy::default();
+        let mut spilled = Copy::default();
+
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        let mut left_rows = BTreeMap::<u64, u64>::new();
+        let mut right_rows = std::collections::BTreeSet::<(u64, u64)>::new();
+        let sorted = |deltas: Vec<RecordDelta>| {
+            deltas
+                .into_iter()
+                .map(|delta| (delta.record.to_vec(), delta.weight))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        for tick in 1..=60u64 {
+            let mut left = Vec::new();
+            for _ in 0..next(6) {
+                let id = next(24);
+                let (key, weight) = match left_rows.remove(&id) {
+                    Some(key) => (key, -1),
+                    None => {
+                        let key = next(6);
+                        left_rows.insert(id, key);
+                        (key, 1)
+                    }
+                };
+                left.push(RecordDelta {
+                    record: Bytes::from(
+                        left_descriptor
+                            .create(&[Value::U64(id), Value::U64(key)])
+                            .expect("encode left row"),
+                    ),
+                    weight,
+                });
+            }
+            let mut right = Vec::new();
+            for _ in 0..next(4) {
+                let row = (next(6), next(4));
+                let weight = if right_rows.remove(&row) {
+                    -1
+                } else {
+                    right_rows.insert(row);
+                    1
+                };
+                right.push(RecordDelta {
+                    record: Bytes::from(
+                        right_descriptor
+                            .create(&[Value::U64(row.0), Value::U64(row.1)])
+                            .expect("encode right row"),
+                    ),
+                    weight,
+                });
+            }
+            let stamp = SubTick { tick, sub_tick: 0 };
+            let mut outputs = Vec::new();
+            for copy in [&mut memory, &mut spilled] {
+                let joined = JoinState
+                    .apply(
+                        &mut copy.left,
+                        &mut copy.right,
+                        &left_descriptor,
+                        &right_descriptor,
+                        &output_descriptor,
+                        &mapping,
+                        &on,
+                        &on,
+                        ValueComparison::Exact,
+                        JoinInput::deltas(&left),
+                        JoinInput::deltas(&right),
+                        stamp,
+                        stamp,
+                        ArrangementUpdateMode::Accumulate,
+                    )
+                    .expect("join");
+                let semi = copy
+                    .semi
+                    .apply(
+                        &mut copy.semi_left,
+                        &mut copy.semi_right,
+                        left_descriptor,
+                        right_descriptor,
+                        &left_descriptor,
+                        &on,
+                        &on,
+                        ValueComparison::Exact,
+                        JoinInput::deltas(&left),
+                        JoinInput::deltas(&right),
+                        stamp,
+                        stamp,
+                        ArrangementUpdateMode::Accumulate,
+                    )
+                    .expect("semi-join");
+                let anti = copy
+                    .anti
+                    .apply(
+                        &mut copy.anti_left,
+                        &mut copy.anti_right,
+                        &left_descriptor,
+                        &right_descriptor,
+                        &left_descriptor,
+                        &on,
+                        &on,
+                        ValueComparison::Exact,
+                        JoinInput::deltas(&left),
+                        JoinInput::deltas(&right),
+                        stamp,
+                        stamp,
+                        ArrangementUpdateMode::Accumulate,
+                    )
+                    .expect("anti-join");
+                outputs.push((sorted(joined), sorted(semi), sorted(anti)));
+                copy.semi.commit_published_overlay();
+                copy.anti.commit_published_overlay();
+                for state in [
+                    &mut copy.left,
+                    &mut copy.right,
+                    &mut copy.semi_left,
+                    &mut copy.semi_right,
+                    &mut copy.anti_left,
+                    &mut copy.anti_right,
+                ] {
+                    state.value_mut().commit_overlay();
+                }
+            }
+            assert_eq!(
+                outputs[0], outputs[1],
+                "tick {tick} output diverged after a spill"
+            );
+            assert!(take_spill_error().is_none());
+
+            // Spill on most ticks, so later ticks read and override runs.
+            if next(4) != 0 {
+                for state in [
+                    &mut spilled.left,
+                    &mut spilled.right,
+                    &mut spilled.semi_left,
+                    &mut spilled.semi_right,
+                    &mut spilled.anti_left,
+                    &mut spilled.anti_right,
+                ] {
+                    if state.value_mut().spill(&context).expect("spill") == SpillOutcome::Spilled {
+                        assert!(
+                            state.value().index.is_empty(),
+                            "a spill keeps nothing resident"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Replace-mode reads of a spilled arrangement see every row.
+        let rows = |state: &ArrangementState| {
+            let mut rows = state
+                .buckets()
+                .flat_map(|(key, bucket)| {
+                    bucket
+                        .iter()
+                        .map(|(record, weight)| (key.to_vec(), record.to_vec(), *weight))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        assert_eq!(rows(spilled.left.value()), rows(memory.left.value()));
+        assert_eq!(rows(spilled.right.value()), rows(memory.right.value()));
+        assert!(!storage.is_empty());
+
+        drop(spilled);
+        assert!(
+            storage.is_empty(),
+            "dropping the arrangements deletes their runs"
         );
     }
 
@@ -1994,6 +2406,7 @@ mod tests {
             overlay: Rc::default(),
             changes: None,
             snapshot: Weak::new(),
+            spilled: None,
         };
 
         let mut prepared = original.clone();

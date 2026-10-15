@@ -1358,6 +1358,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persistent_server_spills_query_state_into_a_fresh_scratch_dir() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let scratch_parent = tempfile::TempDir::new().expect("temp scratch dir");
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
+            .build();
+        let built = ServerBuilder::new(AppId::from_name("rocksdb-server-shell-spill"))
+            .with_schema(schema)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build RocksDB server");
+        let runtime = built.state.runtime().expect("server shell is running");
+        let scratch_dirs = || {
+            std::fs::read_dir(scratch_parent.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            scratch_dirs().is_empty(),
+            "nothing opens until spilling is enabled"
+        );
+
+        crate::memory_governor::enable_spill(
+            &built.state,
+            &runtime,
+            &crate::memory_governor::SpillConfig {
+                parent_dir: scratch_parent.path().to_path_buf(),
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("enable spilling");
+        assert_eq!(scratch_dirs().len(), 1, "one fresh scratch dir");
+
+        let report = runtime
+            .shed_arrangement_memory(usize::MAX)
+            .await
+            .expect("shedding query memory succeeds");
+        assert_eq!(report.resident_bytes_after, 0);
+
+        assert_eq!(
+            built.shutdown().await,
+            crate::server::ShutdownPhase::StorageClosed
+        );
+        assert!(
+            scratch_dirs().is_empty(),
+            "scratch store is removed on shutdown"
+        );
+    }
+
     #[test]
     fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");

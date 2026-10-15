@@ -496,6 +496,29 @@ impl ShellDb {
         }
     }
 
+    async fn set_arrangement_spill_storage(
+        &self,
+        storage: Rc<dyn crate::groove::ivm::SpillStorage>,
+        max_bytes: usize,
+    ) {
+        let db = match self {
+            Self::Memory(db) | Self::Durable(db) => db,
+        };
+        db.set_arrangement_spill_storage(storage, max_bytes).await;
+    }
+
+    async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> ShellResult<crate::groove::ivm::ArrangementSpillReport> {
+        let db = match self {
+            Self::Memory(db) | Self::Durable(db) => db,
+        };
+        db.shed_arrangement_memory(bytes)
+            .await
+            .map_err(|error| ShellError::Db(error.to_string()))
+    }
+
     fn enable_authoritative_scalar_exit_refresh(&self) {
         match self {
             Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
@@ -1567,6 +1590,34 @@ impl InMemoryServerShell {
     /// Run one expiry pass from the host's maintenance timer.
     pub async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
         self.db.evict_expired_staged_large_values().await
+    }
+
+    /// Open scratch storage at `path` through `factory` and let query join
+    /// state spill there, holding at most `max_bytes` at once. Returns
+    /// whether the backend has scratch storage at all.
+    pub async fn enable_arrangement_spill(
+        &self,
+        factory: &dyn StorageFactory,
+        path: PathBuf,
+        max_bytes: usize,
+    ) -> ShellResult<bool> {
+        let Some(storage) = factory.open_spill_storage(path).map_err(db_storage_error)? else {
+            return Ok(false);
+        };
+        self.db
+            .set_arrangement_spill_storage(Rc::from(storage), max_bytes)
+            .await;
+        Ok(true)
+    }
+
+    /// Move query join state to the scratch storage until `bytes` less of
+    /// it stays in memory. Results are unchanged; a shell without scratch
+    /// storage keeps everything resident.
+    pub async fn shed_arrangement_memory(
+        &self,
+        bytes: usize,
+    ) -> ShellResult<crate::groove::ivm::ArrangementSpillReport> {
+        self.db.shed_arrangement_memory(bytes).await
     }
 
     /// Monotonic count of canonical frames queued for any downstream session.

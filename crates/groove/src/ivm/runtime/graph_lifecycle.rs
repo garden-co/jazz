@@ -85,6 +85,11 @@ impl IvmRuntime {
         for arrangement in self.arrangement_states.values() {
             stats.arrangement_rows += arrangement.value().row_count();
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
+            if let Some(run) = arrangement.value().spilled_run() {
+                stats.spilled_arrangements += 1;
+                stats.spilled_arrangement_rows += run.rows();
+                stats.spilled_arrangement_bytes += run.bytes();
+            }
         }
         for state in self.operator_states.values() {
             let OperatorState::Recursive(recursive) = state else {

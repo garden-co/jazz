@@ -592,6 +592,7 @@ impl Database {
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        runtime.share_spill_storage_with(&self.ivm_runtime);
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -2113,6 +2114,31 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Give join arrangements scratch storage to spill to under memory
+    /// pressure (see [`Self::spill_arrangements`]), holding at most
+    /// `max_bytes` there at once.
+    pub fn set_arrangement_spill_storage(
+        &mut self,
+        storage: std::rc::Rc<dyn crate::ivm::SpillStorage>,
+        max_bytes: usize,
+    ) {
+        self.ivm_runtime.set_spill_storage(storage, max_bytes);
+    }
+
+    /// Join-arrangement bytes currently held in memory.
+    pub fn resident_arrangement_bytes(&self) -> usize {
+        self.ivm_runtime.resident_arrangement_bytes()
+    }
+
+    /// Move join arrangements to scratch storage until at most
+    /// `target_bytes` of them stay in memory. Query results are unchanged.
+    pub fn spill_arrangements(
+        &mut self,
+        target_bytes: usize,
+    ) -> Result<crate::ivm::ArrangementSpillReport, crate::ivm::IvmRuntimeError> {
+        self.ivm_runtime.spill_arrangements(target_bytes)
     }
 
     /// Lifetime topology-cache counters, independent of transactional state.

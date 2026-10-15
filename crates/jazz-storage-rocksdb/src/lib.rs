@@ -42,11 +42,13 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
 }
 
 mod memory;
+mod spill;
 
 pub use memory::{
     RocksDbMemoryBudget, RocksDbMemoryUsage, configure_process_memory_budget,
     process_memory_budget, process_memory_usage,
 };
+pub use spill::RocksDbSpillStorage;
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
@@ -142,6 +144,17 @@ impl StorageFactory for RocksDbStorageFactory {
                 )?,
             ))
         })
+    }
+
+    fn open_spill_storage(
+        &self,
+        path: PathBuf,
+    ) -> Result<Option<Box<dyn groove::ivm::SpillStorage>>, Error> {
+        let storage = RocksDbSpillStorage::open(path).map_err(|message| Error::Backend {
+            backend: "rocksdb",
+            message,
+        })?;
+        Ok(Some(Box::new(storage)))
     }
 }
 

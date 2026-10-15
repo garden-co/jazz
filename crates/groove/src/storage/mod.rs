@@ -1478,6 +1478,16 @@ pub trait StorageFactory: std::fmt::Debug + Send + Sync {
         column_families: Vec<String>,
         codec_profile: StorageCodecProfile,
     ) -> StorageFuture<'_, Result<BoxedStorage, Error>>;
+
+    /// Open empty, non-durable scratch storage at `path` for query state
+    /// spilled out of memory, or `None` when this backend has none. Its
+    /// contents never outlive the returned handle.
+    fn open_spill_storage(
+        &self,
+        _path: std::path::PathBuf,
+    ) -> Result<Option<Box<dyn crate::ivm::SpillStorage>>, Error> {
+        Ok(None)
+    }
 }
 
 /// Typed view over one storage column family.
