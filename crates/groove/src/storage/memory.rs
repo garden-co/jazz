@@ -43,71 +43,29 @@ impl MemoryStorageCursor {
     fn next_values(&mut self, limit: usize) -> Result<Vec<KeyValue>, Error> {
         let last_key = self.last_key.clone();
         let values = self.storage.with_cf(&self.cf, |values| {
-            let entries: Vec<KeyValue> = match (&self.bounds, self.direction, &last_key) {
-                (ScanBounds::Prefix(prefix), ScanDirection::Forward, None) => values
-                    .range(prefix.clone()..)
-                    .take_while(|(key, _)| key.starts_with(prefix))
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Prefix(prefix), ScanDirection::Forward, Some(last_key)) => values
-                    .range((Bound::Excluded(last_key.clone()), Bound::Unbounded))
-                    .take_while(|(key, _)| key.starts_with(prefix))
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Prefix(prefix), ScanDirection::Reverse, None) => {
-                    let start = Bound::Included(prefix.clone());
-                    let end = super::prefix_successor(prefix)
-                        .map(Bound::Excluded)
-                        .unwrap_or(Bound::Unbounded);
-                    values
-                        .range((start, end))
-                        .rev()
-                        .take(limit)
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
+            // Every key in the scan's bounds is in range (a prefix scan ends
+            // at the prefix successor). Batches resume strictly past the
+            // last key returned, in scan direction.
+            let (mut lower, mut upper) = match &self.bounds {
+                ScanBounds::Prefix(prefix) => (
+                    Bound::Included(prefix.clone()),
+                    super::prefix_successor(prefix).map_or(Bound::Unbounded, Bound::Excluded),
+                ),
+                ScanBounds::Range { start, end } => {
+                    (Bound::Included(start.clone()), Bound::Excluded(end.clone()))
                 }
-                (ScanBounds::Prefix(prefix), ScanDirection::Reverse, Some(last_key)) => values
-                    .range((
-                        Bound::Included(prefix.clone()),
-                        Bound::Excluded(last_key.clone()),
-                    ))
-                    .rev()
-                    .take_while(|(key, _)| key.starts_with(prefix))
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Range { start, end }, ScanDirection::Forward, None) => values
-                    .range(start.clone()..end.clone())
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Range { end, .. }, ScanDirection::Forward, Some(last_key)) => values
-                    .range((
-                        Bound::Excluded(last_key.clone()),
-                        Bound::Excluded(end.clone()),
-                    ))
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Range { start, end }, ScanDirection::Reverse, None) => values
-                    .range(start.clone()..end.clone())
-                    .rev()
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-                (ScanBounds::Range { start, .. }, ScanDirection::Reverse, Some(last_key)) => values
-                    .range((
-                        Bound::Included(start.clone()),
-                        Bound::Excluded(last_key.clone()),
-                    ))
-                    .rev()
-                    .take(limit)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
             };
-            entries
+            match (self.direction, last_key) {
+                (_, None) => {}
+                (ScanDirection::Forward, Some(last_key)) => lower = Bound::Excluded(last_key),
+                (ScanDirection::Reverse, Some(last_key)) => upper = Bound::Excluded(last_key),
+            }
+            let range = values.range::<Vec<u8>, _>((lower, upper));
+            let clone = |(key, value): (&Vec<u8>, &Vec<u8>)| (key.clone(), value.clone());
+            match self.direction {
+                ScanDirection::Forward => range.take(limit).map(clone).collect::<Vec<KeyValue>>(),
+                ScanDirection::Reverse => range.rev().take(limit).map(clone).collect(),
+            }
         })?;
         #[cfg(test)]
         self.storage

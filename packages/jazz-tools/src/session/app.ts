@@ -12,6 +12,7 @@ import {
   type JazzSessionConsumer,
   type NeedsLoginState,
 } from "./state.js";
+import { toError } from "../runtime/util.js";
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
@@ -42,7 +43,6 @@ export interface JazzApp<Client> {
   /** Acknowledge only after the rendered view has detached its old subscriptions. */
   attachConsumer(): { acknowledge(snapshot: JazzAppSnapshot<Client>): void; release(): void };
 }
-const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
 
 /** Host-independent owner. Configuration is captured once; auth state may update in place. */
 export function createJazzAppOwner<Config, Client>(
@@ -229,7 +229,7 @@ export function createJazzAppOwner<Config, Client>(
           publish();
         })
         .catch((cause) => {
-          failure = asError(cause);
+          failure = toError(cause);
           publish();
           throw cause;
         })
@@ -274,7 +274,7 @@ export function createJazzAppOwner<Config, Client>(
               manualRetry = undefined;
             }
           } catch (cause) {
-            if (generation === actionGeneration) failure = asError(cause);
+            if (generation === actionGeneration) failure = toError(cause);
             throw cause;
           } finally {
             publish();
@@ -303,7 +303,7 @@ export function createJazzAppOwner<Config, Client>(
         if (generation === actionGeneration) manualRetry = undefined;
       } catch (cause) {
         if (!connection && generation === actionGeneration) manualRetry = app.logout;
-        if (generation === actionGeneration) failure = asError(cause);
+        if (generation === actionGeneration) failure = toError(cause);
         throw cause;
       } finally {
         --pendingLogouts;
@@ -322,7 +322,7 @@ export function createJazzAppOwner<Config, Client>(
           await pending;
           await session?.close();
         } catch (cause) {
-          failure = asError(cause);
+          failure = toError(cause);
           publish(true);
           throw cause;
         } finally {

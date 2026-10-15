@@ -1,5 +1,4 @@
 import { bytesToHex, formatUuidAt } from "./hex.js";
-import { Utf8Decoder } from "./utf8.js";
 /**
  * Manage subscription state and compute deltas.
  *
@@ -13,8 +12,7 @@ import type {
   Value,
   WasmRow,
 } from "../drivers/types.js";
-
-const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
+import { isValidUtf8 } from "./util.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -1023,15 +1021,6 @@ function orderedBytes(value: Uint8Array): number[] {
   }
   encoded.push(0, 0);
   return encoded;
-}
-
-function isValidUtf8(bytes: Uint8Array): boolean {
-  try {
-    fatalUtf8Decoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function terminalKeyId(encoded: readonly number[]): string {

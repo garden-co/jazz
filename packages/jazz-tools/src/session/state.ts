@@ -8,6 +8,7 @@ import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
 } from "../runtime/graceful-shutdown-error.js";
+import { toError } from "../runtime/util.js";
 
 /** Re-admit the selected account in place, or decline for an ordinary transition. */
 interface InPlaceRevalidation {
@@ -83,8 +84,6 @@ export function attachJazzSessionConsumer<Client>(
   if (!attach) throw new Error("Unknown Jazz session");
   return attach() as JazzSessionConsumer<Client>;
 }
-const asError = (cause: unknown): Error =>
-  cause instanceof Error ? cause : new Error(String(cause));
 
 /** @internal Hosts prepare accounts and supply their client adapter once. */
 export async function createJazzSessionOwner<Client extends SessionClient>(options: {
@@ -176,7 +175,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
             status: "ready",
             account,
             client: current,
-            error: asError(cause),
+            error: toError(cause),
             recovery: "action",
           });
         throw cause;
@@ -218,7 +217,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           status: usable ? "ready" : "error",
           account: selected,
           client: usable ? client : undefined,
-          error: asError(cause),
+          error: toError(cause),
           recovery: "action",
         });
       }
@@ -237,7 +236,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           publish({
             status: "error",
             account: selected,
-            error: asError(startup),
+            error: toError(startup),
             recovery: "action",
           });
         throw cause;
@@ -247,7 +246,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           status: client ? "ready" : "signed-out",
           account: selected,
           client,
-          error: asError(cause),
+          error: toError(cause),
           recovery: "action",
         });
       throw cause;
@@ -261,7 +260,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       client = selected ? await openClient(selected) : undefined;
     } catch (cause) {
       if (token === generation)
-        publish({ status: "error", account: selected, error: asError(cause), recovery: "session" });
+        publish({ status: "error", account: selected, error: toError(cause), recovery: "session" });
       throw cause;
     }
     if (token !== generation) throw superseded();
