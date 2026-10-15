@@ -1615,6 +1615,23 @@ fn lower_linear_plan_steps_cached(
                         semi_join_if_needed(graph, right, semi_left_keys, semi_right_keys, request);
                     last_join_right = None;
                 } else {
+                    // One prepared graph serves every binding of its source.
+                    // When both sides carry the same binding route, a left
+                    // row must only meet right rows derived for its own
+                    // binding; joining on the relation keys alone would pair
+                    // one binding's row with another binding's proof (#4017).
+                    let (mut left_keys, mut right_keys) = (left_keys, right_keys);
+                    for field in &available_route_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route
+                            && lowered_right.fields.contains(field)
+                            && !right_keys.contains(field)
+                        {
+                            left_keys.push(field.clone());
+                            right_keys.push(field.clone());
+                        }
+                    }
                     graph =
                         policy_join_if_needed(graph, right_graph, left_keys, right_keys, request);
                     let right_fields = lowered_right.fields.clone();
@@ -1665,6 +1682,22 @@ fn lower_linear_plan_steps_cached(
                     let mut next_fields = fields.clone();
                     let mut next_nullable = nullable_fields.clone();
                     let mut next_depths = nullable_field_depths.clone();
+                    // A binding route the right input introduces must stay
+                    // addressable under its own name: the next join keys on
+                    // it, so a later input pairs only with rows derived for
+                    // the same binding. Renaming it away would let a chain
+                    // whose left lacked the route pair one binding's proof
+                    // with another's (#4017).
+                    for field in &right_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route && !fields.contains(field) {
+                            projection
+                                .push(ProjectField::renamed(right_field(field), field.clone()));
+                            next_fields.insert(field.clone());
+                            available_route_fields.insert(field.clone());
+                        }
+                    }
                     for field in right_fields {
                         let output = union_occurrence_outputs
                             .get(&field)
@@ -3083,7 +3116,7 @@ fn lower_equality_param_filter_joins(
     let mut residual = Vec::new();
     let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
-        let Some(join) = equality_param_join(predicate, source_id, source)? else {
+        let Some(join) = equality_param_join(predicate, source_id, source, request)? else {
             residual.push(predicate.clone());
             continue;
         };
@@ -3202,6 +3235,7 @@ fn equality_param_join(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    request: &LoweringContext<'_>,
 ) -> Result<Option<EqualityParamJoin>, UnsupportedReason> {
     let PredicateExpr::Compare {
         left,
@@ -3211,24 +3245,43 @@ fn equality_param_join(
     else {
         return Ok(None);
     };
-    if let (Some((field, value_type, nullable)), NormalizedValueRef::Param(param)) =
-        (source_join_field(left, source_id, source)?, right)
-    {
-        return Ok(Some(EqualityParamJoin {
-            field,
-            param: param.clone(),
-            value_type,
-            nullable,
-        }));
-    }
-    match (left, source_join_field(right, source_id, source)?) {
-        (NormalizedValueRef::Param(param), Some((field, value_type, nullable))) => {
-            Ok(Some(EqualityParamJoin {
-                field,
-                param: param.clone(),
-                value_type,
-                nullable,
-            }))
+    let (field, value) = match (
+        source_join_field(left, source_id, source)?,
+        source_join_field(right, source_id, source)?,
+    ) {
+        (Some(field), None) => (field, right),
+        (None, Some(field)) => (field, left),
+        _ => return Ok(None),
+    };
+    let Some(param) = equality_binding_param(value, request)? else {
+        return Ok(None);
+    };
+    let (field, value_type, nullable) = field;
+    Ok(Some(EqualityParamJoin {
+        field,
+        param,
+        value_type,
+        nullable,
+    }))
+}
+
+/// The binding slot an equality operand reads, when it has one.
+///
+/// A claim operand is a binding slot too when the program carries that claim
+/// as a prepared routing parameter (see `claim_binding_slot`). Joining it
+/// against the binding source keeps the claim value out of the graph, so
+/// every session with the same query shares one graph instead of compiling
+/// its own literal copy (#4017). Any other claim stays a literal predicate.
+fn equality_binding_param(
+    value: &NormalizedValueRef,
+    request: &LoweringContext<'_>,
+) -> Result<Option<String>, UnsupportedReason> {
+    match value {
+        NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
+        NormalizedValueRef::Claim(path) if request.input.binding.source_shape.is_some() => {
+            let domain = request.parameter_domain()?;
+            Ok(super::claim_binding_slot(domain, path)
+                .filter(|slot| domain.routing_params.contains(slot)))
         }
         _ => Ok(None),
     }
