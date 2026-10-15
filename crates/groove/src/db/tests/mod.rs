@@ -41,6 +41,7 @@ mod publication_indices;
 mod queries;
 mod schema;
 mod storage_extraction;
+mod stored_u48;
 mod subscriptions;
 mod support;
 

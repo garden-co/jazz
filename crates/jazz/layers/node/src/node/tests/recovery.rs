@@ -54,7 +54,7 @@ fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
     {
         let mut reopened_node = open_node_at(&temp_dir, schema.clone());
         let mut batch = reopened_node.database.open_batch();
-        batch.insert("jazz_nodes", vec![Value::U64(999), Value::Uuid(node(1).0)]);
+        batch.insert("jazz_nodes", vec![Value::U32(999), Value::Uuid(node(1).0)]);
         let applied =
             crate::local_executor::block_on(reopened_node.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
@@ -2240,7 +2240,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             TX_PROVENANCE_TABLE,
             vec![
                 Value::U64(tx_id.time.0),
-                Value::U64(stored.node_alias.0),
+                Value::U32(stored.node_alias.0),
                 Value::Record(provenance_record),
             ],
         );

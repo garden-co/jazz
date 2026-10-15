@@ -410,13 +410,11 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .collect::<Vec<_>>();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
-        current_rows[0].0,
-        TxTime(history_rows[0].0).physical_ms(),
-        "current created_at must expose the history HLC's physical milliseconds"
+        current_rows[0], history_rows[0],
+        "history and current rows both store provenance as Unix milliseconds"
     );
-    assert_eq!(
-        current_rows[0].1,
-        TxTime(history_rows[0].1).physical_ms(),
-        "current updated_at must expose the history HLC's physical milliseconds"
+    assert_ne!(
+        current_rows[0].0, 0,
+        "created_at carries the HLC's milliseconds"
     );
 }

@@ -23,9 +23,11 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
-        6 => created_at: TxTime,
+        // Unix milliseconds in a 6-byte slot, like the current tables (SPEC 2
+        // §2.3). The in-memory `TxTime` has logical counter zero.
+        6 => created_at: u64,
         7 => updated_by: RowAuthor,
-        8 => updated_at: TxTime,
+        8 => updated_at: u64,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
     }
@@ -291,7 +293,7 @@ impl TouchedRows {
     ) -> Result<Vec<Value>, Error> {
         Ok(vec![
             Value::U64(tx_time.0),
-            Value::U64(tx_node_alias.0),
+            Value::U32(tx_node_alias.0),
             self.to_value()?,
         ])
     }
@@ -2536,10 +2538,10 @@ impl VersionRow {
             .map_err(|_| Error::UnadmittedWriteAuthor)?;
         let created_at = TxTime::from_physical_ms(version.created_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
-            .0;
+            .physical_ms();
         let updated_at = TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
-            .0;
+            .physical_ms();
         let raw = descriptor.create_with_encoded_fields::<Error>(
             source.raw().len() + 128,
             |index, output| {
@@ -2572,7 +2574,7 @@ impl VersionRow {
                     0 => Value::Bytes(version.branch_key().canonical_bytes()),
                     1 => Value::Uuid(version.row_uuid().0),
                     2 => Value::U64(tx_time.0),
-                    3 => Value::U64(tx_node_alias.0),
+                    3 => Value::U32(tx_node_alias.0),
                     4 => Value::U64(schema_version_alias.0),
                     5 => row_author_value(version.created_by())?,
                     6 => Value::U64(created_at),
@@ -2660,7 +2662,7 @@ impl VersionRow {
         NodeAlias(
             self.record
                 .borrowed()
-                .get_u64(idx)
+                .get_u32(idx)
                 .expect("valid tx_node_id"),
         )
     }
@@ -2688,12 +2690,13 @@ impl VersionRow {
 
     pub(super) fn created_at(&self) -> TxTime {
         let idx = HistoryRowRecord::FIELD_CREATED_AT_IDX;
-        TxTime(
+        TxTime::from_physical_ms(
             self.record
                 .borrowed()
                 .get_u64(idx)
                 .expect("valid created_at"),
         )
+        .expect("stored created_at within the packed HLC range")
     }
 
     pub(super) fn updated_by(&self) -> AuthorSubject {
@@ -2710,12 +2713,13 @@ impl VersionRow {
 
     pub(super) fn updated_at(&self) -> TxTime {
         let idx = HistoryRowRecord::FIELD_UPDATED_AT_IDX;
-        TxTime(
+        TxTime::from_physical_ms(
             self.record
                 .borrowed()
                 .get_u64(idx)
                 .expect("valid updated_at"),
         )
+        .expect("stored updated_at within the packed HLC range")
     }
 
     pub(super) fn schema_version_alias(&self) -> SchemaVersionAlias {
@@ -3744,7 +3748,7 @@ pub(super) fn stage_transaction_record(
     let key = || {
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx.tx_id.time.0),
-            PrimaryKeyValue::U64(node_alias.0),
+            PrimaryKeyValue::U32(node_alias.0),
         ])
     };
     let updating = matches!(write, TransactionRecordWrite::Update);
@@ -3761,7 +3765,7 @@ pub(super) fn stage_transaction_record(
                     TX_PROVENANCE_TABLE,
                     vec![
                         Value::U64(tx.tx_id.time.0),
-                        Value::U64(node_alias.0),
+                        Value::U32(node_alias.0),
                         Value::Record(provenance),
                     ],
                 );
@@ -3803,7 +3807,7 @@ pub(super) fn transaction_record_values(
     };
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
-        Value::U64(node_alias.0),
+        Value::U32(node_alias.0),
         Value::String(match tx.kind {
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
@@ -3917,7 +3921,7 @@ pub(super) fn pending_transaction_values(
     ] = evidence;
     Ok(Some(vec![
         Value::U64(tx.tx_id.time.0),
-        Value::U64(node_alias.0),
+        Value::U32(node_alias.0),
         base_snapshot,
         row_read_set,
         absent_read_set,
@@ -3932,7 +3936,7 @@ pub(super) fn rejected_transaction_values(
 ) -> Result<Vec<Value>, Error> {
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
-        Value::U64(node_alias.0),
+        Value::U32(node_alias.0),
         Value::String(match tx.kind {
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
@@ -3964,7 +3968,7 @@ pub(super) fn rejected_version_values(
     let cells = version.cells(table_schema)?;
     let mut values = vec![
         Value::U64(version.tx_time().0),
-        Value::U64(version.tx_node_alias().0),
+        Value::U32(version.tx_node_alias().0),
         Value::Uuid(version.row_uuid().0),
         nullable_deletion_value(version.deletion()),
     ];
@@ -4158,12 +4162,12 @@ pub(super) fn history_values_from_parts(
         Value::Bytes(version.branch_key.canonical_bytes()),
         Value::Uuid(version.row_uuid.0),
         Value::U64(version.tx_time.0),
-        Value::U64(version.tx_node_alias.0),
+        Value::U32(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
         row_author_value(version.created_by)?,
-        Value::U64(version.created_at.0),
+        Value::U64(version.created_at.physical_ms()),
         row_author_value(version.updated_by)?,
-        Value::U64(version.updated_at.0),
+        Value::U64(version.updated_at.physical_ms()),
         nullable_deletion_value(version.deletion),
     ];
     for column in &table.columns {
@@ -4234,21 +4238,21 @@ fn history_values_from_wire(
     values.push(Value::Bytes(version.branch_key().canonical_bytes()));
     values.push(Value::Uuid(version.row_uuid().0));
     values.push(Value::U64(tx_time.0));
-    values.push(Value::U64(tx_node_alias.0));
+    values.push(Value::U32(tx_node_alias.0));
     values.push(Value::U64(schema_version_alias.0));
     values.push(row_author_value(version.created_by())?);
-    // Wire provenance carries public Unix milliseconds. Reconstruct the
-    // internal HLC with logical counter zero at this ingestion boundary.
+    // Wire provenance carries public Unix milliseconds, and so does history.
+    // Refuse at this ingestion boundary what the internal HLC cannot hold.
     values.push(Value::U64(
         TxTime::from_physical_ms(version.created_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
-            .0,
+            .physical_ms(),
     ));
     values.push(row_author_value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
-            .0,
+            .physical_ms(),
     ));
     values.push(nullable_deletion_value(version.deletion()));
     for (idx, column) in table.columns.iter().enumerate() {
@@ -4301,7 +4305,7 @@ pub(super) fn history_primary_key_at(
         PrimaryKeyValue::Uuid(row_uuid.0),
         PrimaryKeyValue::U64(seq.0),
         PrimaryKeyValue::U64(tx_time.0),
-        PrimaryKeyValue::U64(tx_node_alias.0),
+        PrimaryKeyValue::U32(tx_node_alias.0),
     ])
 }
 
@@ -4327,7 +4331,7 @@ pub(super) fn history_key_values(
         Value::Uuid(row_uuid.0),
         Value::U64(seq.0),
         Value::U64(tx_time.0),
-        Value::U64(tx_node_alias.0),
+        Value::U32(tx_node_alias.0),
     ]
 }
 
@@ -4367,12 +4371,12 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
         Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(version.tx_time().0),
-        Value::U64(version.tx_node_alias().0),
+        Value::U32(version.tx_node_alias().0),
         Value::U64(version.schema_version_alias().0),
         row_author_value(version.created_by())?,
-        Value::U64(version.created_at().0),
+        Value::U64(version.created_at().physical_ms()),
         row_author_value(version.updated_by())?,
-        Value::U64(version.updated_at().0),
+        Value::U64(version.updated_at().physical_ms()),
     ])
 }
 
@@ -4382,13 +4386,8 @@ pub(super) fn global_current_values(
     version: &VersionRow,
     global_time: Option<GlobalTime>,
 ) -> Result<Vec<Value>, Error> {
+    // History and current rows both store provenance as Unix milliseconds.
     let mut values = stored_version_prefix_values(version)?;
-    // Current rows are the public read carrier. HLC ordering remains on the
-    // version/transaction fields; provenance exposes Unix milliseconds.
-    values[GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
-        Value::U64(version.created_at().physical_ms());
-    values[GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
-        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -4408,7 +4407,7 @@ pub(super) fn global_current_values(
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {
     PrimaryKeyValue::Composite(vec![
         PrimaryKeyValue::U64(tx_id.time.0),
-        PrimaryKeyValue::U64(alias.0),
+        PrimaryKeyValue::U32(alias.0),
     ])
 }
 
@@ -4420,10 +4419,7 @@ pub(super) fn rejected_version_primary_key_from_record(
             record.get_idx(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?,
             "tx_time",
         )?),
-        PrimaryKeyValue::U64(expect_u64(
-            record.get_idx(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?,
-            "tx_node_id",
-        )?),
+        PrimaryKeyValue::U32(record.get_u32(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?),
         PrimaryKeyValue::Uuid(expect_uuid(
             record.get_idx(RejectedVersionRowRecord::FIELD_ROW_UUID_IDX)?,
             "row_uuid",
@@ -4581,7 +4577,7 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
     values.push(row_author_value(updated.updated_by())?);
     values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
-    values.push(Value::U64(updated.tx_node_alias().0));
+    values.push(Value::U32(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
@@ -4610,7 +4606,7 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
     values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
-    values.push(Value::U64(tx_node_alias.0));
+    values.push(Value::U32(tx_node_alias.0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
@@ -4647,7 +4643,7 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
     );
     values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
-    values.push(Value::U64(provenance.tx_node_alias().0));
+    values.push(Value::U32(provenance.tx_node_alias().0));
 }
 
 /// Runtime carriers preserve logical nullable wrappers while retaining the
@@ -4743,7 +4739,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
                 ("$updatedBy".to_owned(), RowAuthor::value_type()),
                 ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
-                ("tx_node_id".to_owned(), records::ValueType::U64),
+                ("tx_node_id".to_owned(), records::ValueType::U32),
             ]
             .into_iter()
             .map(|(name, value_type)| records::DescriptorField::new(name, value_type)),
@@ -5298,7 +5294,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "020100000000000001000000000000000000030000000000000001010900000000000000022e0000002f000000000000"
+            "0201000000000000010000000000030000000000000001010900000000000000022a0000002b000000000000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5320,7 +5316,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "020100000000000001000000000000000000030000000000000002000000000000000000012e0000004a000000000104010000000000000101080808080808080808080808080808080000"
+            "0201000000000000010000000000030000000000000002000000000000000000012a00000046000000000104010000000000000101080808080808080808080808080808080000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5343,7 +5339,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "02010000000000000100000000000000000103000000000000000000000000000000000001310000003200000001027b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d303630363036303630363036"
+            "0201000000000000010000000001030000000000000000000000000000000000012d0000002e00000001027b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d303630363036303630363036"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(
@@ -5361,7 +5357,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "02010000000000000100000000000000000503000000000000000000000000000000000001310000003200000001027b7d0000"
+            "0201000000000000010000000005030000000000000000000000000000000000012d0000002e00000001027b7d0000"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(

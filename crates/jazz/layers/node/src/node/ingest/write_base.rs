@@ -335,7 +335,7 @@ where
                 .await?
             {
                 let record = raw.record();
-                if NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?) != own_alias {
+                if NodeAlias(record.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?) != own_alias {
                     continue;
                 }
                 let time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);

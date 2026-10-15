@@ -492,6 +492,16 @@ enum InternalValueTypeRepr {
         dictionary: String,
         logical: Box<ValueType>,
     },
+    /// A `U64` value stored in a fixed 6-byte slot (`INV-STORAGE-39`).
+    ///
+    /// Physically this is a [`ValueType::U48`]: 6 bytes little-endian. Logically
+    /// it is [`ValueType::U64`]: Groove narrows the value on write, refusing
+    /// anything above `2^48 - 1` with [`Error::U48OutOfRange`], and widens it
+    /// back on every read, so callers above the storage boundary only ever see
+    /// `U64`. Like `Interned` it is a storage-only marker that never crosses a
+    /// persisted descriptor encoding. Appended last so existing serde variant
+    /// indices of this type are unchanged.
+    StoredU48,
 }
 
 // A self-contained record descriptor occasionally has to cross a durable
@@ -784,6 +794,11 @@ fn descriptor_codec_push_value_type(
         })) => Err(Error::InternedTypeNotEncodable {
             dictionary: dictionary.clone(),
         }),
+        // Like interning, a 6-byte slot for a U64 is a property of one storage
+        // column; descriptors that leave Groove name the logical U64.
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => {
+            Err(Error::StoredU48TypeNotEncodable)
+        }
         ValueType::Uuid => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_UUID)),
         ValueType::EnumTag(schema) => descriptor_codec_push(
             nodes,
@@ -1346,6 +1361,53 @@ impl ValueType {
         }))
     }
 
+    /// A storage column whose `U64` values are kept in a fixed 6-byte slot
+    /// (`INV-STORAGE-39`): each row stores the value as a [`ValueType::U48`]
+    /// and every read widens it back to `U64`. Writes refuse values above
+    /// `2^48 - 1` with [`Error::U48OutOfRange`]; nothing is truncated.
+    ///
+    /// Only valid as a table column type, either at top level or directly
+    /// under a top-level [`ValueType::Nullable`], and never as a key or index
+    /// column; schema admission refuses every other placement. Reads,
+    /// subscriptions and writes see `U64`.
+    pub fn u64_stored_as_u48() -> Self {
+        Self::Internal(InternalValueType(InternalValueTypeRepr::StoredU48))
+    }
+
+    /// Whether this is the [`Self::u64_stored_as_u48`] storage type.
+    pub fn is_u64_stored_as_u48(&self) -> bool {
+        matches!(
+            self,
+            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredU48))
+        )
+    }
+
+    /// Whether a [`Self::u64_stored_as_u48`] marker occurs anywhere in this type.
+    pub fn contains_stored_u48(&self) -> bool {
+        match self {
+            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => true,
+            Self::Tuple(members) => members.iter().any(Self::contains_stored_u48),
+            Self::Array(inner) | Self::Nullable(inner) => inner.contains_stored_u48(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| field.value_type.contains_stored_u48()),
+            Self::Enum(schema) => schema.cases.iter().any(|case| {
+                case.payload
+                    .fields()
+                    .iter()
+                    .any(|field| field.value_type.contains_stored_u48())
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the stored form of this type differs from its logical form:
+    /// it contains an interned or a [`Self::u64_stored_as_u48`] marker.
+    pub fn contains_storage_transcoding(&self) -> bool {
+        self.contains_interned() || self.contains_stored_u48()
+    }
+
     /// The dictionary and logical type of an interned column type.
     pub fn as_interned(&self) -> Option<(&str, &ValueType)> {
         match self {
@@ -1397,16 +1459,18 @@ impl ValueType {
         }
     }
 
-    /// This type with every interned marker replaced by its logical type:
-    /// what reads, subscriptions and the wire see for a storage column.
+    /// This type with every interned marker replaced by its logical type, and
+    /// every [`Self::u64_stored_as_u48`] marker by `U64`: what reads,
+    /// subscriptions and the wire see for a storage column.
     pub fn logical(&self) -> ValueType {
-        if !self.contains_interned() {
+        if !self.contains_storage_transcoding() {
             return self.clone();
         }
         match self {
             Self::Internal(InternalValueType(InternalValueTypeRepr::Interned {
                 logical, ..
             })) => logical.logical(),
+            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => Self::U64,
             Self::Tuple(members) => Self::Tuple(members.iter().map(Self::logical).collect()),
             Self::Array(inner) => Self::Array(Box::new(inner.logical())),
             Self::Nullable(inner) => Self::Nullable(Box::new(inner.logical())),
@@ -1762,6 +1826,7 @@ impl ValueType {
             Self::Uuid => Some(16),
             Self::EnumTag(_) => Some(1),
             Self::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => Some(4),
+            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => Some(6),
             Self::Tuple(members) => members
                 .iter()
                 .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
@@ -1919,6 +1984,10 @@ pub(super) fn encode_fixed_value(
             Value::U32(code),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })),
         ) => bytes.extend(code.to_le_bytes()),
+        (
+            Value::U48(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)),
+        ) => bytes.extend(u48_le_bytes(*value)?),
         (Value::String(value), ValueType::EnumTag(schema)) => {
             bytes.push(schema.discriminant(value)?)
         }
@@ -2014,6 +2083,9 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?)))
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => {
+            Ok(Value::U48(u48_from_le_bytes(read_exact::<6>(bytes)?)))
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
             match crate::large_values::decode_stored_scalar(*kind, bytes)? {
@@ -2123,6 +2195,9 @@ fn validate_value_inner(
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             read_exact::<4>(bytes).map(|_| ())
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => {
+            read_exact::<6>(bytes).map(|_| ())
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
             match crate::large_values::inline_scalar_bytes(*kind, bytes) {
@@ -2467,6 +2542,10 @@ pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
             Value::U32(_),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })),
         ) => Ok(()),
+        (
+            Value::U48(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)),
+        ) => checked_u48(*value).map(|_| ()),
         (
             Value::Large(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),

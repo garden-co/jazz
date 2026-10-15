@@ -91,7 +91,7 @@ where
             );
             let tx_node_alias = NodeAlias(
                 record
-                    .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                    .get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
                     .unwrap(),
             );
             let tx_node = node.node_for_alias(tx_node_alias).unwrap();

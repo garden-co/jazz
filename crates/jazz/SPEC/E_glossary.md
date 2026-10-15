@@ -27,7 +27,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 - **`RowAuthor`** — non-null account and exact principal provenance, encoded as
   a native record. System provenance includes its originating node. Intern
   handles never enter wire, storage, or public ordering.
-- **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
+- **`NodeAlias` / `SchemaVersionAlias`** — node-local interned identities (a fixed 4-byte `u32` and a `u64`);
   never on the wire (ch. 14).
 - **`AuthorSubject::SYSTEM`** — the trusted internal capability that bypasses policy (ch. 7), distinct from persisted system authorship (reserved account/issuer plus originating node).
 

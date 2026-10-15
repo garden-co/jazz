@@ -1994,7 +1994,7 @@ fn transaction_record_size_is_independent_of_branch_write_count() {
             .collect();
         let tx_id = writer.commit_mergeable_many_settled(commits).unwrap();
         let alias = writer.node_aliases[&tx_id.node];
-        let key = [Value::U64(tx_id.time.0), Value::U64(alias.0)];
+        let key = [Value::U64(tx_id.time.0), Value::U32(alias.0)];
         let header = crate::local_executor::block_on(
             writer.database.primary_key_get_raw("jazz_transactions", &key),
         )

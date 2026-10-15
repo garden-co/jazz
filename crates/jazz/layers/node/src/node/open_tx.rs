@@ -1914,7 +1914,7 @@ where
             .await?
         {
             let record = raw.record();
-            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node_alias = NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = self
                 .node_for_alias(node_alias)
                 .ok_or(Error::InvalidStoredValue(

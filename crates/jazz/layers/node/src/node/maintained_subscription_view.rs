@@ -2661,7 +2661,7 @@ fn decode_typed_terminal_record(
                 }
             };
             let tx_time = TxTime(record_u64(record, tx_time_field)?);
-            let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
+            let tx_node_alias = record_node_alias(record, tx_node_field)?;
             let tx_node = node_aliases.node_for_alias(tx_node_alias).ok_or(
                 super::Error::InvalidStoredValue("result tx node alias must exist"),
             )?;
@@ -3069,7 +3069,7 @@ fn decode_relation_edge_version(
         return Ok(None);
     };
     let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
-    let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
+    let tx_node_alias = record_node_alias(record, &version.tx_node_field)?;
     let tx_node =
         node_aliases
             .node_for_alias(tx_node_alias)
@@ -3188,7 +3188,7 @@ fn decode_typed_version_witness(
         table: table.name.clone(),
         branch_key,
         row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
-        tx_node_alias: NodeAlias(record_u64_idx(record, plan.tx_node_idx)?),
+        tx_node_alias: record_node_alias_idx(record, plan.tx_node_idx)?,
         schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
             record,
             plan.schema_version_idx,
@@ -3354,6 +3354,23 @@ fn record_u64(record: BorrowedRecord<'_>, field: &str) -> Result<u64, super::Err
     match record.get_idx(field_idx(record, field)?)? {
         Value::U64(value) => Ok(value),
         _ => Err(super::Error::InvalidStoredValue("field must be u64")),
+    }
+}
+
+fn record_node_alias(record: BorrowedRecord<'_>, field: &str) -> Result<NodeAlias, super::Error> {
+    record_node_alias_idx(record, field_idx(record, field)?)
+}
+
+/// A node alias is a fixed 4-byte `U32` wherever it is stored or projected.
+fn record_node_alias_idx(
+    record: BorrowedRecord<'_>,
+    field_idx: usize,
+) -> Result<NodeAlias, super::Error> {
+    match record.get_idx(field_idx)? {
+        Value::U32(value) => Ok(NodeAlias(value)),
+        _ => Err(super::Error::InvalidStoredValue(
+            "node alias field must be u32",
+        )),
     }
 }
 
@@ -4197,13 +4214,13 @@ mod tests {
             ("source_table", ValueType::String),
             ("source_row", ValueType::Uuid),
             ("source_tx_time", ValueType::U64),
-            ("source_tx_node_id", ValueType::U64),
+            ("source_tx_node_id", ValueType::U32),
             ("source_branch_or_prefix", ValueType::Uuid),
             ("path", ValueType::String),
             ("target_table", ValueType::String),
             ("target_row", ValueType::Uuid),
             ("target_tx_time", ValueType::U64),
-            ("target_tx_node_id", ValueType::U64),
+            ("target_tx_node_id", ValueType::U32),
             ("target_branch_or_prefix", ValueType::Uuid),
         ]);
         let branch = uuid::Uuid::from_bytes([0xb1; 16]);
@@ -4212,13 +4229,13 @@ mod tests {
                 Value::String("posts".to_owned()),
                 Value::Uuid(row(0xb2).0),
                 Value::U64(11),
-                Value::U64(10),
+                Value::U32(10),
                 Value::Uuid(branch),
                 Value::String("author".to_owned()),
                 Value::String("users".to_owned()),
                 Value::Uuid(row(0xb3).0),
                 Value::U64(12),
-                Value::U64(10),
+                Value::U32(10),
                 Value::Uuid(branch),
             ])
             .expect("encode typed branch relation edge");
@@ -6075,7 +6092,7 @@ mod tests {
             ("joined_uuid", groove::records::ValueType::Uuid),
             ("union_arm", groove::records::ValueType::String),
             ("tx_time", groove::records::ValueType::U64),
-            ("tx_node", groove::records::ValueType::U64),
+            ("tx_node", groove::records::ValueType::U32),
         ]);
         let schema = ResultMembershipSchema {
             table_field: "table".to_owned(),
@@ -6111,7 +6128,7 @@ mod tests {
                         Value::Uuid(row(2).0),
                         Value::String(label.to_owned()),
                         Value::U64(10),
-                        Value::U64(10),
+                        Value::U32(10),
                     ])
                     .unwrap()
                     .into(),

@@ -3382,7 +3382,7 @@ where
             // in the membership payload below.
             for (name, ty) in [
                 ("tx_time", ColumnType::U64),
-                ("tx_node_id", ColumnType::U64),
+                ("tx_node_id", ColumnType::U32),
             ] {
                 columns.push(RowProjection {
                     output: TypedOutputField {

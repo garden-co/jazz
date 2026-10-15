@@ -220,6 +220,15 @@ pub enum InternedColumnError {
     },
     #[error("Interning a field of direct record store {store} is not supported yet")]
     DirectRecordStore { store: String },
+    /// A U64-stored-as-U48 column (`INV-STORAGE-39`) sits where Groove
+    /// cannot transcode it: nested, in a key, index or foreign key, or in a
+    /// direct record store.
+    #[error("U64-stored-as-U48 column {table}.{column} is not supported {placement}")]
+    StoredU48Placement {
+        table: String,
+        column: String,
+        placement: &'static str,
+    },
     #[error(
         "Interning column {table}.{column} anywhere but at top level or directly under a top-level nullable is not supported yet"
     )]
@@ -287,6 +296,18 @@ impl DatabaseSchema {
                     store: store.name.clone(),
                 });
             }
+            if let Some((name, _)) = store
+                .key
+                .iter()
+                .chain(&store.value)
+                .find(|(_, value_type)| value_type.contains_stored_u48())
+            {
+                return Err(InternedColumnError::StoredU48Placement {
+                    table: store.name.clone(),
+                    column: name.clone(),
+                    placement: "in a direct record store",
+                });
+            }
         }
         for table in &self.tables {
             self.validate_table_interning(table)?;
@@ -320,7 +341,23 @@ impl DatabaseSchema {
                 })
             }));
         let mut interned_columns = std::collections::BTreeSet::new();
+        let mut stored_u48_columns = std::collections::BTreeSet::new();
         for (name, value_type, shared) in fields {
+            if value_type.contains_stored_u48() {
+                let candidate = match value_type {
+                    ValueType::Nullable(inner) => inner.as_ref(),
+                    other => other,
+                };
+                if !candidate.is_u64_stored_as_u48() {
+                    return Err(InternedColumnError::StoredU48Placement {
+                        table: table.name.clone(),
+                        column: name.to_owned(),
+                        placement: "anywhere but at top level or directly under a top-level nullable",
+                    });
+                }
+                stored_u48_columns.insert(shared.to_owned());
+                continue;
+            }
             let parts =
                 interned_column_parts(value_type).map_err(|()| InternedColumnError::Nested {
                     table: table.name.clone(),
@@ -344,6 +381,39 @@ impl DatabaseSchema {
                 });
             }
             interned_columns.insert(shared.to_owned());
+        }
+        let stored_u48_refusal =
+            |column: &str, placement| InternedColumnError::StoredU48Placement {
+                table: table.name.clone(),
+                column: column.to_owned(),
+                placement,
+            };
+        if let Some(primary_key) = &table.primary_key
+            && let Some(column) = primary_key
+                .columns
+                .iter()
+                .find(|column| stored_u48_columns.contains(&column.column))
+        {
+            return Err(stored_u48_refusal(
+                &column.column,
+                "as a primary-key column",
+            ));
+        }
+        if let Some(column) = table
+            .indices
+            .iter()
+            .flat_map(|index| &index.columns)
+            .find(|column| stored_u48_columns.contains(*column))
+        {
+            return Err(stored_u48_refusal(column, "as an index column"));
+        }
+        if let Some(column) = table
+            .foreign_keys
+            .iter()
+            .flat_map(|foreign_key| &foreign_key.columns)
+            .find(|column| stored_u48_columns.contains(*column))
+        {
+            return Err(stored_u48_refusal(column, "as a foreign-key column"));
         }
         if interned_columns.is_empty() {
             return Ok(());
@@ -392,7 +462,8 @@ impl DatabaseSchema {
                 };
                 for column in &foreign_key.referenced_columns {
                     if referenced.columns.iter().any(|candidate| {
-                        candidate.name == *column && candidate.column_type.contains_interned()
+                        candidate.name == *column
+                            && candidate.column_type.contains_storage_transcoding()
                     }) {
                         return Err(InternedColumnError::ForeignKey {
                             table: referenced.name.clone(),

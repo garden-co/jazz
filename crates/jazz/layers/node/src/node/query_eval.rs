@@ -284,8 +284,8 @@ where
             self.database
                 .primary_key_scan_range_raw(
                     "jazz_transactions",
-                    &[Value::U64(0), Value::U64(0)],
-                    &[Value::U64(time.0 + 1), Value::U64(0)],
+                    &[Value::U64(0), Value::U32(0)],
+                    &[Value::U64(time.0 + 1), Value::U32(0)],
                 )
                 .await?
         };
@@ -2825,7 +2825,7 @@ where
             let version = if seq <= position.0 {
                 let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
                 let tx_node =
-                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                    NodeAlias(record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
                 self.query_version_by_alias(table, row_uuid, tx_time, tx_node)
                     .await?
                     .ok_or(Error::InvalidStoredValue(

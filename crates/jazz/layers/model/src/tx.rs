@@ -921,7 +921,7 @@ groove::define_record! {
     struct HistoryRowRecord {
         0 => row_uuid: RowUuid,
         1 => tx_time: u64,
-        2 => tx_node_id: u64,
+        2 => tx_node_id: u32,
         3 => schema_version: u64,
         4 => created_by: RowAuthor,
         5 => created_at: u64,
@@ -934,7 +934,7 @@ groove::define_record! {
 groove::define_record! {
     struct RejectedTransactionRowRecord {
         0 => time: u64,
-        1 => node_id: u64,
+        1 => node_id: u32,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
         4 => rejection_reason: RejectionReasonTag,
@@ -947,7 +947,7 @@ groove::define_record! {
 groove::define_record! {
     struct RejectedVersionRowRecord {
         0 => tx_time: u64,
-        1 => tx_node_id: u64,
+        1 => tx_node_id: u32,
         2 => row_uuid: RowUuid,
         3 => _deletion: Option<Value>,
         .. user_cells,

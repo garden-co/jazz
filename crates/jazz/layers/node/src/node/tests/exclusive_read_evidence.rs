@@ -10,7 +10,7 @@ fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Va
     let alias = node.node_aliases[&tx_id.node];
     let raw = crate::local_executor::block_on(node.database.primary_key_get_raw(
         PENDING_TRANSACTIONS_TABLE,
-        &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+        &[Value::U64(tx_id.time.0), Value::U32(alias.0)],
     ))
     .unwrap()?;
     let record = raw.record();
@@ -169,7 +169,7 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     );
     let mut values = vec![
         Value::U64(tx_id.time.0),
-        Value::U64(stored.node_alias.0),
+        Value::U32(stored.node_alias.0),
         Value::Nullable(None),
         Value::Nullable(None),
         Value::Nullable(None),
