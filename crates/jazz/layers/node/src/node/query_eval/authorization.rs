@@ -1133,61 +1133,93 @@ where
             authorization_keys.clone(),
             authorization_keys,
         );
-        let (base, binding_route_fields) =
-            match binding_routes {
-                Some((binding, route_fields)) => (
-                    GraphBuilder::join(
-                        base,
-                        binding,
-                        std::iter::empty::<String>(),
-                        std::iter::empty::<String>(),
-                    )
-                    .project_fields(
-                        output_fields
-                            .iter()
-                            .cloned()
-                            .chain(route_fields.iter().map(|field| {
-                                ProjectField::renamed(right_field(field), field.clone())
-                            }))
-                            .collect::<Vec<_>>(),
-                    ),
-                    route_fields,
-                ),
-                None => (base, BTreeSet::new()),
-            };
         let mut join_keys = vec!["row_uuid".to_owned()];
         join_keys.extend(authorized.route_fields.iter().cloned());
-        if authorized.route_fields.is_empty() {
+        let Some((binding, binding_route_fields)) = binding_routes else {
             let mut fields = output_fields.to_vec();
             fields.extend(
-                binding_route_fields
+                authorized
+                    .route_fields
                     .iter()
-                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
             );
             return Ok(PolicyAuthorizationGraph {
                 graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                     .project_fields(fields),
+                route_fields: BTreeSet::new(),
+                access_paths: BTreeMap::new(),
+            });
+        };
+        let with_binding = |graph: GraphBuilder, keys: Vec<String>, carried: &[String]| {
+            GraphBuilder::join(graph, binding.clone(), keys.clone(), keys).project_fields(
+                output_fields
+                    .iter()
+                    .map(|field| ProjectField {
+                        expression: groove::ivm::ProjectExpr::Field(
+                            groove::ivm::FieldRef::stored_name(left_field(&field.output_name)),
+                        ),
+                        output_name: field.output_name.clone(),
+                        output_identity: field.output_identity.clone(),
+                    })
+                    .chain(
+                        carried
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    )
+                    .chain(
+                        binding_route_fields
+                            .iter()
+                            .filter(|field| !carried.contains(*field))
+                            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+                    )
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if authorized.route_fields.is_empty() {
+            // The proof admits a row for every binding alike; pair it with
+            // each binding so the source carries the enclosing slots.
+            let authorized_rows =
+                GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
+                    .project_fields(output_fields.to_vec());
+            return Ok(PolicyAuthorizationGraph {
+                graph: with_binding(authorized_rows, Vec::new(), &[]),
                 route_fields: binding_route_fields,
                 access_paths: BTreeMap::new(),
             });
         }
-        let mut fields = output_fields.to_vec();
-        fields.extend(
-            authorized
-                .route_fields
-                .iter()
-                .map(|field| ProjectField::renamed(right_field(field), field.clone())),
-        );
-        fields.extend(
-            binding_route_fields
-                .iter()
-                .filter(|field| !authorized.route_fields.contains(*field))
-                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
-        );
+        // Take the policy's own routes from its proof first, then attach the
+        // enclosing binding's other slots only to bindings with those route
+        // values. Pairing every source row with every live binding before the
+        // proof would hold a copy of the whole source per binding in a graph
+        // that many bindings share.
+        let proof_routes = authorized.route_fields.iter().cloned().collect::<Vec<_>>();
+        let authorized_rows =
+            GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"]).project_fields(
+                output_fields
+                    .iter()
+                    .cloned()
+                    .chain(
+                        proof_routes
+                            .iter()
+                            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+                    )
+                    .collect::<Vec<_>>(),
+            );
+        let binding_keys = proof_routes
+            .iter()
+            .filter(|field| binding_route_fields.contains(*field))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut route_fields = binding_route_fields.clone();
+        route_fields.extend(proof_routes.iter().cloned());
+        let graph = if binding_route_fields.is_subset(&authorized.route_fields) {
+            authorized_rows
+        } else {
+            with_binding(authorized_rows, binding_keys, &proof_routes)
+        };
         Ok(PolicyAuthorizationGraph {
-            graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
-                .project_fields(fields),
-            route_fields: binding_route_fields,
+            graph,
+            route_fields,
             access_paths: BTreeMap::new(),
         })
     }
@@ -1548,25 +1580,15 @@ where
         let content_fields = global_current_storage_fields(table, true, true);
         let mut image_fields = content_fields.clone();
         image_fields.push("_deletion".to_owned());
-        let global = self
-            .physical_current_source_graph(
-                schema_version,
-                &table.name,
-                PhysicalCurrentClass::Global,
-            )?
-            .project(image_fields.clone());
         // Select the winning row image, then drop it when it is deleted.
+        let layers = layer_stack::try_ref_layers(tier, |r| {
+            self.physical_current_source_graph(schema_version, &table.name, r.physical_class())
+                .map(|rows| layer_stack::Layer::new(rows.project(image_fields.clone())))
+        })?;
         let current = if tier == DurabilityTier::Global {
-            global
+            layer_stack::compose(layers)
         } else {
-            let ahead = self
-                .physical_current_source_graph(
-                    schema_version,
-                    &table.name,
-                    PhysicalCurrentClass::Ahead,
-                )?
-                .project(image_fields.clone());
-            crate::node::codec::pending_overlay_over(global, ahead).project(image_fields)
+            layer_stack::compose(layers).project(image_fields)
         };
         Ok(current
             .filter(not_deleted_predicate())

@@ -1677,6 +1677,11 @@ impl HydrationEvaluator<'_> {
                     }
                 }
                 OpType::Arrange(_) => self.eval_unary_input(graph_node, node).await,
+                // A lookup's storage probes are driven by evaluation
+                // sessions, which this recursive step evaluator is not.
+                OpType::Lookup(_) => Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup cannot run in a recursive step",
+                )),
                 OpType::Filter(filter) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     NodeState::update_filter(filter, output_desc, &input)

@@ -227,6 +227,9 @@ pub fn take_required_sink_deltas(
 }
 
 mod lowering;
+mod route_discipline;
+#[cfg(test)]
+pub(crate) use route_discipline::take_scoped_binding_sources_for_test;
 
 use lowering::*;
 pub use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
@@ -523,7 +526,11 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
-        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
+        // A branch view's layers are masked before their predicates (SPEC 4
+        // §4.7), so an index bounds each of its content layers for a one-shot
+        // read as much as for a maintained one.
+        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView)
+            || matches!(read_view.source, ReadViewSourceSpec::BranchView { .. });
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
             binding,
@@ -1581,12 +1588,21 @@ where
                 )
             })
             .flatten();
-        // Prepared binding-source names are runtime identities.  Claim values
-        // normally route independent bindings through one shape, but equal
-        // author identities may hold distinct authenticated sessions.  Give
-        // their claim scopes separate source identities so a later session
-        // cannot replace an already-maintained sibling binding.
+        // Prepared binding-source names are runtime identities.  On a client,
+        // equal author identities may hold distinct authenticated sessions:
+        // give their claim scopes separate source identities so a later
+        // session cannot replace an already-maintained sibling binding.
+        //
+        // Trusted serving shares one source across sessions. Claim values
+        // bound as slots are part of a session's binding key, so sessions
+        // with different claims hold different bindings of one shared graph;
+        // a claim still inlined as a literal makes the graph itself distinct.
+        // A per-session name would give every connected user a private copy
+        // of the whole compiled program and its IVM graph (#4017).
         let source_shape = source_shape.map(|source_shape| {
+            if !client_local {
+                return source_shape;
+            }
             self.active_session_claim_scope_key(identity)
                 .map(|scope| format!("{source_shape}:session:{scope}"))
                 .unwrap_or(source_shape)
