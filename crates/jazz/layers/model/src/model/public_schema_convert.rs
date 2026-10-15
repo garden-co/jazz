@@ -16,7 +16,7 @@ use crate::schema::{
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_api::relation_ir::{
-    ColumnRef, JoinKind as RelJoinKind, PredicateCmpOp as RelPredicateCmpOp,
+    ColumnRef, JoinKind as RelJoinKind, KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp,
     PredicateExpr as RelPredicateExpr, ProjectExpr as RelProjectExpr,
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
@@ -2120,8 +2120,23 @@ fn lower_exists_rel(
         }
         RelExpr::Project { input, .. } => lower_exists_rel(schema, table, path, input),
         RelExpr::Gather {
-            seed, step, bound, ..
-        } => lower_gather_rel(schema, table, path, seed, step, bound),
+            seed,
+            step,
+            frontier_key,
+            bound,
+            dedupe_key,
+        } => {
+            // Reachability walks row ids. A gather keyed on anything else
+            // cannot be lowered to it, so it must not be silently treated as one.
+            let current_row = RelKeyRef::RowId(RowIdRef::Current);
+            if *frontier_key != current_row || dedupe_key.as_slice() != [current_row] {
+                return Err(err(
+                    policy_path(table, path),
+                    "Gather policies require current-row frontier and dedupe keys",
+                ));
+            }
+            lower_gather_rel(schema, table, path, seed, step, bound)
+        }
         RelExpr::Join {
             left,
             right,
@@ -2488,7 +2503,7 @@ fn lower_gather_step(
         {
             let RelExpr::TableScan {
                 table: output_table,
-                ..
+                alias: output_alias,
             } = right.as_ref()
             else {
                 return Err(err(
@@ -2496,12 +2511,28 @@ fn lower_gather_step(
                     "Gather recursive hop must join to the output table",
                 ));
             };
-            let Some(on) = on.first() else {
+            let [on] = on.as_slice() else {
                 return Err(err(
                     policy_path(table, path),
-                    "Gather recursive hop join requires a column equality",
+                    "Gather recursive hop join requires exactly one column equality",
                 ));
             };
+            // The hop names the parent row only when it joins that row's id.
+            let output_scope = output_alias
+                .as_deref()
+                .unwrap_or_else(|| output_table.as_str());
+            if on.right.column != "id"
+                || on
+                    .right
+                    .scope
+                    .as_deref()
+                    .is_some_and(|scope| scope != output_scope)
+            {
+                return Err(err(
+                    policy_path(table, path),
+                    "Gather recursive hop must join its edge FK to the output row id",
+                ));
+            }
             (
                 left.as_ref(),
                 Some(output_table.as_str().to_owned()),
