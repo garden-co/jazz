@@ -448,7 +448,12 @@ export interface BranchView {
  */
 export type ReadTierOptions =
   | {
-      /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
+      /**
+       * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
+       *
+       * Reads default to local-first in browsers and React Native, and without a
+       * configured server; other environments with a server default to remote.
+       */
       tier?: typeof ReadTier.LocalFirst;
       /**
        * How long the initial load may wait for the server's answer, in
@@ -656,24 +661,7 @@ export interface ConnectRuntimeOptions {
 
 type QueryExecutionDefaultsContext = {
   serverUrl?: string;
-  defaultDurabilityTier?: DurabilityTier;
 };
-
-export function resolveDefaultDurabilityTier(
-  context: QueryExecutionDefaultsContext,
-): DurabilityTier {
-  if (context.defaultDurabilityTier) {
-    return context.defaultDurabilityTier;
-  }
-
-  if (isBrowserRuntime()) {
-    return "local";
-  }
-
-  // In non-browser environments, default to Core confirmation when connected to a server.
-  // For local/in-memory runtimes without a server, keep local semantics.
-  return context.serverUrl ? "global" : "local";
-}
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
@@ -681,7 +669,9 @@ export function resolveEffectiveQueryExecutionOptions(
 ): ResolvedQueryExecutionOptions {
   const tier =
     options?.tier ??
-    (resolveDefaultDurabilityTier(context) === "global" ? ReadTier.Remote : ReadTier.LocalFirst);
+    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
+      ? ReadTier.Remote
+      : ReadTier.LocalFirst);
   if (tier !== "local-only") rejectRemovedReadTier(tier);
   const firstLoadRemoteWaitMs =
     tier === ReadTier.LocalFirst
@@ -697,6 +687,10 @@ export function resolveEffectiveQueryExecutionOptions(
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function isReactNativeRuntime(): boolean {
+  return typeof navigator !== "undefined" && navigator.product === "ReactNative";
 }
 
 function getScheduler(): (task: () => void) => void {
@@ -1019,7 +1013,6 @@ export class JazzClient {
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
-  private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
@@ -1078,13 +1071,11 @@ export class JazzClient {
   private constructor(
     runtime: Runtime,
     context: AppContext,
-    defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
-    this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
 
     if (runtimeOptions?.onAuthFailure) {
@@ -1113,7 +1104,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
-    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
+    return new JazzClient(runtime, context, runtimeOptions);
   }
 
   beginTransaction(
@@ -1401,10 +1392,7 @@ export class JazzClient {
   private normalizeQueryExecutionOptions(
     options?: InternalQueryExecutionOptions,
   ): ResolvedInternalQueryExecutionOptions {
-    const resolved = resolveEffectiveQueryExecutionOptions(
-      { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
-      options,
-    );
+    const resolved = resolveEffectiveQueryExecutionOptions(this.context, options);
     if (!options?.openTransactionId) {
       return resolved;
     }
