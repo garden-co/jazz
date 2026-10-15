@@ -280,6 +280,13 @@ pub(super) fn lowered_terminals(
         let fields = graph_declared_output_fields(&closure.visible_root);
         (closure, fields)
     };
+    // Non-root covered members depend on the root's routes and on their own
+    // policy routes, which the root need not carry (a public root can
+    // reference private rows). Deliver each by every route it carries.
+    let member_route_scope = routing_param_fields
+        .union(&root_route_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let claim_route_fields = request
         .parameter_domain()
         .map_err(single_gap_report)?
@@ -350,7 +357,7 @@ pub(super) fn lowered_terminals(
                             source_id,
                             resolved_source,
                             plan.root_source(),
-                            &root_route_fields,
+                            &member_route_scope,
                             &root_source_route_fields,
                         ),
                     )),
@@ -372,7 +379,7 @@ pub(super) fn lowered_terminals(
         let resolved_source =
             ResolvedSource::lookup(resolved_sources, &contribution.source, "join contribution")?;
         let contribution_route_fields =
-            source_terminal_route_fields(resolved_source, &root_route_fields);
+            source_terminal_route_fields(resolved_source, &member_route_scope);
         let graph = if contribution.id.starts_with("flat_join:") {
             flat_join_contribution_membership_graph(
                 closure.visible_root.clone(),
@@ -424,7 +431,7 @@ pub(super) fn lowered_terminals(
             &contribution.source,
             "inherited contribution",
         )?;
-        let parent_route_fields = source_terminal_route_fields(parent_source, &root_route_fields);
+        let parent_route_fields = source_terminal_route_fields(parent_source, &member_route_scope);
         let graph = closure::inherited_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -453,7 +460,7 @@ pub(super) fn lowered_terminals(
             &contribution.access_source,
             "reachable contribution",
         )?;
-        let access_route_fields = source_terminal_route_fields(access_source, &root_route_fields);
+        let access_route_fields = source_terminal_route_fields(access_source, &member_route_scope);
         let graph = closure::reachable_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -953,7 +960,7 @@ pub(super) fn lowered_terminals(
                     source_id,
                     resolved_source,
                     plan.root_source(),
-                    &root_route_fields,
+                    &member_route_scope,
                     &root_source_route_fields,
                 );
                 push_witness_terminals(
@@ -983,7 +990,7 @@ pub(super) fn lowered_terminals(
                     source_id,
                     resolved_source,
                     plan.root_source(),
-                    &root_route_fields,
+                    &member_route_scope,
                     &root_source_route_fields,
                 );
                 let output = fact_output_with_terminal(

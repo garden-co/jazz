@@ -70,9 +70,16 @@ pub(super) fn lower_closure_membership(
             let Some(resolved_source) = resolved_sources.get(&source) else {
                 continue;
             };
+            // A closure member depends on the root's routes and on its own
+            // source policy routes. Both must survive so its terminal can
+            // deliver each binding's members separately.
+            let member_routes = route_fields
+                .union(&resolved_source.routing_fields)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let graph = graph.project_fields(project_source_fields_with_routes(
                 resolved_source,
-                route_fields,
+                &member_routes,
             ));
             union_member(&mut result_members, source, graph);
         }
@@ -708,6 +715,10 @@ fn closure_membership_graph_for_path(
     // (which include the complete table schema and graph) into this
     // synchronous compiler stack.
     let mut current_source = root_source;
+    // Binding routes the current graph carries. Every later join must key on
+    // the routes both sides carry, or one binding's parents would pair with
+    // another binding's targets.
+    let mut carried_routes = route_fields.clone();
     let mut outputs = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         let target = ResolvedSource::lookup(resolved_sources, &segment.target, "closure target")?;
@@ -733,13 +744,28 @@ fn closure_membership_graph_for_path(
                 [target.row_shape.row_uuid_field.clone()],
                 [source_key],
             )
-            .project_fields(project_source_fields_with_routes(target, route_fields))
+            // The root carries no binding route here, so the semi-join only
+            // narrows the target; the target keeps its own policy routes.
+            .project_fields(project_source_fields_with_routes(
+                target,
+                &target.routing_fields,
+            ))
         } else {
+            let shared_routes = carried_routes
+                .intersection(&target.routing_fields)
+                .cloned()
+                .collect::<Vec<_>>();
+            let target_only_routes = target
+                .routing_fields
+                .difference(&carried_routes)
+                .cloned()
+                .collect::<Vec<_>>();
             GraphBuilder::join(
                 current_graph.unwrap_nullable(source_key.clone()),
                 target.graph.clone(),
-                [source_key],
-                [target.row_shape.row_uuid_field.clone()],
+                std::iter::once(source_key).chain(shared_routes.iter().cloned()),
+                std::iter::once(target.row_shape.row_uuid_field.clone())
+                    .chain(shared_routes.iter().cloned()),
             )
             .project_fields(
                 project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
@@ -749,12 +775,18 @@ fn closure_membership_graph_for_path(
                         "__closure_root_row_uuid",
                     )])
                     .chain(
-                        route_fields
+                        carried_routes
                             .iter()
                             .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    )
+                    .chain(
+                        target_only_routes
+                            .iter()
+                            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
                     ),
             )
         };
+        carried_routes.extend(target.routing_fields.iter().cloned());
         if index + 1 == segments.len() {
             // The terminal graph is only consumed by the result-member
             // collector, so moving it avoids recursively cloning the entire
