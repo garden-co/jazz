@@ -51,6 +51,22 @@ impl StoredArrangementPlan {
         self.tracks_use.load(Ordering::Relaxed)
     }
 
+    /// A plan that reads nothing, for tests of the probed state alone.
+    #[cfg(test)]
+    pub(super) fn reading_nothing() -> Arc<Self> {
+        let descriptor = RecordDescriptor::new([("k", crate::schema::ColumnType::U64)]);
+        Arc::new(Self {
+            descriptor: descriptor.clone(),
+            fields: vec!["k".into()],
+            probe_parts: 1,
+            root: ProbeNode::Union {
+                output: descriptor,
+                inputs: Vec::new(),
+            },
+            tracks_use: Arc::default(),
+        })
+    }
+
     /// The storage keys that read the buckets of `keys`.
     fn probe_keys(&self, keys: &[JoinKey]) -> Result<Vec<JoinKey>, IvmRuntimeError> {
         if self.probe_parts == self.fields.len() {
@@ -577,9 +593,13 @@ impl TickEvaluator<'_> {
                     .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
                 let rows = requests
                     .iter()
-                    .filter_map(|request| loaded.get(request))
-                    .flatten()
-                    .map(|(_, row)| row.as_slice());
+                    .map(|request| {
+                        loaded
+                            .get(request)
+                            .ok_or(IvmRuntimeError::StoredArrangementUnprobed)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let rows = rows.into_iter().flatten().map(|(_, row)| row.as_slice());
                 let grouped = NodeState::group_source_rows(table, rows)?;
                 NodeState::update_table_source(
                     source,
@@ -879,12 +899,8 @@ impl TickEvaluator<'_> {
         stored: &[ArrangementKey],
     ) -> Result<(), IvmRuntimeError> {
         for key in stored {
-            if self
-                .arrangement_states
-                .get(key)
-                .is_some_and(|state| state.value().take_probe_miss())
-            {
-                return Err(IvmRuntimeError::StoredArrangementUnprobed);
+            if let Some(state) = self.arrangement_states.get(key) {
+                state.value().check_probed_reads()?;
             }
         }
         Ok(())

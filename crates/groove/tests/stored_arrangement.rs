@@ -9,6 +9,7 @@
 //! with each other and with one-shot queries.
 
 use std::collections::BTreeMap;
+use std::sync::mpsc::TryRecvError;
 
 use groove::db::{Database, GraphBuilder, PredicateExpr, PrimaryKeyValue};
 use groove::ivm::{AggregateExpr, AggregateFunction, LiteralValue, StaticScanSpec};
@@ -16,7 +17,7 @@ use groove::records::RecordDescriptor;
 use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, PrimaryKeyColumn,
-    TableSchema,
+    PrimaryKeyType, TableSchema,
 };
 use groove::storage::MemoryStorage;
 
@@ -239,6 +240,34 @@ async fn check_maintained_under(graph: GraphBuilder, budget: Option<usize>) -> u
     let mut held = open_db(false).await;
     seed(&mut stored).await;
     seed(&mut held).await;
+    check_agree(stored, held, graph, edits, false, budget).await
+}
+
+/// Drain every update `sub` has into `live`.
+fn drain(sub: &groove::db::Subscription, live: &mut Bag) {
+    loop {
+        match sub.try_recv() {
+            Ok(deltas) => add(live, deltas.to_values().unwrap()),
+            Err(TryRecvError::Empty) => return,
+            Err(error) => panic!("subscription failed: {error:?}"),
+        }
+    }
+}
+
+/// Subscribe to `graph` on two seeded databases, one with stored
+/// arrangements, and check them against each other and one-shot queries
+/// after every edit. `stats_between` reads runtime statistics after every
+/// edit, as a server does: statistics must not count as reads. `budget` is
+/// the stored database's arrangement budget, which its resident bytes stay
+/// within.
+async fn check_agree(
+    mut stored: Database,
+    mut held: Database,
+    graph: GraphBuilder,
+    edits: impl Fn() -> Vec<Edit>,
+    stats_between: bool,
+    budget: Option<usize>,
+) -> usize {
     let stored_sub = stored.subscribe_one_sink(graph.clone()).await.unwrap();
     let held_sub = held.subscribe_one_sink(graph.clone()).await.unwrap();
     let count = stored.runtime_stats().stored_arrangement_count;
@@ -257,12 +286,11 @@ async fn check_maintained_under(graph: GraphBuilder, budget: Option<usize>) -> u
     for (step, (stored_edit, held_edit)) in edits().into_iter().zip(edits()).enumerate() {
         apply(&mut stored, stored_edit).await;
         apply(&mut held, held_edit).await;
-        while let Ok(deltas) = stored_sub.try_recv() {
-            add(&mut stored_live, deltas.to_values().unwrap());
+        if stats_between {
+            stored.runtime_stats();
         }
-        while let Ok(deltas) = held_sub.try_recv() {
-            add(&mut held_live, deltas.to_values().unwrap());
-        }
+        drain(&stored_sub, &mut stored_live);
+        drain(&held_sub, &mut held_live);
         assert_eq!(stored_live, held_live, "step {step}, budget {budget:?}");
         assert_eq!(
             held_live,
@@ -280,6 +308,183 @@ async fn check_maintained_under(graph: GraphBuilder, budget: Option<usize>) -> u
         }
     }
     count
+}
+
+/// Reading runtime statistics between edits walks every arrangement; it
+/// must not count as an unprobed read and fail the next evaluation.
+#[futures_test::test]
+async fn statistics_between_edits_leave_stored_reads_intact() {
+    let graphs = [
+        GraphBuilder::join(
+            GraphBuilder::table("docs"),
+            project_source(),
+            ["project"],
+            ["id"],
+        ),
+        GraphBuilder::anti_join(
+            GraphBuilder::table("docs"),
+            layered_source(),
+            ["project"],
+            ["id"],
+        ),
+        versions_per_project(),
+    ];
+    for graph in graphs {
+        for budget in BUDGETS {
+            let mut stored = open_budgeted(budget).await;
+            let mut held = open_db(false).await;
+            seed(&mut stored).await;
+            seed(&mut held).await;
+            let count = check_agree(stored, held, graph.clone(), edits, true, budget).await;
+            assert!(count > 0);
+        }
+    }
+}
+
+/// Tags keyed by one non-integer column, and notes pointing at them.
+fn keyed_schema(key: ColumnType, key_type: PrimaryKeyType) -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "tags",
+            [
+                ColumnSchema::new("key", key.clone()),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::new(
+            "key", key_type,
+        )])),
+        TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("tag", key),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64).user_supplied()),
+    ])
+}
+
+/// Joins on a tag key of `key` type agree with the held plan. `keys` holds
+/// five distinct keys; the tests pick ones whose encodings are prefixes of
+/// each other or hold zero bytes, which a key codec must keep apart.
+async fn check_keyed(
+    key: ColumnType,
+    key_type: PrimaryKeyType,
+    keys: [(Value, PrimaryKeyValue); 5],
+) {
+    let open = |stored: bool| {
+        let schema = keyed_schema(key.clone(), key_type.clone());
+        async move {
+            let storage = MemoryStorage::new(&["tags", "notes"]).expect("valid families");
+            let mut db = Database::new(schema, storage).await.unwrap();
+            db.set_stored_arrangements_enabled(stored);
+            db
+        }
+    };
+    let tag = |k: usize, label: &str| vec![keys[k].0.clone(), Value::String(label.into())];
+    let note = |id: u64, k: usize| vec![Value::U64(id), keys[k].0.clone()];
+    let seed = |b: &mut groove::db::DatabaseBatch| {
+        for k in 0..4 {
+            b.insert("tags", tag(k, &format!("tag {k}")));
+        }
+        b.insert("notes", note(1, 0));
+        b.insert("notes", note(2, 1));
+        b.insert("notes", note(3, 2));
+        b.insert("notes", note(4, 4));
+    };
+    let edits = || -> Vec<Edit> {
+        let tag_key = |k: usize| PrimaryKeyValue::Composite(vec![keys[k].1.clone()]);
+        vec![
+            Box::new({
+                let row = tag(4, "tag 4");
+                move |b| b.insert("tags", row)
+            }),
+            Box::new({
+                let row = tag(1, "tag 1 renamed");
+                move |b| b.update("tags", row)
+            }),
+            Box::new({
+                let key = tag_key(0);
+                move |b| b.delete("tags", key)
+            }),
+            Box::new({
+                let row = note(2, 3);
+                move |b| b.update("notes", row)
+            }),
+            Box::new({
+                let row = note(5, 1);
+                move |b| b.insert("notes", row)
+            }),
+            Box::new(|b| b.delete("notes", PrimaryKeyValue::U64(1))),
+            Box::new({
+                let row = tag(0, "tag 0 back");
+                move |b| b.insert("tags", row)
+            }),
+        ]
+    };
+    let notes = || GraphBuilder::table("notes");
+    let tags = || GraphBuilder::table("tags");
+    let graphs = [
+        GraphBuilder::join(notes(), tags(), ["tag"], ["key"]),
+        GraphBuilder::semi_join(notes(), tags(), ["tag"], ["key"]),
+        GraphBuilder::anti_join(notes(), tags(), ["tag"], ["key"]),
+    ];
+    for graph in graphs {
+        let mut stored = open(true).await;
+        let mut held = open(false).await;
+        apply(&mut stored, seed).await;
+        apply(&mut held, seed).await;
+        assert!(check_agree(stored, held, graph, edits, true, None).await > 0);
+    }
+}
+
+#[futures_test::test]
+async fn string_keys_read_by_key() {
+    let key = |s: &str| (Value::String(s.into()), PrimaryKeyValue::String(s.into()));
+    check_keyed(
+        ColumnType::String,
+        PrimaryKeyType::String,
+        [key("ab"), key("abc"), key("a\0"), key("a"), key("")],
+    )
+    .await;
+}
+
+#[futures_test::test]
+async fn bytes_keys_read_by_key() {
+    let key = |b: &[u8]| (Value::Bytes(b.to_vec()), PrimaryKeyValue::Bytes(b.to_vec()));
+    check_keyed(
+        ColumnType::Bytes,
+        PrimaryKeyType::Bytes,
+        [
+            key(b"ab"),
+            key(b"abc"),
+            key(&[0]),
+            key(&[0, 0]),
+            key(b"a\0c"),
+        ],
+    )
+    .await;
+}
+
+#[futures_test::test]
+async fn uuid_keys_read_by_key() {
+    let key = |n: u128| {
+        let id = uuid::Uuid::from_u128(n);
+        (Value::Uuid(id), PrimaryKeyValue::Uuid(id))
+    };
+    check_keyed(
+        ColumnType::Uuid,
+        PrimaryKeyType::Uuid,
+        [
+            key(0),
+            key(1),
+            key(1 << 8),
+            key(u128::MAX),
+            key(u128::MAX - 1),
+        ],
+    )
+    .await;
 }
 
 /// Joins with the project source on either side: the source is read by
@@ -371,7 +576,11 @@ async fn keys_extending_the_primary_key_read_by_its_leading_part() {
 /// each changed group from storage.
 #[futures_test::test]
 async fn aggregates_read_stored_groups_by_key() {
-    let graph = GraphBuilder::aggregate(
+    assert!(check_maintained(versions_per_project()).await > 0);
+}
+
+fn versions_per_project() -> GraphBuilder {
+    GraphBuilder::aggregate(
         branch("versions"),
         ["id"],
         [AggregateExpr {
@@ -381,8 +590,7 @@ async fn aggregates_read_stored_groups_by_key() {
             output_name: Some("versions".to_owned()),
             output_identity: None,
         }],
-    );
-    assert!(check_maintained(graph).await > 0);
+    )
 }
 
 /// Only an arrangement keyed on the primary key after the static prefix is

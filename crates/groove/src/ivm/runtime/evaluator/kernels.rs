@@ -11,6 +11,12 @@ impl TickEvaluator<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         // Consumers of stored arrangements read only buckets loaded for them.
         let stored = self.prefetch_stored_inputs_now(node)?;
+        // A miss counts only within this operator's own evaluation.
+        for key in &stored {
+            if let Some(state) = self.arrangement_states.get(key) {
+                state.value().take_probe_miss();
+            }
+        }
         let output = self.compute_operator_batch(node, inputs)?;
         self.check_stored_reads(&stored)?;
         Ok(output)
