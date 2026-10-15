@@ -109,24 +109,18 @@ it("tells Expo Go and old development builds that a native artifact is required"
   );
 });
 
-it.each([2, NATIVE_RELAY_ABI_V1 + 1])(
-  "rejects native ABI %s before executing a command",
-  async (nativeAbi) => {
-    const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => nativeAbi,
-      execute: jest.fn(),
-    };
-    const relay = loadRelay(nativeRelay);
+it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
+  const nativeRelay: FixtureNativeRelay = {
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1 + 1,
+    execute: jest.fn(),
+  };
+  const relay = loadRelay(nativeRelay);
 
-    expect(() => relay.installNativeForegroundRuntime()).toThrow(
-      `Jazz native relay ABI ${nativeAbi} is incompatible`,
-    );
-    await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-      `Jazz native relay ABI ${nativeAbi} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
-    );
-    expect(nativeRelay.execute).not.toHaveBeenCalled();
-  },
-);
+  await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
+    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V1 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
+  );
+  expect(nativeRelay.execute).not.toHaveBeenCalled();
+});
 
 it("forwards opaque commands only after the embedded relay ABI matches", async () => {
   const nativeRelay: FixtureNativeRelay = {

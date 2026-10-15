@@ -66,9 +66,8 @@ use thiserror::Error;
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure. ABI 3 changes primitive scalar
-/// tags from 2 to 0 in foreground row payloads.
-pub const NATIVE_RELAY_ABI_V1: u16 = 3;
+/// refuse to open rather than misread a failure.
+pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
