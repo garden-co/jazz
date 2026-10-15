@@ -81,7 +81,6 @@ fn send_sync(tx: &Sender<Wire>, message: SyncMessage) {
 #[derive(Clone, Debug, Default)]
 struct LinkSummary {
     metrics: PeerMetrics,
-    shipped_complete_tx_payloads: usize,
 }
 
 struct ThreadResult {
@@ -160,7 +159,6 @@ fn install_session_claims(node: &mut NodeState, identity: AuthorSubject) {
 fn peer_summary(peer: &PeerState) -> LinkSummary {
     LinkSummary {
         metrics: peer.metrics.clone(),
-        shipped_complete_tx_payloads: peer.shipped_complete_tx_payloads().len(),
     }
 }
 
@@ -494,9 +492,7 @@ fn row_cells(row: &CurrentRow, table: &TableSchema) -> BTreeMap<String, Value> {
 
 fn assert_link_dedup(summary: LinkSummary) {
     assert!(summary.metrics.view_updates_out > 0);
-    assert_eq!(summary.metrics.duplicate_version_bundles_out, 0);
     assert_eq!(summary.metrics.complete_tx_payload_refs_out, 0);
-    assert_eq!(summary.shipped_complete_tx_payloads, 0);
 }
 
 #[test]

@@ -181,10 +181,6 @@ pub(super) fn duplicate_physical_row_result_set(
     None
 }
 
-pub(super) fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
-    bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
-}
-
 pub(super) fn view_update_singleton_bundles(
     version_carriers: &[VersionCarrier],
 ) -> Vec<VersionBundle> {

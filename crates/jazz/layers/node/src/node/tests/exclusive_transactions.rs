@@ -1638,7 +1638,6 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
             .added_rows().iter()
             .any(|fact| { matches!(fact, input if input.row == row(1)) })
     );
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     let tx_id = bundle.tx.tx_id;
 
@@ -1851,7 +1850,6 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     let second = peer
         .rehydrate_query(&mut core, &second_shape, &second_binding)
@@ -1872,7 +1870,6 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert!(complete_tx_payload_refs.is_empty());
-    assert!(peer.shipped_complete_tx_payloads().is_empty());
 }
 #[test]
 fn exclusive_view_shipping_is_view_atomic_per_recipient() {
@@ -1942,7 +1939,6 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
             version_bundles[0].tx.tx_id
         )]
     );
-    assert!(link_a.shipped_complete_tx_payloads().is_empty());
     reader_a.apply_sync_message_settled(update_a).unwrap();
     assert_eq!(
         reader_a

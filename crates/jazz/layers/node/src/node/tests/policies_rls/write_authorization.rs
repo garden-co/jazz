@@ -867,7 +867,6 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         )]
     );
     assert!(complete_tx_payloads.is_empty());
-    assert!(!bob_peer.shipped_complete_tx_payloads().contains(&tx_id));
     let shipped_rows = version_bundles
         .iter()
         .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
