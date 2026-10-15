@@ -45,12 +45,7 @@ impl AccountRegistryOwner {
             .spawn(move || {
                 let storage: Result<BoxedStorage, String> = match durable {
                     Some((factory, path)) => {
-                        let profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-                            .and_then(|profile| {
-                                // Versions this isolated root's journal keys and closed
-                                // descriptor; values use ordinary Groove records.
-                                profile.with_additional_codecs(["jazz.account-journal.v1"])
-                            });
+                        let profile = jazz::storage_codec_profile::account_storage_codec_profile();
                         profile
                             .map_err(|error| error.to_string())
                             .and_then(|profile| {
@@ -268,8 +263,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("accounts.rocksdb");
         let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-            .unwrap()
+        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
             .with_additional_codecs(["jazz.account-command.v1"])
             .unwrap();
         jazz::db::block_on(async {
