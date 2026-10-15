@@ -113,8 +113,8 @@ struct EnumHuman {
 /// Public `Value` is a host-facing shape, not a generic postcard payload.
 ///
 /// JSON preserves all row metadata. Production binary row boundaries instead
-/// use the descriptor/raw-record codecs in `admin_catalogue_row_format` and the
-/// native runtime, which carry an optional nested-row id explicitly.
+/// use the native runtime's descriptor/raw-record codecs, which carry an
+/// optional nested-row id explicitly.
 const NON_HUMAN_VALUE_CODEC_ERROR: &str =
     "public Value does not support non-human serde codecs; use the descriptor/raw row codec";
 

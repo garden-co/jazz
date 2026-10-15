@@ -69,13 +69,47 @@ chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
 evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
 
 Lowered subscription installation selects Groove's prepared-shape lifetime.
-Private retained serving shapes transfer ownership to their bindings after a
-successful opening; their last binding releases the registration. Retained
-client-local installations keep the existing shared-shape policy. First-result
-reads keep explicit ownership of their private preparation and retire it on
-completion or cancellation. While binding is suspended, the Jazz installation
+Retained installations, client-local and trusted serving alike, use shared
+prepared shapes: subscribers with identical terminals bind one shape, and its
+last binding releases the registration. A trusted-serving binding source is
+shared across sessions: claim values bound as binding slots (including a
+policy's equality against a carried claim) are part of a session's binding key,
+and a claim the graph still inlines as a literal makes its terminals, and so
+its shape, distinct. Client-local sources stay scoped to the session's claims. First-result reads keep explicit ownership of their
+private preparation and retire it on completion or cancellation. While binding is suspended, the Jazz installation
 guard still owns a caller-owned preparation. This changes resource ownership,
 not query results, authorisation routing, or storage and wire encodings.
+
+A shared prepared program is only sound when every operator keeps bindings
+apart. Before a trusted-serving program is installed, the node checks its
+lowered graphs structurally against the binding routes the parameter domain
+declares (`route_discipline.rs`). A node depends on a route when a binding
+source for it lies below. Then:
+
+- every terminal delivers by every route its graph depends on;
+- a binding-dependent join input carries the routes it depends on, an inner
+  join keys on every route both inputs carry, and a semi or anti join keys on
+  every route its right input depends on;
+- aggregates, arg-max/min, windows and collect-by group on every route their
+  input depends on;
+- a lookup keyed by binding values depends on no route: its rows serve every
+  binding at once, and pairing them with a route is sound only on the
+  lookup's own key, which the check cannot yet identify;
+- recursive operators and streaming checksums depend on no route.
+
+A typed query template is checked as the declarative operators it was compiled
+from; one that cannot be expanded must depend on no route. Every program whose
+graphs read a binding source is checked, including one compiled without a
+source name (recursive and frontier policies seeded from claim slots).
+
+A program that breaks a rule is not shared: its binding source is renamed to a
+per-session, per-binding name, so it behaves exactly as a private preparation.
+A program that passes reads a binding source named after its own lowered
+graphs. Equal programs share it, and a program whose graph inlines a session's
+claims reads only its own bindings, never every session's of its signature.
+The check is the safety net; lowering paths that keep routes (closure joins
+key on routes both sides carry, include-deleted policy sources declare their
+routes) are what let a program share.
 
 ### 14.2 Schema → groove
 

@@ -47,6 +47,14 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
+/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row
+/// (keyed by physical table id, which a table rename keeps) and writer node,
+/// the newest transaction time of that node's writes to the row that Core
+/// passed over when it decided a later write of the node chained on a
+/// predecessor it holds no decision for (unknown, or stored Pending). A write
+/// of that node at or before the time arriving afterwards is late
+/// (`INV-HIST-23`).
+pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 /// Retired: the scope relay's row-version repair ledger. Nothing writes or
 /// reads it since the repair lane was removed; it stays registered so stores
 /// that already hold it still open.
@@ -616,6 +624,16 @@ impl RuntimeSchema {
                     ("row", ValueType::Uuid),
                 ]),
                 local_availability_record_descriptor(),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                SUPERSEDED_WRITES_STORE,
+                RecordDescriptor::new([
+                    ("physical_table_id", ValueType::U64),
+                    ("branch_key", ValueType::Bytes),
+                    ("row", ValueType::Uuid),
+                    ("node", ValueType::Uuid),
+                ]),
+                RecordDescriptor::new([("superseded_through", ValueType::U64)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SCOPE_RELAY_REPAIR_LEDGER_STORE,

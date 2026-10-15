@@ -57,7 +57,7 @@ use crate::query::{
 };
 use crate::schema::{
     AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE,
-    SETTLED_PROGRAM_FACTS_STORE, TableSchema, registered_column_transform,
+    SETTLED_PROGRAM_FACTS_STORE, SUPERSEDED_WRITES_STORE, TableSchema, registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{
@@ -1027,6 +1027,9 @@ struct Parking {
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
+    /// The newest `now_ms` an authority commit ingest has seen: the clock a
+    /// write's wait behind a parked predecessor is bounded by.
+    newest_ingest_ms: u64,
 }
 
 /// Recently stored transaction versions with a row-addressable cache view.

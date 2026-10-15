@@ -601,6 +601,102 @@ pub enum Predicate {
     IsNull(Operand),
 }
 
+impl Predicate {
+    /// Calls `f` on every operand of this predicate, descending through
+    /// `All`, `Any`, `Not` and `EnumMatch` payloads.
+    pub fn for_each_operand_mut(&mut self, f: &mut impl FnMut(&mut Operand)) {
+        match self {
+            Self::All(predicates) | Self::Any(predicates) => {
+                for predicate in predicates {
+                    predicate.for_each_operand_mut(f);
+                }
+            }
+            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
+                predicate.for_each_operand_mut(f);
+            }
+            Self::Eq(left, right)
+            | Self::Ne(left, right)
+            | Self::Gt(left, right)
+            | Self::Gte(left, right)
+            | Self::Lt(left, right)
+            | Self::Lte(left, right)
+            | Self::Contains(left, right) => {
+                f(left);
+                f(right);
+            }
+            Self::In(left, values) => {
+                f(left);
+                values.iter_mut().for_each(f);
+            }
+            Self::IsNull(operand) => f(operand),
+        }
+    }
+
+    /// Whether `f` holds for some operand, visiting operands in the same
+    /// order as [`Predicate::for_each_operand_mut`] and stopping at the first.
+    pub fn any_operand(&self, f: &mut impl FnMut(&Operand) -> bool) -> bool {
+        match self {
+            Self::All(predicates) | Self::Any(predicates) => {
+                predicates.iter().any(|predicate| predicate.any_operand(f))
+            }
+            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
+                predicate.any_operand(f)
+            }
+            Self::Eq(left, right)
+            | Self::Ne(left, right)
+            | Self::Gt(left, right)
+            | Self::Gte(left, right)
+            | Self::Lt(left, right)
+            | Self::Lte(left, right)
+            | Self::Contains(left, right) => f(left) || f(right),
+            Self::In(left, values) => f(left) || values.iter().any(f),
+            Self::IsNull(operand) => f(operand),
+        }
+    }
+}
+
+impl Query {
+    /// Calls `f` on each top-level predicate of the query's row conditions:
+    /// its filters, join filters (including nested joins), reachable
+    /// access/edge/seed filters, and the same lists in every policy branch.
+    /// Flat joins, array subqueries, includes and relations are not visited.
+    pub fn for_each_condition_mut(&mut self, f: &mut impl FnMut(&mut Predicate)) {
+        for_each_condition_in(&mut self.filters, &mut self.joins, &mut self.reachable, f);
+        for branch in &mut self.policy_branches {
+            for_each_condition_in(&mut branch.filters, &mut branch.joins, &mut branch.reachable, f);
+        }
+    }
+}
+
+fn for_each_condition_in(
+    filters: &mut [Predicate],
+    joins: &mut [JoinVia],
+    reachable: &mut [ReachableVia],
+    f: &mut impl FnMut(&mut Predicate),
+) {
+    filters.iter_mut().for_each(&mut *f);
+    for join in joins {
+        join.for_each_condition_mut(f);
+    }
+    for reachable in reachable {
+        reachable.access_filters.iter_mut().for_each(&mut *f);
+        reachable.edge_filters.iter_mut().for_each(&mut *f);
+        if let Some(seed) = &mut reachable.seed {
+            seed.filters.iter_mut().for_each(&mut *f);
+        }
+    }
+}
+
+impl JoinVia {
+    /// Calls `f` on each top-level filter of this join and its nested joins.
+    pub fn for_each_condition_mut(&mut self, f: &mut impl FnMut(&mut Predicate)) {
+        self.filters.iter_mut().for_each(&mut *f);
+        for join in &mut self.nested_joins {
+            join.for_each_condition_mut(f);
+        }
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for Predicate {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

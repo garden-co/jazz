@@ -1,23 +1,10 @@
 use super::*;
 use uuid::Uuid;
 
-#[test]
-fn column_type_fixed_sizes() {
-    assert_eq!(ColumnType::Integer.fixed_size(), Some(4));
-    assert_eq!(ColumnType::BigInt.fixed_size(), Some(8));
-    assert_eq!(ColumnType::Boolean.fixed_size(), Some(1));
-    assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
-    assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
-    assert_eq!(ColumnType::TransactionId.fixed_size(), Some(16));
-    assert_eq!(ColumnType::Text.fixed_size(), None);
-    assert_eq!(ColumnType::Bytea.fixed_size(), None);
-    assert_eq!(
-        ColumnType::Enum {
-            variants: vec!["a".to_string()]
-        }
-        .fixed_size(),
-        Some(1)
-    );
+fn descriptor_hash(descriptor: &RowDescriptor) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hash_row_descriptor(&mut hasher, descriptor);
+    *hasher.finalize().as_bytes()
 }
 
 #[test]
@@ -113,9 +100,6 @@ fn row_descriptor_column_lookup() {
     assert_eq!(descriptor.column_index("name"), Some(1));
     assert_eq!(descriptor.column_index("age"), Some(2));
     assert_eq!(descriptor.column_index("unknown"), None);
-
-    assert_eq!(descriptor.fixed_column_count(), 2); // id (uuid) + age (integer)
-    assert_eq!(descriptor.variable_column_count(), 1); // name (text)
 }
 
 #[test]
@@ -210,8 +194,8 @@ fn row_descriptor_hash_changes_when_merge_strategy_changes() {
     ]);
 
     assert_ne!(
-        lww.content_hash(),
-        counter.content_hash(),
+        descriptor_hash(&lww),
+        descriptor_hash(&counter),
         "changing only the merge strategy should change the schema hash"
     );
 }
@@ -793,40 +777,20 @@ fn row_descriptor_content_hash() {
     ]);
 
     // Same columns, different order -> different hash because physical layout changes.
-    assert_ne!(desc1.content_hash(), desc2.content_hash());
+    assert_ne!(descriptor_hash(&desc1), descriptor_hash(&desc2));
 
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);
-    assert_ne!(desc1.content_hash(), desc3.content_hash());
+    assert_ne!(descriptor_hash(&desc1), descriptor_hash(&desc3));
 
     let desc4 = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Uuid),
         ColumnDescriptor::new("name", ColumnType::Text).default(Value::Text("anonymous".into())),
     ]);
     assert_ne!(
-        desc1.content_hash(),
-        desc4.content_hash(),
+        descriptor_hash(&desc1),
+        descriptor_hash(&desc4),
         "Column defaults should affect row descriptor content hash"
-    );
-}
-
-#[test]
-fn cloned_row_descriptor_recomputes_content_hash_after_mutation() {
-    let desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Uuid),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-    let original_hash = desc.content_hash();
-
-    let mut cloned = desc.clone();
-    cloned
-        .columns
-        .push(ColumnDescriptor::new("can_edit", ColumnType::Boolean));
-
-    assert_ne!(
-        original_hash,
-        cloned.content_hash(),
-        "A cloned descriptor must not reuse a stale cached hash after its columns change"
     );
 }
 

@@ -2,6 +2,14 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Apply a node batch and wait until it is durably persisted.
+    async fn apply_and_persist_node_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
+        let applied = self.apply_node_batch(batch).await?;
+        let persisted = self.database.persist_with_progress(&applied).await;
+        self.database.finish_persistence(persisted)?;
+        Ok(())
+    }
+
     /// Reservation history for admitting `candidate_schema`. Descendant parked
     /// envelopes are excluded: they are allowed to inherit identities minted
     /// by this candidate, even when they arrived out of order. Unrelated
@@ -199,18 +207,13 @@ where
 
     async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::Schema.key()),
-                Value::Uuid(schema.id.0),
-                Value::Bytes(codec::encode_catalogue_schema(schema)?),
-            ],
+        put_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::Schema,
+            schema.id.0,
+            codec::encode_catalogue_schema(schema)?,
         );
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
-        Ok(())
+        self.apply_and_persist_node_batch(batch).await
     }
 
     fn hydrate_enum_case_mapping(
@@ -254,51 +257,25 @@ self.database.finish_persistence(persisted)?;
                 }
                 install_enum_case_ids(physical.scalar_enum_cases.entry(id).or_default(), ids, schema_version)?;
             }
+            // Each column writes only its own registry entries, so payload
+            // and non-payload columns hydrate in one pass.
             for column in &table.columns {
-                let records::ValueType::Enum(enum_schema) = &column.column_type else {
-                    continue;
-                };
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
                 let identities = &table_identities.columns[&column.name].enum_variants;
-                let ids = &identities["root"];
-                if ids.len() != enum_schema.cases.len() {
-                    return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                if let records::ValueType::Enum(enum_schema) = &column.column_type {
+                    let ids = &identities["root"];
+                    if ids.len() != enum_schema.cases.len() {
+                        return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                    }
+                    install_payload_enum_case_ids(
+                        physical.payload_enum_cases.entry(id).or_default(),
+                        ids,
+                        schema_version,
+                    )?;
                 }
-                install_payload_enum_case_ids(
-                    physical.payload_enum_cases.entry(id).or_default(),
-                    ids,
-                    schema_version,
-                )?;
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
-                hydrate_nested_scalar_enum_cases(
-                    &column.column_type,
-                    identities,
-                    schema_version,
-                    "root",
-                    "root",
-                    nested,
-                )?;
-                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
-                hydrate_nested_payload_enum_cases(
-                    &column.column_type,
-                    identities,
-                    schema_version,
-                    "root",
-                    "root",
-                    nested_payload,
-                )?;
-            }
-            for column in &table.columns {
-                if matches!(column.column_type, records::ValueType::Enum(_)) {
-                    continue;
-                }
-                let Some(id) = physical.columns.get(&column.name).copied() else {
-                    continue;
-                };
-                let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
-                let identities = &table_identities.columns[&column.name].enum_variants;
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
                     identities,
@@ -422,9 +399,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
+        self.apply_and_persist_node_batch(batch).await?;
         self.catalogue
             .schema_version_aliases
             .insert(schema_version, alias);
@@ -969,18 +944,13 @@ self.database.finish_persistence(persisted)?;
         staged: &StagedSchemaLineage,
     ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
-                Value::Uuid(staged.publication.id.0),
-                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
-            ],
+        put_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::SchemaLineageStaged,
+            staged.publication.id.0,
+            codec::encode_catalogue_staged_lineage(staged)?,
         );
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
-        Ok(())
+        self.apply_and_persist_node_batch(batch).await
     }
 
     async fn persist_pending_schema_lineage(
@@ -989,18 +959,13 @@ self.database.finish_persistence(persisted)?;
     ) -> Result<(), Error> {
         self.validate_pending_schema_lineage_physical_mapping(pending)?;
         let mut batch = self.database.open_batch();
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
-                Value::Uuid(pending.publication.id.0),
-                Value::Bytes(codec::encode_catalogue_pending_lineage(pending)?),
-            ],
+        put_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::SchemaLineagePending,
+            pending.publication.id.0,
+            codec::encode_catalogue_pending_lineage(pending)?,
         );
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
-        Ok(())
+        self.apply_and_persist_node_batch(batch).await
     }
 
     async fn remove_pending_schema_lineage(
@@ -1009,16 +974,12 @@ self.database.finish_persistence(persisted)?;
         publication_id: SchemaLineagePublicationId,
     ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
-        batch.delete(
-            "jazz_catalogue",
-            PrimaryKeyValue::Composite(vec![
-                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
-                PrimaryKeyValue::Uuid(publication_id.0),
-            ]),
+        delete_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::SchemaLineagePending,
+            publication_id.0,
         );
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
+        self.apply_and_persist_node_batch(batch).await?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
         Ok(())
     }
@@ -1035,41 +996,33 @@ self.database.finish_persistence(persisted)?;
         // lineage.  Delete it in the same batch that makes the schema, lens,
         // mapping, and active receipt visible, so an active recovery state
         // never also carries a stale pending obligation.
-        batch.delete(
-            "jazz_catalogue",
-            PrimaryKeyValue::Composite(vec![
-                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
-                PrimaryKeyValue::Uuid(staged.publication.id.0),
-            ]),
+        delete_catalogue(
+            batch,
+            codec::CatalogueRecordKind::SchemaLineagePending,
+            staged.publication.id.0,
         );
         // The active marker only carries an id and sequence. Persist its
         // canonical payload in the same durable activation batch so recovery
         // can prove both the prefix identity and its exact sequence.
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
-                Value::Uuid(staged.publication.id.0),
-                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
-            ],
+        put_catalogue(
+            batch,
+            codec::CatalogueRecordKind::SchemaLineageStaged,
+            staged.publication.id.0,
+            codec::encode_catalogue_staged_lineage(staged)?,
         );
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::Schema.key()),
-                Value::Uuid(schema.id.0),
-                Value::Bytes(codec::encode_catalogue_schema(schema)?),
-            ],
+        put_catalogue(
+            batch,
+            codec::CatalogueRecordKind::Schema,
+            schema.id.0,
+            codec::encode_catalogue_schema(schema)?,
         );
         for predecessor in &staged.publication.predecessors {
             let lens = &predecessor.lens;
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::Lens.key()),
-                    Value::Uuid(lens.id.0),
-                    Value::Bytes(codec::encode_catalogue_lens(lens)),
-                ],
+            put_catalogue(
+                batch,
+                codec::CatalogueRecordKind::Lens,
+                lens.id.0,
+                codec::encode_catalogue_lens(lens),
             );
         }
         Self::write_schema_version_mapping_to_batch(
@@ -1082,13 +1035,11 @@ self.database.finish_persistence(persisted)?;
             id: staged.publication.id,
             catalogue_seq: staged.catalogue_seq,
         };
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::SchemaLineageActive.key()),
-                Value::Uuid(active.id.0),
-                Value::Bytes(codec::encode_catalogue_lineage_activation(active)),
-            ],
+        put_catalogue(
+            batch,
+            codec::CatalogueRecordKind::SchemaLineageActive,
+            active.id.0,
+            codec::encode_catalogue_lineage_activation(active),
         );
         Ok(())
     }
@@ -1099,13 +1050,11 @@ self.database.finish_persistence(persisted)?;
         mapping: Option<&SchemaPhysicalMapping>,
     ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::Lens.key()),
-                Value::Uuid(lens.id.0),
-                Value::Bytes(codec::encode_catalogue_lens(lens)),
-            ],
+        put_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::Lens,
+            lens.id.0,
+            codec::encode_catalogue_lens(lens),
         );
         if let Some(mapping) = mapping {
             let alias = *self
@@ -1117,10 +1066,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
-        Ok(())
+        self.apply_and_persist_node_batch(batch).await
     }
 
     fn write_schema_version_mapping_to_batch(
@@ -1148,13 +1094,11 @@ self.database.finish_persistence(persisted)?;
             "jazz_catalogue_pointer",
             vec![Value::U64(active.revision), Value::Uuid(active.schema.0)],
         );
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
-                Value::Uuid(uuid::Uuid::nil()),
-                Value::Bytes(codec::encode_active_schema(active)?),
-            ],
+        put_catalogue(
+            batch,
+            codec::CatalogueRecordKind::ActiveSchema,
+            uuid::Uuid::nil(),
+            codec::encode_active_schema(active)?,
         );
         Ok(())
     }
@@ -1184,13 +1128,11 @@ self.database.finish_persistence(persisted)?;
                 current_write_schema: active.wire_pointer(),
                 active_catalogue_seq: self.catalogue.active_catalogue_seq,
             };
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
-                    Value::Uuid(ready.genesis.0),
-                    Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
-                ],
+            put_catalogue(
+                batch,
+                codec::CatalogueRecordKind::BootstrapReady,
+                ready.genesis.0,
+                codec::encode_catalogue_bootstrap_ready(&ready),
             );
         }
         Ok(())
@@ -1203,18 +1145,13 @@ self.database.finish_persistence(persisted)?;
             .await?;
         // Migrate a legacy policy-bearing catalogue payload on first activation.
         let structural = SchemaVersion::new(active.compiled.without_permissions());
-        batch.update(
-            "jazz_catalogue",
-            vec![
-                Value::U64(codec::CatalogueRecordKind::Schema.key()),
-                Value::Uuid(structural.id.0),
-                Value::Bytes(codec::encode_catalogue_schema(&structural)?),
-            ],
+        put_catalogue(
+            &mut batch,
+            codec::CatalogueRecordKind::Schema,
+            structural.id.0,
+            codec::encode_catalogue_schema(&structural)?,
         );
-        let applied = self.apply_node_batch(batch).await?;
-        let persisted = self.database.persist_with_progress(&applied).await;
-        self.database.finish_persistence(persisted)?;
-        Ok(())
+        self.apply_and_persist_node_batch(batch).await
     }
 
     /// Internal fixture utility for native integration tests and simulation harnesses.
@@ -1369,9 +1306,7 @@ self.database.finish_persistence(persisted)?;
             "jazz_nodes",
             vec![Value::U32(alias.0), Value::Uuid(node_uuid.0)],
         );
-        let applied = self.apply_node_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
+        self.apply_and_persist_node_batch(batch).await?;
         // This mapping is a durable prerequisite for every later row that
         // contains the compact alias.  Do not leave an in-memory alias behind
         // if resident application or ordered persistence fails: the caller may
@@ -1418,4 +1353,46 @@ self.database.finish_persistence(persisted)?;
             .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
     }
 
+}
+
+impl SchemaCatalogue {
+    /// The compiled schema for `version`: the active schema (carrying its
+    /// permissions), the node's local API schema, or a catalogue entry.
+    fn schema_for_version(&self, version: SchemaVersionId) -> Option<&JazzSchema> {
+        if version == self.active_schema.schema {
+            Some(&self.active_schema.compiled)
+        } else if version == self.local_schema_version_id {
+            Some(&self.schema)
+        } else {
+            self.catalogue_schemas.get(&version).map(|entry| &entry.schema)
+        }
+    }
+}
+
+/// Stage an upsert of one `jazz_catalogue` record.
+fn put_catalogue(
+    batch: &mut DatabaseBatch,
+    kind: codec::CatalogueRecordKind,
+    id: uuid::Uuid,
+    payload: Vec<u8>,
+) {
+    batch.update(
+        "jazz_catalogue",
+        vec![
+            Value::U64(kind.key()),
+            Value::Uuid(id),
+            Value::Bytes(payload),
+        ],
+    );
+}
+
+/// Stage the deletion of one `jazz_catalogue` record.
+fn delete_catalogue(batch: &mut DatabaseBatch, kind: codec::CatalogueRecordKind, id: uuid::Uuid) {
+    batch.delete(
+        "jazz_catalogue",
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(kind.key()),
+            PrimaryKeyValue::Uuid(id),
+        ]),
+    );
 }
