@@ -960,7 +960,7 @@ mod tests {
         )
         .expect("catalogue");
         let leaf = || RelationExpr::TableScan {
-            table: TableName::new("todos"),
+            table: String::from("todos"),
             alias: None,
         };
         for labels in [

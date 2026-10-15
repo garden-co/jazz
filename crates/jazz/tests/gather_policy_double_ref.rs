@@ -60,7 +60,7 @@ fn col(scope: &str, column: &str) -> RelationColumnRef {
 
 fn scan(table: &str, alias: Option<&str>) -> RelationExpr {
     RelationExpr::TableScan {
-        table: TableName::new(table),
+        table: String::from(table),
         alias: alias.map(str::to_owned),
     }
 }

@@ -68,10 +68,10 @@ fn gather_on_the_right_of_the_access_join_is_rejected_instead_of_authorizing_eve
     let PublicPolicyExpr::ExistsRel { rel } = &mut policy else {
         unreachable!("seeded recursive policy is an ExistsRel");
     };
-    let crate::model::public_schema::RelExpr::Filter { input, .. } = rel else {
+    let crate::model::public_schema::RelationExpr::Filter { input, .. } = rel else {
         unreachable!("seeded recursive policy correlates its access join");
     };
-    let crate::model::public_schema::RelExpr::Join { left, right, on, .. } = input.as_mut() else {
+    let crate::model::public_schema::RelationExpr::Join { left, right, on, .. } = input.as_mut() else {
         unreachable!("seeded recursive policy joins its frontier to access");
     };
     std::mem::swap(left, right);

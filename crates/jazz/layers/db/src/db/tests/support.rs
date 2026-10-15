@@ -945,7 +945,7 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             edge_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
     let step = RelationExpr::Project {
@@ -988,7 +988,7 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             access_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
     access_predicates.extend(access_in_filters.iter().map(|(column, values)| {
@@ -997,7 +997,7 @@ pub(super) fn public_recursive_access_policy(
             values: values
                 .iter()
                 .cloned()
-                .map(PublicRelValueRef::Literal)
+                .map(PublicRelValueRef::literal)
                 .collect(),
         }
     }));

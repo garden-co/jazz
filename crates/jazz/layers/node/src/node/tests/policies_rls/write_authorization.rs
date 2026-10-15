@@ -3,7 +3,7 @@
 use crate::query::{Include, JoinMode, OrderDirection};
 use crate::query::{
     RelationCmpOp as PublicRelPredicateCmpOp, RelationColumnRef as PublicRelColumnRef,
-    RelationExpr, RelationJoinCondition as PublicRelJoinCondition,
+    RelationJoinCondition as PublicRelJoinCondition,
     RelationJoinKind as PublicRelJoinKind, RelationPredicate as PublicRelPredicateExpr,
     RelationValueRef as PublicRelValueRef,
 };

@@ -3007,7 +3007,7 @@ mod tests {
             RelationPredicate::False,
         ]);
         let scan = |table: &str, alias: Option<&str>| RelationExpr::TableScan {
-            table: TableName::new(table),
+            table: String::from(table),
             alias: alias.map(str::to_owned),
         };
         let gather = RelationExpr::Gather {
@@ -3257,7 +3257,7 @@ mod tests {
 
         let rel = RelationExpr::Filter {
             input: Box::new(RelationExpr::TableScan {
-                table: TableName::new("members"),
+                table: String::from("members"),
                 alias: Some("m".to_owned()),
             }),
             predicate: RelationPredicate::Cmp {
@@ -3306,7 +3306,7 @@ mod tests {
         assert!(decode_canonical_json_value(&unordered_json, &mut offset).is_err());
 
         let rel = RelationExpr::TableScan {
-            table: TableName::new("docs"),
+            table: String::from("docs"),
             alias: None,
         };
         let permissions = HashMap::from([(
@@ -3881,7 +3881,7 @@ mod tests {
 
     fn permissions_with_raw_relation(relation: Vec<u8>) -> Vec<u8> {
         let leaf = RelationExpr::TableScan {
-            table: TableName::new("documents"),
+            table: String::from("documents"),
             alias: None,
         };
         let permissions = permissions_with_policy(PolicyExpr::ExistsRel { rel: leaf.clone() });
@@ -4016,7 +4016,7 @@ mod tests {
                             label: "documents".to_owned(),
                             input: RelationExpr::Filter {
                                 input: Box::new(RelationExpr::TableScan {
-                                    table: TableName::new("documents"),
+                                    table: String::from("documents"),
                                     alias: Some("d".to_owned()),
                                 }),
                                 predicate,
@@ -4024,7 +4024,7 @@ mod tests {
                         }],
                     }),
                     right: Box::new(RelationExpr::TableScan {
-                        table: TableName::new("owners"),
+                        table: String::from("owners"),
                         alias: Some("o".to_owned()),
                     }),
                     on: vec![RelationJoinCondition {
@@ -4039,7 +4039,7 @@ mod tests {
                 }],
             }),
             step: Box::new(RelationExpr::TableScan {
-                table: TableName::new("documents"),
+                table: String::from("documents"),
                 alias: None,
             }),
             frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
@@ -4065,14 +4065,14 @@ mod tests {
                 RelationUnionArm {
                     label: "a".to_owned(),
                     input: RelationExpr::TableScan {
-                        table: TableName::new("a"),
+                        table: String::from("a"),
                         alias: None,
                     },
                 },
                 RelationUnionArm {
                     label: "b".to_owned(),
                     input: RelationExpr::TableScan {
-                        table: TableName::new("b"),
+                        table: String::from("b"),
                         alias: None,
                     },
                 },
@@ -4116,14 +4116,14 @@ mod tests {
                         RelationUnionArm {
                             label: "duplicate".to_owned(),
                             input: RelationExpr::TableScan {
-                                table: TableName::new("a"),
+                                table: String::from("a"),
                                 alias: None,
                             },
                         },
                         RelationUnionArm {
                             label: "duplicate".to_owned(),
                             input: RelationExpr::TableScan {
-                                table: TableName::new("b"),
+                                table: String::from("b"),
                                 alias: None,
                             },
                         },
