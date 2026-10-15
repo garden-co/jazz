@@ -4,7 +4,6 @@
 //! gate, and a deliberately small static JWT verifier.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use crate::account_registry::AccountId;
 use crate::groove::records::Value;
@@ -184,49 +183,30 @@ pub enum AdmissionSource {
 }
 
 /// Auth/session admission errors.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthAdmissionError {
     /// Static bearer auth is configured but no bearer was supplied.
+    #[error("missing bearer auth")]
     MissingBearer,
     /// A bearer was supplied but does not match the configured static token.
+    #[error("invalid bearer auth")]
     InvalidBearer,
     /// A bearer JWT was supplied but failed signature, expiry, or claim validation.
+    #[error("invalid bearer JWT: {0}")]
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
+    #[error("invalid auth handshake: {0}")]
     InvalidHandshake(String),
     /// A host account binding was attempted for an accountless anonymous session.
+    #[error("trusted account binding requires an authenticated credential")]
     AccountBindingRequiresCredential,
     /// A host account binding selected the reserved system account.
+    #[error("trusted account binding must not select the system account")]
     TrustedAccountIsSystem,
     /// The credential attempted to claim an invalid or Jazz-reserved author identity.
+    #[error("invalid author subject: {0}")]
     InvalidAuthorSubject(AuthorSubjectError),
 }
-
-impl fmt::Display for AuthAdmissionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingBearer => write!(f, "missing bearer auth"),
-            Self::InvalidBearer => write!(f, "invalid bearer auth"),
-            Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
-            Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
-            Self::AccountBindingRequiresCredential => {
-                write!(
-                    f,
-                    "trusted account binding requires an authenticated credential"
-                )
-            }
-            Self::TrustedAccountIsSystem => {
-                write!(
-                    f,
-                    "trusted account binding must not select the system account"
-                )
-            }
-            Self::InvalidAuthorSubject(error) => write!(f, "invalid author subject: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for AuthAdmissionError {}
 
 impl From<AuthorSubjectError> for AuthAdmissionError {
     fn from(error: AuthorSubjectError) -> Self {

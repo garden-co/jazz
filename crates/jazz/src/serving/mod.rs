@@ -1159,21 +1159,28 @@ impl InMemoryServerShell {
 }
 
 /// Error returned by the executable in-memory server shell.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ShellError {
     /// A direct database operation failed.
+    #[error("database error: {0}")]
     Db(String),
     /// A storage operation failed.
+    #[error("storage error: {0}")]
     Storage(String),
     /// A direct transport operation failed.
+    #[error("transport error: {0}")]
     Transport(String),
     /// An expected direct database response was not produced.
+    #[error("missing database response: {0}")]
     MissingEvent(&'static str),
     /// A server session handle is no longer live in this process.
+    #[error("invalid or closed server session")]
     InvalidSession,
     /// A process-local resume token is unknown or has already been consumed.
+    #[error("invalid subscriber resume token: {0}")]
     InvalidResumeToken(u64),
     /// A process-local resume token was presented for the wrong identity.
+    #[error("subscriber resume token belongs to {expected:?}, not {actual:?}")]
     ResumeIdentityMismatch {
         /// Identity that owns the resume cursor.
         expected: AuthorSubject,
@@ -1181,35 +1188,12 @@ pub enum ShellError {
         actual: AuthorSubject,
     },
     /// The requested storage backend is not implemented by this shell.
+    #[error("unsupported server shell storage: {storage:?}")]
     UnsupportedStorage {
         /// Unsupported storage config.
         storage: StorageConfig,
     },
 }
-
-impl fmt::Display for ShellError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Db(error) => write!(f, "database error: {error}"),
-            Self::Storage(error) => write!(f, "storage error: {error}"),
-            Self::Transport(error) => write!(f, "transport error: {error}"),
-            Self::MissingEvent(event) => write!(f, "missing database response: {event}"),
-            Self::InvalidSession => write!(f, "invalid or closed server session"),
-            Self::InvalidResumeToken(token) => {
-                write!(f, "invalid subscriber resume token: {token}")
-            }
-            Self::ResumeIdentityMismatch { expected, actual } => write!(
-                f,
-                "subscriber resume token belongs to {expected:?}, not {actual:?}"
-            ),
-            Self::UnsupportedStorage { storage } => {
-                write!(f, "unsupported server shell storage: {storage:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ShellError {}
 
 impl From<DbError> for ShellError {
     fn from(error: DbError) -> Self {
@@ -1578,13 +1562,16 @@ fn validate_path(field: &'static str, path: &str) -> Result<()> {
 }
 
 /// Configuration validation error.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
     /// Node name was empty or all whitespace.
+    #[error("node_name must not be empty")]
     EmptyNodeName,
     /// A numeric limit was zero.
+    #[error("{0} must be greater than zero")]
     ZeroLimit(&'static str),
     /// Listener path was not an absolute, non-root path without whitespace.
+    #[error("{field} must be an absolute non-root path: {value:?}")]
     InvalidPath {
         /// Name of the invalid config field.
         field: &'static str,
@@ -1592,30 +1579,12 @@ pub enum ConfigError {
         value: String,
     },
     /// Production profile requires durable storage.
+    #[error("production profile requires durable storage")]
     ProductionRequiresDurableStorage,
     /// Production Core role requires coordinated drain.
+    #[error("production core role requires drain_on_shutdown")]
     ProductionRequiresDrain,
 }
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyNodeName => write!(f, "node_name must not be empty"),
-            Self::ZeroLimit(field) => write!(f, "{field} must be greater than zero"),
-            Self::InvalidPath { field, value } => {
-                write!(f, "{field} must be an absolute non-root path: {value:?}")
-            }
-            Self::ProductionRequiresDurableStorage => {
-                write!(f, "production profile requires durable storage")
-            }
-            Self::ProductionRequiresDrain => {
-                write!(f, "production core role requires drain_on_shutdown")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {
