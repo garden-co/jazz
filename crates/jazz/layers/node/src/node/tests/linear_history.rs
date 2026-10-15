@@ -647,6 +647,225 @@ fn unit_with_unknown_schema_waits_and_is_decided_once_it_arrives() {
     );
 }
 
+/// INV-HIST-20, INV-HIST-23: a write chained on a predecessor that Core
+/// holds parked (its schema is not known yet) parks behind it, even though
+/// the write's own schema is known. When the schema arrives Core decides the
+/// predecessor first, then the write, so neither is refused as late.
+///
+/// ```text
+/// carol ── p (evolved schema) ──► core   parked: schema unknown
+/// carol ── w (chained on p) ────► core   parked behind p
+/// core  ◄── evolved schema               p accepted, then w accepted
+/// ```
+#[test]
+fn write_chained_on_a_parked_predecessor_parks_behind_it() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let (_evolved_dir, mut carol_evolved) = open_node_with_schema(node(0x32), evolved.clone());
+    let (_base_dir, mut carol_base) = open_node_with_schema(node(0x32), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x39), base.clone());
+    let target = row(0x81);
+    let (p, p_unit) = carol_evolved
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", target, 50).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("parked")),
+                ("body".to_owned(), v("evolved")),
+            ]),
+        ))
+        .unwrap();
+    let (w, w_unit) = carol_base
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 51).cells(title_cells("behind")),
+        )
+        .unwrap();
+    assert_eq!(p.node, w.node);
+    assert!(p.time < w.time);
+    let SyncMessage::CommitUnit { tx, versions } = w_unit else {
+        panic!("expected a commit unit");
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            version.with_base(crate::protocol::RowBase {
+                seq: None,
+                pending: Some(p),
+            })
+        })
+        .collect();
+    let w_unit = SyncMessage::CommitUnit { tx, versions };
+
+    assert!(core.apply_sync_message_settled(p_unit).unwrap().is_empty());
+    assert!(
+        core.apply_sync_message_settled(w_unit).unwrap().is_empty(),
+        "w waits behind its parked predecessor"
+    );
+    assert!(core.query_transaction(w).unwrap().is_none());
+    assert!(core.parking.parked_commit_units.contains_key(&w));
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let decided = updates
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate,
+                global_time,
+                ..
+            } if *tx_id == p || *tx_id == w => Some((*tx_id, fate.clone(), *global_time)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            decided.as_slice(),
+            [
+                (first, Fate::Accepted, Some(p_seq)),
+                (second, Fate::Accepted, Some(w_seq)),
+            ] if *first == p && *second == w && p_seq < w_seq
+        ),
+        "p then w, both accepted: {decided:?}"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+}
+
+/// INV-HIST-20, INV-HIST-23: the wait behind a parked predecessor is
+/// bounded. Once the predecessor has been parked for
+/// `PARKED_PREDECESSOR_WAIT_MS` on Core's ingest clock, the next authority
+/// ingest decides the chained write as written; the predecessor, when its
+/// schema finally arrives, is late and refused, so the row keeps the newer
+/// write.
+///
+/// ```text
+/// carol ── p (evolved schema) ──► core   parked: schema unknown
+/// carol ── w (chained on p) ────► core   parked behind p
+/// ...  the wait runs out; the next ingest decides w: accepted
+/// core  ◄── evolved schema               p rejected (late)
+/// ```
+#[test]
+fn write_parked_behind_a_predecessor_is_decided_when_the_wait_runs_out() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let (_evolved_dir, mut carol_evolved) = open_node_with_schema(node(0x33), evolved.clone());
+    let (_base_dir, mut carol_base) = open_node_with_schema(node(0x33), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x3a), base.clone());
+    let target = row(0x82);
+    let (p, p_unit) = carol_evolved
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", target, 50).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("stuck")),
+                ("body".to_owned(), v("evolved")),
+            ]),
+        ))
+        .unwrap();
+    let (w, w_unit) = carol_base
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 51).cells(title_cells("newer")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = w_unit else {
+        panic!("expected a commit unit");
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            version.with_base(crate::protocol::RowBase {
+                seq: None,
+                pending: Some(p),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(core.apply_sync_message_settled(p_unit).unwrap().is_empty());
+    let w_unit = SyncMessage::CommitUnit {
+        tx: tx.clone(),
+        versions: versions.clone(),
+    };
+    assert!(core.apply_sync_message_settled(w_unit).unwrap().is_empty());
+    assert!(core.parking.parked_commit_units.contains_key(&w), "w waits behind p");
+
+    // Still within the wait: a resend of w keeps waiting.
+    let p_parked_at = p.time.physical_ms();
+    let resent = crate::local_executor::block_on(core.ingest_commit_unit(
+        tx.clone(),
+        versions.clone(),
+        p_parked_at + crate::node::ingest::PARKED_PREDECESSOR_WAIT_MS - 1,
+    ))
+    .unwrap();
+    assert!(settle_outcome(&mut core, resent).unwrap().is_empty());
+    assert!(core.query_transaction(w).unwrap().is_none());
+
+    // The wait runs out: the next ingest decides w.
+    let decided = crate::local_executor::block_on(core.ingest_commit_unit(
+        tx,
+        versions,
+        p_parked_at + crate::node::ingest::PARKED_PREDECESSOR_WAIT_MS,
+    ))
+    .unwrap();
+    let decided = settle_outcome(&mut core, decided).unwrap();
+    assert!(
+        decided.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == w
+        )),
+        "{decided:?}"
+    );
+    assert!(!core.parking.parked_commit_units.contains_key(&w));
+    assert!(core.parking.parked_commit_units.contains_key(&p));
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert!(
+        updates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+                ..
+            } if *tx_id == p && reason.contains("arrived after a later write of its writer")
+        )),
+        "{updates:?}"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+}
+
 /// INV-TX-23: a node that relays a client's commit unit upstream is not the
 /// fate authority. It keeps the unit pending: no fate, no seq, nothing at the
 /// Global tier. Only Core's fate settles it there.

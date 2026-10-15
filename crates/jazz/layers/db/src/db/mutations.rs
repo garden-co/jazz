@@ -1874,21 +1874,28 @@ where
             }
         };
         let staged_id = staged.id;
+        // The row write takes its place in the writer's order now, behind
+        // every write already queued on this owner (`INV-HIST-23`).
+        let now_ms = now_ms.unwrap_or_else(|| self.next_now_ms());
+        let (table_name, column_name) = (table.to_owned(), column.to_owned());
         let published = self
-            .publish_streaming_value_with_id(
-                mutation,
-                table,
-                row,
-                cells,
-                column,
-                staged,
-                nullable,
-                made_by,
-                permission_subject,
-                now_ms,
-                head,
-                base,
-            )
+            .publish_in_writer_order(now_ms, move |db| async move {
+                db.publish_streaming_value_with_id(
+                    mutation,
+                    &table_name,
+                    row,
+                    cells,
+                    &column_name,
+                    staged,
+                    nullable,
+                    made_by,
+                    permission_subject,
+                    Some(now_ms),
+                    head,
+                    base,
+                )
+                .await
+            })
             .await;
         if published.is_err() {
             // Finalization transfers the pending journal into a staged root,
@@ -1904,6 +1911,67 @@ where
                 .await;
         }
         published
+    }
+
+    /// Publish a write that was not queued when it was made (a finished
+    /// streamed upload) in the writer's order.
+    ///
+    /// A writer's order is its transaction order: Core decides one writer's
+    /// writes by `TxId` (`INV-HIST-23`), local chains follow it, and
+    /// recovery replays pending writes sorted by it. Queued writes reserve
+    /// their `TxId` when they are queued and the owner queue publishes them
+    /// one at a time in that order. A write that minted its `TxId` when it
+    /// committed could commit ahead of an earlier queued write, giving the
+    /// earlier write the older `TxId` but the later place: Core would then
+    /// refuse it as late. So the write reserves its `TxId` now and publishes
+    /// as an owner-queue operation, behind every write queued before it and
+    /// ahead of every write queued after it.
+    ///
+    /// Waiting drives the owner queue, so a caller that blocks the host (a
+    /// native binding) still reaches its own write.
+    async fn publish_in_writer_order<F, Fut>(
+        &self,
+        now_ms: u64,
+        publish: F,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        F: FnOnce(Self) -> Fut,
+        Fut: Future<Output = Result<WriteHandle<S>, Error>> + 'static,
+    {
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let publication = publish(self.clone_for_reserved_transaction(tx_id));
+        let (sender, mut receiver) = futures::channel::oneshot::channel();
+        self.node.enqueue_reserved_write(
+            tx_id,
+            Box::pin(async move {
+                let result = publication.await;
+                let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
+                let _ = sender.send(result);
+                outcome
+            }),
+        );
+        std::future::poll_fn(|context| {
+            loop {
+                if let std::task::Poll::Ready(result) =
+                    std::pin::Pin::new(&mut receiver).poll(context)
+                {
+                    return std::task::Poll::Ready(result.unwrap_or_else(|_| {
+                        Err(Error::new(
+                            ErrorCode::WriteRejected,
+                            "database closed before the write was published",
+                        ))
+                    }));
+                }
+                let queued = self.node.queued_mutation_count();
+                self.node.poll_queued_mutation_once();
+                if self.node.queued_mutation_count() >= queued {
+                    // The queue's front operation waits; its wake drives the
+                    // queue again and the publication then wakes this wait.
+                    return std::task::Poll::Pending;
+                }
+            }
+        })
+        .await
     }
 
     fn validate_streaming_column(
