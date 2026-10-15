@@ -604,4 +604,144 @@ mod tests {
         let decoded: PolicyExpr = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, expr);
     }
+
+    fn every_policy_variant() -> PolicyExpr {
+        let path = || vec!["claims".to_owned(), "team".to_owned()];
+        let rel = RelExpr::TableScan {
+            table: "shares".into(),
+            alias: None,
+        };
+        PolicyExpr::Or(vec![
+            PolicyExpr::Cmp {
+                column: "a".into(),
+                op: CmpOp::Le,
+                value: PolicyValue::Literal(Value::Integer(3)),
+            },
+            PolicyExpr::SessionCmp {
+                path: path(),
+                op: CmpOp::Ne,
+                value: Value::Text("x".into()),
+            },
+            PolicyExpr::IsNull { column: "b".into() },
+            PolicyExpr::SessionIsNull { path: path() },
+            PolicyExpr::IsNotNull { column: "c".into() },
+            PolicyExpr::SessionIsNotNull { path: path() },
+            PolicyExpr::Contains {
+                column: "d".into(),
+                value: PolicyValue::SessionRef(path()),
+            },
+            PolicyExpr::SessionContains {
+                path: path(),
+                value: Value::BigInt(-9),
+            },
+            PolicyExpr::In {
+                column: "e".into(),
+                session_path: path(),
+            },
+            PolicyExpr::InList {
+                column: "f".into(),
+                values: vec![
+                    PolicyValue::Literal(Value::Boolean(true)),
+                    PolicyValue::SessionRef(path()),
+                ],
+            },
+            PolicyExpr::SessionInList {
+                path: path(),
+                values: vec![Value::Null, Value::Double(1.5)],
+            },
+            PolicyExpr::Exists {
+                table: "t".into(),
+                condition: Box::new(PolicyExpr::Not(Box::new(PolicyExpr::True))),
+            },
+            PolicyExpr::ExistsRel { rel },
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "g".into(),
+                max_depth: Some(2),
+            },
+            PolicyExpr::InheritsReferencing {
+                operation: Operation::Update,
+                source_table: "s".into(),
+                via_column: "h".into(),
+                max_depth: None,
+            },
+            PolicyExpr::And(vec![PolicyExpr::False, PolicyExpr::Or(vec![])]),
+        ])
+    }
+
+    #[test]
+    fn policy_expr_json_is_pinned() {
+        let expr = every_policy_variant();
+        let json = r#"{"type":"Or","exprs":[{"type":"Cmp","column":"a","op":"Le","value":{"type":"Literal","value":{"type":"Integer","value":3}}},{"type":"SessionCmp","path":["claims","team"],"op":"Ne","value":{"type":"Text","value":"x"}},{"type":"IsNull","column":"b"},{"type":"SessionIsNull","path":["claims","team"]},{"type":"IsNotNull","column":"c"},{"type":"SessionIsNotNull","path":["claims","team"]},{"type":"Contains","column":"d","value":{"type":"SessionRef","path":["claims","team"]}},{"type":"SessionContains","path":["claims","team"],"value":{"type":"BigInt","value":"-9"}},{"type":"In","column":"e","session_path":["claims","team"]},{"type":"InList","column":"f","values":[{"type":"Literal","value":{"type":"Boolean","value":true}},{"type":"SessionRef","path":["claims","team"]}]},{"type":"SessionInList","path":["claims","team"],"values":[{"type":"Null"},{"type":"Double","value":1.5}]},{"type":"Exists","table":"t","condition":{"type":"Not","expr":{"type":"True"}}},{"type":"ExistsRel","rel":{"TableScan":{"table":"shares"}}},{"type":"Inherits","operation":"Select","via_column":"g","max_depth":2},{"type":"InheritsReferencing","operation":"Update","source_table":"s","via_column":"h","max_depth":null},{"type":"And","exprs":[{"type":"False"},{"type":"Or","exprs":[]}]}]}"#;
+        assert_eq!(serde_json::to_string(&expr).unwrap(), json);
+        assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
+        let session_ref = |path: &str| PolicyExpr::Cmp {
+            column: "a".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec![path.into()]),
+        };
+        for (input, decoded) in [
+            (r#"{"type":"True","extra":1}"#, PolicyExpr::True),
+            (
+                r#"{"type":"And","exprs":[],"extra":1}"#,
+                PolicyExpr::And(vec![]),
+            ),
+            (r#"{"exprs":[],"type":"Or"}"#, PolicyExpr::Or(vec![])),
+            (r#"["True"]"#, PolicyExpr::True),
+            (r#"["And",[]]"#, PolicyExpr::And(vec![])),
+            (
+                r#"["Not",{"type":"True"}]"#,
+                PolicyExpr::not(PolicyExpr::True),
+            ),
+            (
+                r#"{"type":"Cmp","column":"a","op":"Eq","value":{"type":"SessionRef","path":["x"],"more":2}}"#,
+                session_ref("x"),
+            ),
+            (
+                r#"{"type":"Cmp","column":"a","op":"Eq","value":["SessionRef",["x"]]}"#,
+                session_ref("x"),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<PolicyExpr>(input).unwrap(),
+                decoded,
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            (r#"{"type":"And"}"#, "missing field `exprs`"),
+            (r#"{"type":"Not"}"#, "missing field `expr`"),
+            (
+                r#"{"type":"Cmp","column":"a","op":"Eq","value":{"type":"Literal"}}"#,
+                "missing field `value`",
+            ),
+            (
+                r#"{"type":"And","exprs":3}"#,
+                "invalid type: integer `3`, expected a sequence",
+            ),
+            (
+                r#"{"type":"Nope"}"#,
+                "unknown variant `Nope`, expected one of `Cmp`, `SessionCmp`, `IsNull`, \
+                 `SessionIsNull`, `IsNotNull`, `SessionIsNotNull`, `Contains`, \
+                 `SessionContains`, `In`, `InList`, `SessionInList`, `Exists`, `ExistsRel`, \
+                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False` at line \
+                 1 column 14",
+            ),
+        ] {
+            let actual = serde_json::from_str::<PolicyExpr>(input)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(actual, error, "{input}");
+        }
+        for input in [
+            r#""True""#,
+            r#"{"type":"Not","expr":3}"#,
+            r#"{"type":"Cmp","column":"a","op":"Eq","value":"x"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<PolicyExpr>(input).is_err(),
+                "{input}"
+            );
+        }
+    }
 }
