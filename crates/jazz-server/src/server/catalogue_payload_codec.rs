@@ -8,9 +8,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use jazz::protocol_limits::{
-    MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
-};
+use jazz::protocol_limits::PolicyExpressionLimitError;
+use jazz::query::policy_limits::PolicyExpressionBudget;
 use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{CmpOp, Operation, OperationPolicy, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
@@ -160,6 +159,12 @@ impl std::fmt::Display for CatalogueEncodingError {
 }
 
 impl std::error::Error for CatalogueEncodingError {}
+
+impl From<PolicyExpressionLimitError> for CatalogueEncodingError {
+    fn from(error: PolicyExpressionLimitError) -> Self {
+        Self::ProtocolLimit(error)
+    }
+}
 
 // ============================================================================
 // Schema Encoding
@@ -879,7 +884,7 @@ enum RelationEncodeTask<'a> {
 fn decode_canonical_relation_expr(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<RelExpr, CatalogueEncodingError> {
     let start = *offset;
     let version = read_u8(data, offset)?;
@@ -894,42 +899,6 @@ fn decode_canonical_relation_expr(
     encode_canonical_relation_expr(&mut canonical, &rel);
     ensure_canonical_segment(data, start, *offset, &canonical, "relation policy")?;
     Ok(rel)
-}
-
-#[derive(Default)]
-struct PolicyExpressionDecodeBudget {
-    nodes: usize,
-}
-
-impl PolicyExpressionDecodeBudget {
-    fn enter(&mut self, depth: usize) -> Result<(), CatalogueEncodingError> {
-        if depth > MAX_POLICY_EXPRESSION_DEPTH {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_DEPTH",
-                MAX_POLICY_EXPRESSION_DEPTH,
-                depth,
-            ));
-        }
-        if self.nodes >= MAX_POLICY_EXPRESSION_NODES {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_NODES",
-                MAX_POLICY_EXPRESSION_NODES,
-                self.nodes + 1,
-            ));
-        }
-        self.nodes += 1;
-        Ok(())
-    }
-    fn reserve(&self, children: usize) -> Result<(), CatalogueEncodingError> {
-        if children > MAX_POLICY_EXPRESSION_NODES - self.nodes {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_NODES",
-                MAX_POLICY_EXPRESSION_NODES,
-                self.nodes.saturating_add(children),
-            ));
-        }
-        Ok(())
-    }
 }
 
 enum RelationDecodeTask {
@@ -959,7 +928,7 @@ enum RelationDecodeValue {
 fn decode_relation_expr_body_iterative(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<RelExpr, CatalogueEncodingError> {
     let mut tasks = vec![RelationDecodeTask::Expr(1)];
     let mut values = Vec::new();
@@ -1150,7 +1119,7 @@ fn decode_relation_expr_body_iterative(
 fn decode_relation_predicate_task_iterative(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
     depth: usize,
     tasks: &mut Vec<RelationDecodeTask>,
     values: &mut Vec<RelationDecodeValue>,
@@ -1423,7 +1392,7 @@ fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
 fn decode_table_policies(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<TablePolicies, CatalogueEncodingError> {
     let mut expr = || {
         read_opt(data, offset, |data, offset| {
@@ -1462,7 +1431,7 @@ pub fn decode_permissions(
     let mut offset = 1;
     let table_count = read_count(data, &mut offset, "permissions_tables")?;
     let mut permissions = HashMap::new();
-    let mut budget = PolicyExpressionDecodeBudget::default();
+    let mut budget = PolicyExpressionBudget::default();
 
     for _ in 0..table_count {
         let table_name = Str("table_name").get(data, &mut offset)?;
@@ -1644,7 +1613,7 @@ wire_enum! {
 fn decode_policy_expr(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<PolicyExpr, CatalogueEncodingError> {
     let mut frames = Vec::new();
 
@@ -1732,7 +1701,7 @@ enum PolicyDecodeFrame {
 fn decode_policy_expr_node(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<DecodedPolicyNode, CatalogueEncodingError> {
     let complete = |expression| Ok(DecodedPolicyNode::Complete(expression));
     let tag = read_u8(data, offset)?;
@@ -1792,14 +1761,6 @@ fn decode_policy_expr_node(
             context: "policy_expr",
         }),
     }
-}
-
-fn policy_expression_limit(
-    limit: &'static str,
-    max: usize,
-    actual: usize,
-) -> CatalogueEncodingError {
-    CatalogueEncodingError::ProtocolLimit(PolicyExpressionLimitError { limit, max, actual })
 }
 
 wire_enum! {
@@ -2341,6 +2302,7 @@ tuple_wire!((A TA 0, B TB 1, C TC 2), (A TA 0, B TB 1, C TC 2, D TD 3));
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::protocol_limits::{MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES};
     use jazz::tools::public_schema::SchemaBuilder;
     use jazz::tools::public_schema::{
         PolicyExpr, RelColumnRef, RelExpr, RelPredicateCmpOp, RelPredicateExpr, RelValueRef,
@@ -2621,7 +2583,7 @@ mod tests {
             decode_policy_expr(
                 &with_huge(POLICY_EXPR_SESSION_CMP),
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             "policy_session_cmp_path",
         );
@@ -2640,7 +2602,7 @@ mod tests {
                 decode_policy_expr(
                     &with_huge(tag),
                     &mut offset,
-                    &mut PolicyExpressionDecodeBudget::default(),
+                    &mut PolicyExpressionBudget::default(),
                 ),
                 context,
             );
@@ -2656,7 +2618,7 @@ mod tests {
             decode_policy_expr(
                 &session_in_list_value_count,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             "policy_session_in_list_values",
         );
@@ -2669,7 +2631,7 @@ mod tests {
                 decode_policy_expr(
                     &with_empty_name_and_huge(tag),
                     &mut offset,
-                    &mut PolicyExpressionDecodeBudget::default(),
+                    &mut PolicyExpressionBudget::default(),
                 ),
                 context,
             );
@@ -2709,7 +2671,7 @@ mod tests {
             decode_policy_expr(
                 &[POLICY_EXPR_SESSION_CMP],
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             Err(CatalogueEncodingError::TruncatedData { .. })
         ));
@@ -3362,7 +3324,7 @@ mod tests {
             decode_canonical_relation_expr(
                 &encoded,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             )
             .expect("labeled union grammar decodes"),
             relation
@@ -3376,7 +3338,7 @@ mod tests {
             decode_canonical_relation_expr(
                 &legacy,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             Err(CatalogueEncodingError::DecodeError { .. })
         ));
