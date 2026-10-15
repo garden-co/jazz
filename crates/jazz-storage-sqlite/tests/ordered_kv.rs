@@ -286,9 +286,13 @@ fn historical_epoch_1_sqlite_fixture_is_rejected_without_mutation() {
         drop(read_only);
 
         let before = std::fs::read(&historical_path).unwrap();
+        // The historical root declares the retired Groove v1 families, so
+        // admission names them instead of failing with a layout error.
         assert!(matches!(
             SqliteStorage::open(&historical_path, &["records", "indices"]),
-            Err(Error::InvalidStorageLayout(_))
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+                if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                    && unknown.iter().any(|codec| codec == "groove.large-value.v1")
         ));
         assert_eq!(std::fs::read(&historical_path).unwrap(), before);
     });

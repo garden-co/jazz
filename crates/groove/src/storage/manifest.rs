@@ -166,6 +166,10 @@ impl StorageEpochManifest {
     /// ordering and omitted/default fields must not change a durable manifest.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
+        self.encode_structure()
+    }
+
+    fn encode_structure(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::from(*MAGIC);
         bytes.extend_from_slice(&self.epoch.to_be_bytes());
         bytes.extend_from_slice(&self.adapter.version.to_be_bytes());
@@ -185,6 +189,15 @@ impl StorageEpochManifest {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let manifest = Self::decode_structure(bytes)?;
+        require_groove_epoch_1_codecs(&manifest.required_codecs)?;
+        Ok(manifest)
+    }
+
+    /// Decodes a canonical manifest without requiring this build's mandatory
+    /// Groove codecs, so admission can name a root's missing and unknown
+    /// families instead of failing with a generic layout error.
+    fn decode_structure(bytes: &[u8]) -> Result<Self, Error> {
         let mut input = bytes;
         if take(&mut input, 4)? != MAGIC {
             return Err(invalid("manifest magic is invalid"));
@@ -219,9 +232,9 @@ impl StorageEpochManifest {
             required_codecs: codecs,
             parameters,
         };
-        manifest.validate()?;
+        manifest.validate_structure()?;
         // Require one canonical encoding rather than merely an equivalent map.
-        if manifest.encode()? != bytes {
+        if manifest.encode_structure()? != bytes {
             return Err(invalid("manifest is noncanonical"));
         }
         Ok(manifest)
@@ -229,7 +242,10 @@ impl StorageEpochManifest {
 
     /// Validates an existing root before the caller mutates any ordinary state.
     pub fn admit_existing(&self, bytes: &[u8]) -> Result<ManifestOpenReceipt, Error> {
-        let found = Self::decode(bytes)?;
+        // A root written with retired Groove families (for example
+        // `groove.large-value.v1`) is well formed; report its inventory
+        // difference as the typed codec error rather than a layout error.
+        let found = Self::decode_structure(bytes)?;
         if found.epoch != self.epoch {
             return Err(invalid("unsupported storage epoch"));
         }
@@ -267,6 +283,11 @@ impl StorageEpochManifest {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        self.validate_structure()?;
+        require_groove_epoch_1_codecs(&self.required_codecs)
+    }
+
+    fn validate_structure(&self) -> Result<(), Error> {
         if self.epoch != STORAGE_EPOCH_1 {
             return Err(invalid("unsupported storage epoch"));
         }
@@ -280,7 +301,6 @@ impl StorageEpochManifest {
         if self.required_codecs.is_empty() {
             return Err(invalid("manifest codec profile is empty"));
         }
-        require_groove_epoch_1_codecs(&self.required_codecs)?;
         for key in self.parameters.keys() {
             valid_id("parameter ID", key)?;
         }
@@ -437,6 +457,11 @@ mod tests {
     fn scalar_v1_root_is_refused_before_scalar_decoding() {
         let previous = b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         assert!(matches!(manifest().admit_existing(previous),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+            if missing == ["groove.large-value.v2", "groove.ordered-chunk-storage.v2"]
+                && unknown == ["groove.large-value.v1", "groove.ordered-chunk-storage.v1"]));
+        // Decoding a manifest as this build's own still requires the base.
+        assert!(matches!(StorageEpochManifest::decode(previous),
             Err(Error::InvalidStorageLayout(message))
             if message == "codec profile omits mandatory Groove epoch-one codec"));
     }
@@ -451,8 +476,9 @@ mod tests {
             "groove.ordered-chunk-storage.v1",
         );
         assert!(matches!(manifest().admit_existing(previous.as_bytes()),
-            Err(Error::InvalidStorageLayout(message))
-            if message == "codec profile omits mandatory Groove epoch-one codec"));
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+            if missing == ["groove.ordered-chunk-storage.v2"]
+                && unknown == ["groove.ordered-chunk-storage.v1"]));
     }
 
     #[test]

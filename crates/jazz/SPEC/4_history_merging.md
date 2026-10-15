@@ -156,8 +156,10 @@ individual encoding still has a named byte contract, golden fixtures, and
 rejection/reopen receipts in the encoding registry, but no separate persisted
 Jazz marker. A change incompatible with a released root layout versions that
 root's marker; changes within this unreleased storage-breaking batch are
-consolidated into the same v1 contract. There is no physical epoch or wire
-version change. Earlier per-family profiles are refused without migration.
+consolidated into the same v1 contract. There is no physical epoch change.
+Earlier per-family profiles are refused without migration. Some of these
+encodings also change wire bytes; the wire version bump for them ships with
+the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
 `jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
 `jazz.catalogue-storage.v1`. Its outer

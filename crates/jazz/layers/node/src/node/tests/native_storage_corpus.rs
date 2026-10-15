@@ -1919,7 +1919,9 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     .err()
     .expect("retired SQLite profile must reject");
     assert!(
-        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message == "codec profile omits mandatory Groove epoch-one codec"),
+        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref missing, ref unknown, .. }
+            if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                && unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
@@ -2415,10 +2417,6 @@ fn rocksdb_family_entries(
 /// Jazz markers.
 fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
     match result {
-        Err(groove::storage::Error::InvalidStorageLayout(message)) => {
-            // Historical roots predate the mandatory v2 scalar codec.
-            assert_eq!(message, "codec profile omits mandatory Groove epoch-one codec", "{store}");
-        }
         Err(groove::storage::Error::UnsupportedStorageCodecs {
             epoch,
             missing,
@@ -2430,11 +2428,12 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 vec![
                     "groove.durable-index.v2".to_owned(),
                     "groove.large-value.v2".to_owned(),
+                    "groove.ordered-chunk-storage.v2".to_owned(),
                     "jazz.node-storage.v1".to_owned(),
                 ],
                 "{store}"
             );
-            assert_eq!(unknown, ["groove.large-value.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
+            assert_eq!(unknown, ["groove.large-value.v1","groove.ordered-chunk-storage.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
         }
         Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
         Ok(()) => panic!("{store}: a pre-linear root must not open"),

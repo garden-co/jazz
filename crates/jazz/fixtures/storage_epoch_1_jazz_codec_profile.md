@@ -37,8 +37,31 @@ pins all three exact `JSM1` manifests (memory adapter version 1, no parameters):
 Manifest admission compares complete inventories, not independently negotiated
 features. Previous per-family Jazz profiles, missing/future formats, and roots
 opened as the wrong kind are refused before ordinary data is decoded or
-mutated. Older binaries likewise reject these consolidated profiles. No
-migration, fallback reader, physical epoch bump, or wire change is introduced.
+mutated, with the typed `UnsupportedStorageCodecs { missing, unknown }` error
+(also for roots that still declare the retired `groove.large-value.v1` and
+`groove.ordered-chunk-storage.v1`). Older binaries likewise reject these
+consolidated profiles. No migration or fallback reader is introduced, and the
+physical storage epoch stays 1.
+
+This is not wire compatible, although the wire protocol version is unchanged
+(v6) in this change:
+
+- `JVRR\x02` row payload bytes change (large-value scalar tags, descriptor and
+  edit layouts, record layouts) while keeping the `JVRR\x02` marker.
+- Large-value scalar tags `Primitive`/`Chunked` move from 2/3 to 0/1, so
+  `BranchKey` column-value bytes change (Groove SPEC 9, "Scalar tag history").
+- Catalogue schema bytes always use version 2 and lineage publications always
+  use the counted `jazz-schema-lineage-publication-v2` identity, so
+  single-predecessor lineage publication IDs change.
+- React Native foreground row payloads carry the new scalar tags, but the
+  native relay ABI stays 2.
+
+Until the alpha.60 release bumps the wire version (and the native relay ABI)
+together with this storage cleanup, a peer built before this change and a peer
+built with it both advertise v6, pass the Hello, and then fail with opaque
+decode or content-ID errors instead of a typed version refusal. This change
+must not ship in a release without that bump. Details and receipts:
+`dev/proofs/storage-format-cleanup-compatibility.md`.
 
 Historical published/epoch-one/pre-linear fixtures remain immutable refusal
 evidence. Current native and browser fixtures are regenerated through their

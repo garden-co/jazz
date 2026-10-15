@@ -2523,6 +2523,11 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::String => "groove.internal.stored_scalar.string",
             LargeValueKind::Json => "groove.internal.stored_scalar.json",
         },
+        // Tags 0 and 1 are reused: under `groove.large-value.v1` they were
+        // reserved for the retired private `[tag] + payload` codec and
+        // Primitive/Chunked were 2/3. Old roots are refused at manifest
+        // admission and old peers at the wire version, so no v1 byte
+        // sequence reaches this decoder (SPEC 9, "Scalar tag history").
         [
             EnumCase::new("Primitive", primitive),
             EnumCase::new("Chunked", chunked),

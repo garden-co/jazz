@@ -71,6 +71,21 @@ The `groove.large-value.v2` scalar enum has exactly two cases:
 `Primitive = 0`, `Chunked = 1`. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
+
+Scalar tag history. Under `groove.large-value.v1` the cases were
+`Primitive = 2`, `Chunked = 3`, and tags 0 and 1 were permanently reserved:
+they had belonged to the superseded private `[tag] + payload` codec, whose
+inline bytes `[0] + payload` could otherwise collide with a canonical
+length-prefixed record, so v1 decoders rejected them. `groove.large-value.v2`
+retires that reservation and reuses 0 and 1 for the only two cases; tags 2 and
+3 are now unknown and rejected. The reuse is safe only because no v1 or older
+scalar can reach a v2 decoder: a root that declares `groove.large-value.v1`
+(or predates it) is refused at manifest admission with
+`UnsupportedStorageCodecs` before any scalar is read, and peers that encode
+v1 scalars on the wire must be refused at the wire-version handshake. The v2
+tags change Jazz bytes that embed scalars (row payloads, `BranchKey` column
+values), so the wire version must move with this family; see
+`dev/proofs/storage-format-cleanup-compatibility.md`.
 Every engine-owned record field has a permanent, one-based numeric record-slot
 identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`.
 Byte edits are `{ 1: offset, 2: delete_length, 3: insert_bytes }`;
