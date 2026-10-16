@@ -56,6 +56,11 @@ const positions = (entries: RowSettlement[]) =>
   new Map(entries.map((entry) => [entry.rowId, BigInt(entry.position)]));
 const comparePosition = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
+const isTransactionConflict = (error: unknown): boolean =>
+  (error instanceof PersistedWriteRejectedError &&
+    (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+  (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+
 /** Internal account-device handshake. Ordinary Jazz policies own record authorisation. */
 export class DeviceApproval {
   private readonly lifetime = new AbortController();
@@ -238,11 +243,7 @@ export class DeviceApproval {
         return { ...snapshot, identity: snapshot.identity };
       } catch (error) {
         // The core can reject the local snapshot before an authority fate exists.
-        const conflict =
-          (error instanceof PersistedWriteRejectedError &&
-            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
-          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
-        if (attempt >= 2 || !conflict) throw error;
+        if (attempt >= 2 || !isTransactionConflict(error)) throw error;
       }
     }
   }
@@ -678,7 +679,11 @@ export class DeviceApproval {
     if (this.backgroundError) {
       const error = this.backgroundError;
       this.backgroundError = undefined;
-      throw error;
+      // A completed background attempt can lose its snapshot to concurrent
+      // writes. The foreground operation takes fresh accepted authority and
+      // retries any unanswered challenge; do not reject it with that old fate.
+      // Crypto, lifecycle and other operational failures still reach its caller.
+      if (!isTransactionConflict(error)) throw error;
     }
   }
 
@@ -694,7 +699,7 @@ export class DeviceApproval {
         !this.responding.has(challenge.id) &&
         !snapshot.proofs.some((proof) => proof.id === challenge.id)
       )
-        await this.respond(challenge.id);
+        await this.respond(challenge.id, snapshot);
     }
     const active = new Set(snapshot.successor ? [] : snapshot.baseMembers);
     const eligible = await this.eligibleApprovals(snapshot);
@@ -721,8 +726,8 @@ export class DeviceApproval {
     }
   }
 
-  private async respond(challengeId: string): Promise<void> {
-    const snapshot = await this.currentSnapshot();
+  private async respond(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
+    const snapshot = preparedSnapshot ?? (await this.currentSnapshot());
     const challenge = snapshot.challenges.find(
       (item) =>
         item.id === challengeId &&
@@ -738,7 +743,7 @@ export class DeviceApproval {
         secret = await this.keys.open(
           device,
           this.context(challenge, "challenge"),
-          challenge.envelope,
+          challenge.envelope.slice(),
         );
       } catch {
         this.assertOpen();
