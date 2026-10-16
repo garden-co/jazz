@@ -26,7 +26,7 @@ static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use jazz_cli::commands;
+use jazz::tools::AppId;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
@@ -275,7 +275,8 @@ async fn run() {
     match cli.command {
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                commands::create::app(name);
+                let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
+                println!("{app_id}");
             }
         },
         Commands::Server {
@@ -338,7 +339,7 @@ async fn run() {
                 admin_secret,
                 ..Default::default()
             };
-            if let Err(e) = commands::server::run(
+            if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,

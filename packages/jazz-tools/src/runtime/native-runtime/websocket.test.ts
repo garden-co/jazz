@@ -613,6 +613,28 @@ describe("websocket frame carrier", () => {
     }
   });
 
+  it("reports a later-version server Hello as a version mismatch, whatever its body (#2468)", async () => {
+    // Only the tag and version range are shared across wire versions. A later
+    // server may lay out the rest of its Hello differently.
+    const next = WIRE_PROTOCOL_VERSION + 1;
+    const writer = new PostcardWriter();
+    writer.u64(0); // WireFrame::Hello
+    writer.u64(next);
+    writer.u64(next);
+    writer.u64(0x7f); // a body this version cannot parse
+    writer.u64(0x3fff);
+    writer.u64(42);
+    const laterHello = writer.finish();
+
+    expect(isWireHello(laterHello)).toBe(true);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([laterHello]));
+    await expect(carrier.ready()).rejects.toThrow(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${next}..=${next}`,
+    );
+    expect(socket.closed).toBe(true);
+  });
+
   it("sends an authority-unbound hello first on every reconnect", async () => {
     const sockets: RecordingWebSocket[] = [];
     const peerIdentity = Uint8Array.from({ length: 16 }, (_, index) => index + 1);

@@ -12,7 +12,7 @@ import {
   type JazzSessionConsumer,
   type NeedsLoginState,
 } from "./state.js";
-import { toError } from "../runtime/util.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
@@ -78,7 +78,7 @@ export function createJazzAppOwner<Config, Client>(
     needsLogin: false,
   });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
-  const listeners = new Set<() => void>();
+  const listeners = createListeners("Jazz app observer failed");
   const consumers = new Set<{ lease?: JazzSessionConsumer<Client> }>();
   function publish(force = false) {
     if (disposed && !force) return;
@@ -122,13 +122,7 @@ export function createJazzAppOwner<Config, Client>(
       return;
     snapshot = Object.freeze(next);
     if (current) versions.set(snapshot, current);
-    for (const listener of [...listeners]) {
-      try {
-        listener();
-      } catch (cause) {
-        console.error("Jazz app observer failed", cause);
-      }
-    }
+    listeners.notify();
   }
   function disconnect() {
     unsubscribeConnection?.();
@@ -203,12 +197,7 @@ export function createJazzAppOwner<Config, Client>(
   }
   const app: JazzApp<Client> = {
     getSnapshot: () => snapshot,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     start() {
       if (disposed) return Promise.reject(new Error("Jazz app is disposed"));
       if (pending) return pending;
