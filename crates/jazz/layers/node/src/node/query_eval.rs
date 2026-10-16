@@ -1189,6 +1189,7 @@ where
         param_types: &BTreeMap<String, ColumnType>,
         claim_params: &BTreeMap<String, ProgramClaimParam>,
         identity: AuthorSubject,
+        shared_serving: bool,
     ) -> Option<String> {
         let source = query_binding_source_shape_for_parts_if_needed(param_types, claim_params)?;
         if identity == AuthorSubject::SYSTEM {
@@ -1202,6 +1203,10 @@ where
             .any(|claim| !groove::records::collect_by_ordered_scalar(&claim.ty))
         {
             Some(self.effective_session_claim_scope_key(identity))
+        } else if shared_serving {
+            // Trusted serving routes scalar claim slots per binding, so
+            // sessions share one source and differ only in their bindings.
+            None
         } else {
             self.active_session_claim_scope_key(identity)
         };
@@ -1236,6 +1241,7 @@ where
                     shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1276,6 +1282,7 @@ where
                     shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1335,8 +1342,12 @@ where
                 &mut claim_params,
             )?;
         }
-        let source_shape =
-            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
+        let source_shape = self.query_binding_source_shape_for_identity(
+            shape.params(),
+            &claim_params,
+            identity,
+            false,
+        );
         if let Some(source_shape) = &source_shape {
             if use_prepared_binding_source
                 && !input_shape.reachable_contributions.is_empty()
@@ -1431,6 +1442,7 @@ where
                     lowered_shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1659,6 +1671,7 @@ where
                     shape.params(),
                     &binding_claim_params,
                     identity,
+                    !client_local,
                 )
             })
             .flatten();
@@ -1684,15 +1697,10 @@ where
         // with different claims hold different bindings of one shared graph;
         // a claim still inlined as a literal makes the graph itself distinct.
         // A per-session name would give every connected user a private copy
-        // of the whole compiled program and its IVM graph (#4017).
-        let source_shape = source_shape.map(|source_shape| {
-            if !client_local {
-                return source_shape;
-            }
-            self.active_session_claim_scope_key(identity)
-                .map(|scope| format!("{source_shape}:session:{scope}"))
-                .unwrap_or(source_shape)
-        });
+        // of the whole compiled program and its IVM graph (#4017). Payload
+        // claims cannot be route slots, so they keep a session scope even
+        // when serving; `query_binding_source_shape_for_identity` applies both
+        // rules.
         if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
@@ -2598,8 +2606,12 @@ where
             let input_shape = self.normalized_row_set_shape(shape, binding)?;
             binding_claim_params_for_shape(&input_shape, shape.params())
         };
-        let source_shape =
-            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
+        let source_shape = self.query_binding_source_shape_for_identity(
+            shape.params(),
+            &claim_params,
+            identity,
+            false,
+        );
         Ok(source_shape.map(|source_shape| format!("{source_shape}:client-local")))
     }
 
