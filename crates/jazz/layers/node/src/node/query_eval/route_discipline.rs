@@ -25,6 +25,8 @@ use super::lowering::{
 use super::query_engine::ParameterDomain;
 use super::*;
 
+mod borrowed;
+
 /// Why a lowered program may not share a binding source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RouteViolation(pub(super) String);
@@ -55,17 +57,65 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
     slot_routes: &BTreeMap<String, String>,
     infer: impl Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
 ) -> Result<(), RouteViolation> {
+    check_routes(terminals, slot_routes, &DirectGraph { infer })
+}
+
+trait RouteGraph<'g> {
+    type Node: Copy;
+    fn operator(&self, node: Self::Node) -> &'g GraphBuilder;
+    fn child(&self, node: Self::Node, child: &'g GraphBuilder) -> Self::Node;
+    fn key(&self, node: Self::Node) -> usize;
+    fn output(&self, node: Self::Node) -> Result<RecordDescriptor, RouteViolation>;
+    fn children(&self, node: Self::Node) -> Vec<Self::Node> {
+        children(self.operator(node))
+            .map(|child| self.child(node, child))
+            .collect()
+    }
+}
+
+struct DirectGraph<F> {
+    infer: F,
+}
+impl<'g, F, E> RouteGraph<'g> for DirectGraph<F>
+where
+    F: Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
+    E: std::fmt::Debug,
+{
+    type Node = &'g GraphBuilder;
+    fn operator(&self, node: Self::Node) -> &'g GraphBuilder {
+        node
+    }
+    fn child(&self, _: Self::Node, child: &'g GraphBuilder) -> Self::Node {
+        child
+    }
+    fn key(&self, node: Self::Node) -> usize {
+        std::ptr::from_ref(node) as usize
+    }
+    fn output(&self, node: Self::Node) -> Result<RecordDescriptor, RouteViolation> {
+        (self.infer)(node).map_err(|error| {
+            RouteViolation(format!(
+                "cannot describe a binding-dependent input: {error:?}"
+            ))
+        })
+    }
+}
+
+fn check_routes<'g, G: RouteGraph<'g>>(
+    terminals: impl IntoIterator<Item = (&'g str, G::Node, BTreeSet<String>)>,
+    slot_routes: &BTreeMap<String, String>,
+    graph: &G,
+) -> Result<(), RouteViolation> {
     let terminals = terminals.into_iter().collect::<Vec<_>>();
     let aliases = slot_aliases(
         terminals.iter().map(|(_, graph, _)| *graph),
         slot_routes,
-        &infer,
+        graph,
     );
     let mut checker = RouteChecker {
         slot_routes,
         aliases,
         routes: slot_routes.values().cloned().collect(),
-        infer,
+        graph,
         deps: HashMap::new(),
         carried: HashMap::new(),
         masks: HashMap::new(),
@@ -95,23 +145,23 @@ pub(super) fn check_route_discipline<'g, E: std::fmt::Debug>(
 /// fields by slot, and a join against it keeps that name. A slot whose name
 /// a stored relation also uses is not aliased, so a stored column is never
 /// taken for a route.
-fn slot_aliases<'g, E>(
-    graphs: impl IntoIterator<Item = &'g GraphBuilder>,
+fn slot_aliases<'g, G: RouteGraph<'g>>(
+    graphs: impl IntoIterator<Item = G::Node>,
     slot_routes: &BTreeMap<String, String>,
-    infer: &impl Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
+    graph: &G,
 ) -> BTreeMap<String, String> {
     let mut stored = BTreeSet::new();
     let mut seen = BTreeSet::new();
     let mut pending = graphs.into_iter().collect::<Vec<_>>();
     while let Some(node) = pending.pop() {
-        if !seen.insert(std::ptr::from_ref(node)) {
+        if !seen.insert(graph.key(node)) {
             continue;
         }
-        let kids = children(node);
-        if !matches!(node, GraphBuilder::BindingSource { .. })
-            && (kids.len() == 0 || matches!(node, GraphBuilder::Lookup { .. }))
+        let kids = graph.children(node);
+        if !matches!(graph.operator(node), GraphBuilder::BindingSource { .. })
+            && (kids.is_empty() || matches!(graph.operator(node), GraphBuilder::Lookup { .. }))
         {
-            match infer(node) {
+            match graph.output(node) {
                 Ok(output) => stored.extend(
                     output
                         .fields()
@@ -131,32 +181,28 @@ fn slot_aliases<'g, E>(
         .collect()
 }
 
-struct RouteChecker<'a, 'g, F> {
+struct RouteChecker<'a, 'g, G: RouteGraph<'g>> {
     slot_routes: &'a BTreeMap<String, String>,
     aliases: BTreeMap<String, String>,
     routes: BTreeSet<String>,
-    infer: F,
-    deps: HashMap<*const GraphBuilder, BTreeSet<String>>,
-    carried: HashMap<*const GraphBuilder, BTreeSet<String>>,
-    masks: HashMap<*const GraphBuilder, BTreeSet<String>>,
-    equivalents: HashMap<*const GraphBuilder, BTreeMap<String, String>>,
-    checked: BTreeSet<*const GraphBuilder>,
+    graph: &'a G,
+    deps: HashMap<usize, BTreeSet<String>>,
+    carried: HashMap<usize, BTreeSet<String>>,
+    masks: HashMap<usize, BTreeSet<String>>,
+    equivalents: HashMap<usize, BTreeMap<String, String>>,
+    checked: BTreeSet<usize>,
     graphs: std::marker::PhantomData<&'g GraphBuilder>,
 }
 
-impl<'g, F, E> RouteChecker<'_, 'g, F>
-where
-    F: Fn(&'g GraphBuilder) -> Result<RecordDescriptor, E>,
-    E: std::fmt::Debug,
-{
+impl<'g, G: RouteGraph<'g>> RouteChecker<'_, 'g, G> {
     /// Binding routes whose values can decide which rows `node` outputs:
     /// every slot of every binding source it reads.
-    fn depends(&mut self, node: &'g GraphBuilder) -> BTreeSet<String> {
-        let key = std::ptr::from_ref(node);
+    fn depends(&mut self, node: G::Node) -> BTreeSet<String> {
+        let key = self.graph.key(node);
         if let Some(depends) = self.deps.get(&key) {
             return depends.clone();
         }
-        let depends: BTreeSet<String> = match node {
+        let depends: BTreeSet<String> = match self.graph.operator(node) {
             GraphBuilder::BindingSource { output, .. } => output
                 .fields()
                 .iter()
@@ -168,7 +214,10 @@ where
                         .unwrap_or_else(|| slot.to_owned())
                 })
                 .collect(),
-            _ => children(node)
+            _ => self
+                .graph
+                .children(node)
+                .into_iter()
                 .flat_map(|child| self.depends(child))
                 .collect(),
         };
@@ -177,8 +226,8 @@ where
     }
 
     /// Binding route fields present in `node`'s output records.
-    fn carried(&mut self, node: &'g GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
-        let key = std::ptr::from_ref(node);
+    fn carried(&mut self, node: G::Node) -> Result<BTreeSet<String>, RouteViolation> {
+        let key = self.graph.key(node);
         if let Some(carried) = self.carried.get(&key) {
             return Ok(carried.clone());
         }
@@ -198,16 +247,16 @@ where
     /// pair them with their route only on the lookup's own key, which this
     /// check cannot yet tell from the table's other columns, so a program
     /// that reads one is not shared.
-    fn masked(&mut self, node: &'g GraphBuilder) -> Result<BTreeSet<String>, RouteViolation> {
-        let key = std::ptr::from_ref(node);
+    fn masked(&mut self, node: G::Node) -> Result<BTreeSet<String>, RouteViolation> {
+        let key = self.graph.key(node);
         if let Some(masked) = self.masks.get(&key) {
             return Ok(masked.clone());
         }
-        let masked = match node {
-            GraphBuilder::Lookup { keys, .. } => self.depends(keys),
+        let masked = match self.graph.operator(node) {
+            GraphBuilder::Lookup { keys, .. } => self.depends(self.graph.child(node, keys)),
             _ => {
                 let mut masked = BTreeSet::new();
-                for child in children(node) {
+                for child in self.graph.children(node) {
                     masked.extend(self.masked(child)?);
                 }
                 masked
@@ -217,12 +266,8 @@ where
         Ok(masked)
     }
 
-    fn output_names(&self, node: &'g GraphBuilder) -> Result<Vec<String>, RouteViolation> {
-        let output = (self.infer)(node).map_err(|error| {
-            RouteViolation(format!(
-                "cannot describe a binding-dependent input: {error:?}"
-            ))
-        })?;
+    fn output_names(&self, node: G::Node) -> Result<Vec<String>, RouteViolation> {
+        let output = self.graph.output(node)?;
         Ok(output
             .fields()
             .iter()
@@ -232,11 +277,7 @@ where
 
     /// The route a join key stands for: the key's own route name, or the
     /// route an earlier join pinned that field to.
-    fn key_route(
-        &mut self,
-        input: &'g GraphBuilder,
-        field: &FieldRef,
-    ) -> Result<String, RouteViolation> {
+    fn key_route(&mut self, input: G::Node, field: &FieldRef) -> Result<String, RouteViolation> {
         let name = self.raw_field_name(input, field)?;
         let equivalents = self.equivalents(input)?;
         Ok(equivalents
@@ -248,15 +289,12 @@ where
     /// Fields of `node`'s output that equal a binding route in every row,
     /// because a join keyed them on that route. A later join keyed on such
     /// a field keys on the route itself.
-    fn equivalents(
-        &mut self,
-        node: &'g GraphBuilder,
-    ) -> Result<BTreeMap<String, String>, RouteViolation> {
-        let key = std::ptr::from_ref(node);
+    fn equivalents(&mut self, node: G::Node) -> Result<BTreeMap<String, String>, RouteViolation> {
+        let key = self.graph.key(node);
         if let Some(equivalents) = self.equivalents.get(&key) {
             return Ok(equivalents.clone());
         }
-        let equivalents = match node {
+        let equivalents = match self.graph.operator(node) {
             GraphBuilder::Join {
                 left,
                 right,
@@ -264,6 +302,8 @@ where
                 right_on,
                 ..
             } => {
+                let left = self.graph.child(node, left);
+                let right = self.graph.child(node, right);
                 let mut equivalents = BTreeMap::new();
                 for (prefix, side) in [("left.", left), ("right.", right)] {
                     for (field, route) in self.equivalents(side)? {
@@ -291,6 +331,7 @@ where
                 equivalents
             }
             GraphBuilder::Project { input, fields } => {
+                let input = self.graph.child(node, input);
                 let input_equivalents = self.equivalents(input)?;
                 let mut equivalents = BTreeMap::new();
                 for field in fields {
@@ -313,7 +354,9 @@ where
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
             | GraphBuilder::SemiJoin { left: input, .. }
-            | GraphBuilder::AntiJoin { left: input, .. } => self.equivalents(input)?,
+            | GraphBuilder::AntiJoin { left: input, .. } => {
+                self.equivalents(self.graph.child(node, input))?
+            }
             _ => BTreeMap::new(),
         };
         self.equivalents.insert(key, equivalents.clone());
@@ -326,20 +369,12 @@ where
     }
 
     /// The name of `field` in `input`, as the route it aliases if any.
-    fn field_name(
-        &self,
-        input: &'g GraphBuilder,
-        field: &FieldRef,
-    ) -> Result<String, RouteViolation> {
+    fn field_name(&self, input: G::Node, field: &FieldRef) -> Result<String, RouteViolation> {
         let name = self.raw_field_name(input, field)?;
         Ok(self.route_name(name))
     }
 
-    fn raw_field_name(
-        &self,
-        input: &'g GraphBuilder,
-        field: &FieldRef,
-    ) -> Result<String, RouteViolation> {
+    fn raw_field_name(&self, input: G::Node, field: &FieldRef) -> Result<String, RouteViolation> {
         Ok(match field {
             FieldRef::Name(name) | FieldRef::StoredName(name) => name.clone(),
             FieldRef::Resolved(index) => self
@@ -350,20 +385,20 @@ where
         })
     }
 
-    fn check(&mut self, root: &'g GraphBuilder) -> Result<(), RouteViolation> {
+    fn check(&mut self, root: G::Node) -> Result<(), RouteViolation> {
         let mut pending = vec![root];
         while let Some(node) = pending.pop() {
-            if !self.checked.insert(std::ptr::from_ref(node)) {
+            if !self.checked.insert(self.graph.key(node)) {
                 continue;
             }
-            pending.extend(children(node));
+            pending.extend(self.graph.children(node));
             self.check_node(node)?;
         }
         Ok(())
     }
 
-    fn check_node(&mut self, node: &'g GraphBuilder) -> Result<(), RouteViolation> {
-        match node {
+    fn check_node(&mut self, node: G::Node) -> Result<(), RouteViolation> {
+        match self.graph.operator(node) {
             GraphBuilder::Join {
                 left,
                 right,
@@ -385,6 +420,8 @@ where
                 right_on,
                 ..
             } => {
+                let left = self.graph.child(node, left);
+                let right = self.graph.child(node, right);
                 let left_depends = self.depends(left);
                 let right_depends = self.depends(right);
                 if left_depends.is_empty() && right_depends.is_empty() {
@@ -401,12 +438,12 @@ where
                     if !depends.is_subset(carried) {
                         let mut reason = format!(
                             "{} {side} input depends on binding routes {depends:?} but carries {carried:?}",
-                            operator_name(node),
+                            operator_name(self.graph.operator(node)),
                         );
                         if crate::debug_env::covered_input_trace() {
                             reason.push_str(&format!(
                                 " (sketch {}; left names {:?}, right names {:?})",
-                                sketch(node, 12),
+                                sketch(self.graph.operator(node), 12),
                                 self.output_names(left)?,
                                 self.output_names(right)?,
                             ));
@@ -424,7 +461,7 @@ where
                 // An inner join must pair each route both sides carry. A
                 // semi or anti join emits left rows only, so every route its
                 // right input depends on must also key the left row.
-                let required = if matches!(node, GraphBuilder::Join { .. }) {
+                let required = if matches!(self.graph.operator(node), GraphBuilder::Join { .. }) {
                     left_carried
                         .intersection(&right_carried)
                         .cloned()
@@ -445,7 +482,7 @@ where
                         let left_equivalents = self.equivalents(left)?;
                         reason.push_str(&format!(
                             " (keys {keys:?}, left carries {left_carried:?}, right carries {right_carried:?}, left equivalents {left_equivalents:?}, sketch {}; left names {:?}, right names {:?})",
-                            sketch(node, 12),
+                            sketch(self.graph.operator(node), 12),
                             self.output_names(left)?,
                             self.output_names(right)?,
                         ));
@@ -466,11 +503,12 @@ where
             | GraphBuilder::TopBy {
                 input, group_cols, ..
             } => {
+                let input = self.graph.child(node, input);
                 if let GraphBuilder::TopBy {
                     offset: 0,
                     limit: TopByLimit::Unbounded,
                     ..
-                } = node
+                } = self.graph.operator(node)
                 {
                     // Orders without excluding any row: nothing to separate.
                     return Ok(());
@@ -493,6 +531,7 @@ where
                 }
             }
             GraphBuilder::CollectBy { input, collect } => {
+                let input = self.graph.child(node, input);
                 // Each collection must belong to one binding's parent record.
                 let depends = self.depends(input);
                 if depends.is_empty() {
@@ -532,7 +571,7 @@ where
                 } else {
                     Err(RouteViolation(format!(
                         "{} is not route-aware but depends on binding routes {depends:?}",
-                        operator_name(node)
+                        operator_name(self.graph.operator(node))
                     )))
                 }
             }
@@ -916,6 +955,70 @@ where
         &self,
         program: &QueryProgram,
     ) -> Result<(), RouteViolation> {
+        let borrowed = self.check_borrowed_program_routes(program);
+        #[cfg(any(test, feature = "testing"))]
+        let audit = std::env::var_os("JAZZ_BORROWED_ROUTE_AUDIT").is_some();
+        #[cfg(not(any(test, feature = "testing")))]
+        let audit = false;
+        if !audit && let Some(proof) = borrowed {
+            return proof;
+        }
+        let expanded = self.check_expanded_program_routes(program);
+        if audit {
+            if let Some(proof) = borrowed {
+                assert_eq!(
+                    proof.is_ok(),
+                    expanded.is_ok(),
+                    "borrowed route proof disagrees with expanded proof"
+                );
+                eprintln!(
+                    "JAZZ_BORROWED_ROUTE decided=true accepted={}",
+                    proof.is_ok()
+                );
+            } else {
+                eprintln!("JAZZ_BORROWED_ROUTE decided=false");
+            }
+        }
+        expanded
+    }
+
+    fn check_borrowed_program_routes(
+        &self,
+        program: &QueryProgram,
+    ) -> Option<Result<(), RouteViolation>> {
+        let parameters = &program.lowered.parameters;
+        let route_params = prepared_route_param_names(parameters);
+        let mut view = borrowed::View::new(&self.database);
+        let mut terminals = Vec::new();
+        for terminal in &program.lowered.terminals {
+            let eligible = terminal_route_eligible_fields(&terminal.output).ok()?;
+            terminals.push((
+                terminal.sink.as_str(),
+                view.build(&terminal.graph).ok()?,
+                terminal_route_fields(&route_params, &eligible)
+                    .into_iter()
+                    .collect(),
+            ));
+        }
+        if let Some(graph) = &program.lowered.internal_app_rows_graph {
+            let eligible = app_row_terminal_route_eligible_fields(&program.lowered.output).ok()?;
+            terminals.push((
+                "internal-app-rows",
+                view.build(graph).ok()?,
+                route_params
+                    .iter()
+                    .filter(|field| eligible.contains(*field))
+                    .cloned()
+                    .collect(),
+            ));
+        }
+        let proof = check_routes(terminals, &binding_slot_routes(parameters), &view);
+        // A failed proof without lookups is definitive too. Lookup-dependent
+        // failures keep the existing expanded analysis path.
+        (proof.is_ok() || !view.has_lookups).then_some(proof)
+    }
+
+    fn check_expanded_program_routes(&self, program: &QueryProgram) -> Result<(), RouteViolation> {
         let parameters = &program.lowered.parameters;
         let route_params = prepared_route_param_names(parameters);
         // Expansion depends only on each immutable input, not its terminal.
