@@ -802,8 +802,7 @@ where
                 continue;
             };
             return self
-                .decode_stored_history_record(Some(batch), table, &storage_table, record)
-                .await
+                .decode_history_owned_record(table, &storage_table, record)
                 .map(Some);
         }
         Ok(None)
@@ -921,9 +920,8 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
-        tx_author: AuthorSubject,
     ) -> Result<(), Error> {
-        let (history_table, record) = self.version_storage_write_binding(version, tx_author)?;
+        let (history_table, record) = self.version_storage_write_binding(version)?;
         if version.seq()? != GlobalTime(0) {
             // An accepted write's pending record, if any, moves to its seq.
             batch.delete(
@@ -956,7 +954,7 @@ where
         // Validate node-local authored column aliases before deriving
         // the current carrier; encoding itself retains trusted bytes.
         let _ = self.authored_columns_for_version(version)?;
-        let physical = self.encode_physical_version_record(&plan, version, Some(global_time), None)?;
+        let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
         batch.update_raw(
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),
@@ -997,7 +995,7 @@ where
             PhysicalWriteTarget::AheadCurrent,
         )?;
         let _ = self.authored_columns_for_version(version)?;
-        let physical = self.encode_physical_version_record(&plan, version, None, None)?;
+        let physical = self.encode_physical_version_record(&plan, version, None)?;
         batch.update_raw(
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),

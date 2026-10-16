@@ -31,9 +31,9 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use manifest::{
-    AdapterFormat, GROOVE_DURABLE_INDEX_V2_CODEC, ManifestOpenReceipt, MigrationJournal,
-    MigrationRegistry, STORAGE_EPOCH_1, StorageCodecProfile, StorageEpochManifest,
-    StorageMigration,
+    AdapterFormat, GROOVE_DICTIONARY_V1_CODEC, GROOVE_DURABLE_INDEX_V2_CODEC, ManifestOpenReceipt,
+    MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1, StorageCodecProfile,
+    StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]

@@ -25,6 +25,7 @@ impl TickEvaluator<'_> {
                 NodeState::update_table_source_from_inputs(
                     input,
                     self.schema,
+                    self.dictionaries,
                     self.variant_projections,
                     &output_desc,
                     self.evaluation_inputs
@@ -46,6 +47,7 @@ impl TickEvaluator<'_> {
                 NodeState::update_index_source_from_inputs(
                     input,
                     self.schema,
+                    self.dictionaries,
                     self.variant_projections,
                     &output_desc,
                     self.evaluation_inputs

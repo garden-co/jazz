@@ -189,44 +189,64 @@ impl NodeState {
         )
     }
 
-    // Resolve each variant layout once for the batch, before projecting rows.
-    // A descriptor is interned, but constructing its fields is not free.
+    /// Group stored rows of `table` into logical table deltas, one per
+    /// variant. Each variant layout is resolved once for the batch. Every IVM
+    /// source that reads base rows from storage comes through here, so a
+    /// table's interned columns are resolved to their values (through
+    /// `dictionaries`) before any operator sees a record; tables without
+    /// interned columns keep their stored bytes as they are.
     pub(super) fn group_source_rows<'a>(
         table: &crate::schema::TableSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         rows: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-        let mut grouped = HashMap::<u32, TableDelta>::default();
+        let mut grouped =
+            HashMap::<u32, (TableDelta, Option<crate::records::RecordTranscoder>)>::default();
+        let mut registry = None;
         for stored in rows {
             let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let group = match grouped.entry(variant_tag) {
+            let (group, transcoder) = match grouped.entry(variant_tag) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let descriptor =
-                        table
-                            .record_schema_for_variant(variant_tag)
-                            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                                table: table.name.clone(),
-                                version: u64::from(variant_tag),
-                            })?;
-                    entry.insert(TableDelta {
-                        table: table.name.clone(),
-                        variant_tag,
-                        descriptor,
-                        deltas: Vec::new(),
-                    })
+                    let storage = table
+                        .storage_record_schema_for_variant(variant_tag)
+                        .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                            table: table.name.clone(),
+                            version: u64::from(variant_tag),
+                        })?;
+                    let transcoder = crate::records::RecordTranscoder::new(storage)?;
+                    let descriptor = transcoder
+                        .as_ref()
+                        .map_or(storage, crate::records::RecordTranscoder::logical);
+                    entry.insert((
+                        TableDelta {
+                            table: table.name.clone(),
+                            variant_tag,
+                            descriptor,
+                            deltas: Vec::new(),
+                        },
+                        transcoder,
+                    ))
                 }
             };
-            group.deltas.push(RecordDelta {
-                record: Bytes::copy_from_slice(payload),
-                weight: 1,
-            });
+            let record = match transcoder {
+                Some(transcoder) => {
+                    let registry = registry.get_or_insert_with(|| dictionaries.borrow());
+                    Bytes::from(crate::dictionary::transcode_to_logical(
+                        transcoder, registry, payload,
+                    )?)
+                }
+                None => Bytes::copy_from_slice(payload),
+            };
+            group.deltas.push(RecordDelta { record, weight: 1 });
         }
-        Ok(grouped.into_values().collect())
+        Ok(grouped.into_values().map(|(delta, _)| delta).collect())
     }
 
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -239,6 +259,7 @@ impl NodeState {
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
         let table_deltas = Self::group_source_rows(
             table_schema,
+            dictionaries,
             inputs
                 .rows(request)?
                 .iter()
@@ -256,6 +277,7 @@ impl NodeState {
     pub(super) fn update_index_source_from_inputs(
         input: &IndexSourceOp,
         schema: &DatabaseSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -270,6 +292,7 @@ impl NodeState {
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
             let table_deltas = Self::group_source_rows(
                 table_schema,
+                dictionaries,
                 rows.iter().map(|(_, stored)| stored.as_slice()),
             )?;
             return Self::update_table_source(

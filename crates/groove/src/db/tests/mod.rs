@@ -33,6 +33,7 @@ use crate::storage::{
 use support::*;
 
 mod batches;
+mod dictionaries;
 mod graphs;
 mod indices;
 mod persistence;

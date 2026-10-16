@@ -1333,6 +1333,71 @@ mod version_record_wire_row {
             assert!(serde_json::from_str::<WireRow>("[256]").is_err());
         }
 
+        /// Actors: a node replicating one of its global-current rows.
+        ///
+        /// A Jazz row whose stored form interns its author columns reaches
+        /// JVRR in its logical form: Groove reads it back with full
+        /// `RowAuthor` values under plain `RowAuthor` types, it round-trips
+        /// as plain values, and the stored descriptor itself refuses to
+        /// encode, so a dictionary code is never framed as a wire value.
+        /// White-box: the JVRR envelope is below every public API.
+        #[test]
+        fn rows_with_interned_author_columns_cross_jvrr_as_plain_values() {
+            let table = crate::schema::TableSchema::new(
+                "todos",
+                [crate::schema::ColumnSchema::new("title", ValueType::String)],
+            )
+            .global_current_storage_table();
+            let stored = table.storage_record_schema();
+            assert!(stored.contains_interned(), "author columns are interned");
+            assert!(matches!(
+                groove::records::encode_persisted_record_descriptor(&stored),
+                Err(groove::records::Error::InternedTypeNotEncodable { dictionary })
+                    if dictionary == crate::schema::AUTHORS_DICTIONARY
+            ));
+            let stored_row = OwnedRecord::new(Vec::new(), stored);
+            assert!(matches!(
+                encode(&stored_row),
+                Err(groove::records::Error::InternedTypeNotEncodable { .. })
+            ));
+
+            let logical = table.record_schema();
+            assert!(!logical.contains_interned());
+            let alice = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let bob = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xb2; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let values = logical
+                .fields()
+                .iter()
+                .map(|field| match field.name.as_deref() {
+                    Some("created_by") => alice.clone(),
+                    Some("updated_by") => bob.clone(),
+                    _ => match &field.value_type {
+                        ValueType::Bytes => Value::Bytes(vec![1]),
+                        ValueType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
+                        ValueType::U64 => Value::U64(9),
+                        ValueType::Nullable(_) => Value::Nullable(None),
+                        other => panic!("unexpected global-current field type {other:?}"),
+                    },
+                })
+                .collect::<Vec<_>>();
+            let row = OwnedRecord::new(logical.create(&values).unwrap(), logical);
+            let decoded = decode(&encode(&row).unwrap()).unwrap();
+            assert!(!decoded.descriptor().contains_interned());
+            let created_by = logical.field_index("created_by").unwrap();
+            let updated_by = logical.field_index("updated_by").unwrap();
+            assert_eq!(decoded.borrowed().get_idx(created_by).unwrap(), alice);
+            assert_eq!(decoded.borrowed().get_idx(updated_by).unwrap(), bob);
+            assert_eq!(decoded.raw(), row.raw());
+        }
+
         // These internal tests exercise the exact untrusted byte boundary and
         // proof reuse, which ordinary client queries cannot observe directly.
         #[test]

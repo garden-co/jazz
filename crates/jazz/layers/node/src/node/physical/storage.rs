@@ -287,7 +287,7 @@ where
     pub(super) fn contribution_merge_storage_value(
         &self,
         provenance: Option<&ContributionMergeProvenance>,
-    ) -> Result<Value, Error> {
+    ) -> Result<Option<OwnedRecord>, Error> {
         super::codec::contribution_merge_storage_value(
             provenance,
             |table| self.contribution_table_id_for_storage(table),
@@ -403,9 +403,6 @@ where
             .iter()
             .enumerate()
             .map(|(index, field)| {
-                if !current && index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
-                    return PhysicalWriteField::HistoryUpdatedBy;
-                }
                 if current {
                     match index {
                         GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX => {
@@ -790,14 +787,10 @@ where
         Ok(())
     }
 
-    /// Encode `version` for its history table. `tx_author` is the `made_by`
-    /// of the transaction that wrote it: the image stores `updated_by` only
-    /// when it differs (SPEC 2 §2.7.1). Every caller writes or holds that
-    /// transaction record, so a read can always fill the author back in.
+    /// Encode `version` for its history table.
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
-        tx_author: AuthorSubject,
     ) -> Result<
         (
             groove::Intern<String>,
@@ -821,7 +814,7 @@ where
         self.mark_tx_touched_row(table_id, version);
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
-            self.encode_physical_version_record(&plan, version, None, Some(tx_author))?,
+            self.encode_physical_version_record(&plan, version, None)?,
         ))
     }
 
@@ -833,20 +826,8 @@ where
         plan: &PreparedPhysicalWritePlan,
         version: &VersionRow,
         global_time: Option<GlobalTime>,
-        tx_author: Option<AuthorSubject>,
     ) -> Result<groove::records::ValidatedVariantRecord, Error> {
         let input = version.record.borrowed();
-        let history_updated_by = |version: &VersionRow| -> Result<Value, Error> {
-            let tx_author = tx_author.ok_or(Error::InvalidStoredValue(
-                "a history image is written with its transaction author",
-            ))?;
-            let updated_by = version.updated_by();
-            Ok(if row_author_value(updated_by)? == row_author_value(tx_author)? {
-                Value::Nullable(None)
-            } else {
-                history_updated_by_value(updated_by)?
-            })
-        };
         let matching_layout = input.descriptor() == plan.history_descriptor;
         let encoded = groove::records::ValidatedVariantRecord::create_with_encoded_fields::<Error>(
             groove_variant_tag(version.schema_version_alias())?,
@@ -869,7 +850,6 @@ where
                         Value::U64(version.updated_at().physical_ms())
                     }
                     PhysicalWriteField::UpdatedBy => row_author_value(version.updated_by())?,
-                    PhysicalWriteField::HistoryUpdatedBy => history_updated_by(version)?,
                     PhysicalWriteField::GlobalTime => {
                         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0))))
                     }
@@ -906,9 +886,7 @@ where
             let mut values = if current {
                 global_current_values(&plan.source_table, version, global_time)?
             } else {
-                let mut values = version.record.to_values()?;
-                values[HistoryRowRecord::FIELD_UPDATED_BY_IDX] = history_updated_by(version)?;
-                values
+                version.record.to_values()?
             };
             self.remap_authored_enum_cells_for_physical(
                 &mut values,
