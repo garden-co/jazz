@@ -1448,7 +1448,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -1457,7 +1457,7 @@ where
     /// physical history table. Test-only: it inspects storage without the
     /// touched-rows list, so it also reads settled transactions whose list
     /// was released. Ordered like [`Self::query_versions_for_tx`].
-    pub(super) async fn stored_versions_for_tx_for_test(
+    pub async fn stored_versions_for_tx_for_test(
         &mut self,
         tx_id: TxId,
     ) -> Result<Vec<VersionRow>, Error> {
@@ -1500,10 +1500,7 @@ where
 
     /// [`Self::commit_unit_for`] built from [`Self::stored_versions_for_tx_for_test`],
     /// so it also rebuilds a settled transaction's unit.
-    pub(super) async fn stored_commit_unit_for_test(
-        &mut self,
-        tx_id: TxId,
-    ) -> Result<SyncMessage, Error> {
+    pub async fn stored_commit_unit_for_test(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
         let tx = self
             .query_transaction(tx_id)
             .await?
