@@ -14,7 +14,8 @@
 //! both tables at `Global`; the reader connects after every write settled and
 //! subscribes to both tables. Every store is RocksDB. After close, every
 //! column family is read raw and each entry is attributed to its logical
-//! table (class-CF framing `u32be len | name | key`) or, in `indices`, to its
+//! table (class-CF framing `u32be table id | key`, named through the class
+//! table-id registry) or, in `indices`, to its
 //! `table\0index\0` prefix. Bytes are key plus value.
 
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
