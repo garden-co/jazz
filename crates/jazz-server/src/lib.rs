@@ -69,14 +69,31 @@ pub async fn run(
             budget.block_cache_bytes / (1024 * 1024)
         );
     }
-    // Serves until this function returns.
-    let _cache_budget_task = limits.cache_budget_governor().map(|governor| {
+    // Before any runtime exists, so every runtime reads stored tables by key
+    // and records the buckets it uses from its first evaluation.
+    jazz::groove::ivm::set_process_stored_arrangements(limits.stored_arrangements);
+    let ceiling = limits.query_cache_ceiling_bytes();
+    jazz::groove::ivm::set_process_cache_budget(ceiling);
+    if !limits.stored_arrangements {
+        info!("Query cache: off, query indexes of stored tables are held in memory");
+    } else if let Some(ceiling) = ceiling {
         info!(
-            "Query cache budget: {} MiB, lowered under memory pressure",
-            governor.ceiling_bytes() / (1024 * 1024)
+            "Query cache budget: {} MiB{}",
+            ceiling / (1024 * 1024),
+            if limits.memory_limit_bytes.is_some() {
+                ", lowered under memory pressure"
+            } else {
+                ""
+            }
         );
-        AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))
-    });
+    }
+    // Serves until this function returns, and leaves the process unbounded
+    // again for a server started after it.
+    let _cache_budget = CacheBudgetGuard(
+        limits
+            .cache_budget_governor()
+            .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
+    );
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
@@ -163,6 +180,18 @@ pub async fn run(
                     ("memtables", usage.memtable_bytes),
                     ("table_readers", usage.table_reader_bytes),
                 ])
+            })
+        });
+    #[cfg(feature = "otel")]
+    let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
+                budget_bytes: jazz::groove::ivm::process_cache_budget().map(|bytes| bytes as u64),
+                resident_bytes: jazz::groove::ivm::process_cache_resident_bytes() as u64,
+                evicted_buckets: jazz::groove::ivm::process_cache_evicted_buckets(),
+                process_rss_bytes: resources::process_rss_bytes(),
             })
         });
     let shutdown_budget = shutdown_timeout
@@ -271,15 +300,25 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// How often the arrangement budget follows the resident set.
+/// Resets the process-wide query cache settings when its server stops.
+struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
+
+impl Drop for CacheBudgetGuard {
+    fn drop(&mut self) {
+        jazz::groove::ivm::set_process_cache_budget(None);
+        jazz::groove::ivm::set_process_stored_arrangements(false);
+    }
+}
+
+/// How often the query cache budget follows the resident set.
 const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Keep the process-wide arrangement budget in step with memory pressure.
-async fn govern_cache_budget(governor: resources::CacheBudgetGovernor) {
-    use jazz::groove::ivm::{
-        process_cache_budget, process_cache_resident_bytes, set_process_cache_budget,
-    };
-    set_process_cache_budget(Some(governor.ceiling_bytes()));
+/// Keep the process-wide query cache budget in step with memory pressure.
+async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
+    use jazz::groove::ivm::{process_cache_resident_bytes, set_process_cache_budget};
+    let ceiling = governor.ceiling_bytes();
+    let floor = governor.floor_bytes();
+    let mib = |bytes: usize| bytes / (1024 * 1024);
     let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -287,11 +326,33 @@ async fn govern_cache_budget(governor: resources::CacheBudgetGovernor) {
         let Some(rss) = resources::process_rss_bytes() else {
             return;
         };
-        let current = process_cache_budget().unwrap_or(governor.ceiling_bytes());
-        let next = governor.next_budget(rss, process_cache_resident_bytes(), current);
-        if next != current {
-            tracing::debug!(rss, current, next, "arrangement budget");
-            set_process_cache_budget(Some(next));
+        let current = governor.budget_bytes();
+        let next = governor.step(rss, process_cache_resident_bytes());
+        if next == current {
+            continue;
+        }
+        set_process_cache_budget(Some(next));
+        let rss_mib = rss / (1024 * 1024);
+        if current == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: query cache budget lowered, queries read more from storage"
+            );
+        } else if next == floor {
+            tracing::warn!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: query cache budget at its floor"
+            );
+        } else if next == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "query cache budget back at its ceiling"
+            );
+        } else {
+            tracing::debug!(rss_mib, budget_mib = mib(next), "query cache budget");
         }
     }
 }

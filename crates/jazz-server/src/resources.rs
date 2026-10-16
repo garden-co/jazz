@@ -27,6 +27,12 @@ pub struct ServerResourceLimits {
     pub max_websocket_connections: usize,
     /// Memory the process may use, or `None` when nothing limits it.
     pub memory_limit_bytes: Option<u64>,
+    /// Whether queries read arrangements of stored tables from storage by
+    /// key instead of holding them (on by default).
+    pub stored_arrangements: bool,
+    /// The query cache budget while memory is plentiful, instead of a share
+    /// of the memory limit.
+    pub query_cache_budget_bytes: Option<u64>,
 }
 
 impl Default for ServerResourceLimits {
@@ -34,6 +40,8 @@ impl Default for ServerResourceLimits {
         Self {
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             memory_limit_bytes: None,
+            stored_arrangements: true,
+            query_cache_budget_bytes: None,
         }
     }
 }
@@ -60,27 +68,65 @@ impl ServerResourceLimits {
 }
 
 /// Steers the process-wide budget of stored arrangement buckets (see
-/// `groove::ivm::set_process_cache_budget`) from the process's
-/// resident set: over the target, the budget drops by the overshoot, so
-/// queries read more buckets from storage; under it, the budget grows back
-/// towards its ceiling a step at a time. The trade between memory and
-/// storage reads is continuous, with no switch between modes.
+/// `groove::ivm::set_process_cache_budget`) from the process's resident
+/// set, trading memory for storage reads continuously:
+///
+/// - Over the RSS target, each step lowers the budget by an eighth, never
+///   below a floor, so queries read more buckets from storage.
+/// - Once the arrangements have evicted down to a lowered budget, the
+///   governor checks that RSS fell. If it did not, the memory is held
+///   elsewhere and lowering further would only cost reads: the budget holds,
+///   and grows back slowly while RSS stays flat, until RSS grows again.
+/// - Under the target, the budget grows back a tenth of the ceiling per
+///   step, within the headroom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheBudgetGovernor {
     target_rss_bytes: u64,
     ceiling_bytes: usize,
+    floor_bytes: usize,
+    budget: usize,
+    /// The RSS at the last lowering, until eviction catches up with it.
+    lowered_at_rss: Option<u64>,
+    /// The RSS at which lowering stopped moving RSS.
+    unresponsive_at_rss: Option<u64>,
 }
+
+/// The floor of the budget, as a fraction of its ceiling: the hot buckets
+/// every query reads stay resident under any pressure.
+const CACHE_FLOOR_DIVISOR: usize = 8;
+/// The most one step lowers the budget by, as a fraction of the budget.
+const CACHE_STEP_DOWN_DIVISOR: usize = 8;
+/// What one step grows the budget by, as a fraction of the ceiling: faster
+/// under the target, slower while probing whether RSS stays flat over it.
+const CACHE_STEP_UP_DIVISOR: usize = 10;
+const CACHE_PROBE_UP_DIVISOR: usize = 50;
 
 impl ServerResourceLimits {
     /// The governor for this process's limit, or `None` when nothing limits
-    /// memory and arrangements keep every bucket they read.
+    /// memory and the budget stays where it was configured.
     pub fn cache_budget_governor(&self) -> Option<CacheBudgetGovernor> {
         let limit = self.memory_limit_bytes?;
+        let ceiling = self.query_cache_ceiling_bytes()?;
         Some(CacheBudgetGovernor {
             target_rss_bytes: limit / 100 * RSS_TARGET_SHARE_PERCENT,
-            ceiling_bytes: usize::try_from(limit / 100 * CACHE_CEILING_SHARE_PERCENT)
-                .unwrap_or(usize::MAX),
+            ceiling_bytes: ceiling,
+            floor_bytes: ceiling / CACHE_FLOOR_DIVISOR,
+            budget: ceiling,
+            lowered_at_rss: None,
+            unresponsive_at_rss: None,
         })
+    }
+
+    /// The query cache budget while memory is plentiful: the configured one,
+    /// or a share of the memory limit; `None` is unbounded.
+    pub fn query_cache_ceiling_bytes(&self) -> Option<usize> {
+        let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
+        self.query_cache_budget_bytes
+            .or_else(|| {
+                self.memory_limit_bytes
+                    .map(|limit| limit / 100 * CACHE_CEILING_SHARE_PERCENT)
+            })
+            .map(to_usize)
     }
 }
 
@@ -90,24 +136,69 @@ impl CacheBudgetGovernor {
         self.ceiling_bytes
     }
 
-    /// The budget to set next, given the process's resident set, the
-    /// arrangements' resident bytes, and the current budget.
-    pub fn next_budget(&self, rss_bytes: u64, resident_bytes: usize, current: usize) -> usize {
+    /// The budget never goes below this.
+    pub fn floor_bytes(&self) -> usize {
+        self.floor_bytes
+    }
+
+    pub fn budget_bytes(&self) -> usize {
+        self.budget
+    }
+
+    /// Take one step given the process's resident set and the arrangements'
+    /// resident bytes; returns the budget to set.
+    pub fn step(&mut self, rss_bytes: u64, resident_bytes: usize) -> usize {
         let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
-        if rss_bytes > self.target_rss_bytes {
-            // Evicting the overshoot from the cache brings the process back
-            // to its target, as far as the cache can.
-            let overshoot = to_usize(rss_bytes - self.target_rss_bytes);
-            return resident_bytes.saturating_sub(overshoot).min(current);
+        // RSS moves by allocator noise between steps; changes within it are
+        // flat.
+        let noise = self.target_rss_bytes / 200;
+        if rss_bytes <= self.target_rss_bytes {
+            self.lowered_at_rss = None;
+            self.unresponsive_at_rss = None;
+            let headroom = to_usize(self.target_rss_bytes - rss_bytes);
+            self.budget = self
+                .budget
+                .saturating_add(self.ceiling_bytes / CACHE_STEP_UP_DIVISOR)
+                .min(resident_bytes.saturating_add(headroom))
+                .clamp(self.budget, self.ceiling_bytes);
+            return self.budget;
         }
-        // Grow back a tenth of the ceiling per step, and no further than the
-        // headroom, so reclaimed memory does not refill the cache at once.
-        let headroom = to_usize(self.target_rss_bytes - rss_bytes);
-        current
-            .saturating_add(self.ceiling_bytes / 10)
-            .min(resident_bytes.saturating_add(headroom))
-            .max(current)
-            .min(self.ceiling_bytes)
+        if let Some(at) = self.unresponsive_at_rss {
+            if rss_bytes > at + noise {
+                // Memory grew since lowering stopped helping: try again.
+                self.unresponsive_at_rss = None;
+            } else {
+                // Lowering does not move RSS; hand reads back their cache
+                // while RSS stays flat.
+                self.budget = self
+                    .budget
+                    .saturating_add(self.ceiling_bytes / CACHE_PROBE_UP_DIVISOR)
+                    .min(self.ceiling_bytes);
+                return self.budget;
+            }
+        }
+        if let Some(at) = self.lowered_at_rss {
+            if resident_bytes > self.budget {
+                // Arrangements evict at their next install; judge after.
+                return self.budget;
+            }
+            if rss_bytes + noise >= at {
+                self.lowered_at_rss = None;
+                self.unresponsive_at_rss = Some(rss_bytes);
+                return self.budget;
+            }
+        }
+        // Lowering a budget the arrangements do not fill frees nothing, so
+        // start from what they hold.
+        let from = self.budget.min(resident_bytes);
+        let lowered = from
+            .saturating_sub(from / CACHE_STEP_DOWN_DIVISOR)
+            .max(self.floor_bytes);
+        if lowered < self.budget {
+            self.budget = lowered;
+            self.lowered_at_rss = Some(rss_bytes);
+        }
+        self.budget
     }
 }
 
@@ -191,47 +282,112 @@ mod tests {
         assert_eq!(parse_vm_rss("Name:\tjazz\n"), None);
     }
 
+    fn governor(limit_mib: u64) -> CacheBudgetGovernor {
+        ServerResourceLimits {
+            memory_limit_bytes: Some(limit_mib * MIB),
+            ..ServerResourceLimits::default()
+        }
+        .cache_budget_governor()
+        .unwrap()
+    }
+
     #[test]
-    fn cache_budget_follows_memory_pressure_smoothly() {
-        let limits = |limit: Option<u64>| ServerResourceLimits {
+    fn cache_budget_ceiling_comes_from_the_limit_or_configuration() {
+        let limits = |limit: Option<u64>, budget: Option<u64>| ServerResourceLimits {
             memory_limit_bytes: limit,
+            query_cache_budget_bytes: budget,
             ..ServerResourceLimits::default()
         };
-        assert_eq!(limits(None).cache_budget_governor(), None);
-        let governor = limits(Some(1000 * MIB)).cache_budget_governor().unwrap();
-        let ceiling = governor.ceiling_bytes();
-        assert_eq!(ceiling as u64, 1000 * MIB / 100 * 25);
-        let target = 1000 * MIB / 100 * 80;
-        let mib = MIB as usize;
+        assert_eq!(limits(None, None).cache_budget_governor(), None);
+        assert_eq!(limits(None, None).query_cache_ceiling_bytes(), None);
+        assert_eq!(
+            limits(None, Some(64 * MIB)).query_cache_ceiling_bytes(),
+            Some(64 * MIB as usize)
+        );
+        assert_eq!(limits(None, Some(64 * MIB)).cache_budget_governor(), None);
+        let governor = governor(1000);
+        assert_eq!(governor.ceiling_bytes() as u64, 1000 * MIB / 100 * 25);
+        assert_eq!(governor.floor_bytes(), governor.ceiling_bytes() / 8);
+        let configured = limits(Some(1000 * MIB), Some(64 * MIB))
+            .cache_budget_governor()
+            .unwrap();
+        assert_eq!(configured.ceiling_bytes() as u64, 64 * MIB);
+    }
 
+    #[test]
+    fn cache_budget_steps_down_smoothly_to_a_floor() {
+        let mut governor = governor(1000);
+        let ceiling = governor.ceiling_bytes();
+        let target = 1000 * MIB / 100 * 80;
         // Plenty of room: the budget stays at its ceiling.
-        assert_eq!(governor.next_budget(100 * MIB, 50 * mib, ceiling), ceiling);
-        // Over the target, the budget drops by the overshoot below what the
-        // arrangements hold, and to nothing when they cannot cover it.
+        assert_eq!(governor.step(100 * MIB, ceiling), ceiling);
+        // Far over the target, each step lowers by an eighth as long as RSS
+        // follows the evictions (here 10 MiB per step), and never below the
+        // floor.
+        let mut rss = target + 500 * MIB;
+        let mut budgets = vec![ceiling];
+        while budgets.last() != Some(&governor.floor_bytes()) {
+            let budget = governor.step(rss, *budgets.last().unwrap());
+            assert!(budget >= *budgets.last().unwrap() / 8 * 7, "{budgets:?}");
+            budgets.push(budget);
+            rss -= 10 * MIB;
+            assert!(budgets.len() < 100, "{budgets:?}");
+        }
+        assert!(budgets.len() > 10, "{budgets:?}");
         assert_eq!(
-            governor.next_budget(target + 30 * MIB, 200 * mib, ceiling),
-            170 * mib
+            governor.step(rss, governor.floor_bytes()),
+            governor.floor_bytes()
         );
-        assert_eq!(
-            governor.next_budget(target + 300 * MIB, 200 * mib, ceiling),
-            0
-        );
-        // A higher resident set never raises a lowered budget.
-        assert_eq!(
-            governor.next_budget(target + 10 * MIB, 200 * mib, 100 * mib),
-            100 * mib
-        );
-        // Back under the target it grows a tenth of the ceiling per step,
-        // within the headroom.
-        assert_eq!(governor.next_budget(target - 500 * MIB, 0, 0), ceiling / 10);
-        assert_eq!(
-            governor.next_budget(target - 5 * MIB, 0, 10 * mib),
-            10 * mib
-        );
-        assert_eq!(
-            governor.next_budget(target - 20 * MIB, 0, 10 * mib),
-            20 * mib
-        );
+    }
+
+    #[test]
+    fn cache_budget_stops_lowering_when_rss_does_not_follow() {
+        let mut governor = governor(1000);
+        let ceiling = governor.ceiling_bytes();
+        let rss = 1000 * MIB / 100 * 85;
+        // The first step lowers; evictions bring the arrangements down to
+        // it, but RSS stays where it was.
+        let lowered = governor.step(rss, ceiling);
+        assert!(lowered < ceiling);
+        // Before the arrangements evict, the governor waits.
+        assert_eq!(governor.step(rss, ceiling), lowered);
+        // Evicted, RSS unmoved: the budget holds rather than collapsing.
+        assert_eq!(governor.step(rss, lowered), lowered);
+        // RSS stays flat: the budget grows back slowly towards the ceiling.
+        let grown = governor.step(rss, lowered);
+        assert!(grown > lowered && grown < ceiling);
+        let mut budget = grown;
+        for _ in 0..100 {
+            budget = governor.step(rss, budget);
+        }
+        assert_eq!(budget, ceiling);
+        // RSS grows again: lowering is tried again.
+        assert!(governor.step(rss + 50 * MIB, ceiling) < ceiling);
+    }
+
+    #[test]
+    fn cache_budget_grows_back_within_the_headroom() {
+        let mut governor = governor(1000);
+        let ceiling = governor.ceiling_bytes();
+        let target = 1000 * MIB / 100 * 80;
+        let mut rss = target + 500 * MIB;
+        let mut budget = ceiling;
+        for _ in 0..40 {
+            budget = governor.step(rss, budget);
+            rss -= 10 * MIB;
+        }
+        let low = budget;
+        assert!(low < ceiling / 2);
+        // Back under the target it grows by at most a tenth of the ceiling
+        // per step, and no further than the headroom.
+        let mib = MIB as usize;
+        assert_eq!(governor.step(target - 5 * MIB, low), low + 5 * mib);
+        let next = governor.step(target - 500 * MIB, low + 5 * mib);
+        assert_eq!(next, low + 5 * mib + ceiling / 10);
+        for _ in 0..20 {
+            budget = governor.step(target - 500 * MIB, budget);
+        }
+        assert_eq!(budget, ceiling);
     }
 
     #[test]

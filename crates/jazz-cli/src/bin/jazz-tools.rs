@@ -201,6 +201,24 @@ enum Commands {
         #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
         memory_limit_bytes: Option<u64>,
 
+        /// Read the query indexes of stored tables from storage by key,
+        /// keeping only a bounded cache of them in memory. `0` holds them
+        /// all in memory instead.
+        #[arg(
+            long,
+            env = "JAZZ_STORED_ARRANGEMENTS",
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
+        stored_arrangements: bool,
+
+        /// Bytes the query cache may keep while memory is plentiful.
+        /// Defaults to a quarter of the memory limit; it is lowered under
+        /// memory pressure either way.
+        #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
+        query_cache_budget_bytes: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -277,6 +295,8 @@ async fn run() {
             shutdown_timeout_secs,
             max_connections,
             memory_limit_bytes,
+            stored_arrangements,
+            query_cache_budget_bytes,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -338,6 +358,8 @@ async fn run() {
                     max_websocket_connections: max_connections,
                     memory_limit_bytes: memory_limit_bytes
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
+                    stored_arrangements,
+                    query_cache_budget_bytes,
                 },
             )
             .await
@@ -645,9 +667,35 @@ mod tests {
     }
 
     #[test]
+    fn server_command_reads_query_cache_switches_from_env() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _stored_guard = EnvVarGuard::set("JAZZ_STORED_ARRANGEMENTS", "0");
+        let _budget_guard = EnvVarGuard::set("JAZZ_QUERY_CACHE_BUDGET_BYTES", "1048576");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert!(!stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, Some(1 << 20));
+            }
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
     fn server_command_defaults_and_validates_max_connections() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let _env_guard = EnvVarGuard::remove("JAZZ_MAX_CONNECTIONS");
+        let _stored_guard = EnvVarGuard::remove("JAZZ_STORED_ARRANGEMENTS");
+        let _budget_guard = EnvVarGuard::remove("JAZZ_QUERY_CACHE_BUDGET_BYTES");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
@@ -658,6 +706,8 @@ mod tests {
             Commands::Server {
                 max_connections,
                 memory_limit_bytes,
+                stored_arrangements,
+                query_cache_budget_bytes,
                 ..
             } => {
                 assert_eq!(
@@ -665,6 +715,8 @@ mod tests {
                     jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
                 );
                 assert_eq!(memory_limit_bytes, None);
+                assert!(stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, None);
             }
             _ => panic!("expected server command"),
         }

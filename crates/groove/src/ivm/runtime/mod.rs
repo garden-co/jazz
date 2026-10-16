@@ -59,7 +59,10 @@ mod recursion;
 mod residency;
 mod state;
 mod stored_arrangement;
-pub use residency::{process_cache_budget, process_cache_resident_bytes, set_process_cache_budget};
+pub use residency::{
+    process_cache_budget, process_cache_evicted_buckets, process_cache_resident_bytes,
+    process_stored_arrangements, set_process_cache_budget, set_process_stored_arrangements,
+};
 mod terminal;
 mod typed_template;
 
@@ -392,7 +395,7 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
-            stored_arrangements_enabled: true,
+            stored_arrangements_enabled: residency::process_stored_arrangements(),
             cache_budget: None,
             arrangement_use_tracking: Arc::new(std::sync::atomic::AtomicBool::new(
                 residency::process_cache_budget().is_some(),

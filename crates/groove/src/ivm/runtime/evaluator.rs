@@ -3176,6 +3176,9 @@ impl TickEvaluator<'_> {
         }
         // The copy, not the shared state, saw this kernel's reads.
         arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -3312,6 +3315,9 @@ impl TickEvaluator<'_> {
         }
         // The copy, not the shared state, saw this kernel's reads.
         arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,

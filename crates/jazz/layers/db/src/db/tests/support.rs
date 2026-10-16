@@ -186,7 +186,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
 
 pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let storage = rocks_storage(schema);
-    block_on(Db::open(DbConfig {
+    let db = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
         identity: DbIdentity {
@@ -195,7 +195,25 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
     }))
-    .unwrap()
+    .unwrap();
+    if let Some(budget) = query_cache_test_budget() {
+        db.set_stored_arrangements_enabled_for_test(true);
+        db.set_query_cache_budget_for_test(Some(budget));
+    }
+    db
+}
+
+/// `JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES` runs the suite with stored
+/// arrangements read by key and their cache bounded to that many bytes, so
+/// eviction runs under every permission, read and subscription test.
+pub(super) fn query_cache_test_budget() -> Option<usize> {
+    std::env::var("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES")
+        .ok()
+        .map(|bytes| {
+            bytes
+                .parse()
+                .expect("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES is a byte count")
+        })
 }
 
 /// Construct the explicit provider-side identity fixture used by DB tests.
@@ -1970,6 +1988,10 @@ pub(super) fn open_core_with_claims(
     )
     .unwrap();
     node.set_test_provider_claims(author, claims);
+    if let Some(budget) = query_cache_test_budget() {
+        node.set_stored_arrangements_enabled_for_test(true);
+        node.set_query_cache_budget_for_test(Some(budget));
+    }
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),

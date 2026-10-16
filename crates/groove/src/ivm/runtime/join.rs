@@ -778,6 +778,15 @@ impl ArrangementState {
         self.probe_missed.replace(false)
     }
 
+    /// Take the bucket reads a kernel made through a copy of this state, so
+    /// they count as uses of these buckets for eviction.
+    pub(super) fn absorb_reads(&self, copy: &Self) {
+        let reads = std::mem::take(&mut *copy.touched.borrow_mut());
+        if !reads.is_empty() {
+            self.touched.borrow_mut().extend(reads);
+        }
+    }
+
     /// Fail a read that missed a bucket nobody probed, rather than let it
     /// read as empty. Kernels that read a copy of the state check the copy.
     pub(super) fn check_probed_reads(&self) -> Result<(), IvmRuntimeError> {
@@ -931,6 +940,9 @@ impl ArrangementState {
     /// absent, and reads stamp their keys' last use.
     fn commit_resident(&mut self) {
         self.probed = Rc::default();
+        // A rebuild recounts the resident bytes below; the running total is
+        // stale until then and must not be adjusted.
+        let recount = self.rebuilt;
         let overlay = std::mem::take(&mut self.overlay);
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
         let index = Rc::make_mut(&mut self.index);
@@ -938,8 +950,10 @@ impl ArrangementState {
             let absent = Rc::make_mut(&mut self.absent);
             for (key, bucket) in overlay {
                 if let Some(old) = index.remove(&key) {
-                    self.resident_bytes -= resident_bucket_bytes(&key, Some(&old));
-                } else if absent.remove(&key) {
+                    if !recount {
+                        self.resident_bytes -= resident_bucket_bytes(&key, Some(&old));
+                    }
+                } else if absent.remove(&key) && !recount {
                     self.resident_bytes -= resident_bucket_bytes(&key, None);
                 }
                 match bucket {
@@ -949,13 +963,17 @@ impl ArrangementState {
                         {
                             bucket.commit_overlay();
                         }
-                        self.resident_bytes += resident_bucket_bytes(&key, Some(&bucket));
+                        if !recount {
+                            self.resident_bytes += resident_bucket_bytes(&key, Some(&bucket));
+                        }
                         index.insert(key, bucket);
                     }
                     // A full arrangement knows every key outside its index is
                     // empty; a partial one remembers the empty keys it read.
                     None if !self.full => {
-                        self.resident_bytes += resident_bucket_bytes(&key, None);
+                        if !recount {
+                            self.resident_bytes += resident_bucket_bytes(&key, None);
+                        }
                         absent.insert(key);
                     }
                     None => {}
@@ -1496,6 +1514,16 @@ mod tests {
             Err(IvmRuntimeError::StoredArrangementUnprobed)
         ));
         assert!(state.check_probed_reads().is_ok());
+    }
+
+    #[test]
+    fn reads_through_a_copy_count_as_uses_of_the_original() {
+        let state = probed_state(&[b"a"]);
+        let copy = state.clone();
+        copy.touched.borrow_mut().push(JoinKey::from_slice(b"a"));
+        state.absorb_reads(&copy);
+        assert!(copy.touched.borrow().is_empty());
+        assert_eq!(*state.touched.borrow(), vec![JoinKey::from_slice(b"a")]);
     }
 
     #[test]

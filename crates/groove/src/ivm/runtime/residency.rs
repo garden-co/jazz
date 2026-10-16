@@ -14,12 +14,37 @@
 //!
 //! The budget is process-wide, shared by every runtime in the process, so
 //! that one figure (set from the process memory limit, and lowered under
-//! memory pressure) bounds them all. A runtime can override it with a budget
-//! of its own.
+//! memory pressure) bounds them all; each runtime keeps a share of it in
+//! proportion to what it holds. A runtime can override it with a budget of
+//! its own.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::*;
+
+/// Whether runtimes created from now on read arrangements of stored tables
+/// from storage by key. Off by default: a server turns it on for its
+/// process, while clients keep holding their arrangements.
+static STORED_ARRANGEMENTS: AtomicBool = AtomicBool::new(false);
+/// Buckets evicted across the process since it started.
+static EVICTED_BUCKETS: AtomicU64 = AtomicU64::new(0);
+
+/// Have runtimes created from now on read arrangements of stored tables
+/// from storage by key (see `stored_arrangement`); runtimes already running
+/// keep their setting.
+pub fn set_process_stored_arrangements(enabled: bool) {
+    STORED_ARRANGEMENTS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn process_stored_arrangements() -> bool {
+    STORED_ARRANGEMENTS.load(Ordering::Relaxed)
+}
+
+/// Resident buckets evicted across the process since it started; each is
+/// read from storage again by its next read.
+pub fn process_cache_evicted_buckets() -> u64 {
+    EVICTED_BUCKETS.load(Ordering::Relaxed)
+}
 
 /// Orders reads of resident buckets across every stored arrangement.
 static RESIDENCY_CLOCK: AtomicU64 = AtomicU64::new(1);
@@ -113,9 +138,15 @@ impl IvmRuntime {
         let excess = match (self.cache_budget, process_cache_budget()) {
             (Some(budget), _) => excess_over(resident, budget),
             (None, Some(budget)) => {
+                // Over the process budget, each runtime keeps its share of it
+                // in proportion to what it holds, so a busy runtime does not
+                // evict everything to pay for idle ones, which shrink to
+                // their own share at their next install.
                 let others = process_cache_resident_bytes().saturating_sub(self.resident_share.0);
-                excess_over(others.saturating_add(resident), budget)
-                    .map(|excess| excess.min(resident))
+                let total = others.saturating_add(resident);
+                (total > budget)
+                    .then(|| fair_share(budget, resident, total))
+                    .and_then(|share| excess_over(resident, share))
             }
             (None, None) => None,
         };
@@ -149,6 +180,7 @@ impl IvmRuntime {
         }
         for (arrangement, keys) in evict {
             if let Some(state) = self.arrangement_states.get_mut(&arrangement) {
+                EVICTED_BUCKETS.fetch_add(keys.len() as u64, Ordering::Relaxed);
                 state.value_mut().evict(&keys);
             }
         }
@@ -156,8 +188,30 @@ impl IvmRuntime {
     }
 }
 
+/// The part of `budget` a runtime holding `resident` of `total` bytes keeps.
+fn fair_share(budget: usize, resident: usize, total: usize) -> usize {
+    let share = budget as u128 * resident as u128 / total.max(1) as u128;
+    usize::try_from(share).unwrap_or(usize::MAX)
+}
+
 /// Bytes to free so `resident` lands a tenth under `budget`, or `None`
 /// within budget.
 fn excess_over(resident: usize, budget: usize) -> Option<usize> {
     (resident > budget).then(|| resident - (budget - budget / 10))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{excess_over, fair_share};
+
+    #[test]
+    fn a_runtime_keeps_its_proportional_share_of_the_process_budget() {
+        // A busy runtime holding 20 of 220 bytes keeps 20/220 of a 110 byte
+        // budget, not nothing to pay for an idle runtime's 200.
+        assert_eq!(fair_share(110, 20, 220), 10);
+        assert_eq!(excess_over(20, fair_share(110, 20, 220)), Some(11));
+        assert_eq!(fair_share(110, 200, 220), 100);
+        assert_eq!(fair_share(0, 20, 220), 0);
+        assert_eq!(fair_share(usize::MAX - 1, 1, 1), usize::MAX - 1);
+    }
 }
