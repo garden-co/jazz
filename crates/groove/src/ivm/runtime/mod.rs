@@ -224,6 +224,9 @@ pub struct IvmRuntime {
     persistence_indeterminate: Rc<Cell<bool>>,
     /// Durable numeric ids of schema indexes, shared by runtime clones.
     index_ids: SharedIndexIds,
+    /// Groove dictionaries of interned columns, shared with the database and
+    /// runtime clones. Table sources decode stored rows through it.
+    dictionaries: crate::dictionary::SharedDictionaries,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -308,19 +311,26 @@ impl IvmRuntime {
     }
 
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
-        Self::new_with_index_ids(schema, SharedIndexIds::default())
+        let dictionaries = Rc::new(RefCell::new(
+            crate::dictionary::DictionaryRegistry::declared(&schema.dictionaries),
+        ));
+        Self::new_with_shared_state(schema, SharedIndexIds::default(), dictionaries)
     }
 
     /// Build a runtime whose schema indexes take their durable numeric ids
-    /// from `index_ids` (loaded from storage by the database facade).
-    pub(crate) fn new_with_index_ids(
+    /// from `index_ids` and whose interned columns use `dictionaries` (both
+    /// loaded from storage by the database facade).
+    pub(crate) fn new_with_shared_state(
         schema: DatabaseSchema,
         index_ids: SharedIndexIds,
+        dictionaries: crate::dictionary::SharedDictionaries,
     ) -> Result<Self, IvmRuntimeError> {
+        schema.validate_interned_columns()?;
+        dictionaries.borrow().check_declares(&schema.dictionaries)?;
         let table_storage_descriptors = schema
             .tables
             .iter()
-            .map(|table| (table.name.clone(), table.record_schema()))
+            .map(|table| (table.name.clone(), table.storage_record_schema()))
             .collect();
         let table_descriptors = schema
             .tables
@@ -398,6 +408,7 @@ impl IvmRuntime {
             completed_deferred_publications: HashSet::default(),
             persistence_indeterminate: Rc::new(Cell::new(false)),
             index_ids,
+            dictionaries,
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
@@ -504,6 +515,10 @@ impl IvmRuntime {
         &self.index_ids
     }
 
+    pub(crate) fn dictionaries(&self) -> &crate::dictionary::SharedDictionaries {
+        &self.dictionaries
+    }
+
     /// The durable id of a declared schema index (allocated in memory when
     /// first seen; see [`index_ids`]).
     pub(crate) fn index_storage_id(&self, table: &str, index: &IndexSchema) -> u32 {
@@ -565,6 +580,19 @@ pub(crate) use index_ids::{
 };
 mod windows;
 use windows::*;
+
+impl From<crate::dictionary::DictionaryTranscodeError> for IvmRuntimeError {
+    fn from(error: crate::dictionary::DictionaryTranscodeError) -> Self {
+        match error {
+            crate::dictionary::DictionaryTranscodeError::Record(error) => {
+                Self::RecordEncoding(error)
+            }
+            crate::dictionary::DictionaryTranscodeError::Dictionary(error) => {
+                Self::Dictionary(error)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
@@ -647,6 +675,10 @@ pub enum IvmRuntimeError {
     DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
+    #[error(transparent)]
+    Dictionary(#[from] crate::dictionary::DictionaryError),
+    #[error(transparent)]
+    InvalidInternedColumn(#[from] crate::schema::InternedColumnError),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
     RecursiveIterationLimit { node: NodeId, max_iters: usize },
     #[error(transparent)]

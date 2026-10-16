@@ -47,22 +47,3 @@ pub enum PolicyEnforcementMode {
     /// Enforcing runtimes fail closed for missing explicit policy.
     Enforcing,
 }
-
-/// Stable policy identity used to decide whether compiled programs can share work.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PolicySharingKey {
-    /// Internal/system policy bypass.
-    System,
-    /// Authenticated policy context. Claim values are runtime parameters; this
-    /// key records only the claim paths that the lowered graph depends on.
-    Identity {
-        /// Missing-policy behavior.
-        mode: PolicyEnforcementMode,
-        /// Identity whose permissions are being evaluated.
-        permission_subject: AuthorSubject,
-        /// Identity recorded on writes, when it differs from the permission subject.
-        attribution: Option<AuthorSubject>,
-        /// Trusted claim paths referenced by the lowered graph.
-        claim_paths: BTreeSet<ClaimPath>,
-    },
-}

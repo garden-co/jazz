@@ -1191,6 +1191,300 @@ fn nullable_tuple_round_trips() {
     );
 }
 
+/// Pinned tuple-member bytes (#2759, `INV-STORAGE-9`): nullable integer
+/// members keep the big-endian / order-preserving member encoding of their
+/// payload and decode back through it, `F64` members use the ordered-index
+/// transform big-endian, and nulls zero-fill the payload width. Each value
+/// round-trips through decode, structural validation and typed reads.
+#[test]
+fn tuple_member_fixtures_pin_bytes_and_round_trip() {
+    let nullable = |value_type: ValueType| ValueType::Nullable(Box::new(value_type));
+    let some = |value: Value| Value::Nullable(Some(Box::new(value)));
+    let cases: Vec<(ValueType, Value, Vec<u8>)> = vec![
+        (
+            nullable(ValueType::U16),
+            some(Value::U16(0x0102)),
+            vec![1, 0x01, 0x02],
+        ),
+        (
+            nullable(ValueType::U16),
+            Value::Nullable(None),
+            vec![0, 0, 0],
+        ),
+        (
+            nullable(ValueType::U32),
+            some(Value::U32(0x0102_0304)),
+            vec![1, 0x01, 0x02, 0x03, 0x04],
+        ),
+        (
+            nullable(ValueType::U48),
+            some(Value::U48(0x0102_0304_0506)),
+            vec![1, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06],
+        ),
+        (
+            nullable(ValueType::U64),
+            some(Value::U64(0x0102_0304_0506_0708)),
+            vec![1, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+        ),
+        (
+            nullable(ValueType::I32),
+            some(Value::I32(-1)),
+            vec![1, 0x7f, 0xff, 0xff, 0xff],
+        ),
+        (
+            nullable(ValueType::I64),
+            some(Value::I64(1)),
+            vec![1, 0x80, 0, 0, 0, 0, 0, 0, 0x01],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            some(some(Value::U16(0x0102))),
+            vec![1, 1, 0x01, 0x02],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            some(Value::Nullable(None)),
+            vec![1, 0, 0, 0],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            Value::Nullable(None),
+            vec![0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(1.0),
+            vec![0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(-1.0),
+            vec![0x40, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(0.0),
+            vec![0x80, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(-0.0),
+            vec![0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(f64::INFINITY),
+            vec![0xff, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(f64::NEG_INFINITY),
+            vec![0x00, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            nullable(ValueType::F64),
+            some(Value::F64(1.0)),
+            vec![1, 0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            nullable(ValueType::F64),
+            Value::Nullable(None),
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::Tuple(vec![nullable(ValueType::U16), ValueType::F64]),
+            Value::Tuple(vec![some(Value::U16(0x0102)), Value::F64(1.0)]),
+            vec![1, 0x01, 0x02, 0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+    ];
+    for (member_type, member, member_bytes) in cases {
+        let tuple_type = ValueType::Tuple(vec![member_type.clone()]);
+        let tuple = Value::Tuple(vec![member.clone()]);
+        let record_descriptor = descriptor([tuple_type.clone()]);
+        let raw = record_descriptor
+            .create(std::slice::from_ref(&tuple))
+            .unwrap();
+        assert_eq!(raw, member_bytes, "{member_type:?} {member:?}");
+        assert_eq!(
+            record_descriptor.get_idx(&raw, 0).unwrap(),
+            tuple,
+            "{member_type:?} {member:?}"
+        );
+        record_descriptor.bind(&raw).validate_canonical().unwrap();
+        assert_eq!(
+            <Value as RecordField>::read_raw(&raw, &tuple_type).unwrap(),
+            tuple
+        );
+        assert_eq!(
+            <Value as RecordField>::read_tuple_raw(&raw, &member_type).unwrap(),
+            member
+        );
+
+        // The same tuple nested under every containing type.
+        let child = OwnedRecord::new(raw.clone(), record_descriptor);
+        let schema =
+            EnumSchema::new("wrapper", [EnumCase::new("value", record_descriptor)]).unwrap();
+        for (wrapper_type, wrapper) in [
+            (
+                ValueType::Record(Box::new(record_descriptor)),
+                Value::Record(child.clone()),
+            ),
+            (
+                ValueType::Array(Box::new(tuple_type.clone())),
+                Value::Array(vec![tuple.clone(), tuple.clone()]),
+            ),
+            (nullable(tuple_type.clone()), some(tuple.clone())),
+            (
+                ValueType::Enum(Box::new(schema)),
+                Value::Enum(EnumValue::new(0, child.clone())),
+            ),
+        ] {
+            let outer = descriptor([wrapper_type.clone()]);
+            let outer_raw = outer.create(std::slice::from_ref(&wrapper)).unwrap();
+            assert_eq!(outer.get_idx(&outer_raw, 0).unwrap(), wrapper);
+            outer.bind(&outer_raw).validate_canonical().unwrap();
+            assert_eq!(
+                outer
+                    .create(&outer.bind(&outer_raw).to_values().unwrap())
+                    .unwrap(),
+                outer_raw
+            );
+        }
+    }
+}
+
+/// Typed tuple reads decode nullable and `F64` members with the member
+/// encoding, matching the dynamic decoder (#2759).
+#[test]
+fn typed_tuple_reads_use_member_encoding() {
+    let tuple_type = ValueType::Tuple(vec![
+        ValueType::Nullable(Box::new(ValueType::U32)),
+        ValueType::F64,
+    ]);
+    let record_descriptor = descriptor([tuple_type.clone()]);
+    let raw = record_descriptor
+        .create(&[Value::Tuple(vec![
+            Value::Nullable(Some(Box::new(Value::U32(0x0102_0304)))),
+            Value::F64(-2.5),
+        ])])
+        .unwrap();
+    assert_eq!(
+        <(Option<u32>, f64) as RecordField>::read_raw(&raw, &tuple_type).unwrap(),
+        (Some(0x0102_0304), -2.5)
+    );
+}
+
+/// `F64` tuple members sort bytewise in numeric order, like integer members.
+#[test]
+fn tuple_f64_member_bytes_sort_numerically() {
+    let record_descriptor = descriptor([ValueType::Tuple(vec![ValueType::F64])]);
+    let values = [
+        f64::NEG_INFINITY,
+        -1e300,
+        -2.5,
+        -1.0,
+        -f64::MIN_POSITIVE,
+        -0.0,
+        0.0,
+        f64::MIN_POSITIVE,
+        1.0,
+        2.5,
+        1e300,
+        f64::INFINITY,
+    ];
+    let encoded = values
+        .iter()
+        .map(|value| {
+            record_descriptor
+                .create(&[Value::Tuple(vec![Value::F64(*value)])])
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        record_descriptor
+            .create(&[Value::Tuple(vec![Value::F64(f64::NAN)])])
+            .unwrap_err(),
+        Error::InvalidF64NaN
+    );
+}
+
+// Byte-level admission is internal: no public API constructs arbitrary raw
+// tuple bytes, and the contract under test is that structural validation and
+// decode/re-encode agree on every byte string.
+/// Structural validation of tuple members admits exactly the byte strings that
+/// decode and re-encode to themselves (#2759): exhaustively for two-byte
+/// tuples, and over seeded byte strings for wider members.
+#[test]
+fn tuple_member_validation_admits_exactly_canonical_decodes() {
+    fn roundtrips(record_descriptor: RecordDescriptor, raw: &[u8]) -> bool {
+        record_descriptor
+            .bind(raw)
+            .to_values()
+            .and_then(|values| record_descriptor.create(&values))
+            .is_ok_and(|encoded| encoded == raw)
+    }
+    fn check(record_descriptor: RecordDescriptor, raw: &[u8]) {
+        let structural = record_descriptor.bind(raw).validate_canonical().is_ok();
+        assert_eq!(
+            structural,
+            roundtrips(record_descriptor, raw),
+            "{record_descriptor:?}: {raw:02x?}"
+        );
+        assert_eq!(
+            record_descriptor.bind(raw).validate().is_ok(),
+            structural,
+            "{record_descriptor:?}: {raw:02x?}"
+        );
+    }
+    let nullable = |value_type: ValueType| ValueType::Nullable(Box::new(value_type));
+    let status = ValueType::EnumTag(ScalarEnumSchema::new("status", ["a", "b", "c"]).unwrap());
+    for members in [
+        vec![nullable(ValueType::U8)],
+        vec![nullable(ValueType::Bool)],
+        vec![status.clone(), ValueType::Bool],
+        vec![nullable(status.clone())],
+        vec![ValueType::Tuple(vec![ValueType::Bool]), ValueType::U8],
+    ] {
+        let record_descriptor = descriptor([ValueType::Tuple(members)]);
+        for raw in 0..=u16::MAX {
+            check(record_descriptor, &raw.to_be_bytes());
+        }
+    }
+
+    let wide = [
+        vec![ValueType::F64],
+        vec![nullable(ValueType::F64)],
+        vec![nullable(ValueType::U16), nullable(ValueType::I32)],
+        vec![nullable(nullable(ValueType::U16))],
+        vec![nullable(ValueType::Tuple(vec![
+            ValueType::Bool,
+            ValueType::F64,
+        ]))],
+    ];
+    let mut seed = 0x2759_5eed_u64;
+    for members in wide {
+        let tuple_type = ValueType::Tuple(members);
+        let width = tuple_type.fixed_size().unwrap();
+        let record_descriptor = descriptor([tuple_type]);
+        for _ in 0..20_000 {
+            let raw = (0..width)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    // Bias toward the flag and boundary bytes that matter.
+                    match (seed >> 33) % 4 {
+                        0 => 0,
+                        1 => 1,
+                        2 => 0xff,
+                        _ => (seed >> 41) as u8,
+                    }
+                })
+                .collect::<Vec<_>>();
+            check(record_descriptor, &raw);
+        }
+    }
+}
+
 #[test]
 fn fixed_tuple_arrays_support_indexed_element_reads() {
     let first = uuid::Uuid::from_bytes([0x01; 16]);

@@ -1989,4 +1989,178 @@ mod tests {
             .expect_err("text never correlates with a UUID");
         assert_eq!(error, QueryError::OperandTypeMismatch);
     }
+
+    mod predicate_codec_pins {
+        use super::*;
+        use crate::query::policy_limits::{
+            MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES,
+        };
+
+        fn col(name: &str) -> Operand {
+            Operand::Column(name.to_owned())
+        }
+
+        fn every_variant() -> Predicate {
+            Predicate::All(vec![
+                Predicate::Any(vec![
+                    Predicate::Eq(col("a"), Operand::Param("p".to_owned())),
+                    Predicate::Ne(col("a"), Operand::Claim("c".to_owned())),
+                ]),
+                Predicate::Not(Box::new(Predicate::Gt(
+                    col("b"),
+                    Operand::Literal(Value::I64(-3)),
+                ))),
+                Predicate::Gte(col("b"), Operand::Literal(Value::String("s".to_owned()))),
+                Predicate::Lt(col("b"), Operand::Literal(Value::Bool(true))),
+                Predicate::Lte(col("b"), Operand::Literal(Value::U64(7))),
+                Predicate::In(
+                    col("c"),
+                    vec![
+                        Operand::Literal(Value::I32(1)),
+                        Operand::Param("q".to_owned()),
+                    ],
+                ),
+                Predicate::Contains(col("d"), Operand::Literal(Value::Bytes(vec![1, 2]))),
+                Predicate::EnumMatch {
+                    column: "e".to_owned(),
+                    case: "k".to_owned(),
+                    payload: Box::new(Predicate::Any(vec![Predicate::IsNull(col("f"))])),
+                },
+                Predicate::All(vec![]),
+            ])
+        }
+
+        fn nested(depth: usize) -> Predicate {
+            let mut predicate = Predicate::IsNull(col("x"));
+            for _ in 1..depth {
+                predicate = Predicate::Not(Box::new(predicate));
+            }
+            predicate
+        }
+
+        fn wide(nodes: usize) -> Predicate {
+            Predicate::All((1..nodes).map(|_| Predicate::IsNull(col("x"))).collect())
+        }
+
+        fn json_err(json: &str) -> String {
+            serde_json::from_str::<Predicate>(json)
+                .expect_err("must reject")
+                .to_string()
+        }
+
+        #[test]
+        fn predicate_json_and_postcard_encodings_are_pinned() {
+            let predicate = every_variant();
+            let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"EnumMatch":{"column":"e","case":"k","payload":{"Any":[{"IsNull":{"Column":"f"}}]}}},{"All":[]}]}"#;
+            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020b0165016b01010c0001660000";
+            assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
+            assert_eq!(
+                hex::encode(postcard::to_allocvec(&predicate).unwrap()),
+                bytes
+            );
+            assert_eq!(serde_json::from_str::<Predicate>(json).unwrap(), predicate);
+            assert_eq!(
+                postcard::from_bytes::<Predicate>(&hex::decode(bytes).unwrap()).unwrap(),
+                predicate
+            );
+            assert_eq!(
+                serde_json::from_str::<Predicate>(
+                    r#"{"EnumMatch":["e","k",{"IsNull":{"Column":"f"}}]}"#
+                )
+                .unwrap(),
+                Predicate::EnumMatch {
+                    column: "e".to_owned(),
+                    case: "k".to_owned(),
+                    payload: Box::new(Predicate::IsNull(col("f"))),
+                }
+            );
+        }
+
+        #[test]
+        fn predicate_decode_errors_are_pinned() {
+            for (json, error) in [
+                (
+                    r#"{"EnumMatch":{"column":"e","case":"k","payload":{"IsNull":{"Column":"f"}},"extra":1}}"#,
+                    "unknown field `extra`, expected one of `column`, `case`, `payload` at line 1 column 81",
+                ),
+                (
+                    r#"{"EnumMatch":{"column":"e","column":"e","case":"k"}}"#,
+                    "duplicate field `column` at line 1 column 35",
+                ),
+                (
+                    r#"{"EnumMatch":{"case":"k","payload":{"IsNull":{"Column":"f"}}}}"#,
+                    "missing field `column` at line 1 column 61",
+                ),
+                (
+                    r#"{"Eq":[{"Column":"a"},{"Column":"b"},{"Column":"c"}]}"#,
+                    "trailing characters at line 1 column 38",
+                ),
+                (
+                    r#"{"All":{"IsNull":{"Column":"f"}}}"#,
+                    "invalid type: map, expected a bounded sequence of policy predicates at line 1 column 7",
+                ),
+            ] {
+                assert_eq!(json_err(json), error, "{json}");
+            }
+            for json in [
+                r#"{"EnumMatch":["e","k"]}"#,
+                r#"{"Eq":[{"Column":"a"}]}"#,
+                r#"{"In":[{"Column":"a"}]}"#,
+                r#"{"Nope":[]}"#,
+            ] {
+                assert!(serde_json::from_str::<Predicate>(json).is_err(), "{json}");
+            }
+        }
+
+        #[test]
+        fn predicate_decode_budget_is_pinned() {
+            let wide_json = serde_json::to_string(&wide(MAX_POLICY_EXPRESSION_NODES + 1)).unwrap();
+            assert_eq!(
+                json_err(&wide_json),
+                "MAX_POLICY_EXPRESSION_NODES exceeded: observed 16385, maximum 16384 at line 1 column 425966"
+            );
+            let nested_wide =
+                serde_json::to_string(&Predicate::Not(Box::new(wide(MAX_POLICY_EXPRESSION_NODES))))
+                    .unwrap();
+            assert_eq!(
+                json_err(&nested_wide),
+                "MAX_POLICY_EXPRESSION_NODES exceeded: observed 16385, maximum 16384 at line 1 column 425947"
+            );
+            let wide_ok = wide(MAX_POLICY_EXPRESSION_NODES);
+            assert_eq!(
+                serde_json::from_str::<Predicate>(&serde_json::to_string(&wide_ok).unwrap())
+                    .unwrap(),
+                wide_ok
+            );
+            for depth in [MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_DEPTH + 1] {
+                let bytes = postcard::to_allocvec(&nested(depth)).unwrap();
+                let decoded = postcard::from_bytes::<Predicate>(&bytes);
+                if depth == MAX_POLICY_EXPRESSION_DEPTH {
+                    assert_eq!(decoded.unwrap(), nested(depth));
+                } else {
+                    assert_eq!(decoded.unwrap_err(), postcard::Error::SerdeDeCustom);
+                }
+            }
+            // A length header claiming more children than the remaining budget
+            // is refused before any child is read (the zero padding decodes as
+            // 8192 empty `All` children, then runs out).
+            for (header, error) in [
+                (
+                    vec![0x00u8, 0x80, 0x80, 0x01],
+                    postcard::Error::SerdeDeCustom,
+                ),
+                (
+                    vec![0x00, 0xff, 0x7f],
+                    postcard::Error::DeserializeUnexpectedEnd,
+                ),
+            ] {
+                let mut bytes = header;
+                bytes.resize(bytes.len() + MAX_POLICY_EXPRESSION_NODES, 0);
+                assert_eq!(
+                    postcard::from_bytes::<Predicate>(&bytes).unwrap_err(),
+                    error
+                );
+            }
+        }
+    }
 }

@@ -5,6 +5,8 @@
 //! across every layer from `Db` facade calls through protocol messages to groove
 //! storage keys.
 
+use crate::identity::principal_is_nonempty;
+
 /// Declares a `Copy` identifier newtype with the shared derive set. The derive
 /// list (including serde) is part of the wire and storage contract.
 macro_rules! id_newtype {
@@ -264,7 +266,9 @@ pub enum AuthorSubjectError {
     InvalidSystemOrigin,
 }
 
-fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
+/// The `(issuer, subject)` principal record shared by row authors and the
+/// account registry.
+pub(crate) fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
     use crate::groove::records::{RecordDescriptor, ValueType};
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
@@ -898,13 +902,6 @@ fn parse_canonical_parts(
             "expected principal or account author".into(),
         )),
     }
-}
-
-fn principal_is_nonempty(value: &str) -> bool {
-    value
-        .as_bytes()
-        .iter()
-        .any(|byte| !matches!(byte, b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' '))
 }
 
 impl PartialOrd for AuthorSubject {

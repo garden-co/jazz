@@ -8,7 +8,7 @@ import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
 } from "../runtime/graceful-shutdown-error.js";
-import { toError } from "../runtime/util.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 /** Re-admit the selected account in place, or decline for an ordinary transition. */
 interface InPlaceRevalidation {
@@ -104,7 +104,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     client,
     needsLogin: accountNeedsLogin(selected),
   });
-  const listeners = new Set<() => void>();
+  const listeners = createListeners("Jazz session observer failed");
   const leases = new Set<{ waiting?: () => void }>();
   // Development builds only: warn an app that drives logins itself when it
   // keeps writing to an account that still needs one.
@@ -128,13 +128,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     snapshot = Object.freeze({ ...next, needsLogin: accountNeedsLogin(next.account) });
     versions.set(snapshot, ++version);
     needsLoginWarning.update();
-    for (const listener of [...listeners]) {
-      try {
-        listener();
-      } catch (error) {
-        console.error("Jazz session observer failed", error);
-      }
-    }
+    listeners.notify();
   };
   const detach = (next: Omit<JazzSessionSnapshot<Client>, "needsLogin">) => {
     const waits = [...leases].map(
@@ -299,12 +293,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   };
   const session: JazzSession<Client> = {
     getSnapshot: () => snapshot,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),

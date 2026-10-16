@@ -158,7 +158,9 @@ the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
 is decoded; a v5 envelope on a v6 link is rejected by its version field. The v6
 baseline, frozen fresh rather than appended to v5, is:
 
-- the `JVRR` row blob is version `2` (no `parents`; `_deletion` cell), and
+- the `JVRR` row blob is version `3` (no `parents`; `_deletion` cell; row
+  descriptors defined once per sync message in a descriptor table, SPEC 16),
+  and
   `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
   layout") then `counter_signs` (SPEC 4 §4.3). Every row version of a
   `CommitUnit` carries the base of the image its writer made it over (the
@@ -301,19 +303,20 @@ sequence and the remaining Hello fields are otherwise well formed.
 Postcard enum ordinals are wire data. The wire-protocol v6 baseline freezes these permanent
 discriminants (decimal):
 
-| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`             | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `reserved=14`, `reserved=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27`, `ViewUpdatePart=28`, `reserved=29` |
-| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `reserved=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`             | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `reserved=14`, `reserved=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27`, `ViewUpdatePart=28`, `reserved=29`, `ReadBarrier=30` |
+| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `reserved=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 `SyncMessage` tags 0 through 27 keep the compact v5 numbering; v6 retires tags
 14 (`FetchRowVersions`) and 15 (`RowVersionPayloads`) in place and appends
-`ViewUpdatePart` (28) and the since retired tag 29. Tags 14, 15 and 29 of
+`ViewUpdatePart` (28), the since retired tag 29 and `ReadBarrier` (30). Tags
+14, 15 and 29 of
 `SyncMessage` and tag 2 of `KnownStateDeclaration` are retired and MUST reject
 decoding; they have no
 constructible message. Historical fixtures retain their original bytes and are
@@ -324,6 +327,64 @@ their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
 new negotiated feature bit. Wire-protocol v6 intentionally provides neither
 old-version decoding nor migration.
+
+#### Forward compatibility of tagged unions (#2468, `INV-WIRE-2`)
+
+Every tagged union on the wire is **closed and strictly decoded**: an unknown
+discriminant, at any depth, is `MalformedFrame`, exactly as #2435 fixed for
+`WireErrorCode` and `WireRetry`. There is no opaque or skippable "unknown
+variant". Jazz receivers must interpret every message exactly; a variant an
+older peer silently skipped could carry a fate, a revocation or a coverage
+claim whose absence changes results. Growth instead comes in three layers:
+
+1. **Cross-version bytes (permanent in every wire version).** A `Hello`
+   starts with the `WireFrame::Hello` tag (`0`) and then the
+   `min_protocol_version`, `max_protocol_version` pair. A `WireFrame::Error`
+   (tag `1` since wire v5) is `{ code, retry, message }` with the codes and retries in the
+   table above. Nothing else is shared across versions. A receiver reads a
+   Hello's version range **before** the rest of its body and answers a
+   foreign range with `UnsupportedProtocolVersion`/`Never`, never with
+   `MalformedFrame`, even when the remaining bytes do not parse with this
+   version's layout. Before negotiation completes, a peer sends only these
+   baseline error codes and retries.
+2. **Additive change within a version: capability bits.** A new variant of
+   any union (`WireFrame`, `SyncMessage`, or a union nested inside one, such
+   as `SubscribeRejectReason` or `LensOp`), a new message carrying extra
+   fields, or a new `WireErrorCode` or `WireRetry` is assigned a new feature
+   bit. A sender emits it only when that bit is in the negotiated
+   intersection and otherwise uses the baseline form; for a new error code,
+   that is a baseline code with the same retry meaning. The receiver rejects
+   it with `UnsupportedFeature` when the bit was not negotiated.
+   `SyncMessage::required_wire_features` MUST account for nested variants,
+   not only the top-level tag. Postcard has no optional trailing fields, so a
+   new field on an existing struct is never additive: it needs a new variant
+   behind a bit, or layer 3.
+3. **Everything else: a version bump.** Reordering, removing, or
+   re-meaning a variant or field, or changing the Hello body after the
+   version range, needs a new `WIRE_PROTOCOL_VERSION`. Negotiation stays
+   exact-version (no ranges), so peers on different versions refuse each
+   other cleanly through layer 1.
+
+Worked examples, with Alice on version `N` and Bob on `N` plus a new bit `B`
+for a new `SyncMessage` variant `X`:
+
+- _Newer sender, older receiver._ Alice does not advertise `B`, so the
+  intersection lacks it and Bob never sends `X` to Alice. If he did, Alice
+  rejects it as malformed (unknown tag) and closes the link.
+- _Older sender, newer receiver._ Alice sends only baseline messages, which
+  Bob decodes unchanged. Bob also rejects `X` from any peer that did not
+  negotiate `B`.
+- _New error code._ Bob adds `WireErrorCode::Y` behind bit `C`. To Alice he
+  sends the baseline code with the same retry meaning; to a peer that
+  negotiated `C` he sends `Y`.
+- _Different versions._ Bob on `N+1` changes the Hello body. Alice reads
+  `(N+1, N+1)` from the prefix and replies with the frozen
+  `UnsupportedProtocolVersion`/`Never` error frame, which Bob decodes with
+  his own layer-1 decoder. The reverse direction is symmetric.
+
+Canonical encoding and resource bounds are unchanged: capability bits add no
+alternate spellings, and the version probe reads two bounded varints before
+the existing exact decode.
 
 The optional feature bits are `PayloadLz4=1<<3`,
 `PayloadZstd=1<<4`,
@@ -411,17 +472,18 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                  | direction      | payload                                                                                                                |
-| -------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `CommitUnit`                                             | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                    |
-| `FateUpdate`                                             | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                 |
-| `RegisterShape`                                          | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                              |
-| `Subscribe`                                              | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                      |
-| `SubscribeRejected`                                      | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                     |
-| `Unsubscribe`                                            | up             | `{ subscription: SubscriptionKey }`                                                                                    |
-| `ViewUpdate`                                             | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }` |
-| `ViewUpdatePart`                                         | down           | `ViewUpdate` payload shape; a non-final part of an update over the routed payload limit                                |
-| `PublishSchemaWithLens` / `PublishLens` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                 |
+| message                                                  | direction      | payload                                                                                                                    |
+| -------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `CommitUnit`                                             | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                        |
+| `FateUpdate`                                             | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                     |
+| `ReadBarrier`                                            | up             | `{ writes_through: u64 }`: hold later requests until this link's first `writes_through` commit units are answered (§8.2.1) |
+| `RegisterShape`                                          | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                  |
+| `Subscribe`                                              | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                          |
+| `SubscribeRejected`                                      | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                         |
+| `Unsubscribe`                                            | up             | `{ subscription: SubscriptionKey }`                                                                                        |
+| `ViewUpdate`                                             | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }`     |
+| `ViewUpdatePart`                                         | down           | `ViewUpdate` payload shape; a non-final part of an update over the routed payload limit                                    |
+| `PublishSchemaWithLens` / `PublishLens` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                     |
 
 A `VersionCarrier` in `ViewUpdate.version_carriers` is either one owned
 `VersionBundle` or a packed run that expands to the same bundle sequence. A
@@ -505,6 +567,54 @@ relay path as `Fate::Pending` at `DurabilityTier::Local`, forwards it upstream
 and waits for Core's `FateUpdate`; it must not emit a fate, assign a seq, or make
 the write visible at the `Global` tier (`INV-TX-23`). Only a structurally wired fate
 authority path may decide fate (ch. 3 §3.6, ch. 9).
+
+### 8.2.1 Read-your-writes barrier (#3863, `INV-SYNC-49`)
+
+A link sends commit units on the writes channel and requests (`RegisterShape`,
+`Subscribe`, `Unsubscribe`, `CurrentRowsRequest`, `CurrentRowsCancel`, and the
+authorization requests) on the requests channel. Each channel is FIFO, but the
+two are credited and scheduled independently (SPEC 14), so a read sent after a
+write can reach the receiver first. A reconnect resends both with no order
+between them.
+
+The contract: **a request is served only after the receiver has answered every
+commit unit the same link sent before it.** To make that hold on any
+transport:
+
+- The sending link counts the commit units the transport accepts on that link,
+  starting at zero on every new link. In each turn it uploads its outbox
+  before any request, so a reconnect resends the outbox ahead of reissued opens.
+  A full large-value channel stops uploads for that turn but not requests; the
+  commits it holds back are not yet counted.
+- Before the first request after new writes, the sender sends
+  `ReadBarrier { writes_through }` on the requests channel, naming its count.
+  Requests with no writes since the last barrier carry none.
+- The receiving link numbers commit units in arrival order. It holds a
+  `ReadBarrier`, and every request behind it, until it has received
+  `writes_through` commit units and answered each one. A write is answered by
+  the first `FateUpdate` this link sends for it. A
+  copy of a write this link has already answered as stored, and not yet
+  settled, is answered on arrival: a recovering relay acknowledges a write it
+  restored from its own storage before the writer's resent copy reaches it.
+  A terminal fate ends that standing. Messages on
+  other channels are never held. Held requests keep their buffer leases, so
+  the sender's request credit bounds what a receiver holds. When a turn's
+  input runs out with requests held, the receiver sends the answers it has
+  ready and serves the requests they release in that same turn, so the
+  barrier costs no extra turn when the write is handled at once.
+- "Answered" means stored or decided **at this node**. A Core answers with the
+  terminal fate. A relay or local receiver answers with its local
+  acknowledgement once the write is durable there, so its clients keep reading
+  while it is offline; its own upstream link then puts that write ahead of the
+  requests it forwards. Each hop guarantees its own order, so the chain gives
+  read-your-writes end to end.
+
+What this does not cover: a write still held on the client (for example behind
+its large-value upload) has not been sent, so no barrier names it. A one-shot
+remote read waits for such writes on the client before it is issued
+(#3844); a live view shows the client's own pending writes locally until the
+authority's update includes them. Reads served from local state
+(`local-first`, `local-only`) never wait for the authority.
 
 ### 8.3 Fates downstream
 

@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
 - `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
 - `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
-- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian order-preserving member encoding.
+- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple members MUST use the big-endian order-preserving member encoding on encode, decode and structural validation alike, recursively through nested tuple and nullable members (a present nullable member's payload is itself a member), with `F64` members in the §2.8 ordered-index transform.
 - `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
 - `INV-STORAGE-38`: Durable index ids MUST be assigned per `(table, index, definition)` from a monotonic counter starting at 1, recorded in the `indices` registry (`\0groove-index-id\0` keys) no later than the storage-atomic write of the first entry that uses them, stable across reopen and index reordering, and never reused: a changed definition or a runtime (re)registration receives a fresh id, so entries of an earlier incarnation are never read. An `indices` family holding entries without the `groove-durable-index-v2` layout marker, or with another marker, MUST fail open with `InvalidStorageLayout`; node roots declare `groove.durable-index.v2` in their manifest.
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
@@ -793,6 +793,52 @@ shorthand for the declared durable pk-ref case.)
 `IndexBy`/`Persist` path; they have not yet been folded into the target unified
 arrangement abstraction.
 
+### Interned columns and dictionaries
+
+Codec family `groove.dictionary.v1`. A table column may be declared
+**interned** into a named dictionary with `ValueType::interned(dictionary,
+logical)`. A row then stores the 4-byte code of the column's value instead of
+the value: a fixed-width little-endian `u32`, or, for
+`Nullable(Interned)`, a presence byte followed by the code (`00` and four zero
+bytes when null). Interning is declared per Groove physical column, so every
+variant payload that declares the interned type stores codes too.
+
+Each dictionary is declared by a `DictionarySchema { name, value_type }` and
+stored in its own Groove-owned column family `__groove_dictionary_<name>`:
+
+```text
+key   = code as u32 big-endian (4 bytes)
+value = canonical Groove encoding of the value (value_type)
+```
+
+Codes are dense from 0: the entries of a dictionary are exactly the codes
+`0..n`, and one value has one code. A value holds no indirect large value.
+Groove owns the whole mapping. It allocates the next code synchronously
+while preparing a write, and every publication carries every entry not yet
+durable in its single atomic `write_many`, so an entry is durable with, or
+before, the first row that stores its code. An allocation is never undone: a
+code reserved by a dropped batch keeps its value and its entry is written by
+the next publication. Opening loads each declared dictionary into memory and
+refuses (`DictionaryError::InvalidDictionary`) a key that is not 4 bytes, a
+gap in the codes, a value that is not canonical, and a repeated value.
+
+Interned columns are storage-only. `TableSchema::record_schema` and
+`record_schema_for_variant` return the **logical** descriptor (each interned
+field has its logical type); `storage_record_schema*` return the physical one.
+Every point, scan and index read, every old row of a write's delta, and every
+IVM table source resolves codes before a caller or operator sees the record,
+so queries, policies and the wire only ever see values. A descriptor carrying
+an interned type cannot be encoded as a persisted or wire descriptor
+(`records::Error::InternedTypeNotEncodable`).
+
+Schema admission refuses (`InternedColumnError`) an interned column in a
+primary key, an index or a foreign key, in a direct record store, nested
+anywhere but at top level or directly under a top-level `Nullable`, naming an
+undeclared dictionary or a different value type than the dictionary holds,
+and a dictionary whose value type contains an engine storage type or an enum.
+A schema rebuild keeps the dictionaries loaded at open and refuses to declare
+another (`DictionaryError::NotLoaded`).
+
 ### 2.6 Commit ordering
 
 A committed `DatabaseBatch` is the storage boundary at which table writes become
@@ -847,9 +893,15 @@ The first variable value starts immediately after the fixed fields and offset
 table. The last variable value ends at the record's end, so its end offset is
 implicit. Multi-byte scalar fields and offsets are little-endian, measured from
 the record start (`INV-STORAGE-9`). Fixed-width tuple members use concatenated
-order-preserving member encodings: integer tuple members are big-endian, `Bool`
-is `0|1`, `Uuid` is raw bytes, enum values are their `u8` discriminants, and
-nested fixed-width tuple/nullable members recurse (`INV-STORAGE-9`).
+order-preserving member encodings: integer tuple members are big-endian (signed
+ones with the sign bit flipped), `F64` members use the §2.8 ordered-index
+transform big-endian (NaN invalid), `Bool` is `0|1`, `Uuid` is raw bytes, enum
+values are their `u8` discriminants, and nested fixed-width tuple/nullable
+members recurse: a present nullable member's payload is itself a tuple member,
+and a null one is flag `0` plus a zero-filled payload width. Decoding and
+structural validation use exactly this member grammar, so a tuple's structural
+validation admits precisely the bytes that decode and re-encode unchanged
+(`INV-STORAGE-9`).
 
 A record decoder MUST consume exactly the descriptor-defined record span: a
 truncated fixed field, offset table, or variable payload; an out-of-range or

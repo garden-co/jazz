@@ -682,40 +682,22 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
     }
 }
 
+/// Writes a one-byte tag followed by `payload`.
+fn put_tagged(bytes: &mut Vec<u8>, tag: u8, payload: &[u8]) {
+    bytes.push(tag);
+    bytes.extend_from_slice(payload);
+}
+
 fn put_value(bytes: &mut Vec<u8>, value: &Value) {
     match value {
-        Value::U8(value) => {
-            bytes.push(1);
-            bytes.push(*value);
-        }
-        Value::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I32(value) => {
-            bytes.push(15);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I64(value) => {
-            bytes.push(14);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::F64(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        Value::Bool(value) => {
-            bytes.push(6);
-            bytes.push(u8::from(*value));
-        }
+        Value::U8(value) => put_tagged(bytes, 1, &[*value]),
+        Value::U16(value) => put_tagged(bytes, 2, &value.to_be_bytes()),
+        Value::U32(value) => put_tagged(bytes, 3, &value.to_be_bytes()),
+        Value::U64(value) => put_tagged(bytes, 4, &value.to_be_bytes()),
+        Value::I32(value) => put_tagged(bytes, 15, &value.to_be_bytes()),
+        Value::I64(value) => put_tagged(bytes, 14, &value.to_be_bytes()),
+        Value::F64(value) => put_tagged(bytes, 5, &value.to_bits().to_be_bytes()),
+        Value::Bool(value) => put_tagged(bytes, 6, &[u8::from(*value)]),
         Value::String(value) => {
             bytes.push(7);
             put_str(bytes, value);
@@ -724,14 +706,8 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(8);
             put_bytes(bytes, value);
         }
-        Value::Uuid(value) => {
-            bytes.push(9);
-            bytes.extend_from_slice(value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            bytes.push(10);
-            bytes.push(*value);
-        }
+        Value::Uuid(value) => put_tagged(bytes, 9, value.as_bytes()),
+        Value::EnumTag(value) => put_tagged(bytes, 10, &[*value]),
         Value::Tuple(values) => {
             bytes.push(11);
             put_len(bytes, values.len());
@@ -746,10 +722,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 put_value(bytes, value);
             }
         }
-        Value::Nullable(None) => {
-            bytes.push(13);
-            bytes.push(0);
-        }
+        Value::Nullable(None) => put_tagged(bytes, 13, &[0]),
         Value::Nullable(Some(value)) => {
             bytes.push(13);
             bytes.push(1);
@@ -775,10 +748,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, value.record().raw());
         }
-        Value::U48(value) => {
-            bytes.push(19);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
+        Value::U48(value) => put_tagged(bytes, 19, &value.to_be_bytes()),
         Value::Large(value) => {
             bytes.push(18);
             bytes.push(match value.kind {

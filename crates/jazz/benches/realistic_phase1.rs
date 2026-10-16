@@ -29,7 +29,7 @@ use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::public_schema::{CmpOp, RelValueRef};
+use jazz::tools::public_schema::{CmpOp, RelationValueRef};
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
 };
@@ -158,7 +158,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
+        RelationValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
     );
 
     schema_fixture::compile(

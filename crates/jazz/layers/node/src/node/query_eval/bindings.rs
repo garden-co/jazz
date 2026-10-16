@@ -695,42 +695,13 @@ fn collect_claim_field_params_from_predicate(
     param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) {
-    match predicate {
-        NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
-        NormalizedPredicateExpr::Compare { left, right, .. } => {
-            collect_claim_field_param(left, param_types, params);
-            collect_claim_field_param(right, param_types, params);
-        }
-        NormalizedPredicateExpr::In { value, options } => {
-            collect_claim_field_param(value, param_types, params);
-            for option in options {
-                collect_claim_field_param(option, param_types, params);
-            }
-        }
-        NormalizedPredicateExpr::ArrayContains { value, needle }
-        | NormalizedPredicateExpr::TextContains { value, needle } => {
-            collect_claim_field_param(value, param_types, params);
-            collect_claim_field_param(needle, param_types, params);
-        }
-        NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
-            collect_claim_field_param(value, param_types, params);
-        }
-        NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
-            for child in children {
-                collect_claim_field_params_from_predicate(child, param_types, params);
-            }
-        }
-        NormalizedPredicateExpr::Not(child) => {
-            collect_claim_field_params_from_predicate(child, param_types, params);
-        }
-        // Payload fields belong to the enum value rather than the containing
-        // record. They can still contain claim parameters, so walk the nested
-        // predicate while only collecting the enclosing record value here.
-        NormalizedPredicateExpr::EnumMatch { value, payload, .. } => {
-            collect_claim_field_param(value, param_types, params);
-            collect_claim_field_params_from_predicate(payload, param_types, params);
-        }
-    }
+    // Payload fields belong to the enum value rather than the containing
+    // record, but they can still contain claim parameters, so the walk
+    // descends into enum-match payloads too.
+    let _ = predicate.try_for_each_value::<()>(&mut |value| {
+        collect_claim_field_param(value, param_types, params);
+        Ok(())
+    });
 }
 
 fn collect_claim_field_param(

@@ -24,6 +24,8 @@ include!("query/relation_codec.rs");
 // Relation-facade validation and name resolution into the stable query vocabulary.
 // Executable lowering and normalization remain in `node::query_eval`.
 include!("query/relation_resolution.rs");
+include!("query/relation_gather.rs");
+include!("query/relation_values.rs");
 
 // Fluent query builders.
 include!("query/builders.rs");

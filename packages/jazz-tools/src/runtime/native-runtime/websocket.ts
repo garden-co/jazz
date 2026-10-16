@@ -172,10 +172,19 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
   return writer.finish();
 }
 
+/**
+ * Classify a `Hello`. Only the tag and version range are shared across wire
+ * versions; the rest of the body is read exactly when the range is this
+ * version's, and a foreign-version Hello is left to `decodeServerHello` to
+ * report as a version mismatch (SPEC 8 §8.1.1).
+ */
 export function isWireHello(frame: Uint8Array): boolean {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) return false;
-  readWireHelloBodyExact(reader);
+  const { min, max } = readWireHelloVersionRange(reader);
+  if (min === WIRE_PROTOCOL_VERSION && max === WIRE_PROTOCOL_VERSION) {
+    readWireHelloBodyAfterRangeExact(reader);
+  }
   return true;
 }
 
@@ -414,13 +423,15 @@ function decodeServerHello(
 ): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
-  const hello = readWireHelloBodyExact(reader);
-  const { min, max, features, role, authority } = hello;
+  // The version range comes first in every wire version; the rest of the
+  // body is version-scoped, so check the range before reading it.
+  const { min, max } = readWireHelloVersionRange(reader);
   if (min !== WIRE_PROTOCOL_VERSION || max !== WIRE_PROTOCOL_VERSION) {
     throw new Error(
       `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
     );
   }
+  const { features, role, authority } = readWireHelloBodyAfterRangeExact(reader);
   const unsupportedFeatures = features & ~BigInt(localFeatures);
   if (unsupportedFeatures !== 0n) {
     throw new Error(
@@ -437,15 +448,15 @@ function assertWireFeatures(features: number, label: string): void {
   }
 }
 
-function readWireHelloBodyExact(reader: PostcardReader): {
-  min: number;
-  max: number;
+function readWireHelloVersionRange(reader: PostcardReader): { min: number; max: number } {
+  return { min: reader.u64(), max: reader.u64() };
+}
+
+function readWireHelloBodyAfterRangeExact(reader: PostcardReader): {
   features: bigint;
   role: number;
   authority?: { node: Uint8Array; epoch: bigint };
 } {
-  const min = reader.u64();
-  const max = reader.u64();
   const features = reader.u64BigInt();
   const role = reader.u64();
   const authority = reader.option((value) => {
@@ -456,7 +467,7 @@ function readWireHelloBodyExact(reader: PostcardReader): {
     return { node, epoch: value.u64BigInt() };
   });
   assertReaderDone(reader, "WireFrame::Hello");
-  return { min, max, features, role, authority };
+  return { features, role, authority };
 }
 
 function assertReaderDone(reader: PostcardReader, payload: string): void {
