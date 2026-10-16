@@ -44,18 +44,27 @@ fn assert_cold_initial_subscription(seed_row: bool, matches: bool) {
     control.pause_on(TestStorageOperation::ScanOpen);
     control.pause_on(TestStorageOperation::Get);
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
-    assert!(
-        subscription.try_next_event().is_none(),
-        "pending storage is not an empty result"
-    );
-    db.refresh_subscriptions().unwrap();
-    assert!(
-        subscription.try_next_event().is_none(),
-        "refresh must preserve pending initialization"
-    );
-    control.resume();
     let mut initial = None;
+    if seed_row {
+        assert!(
+            subscription.try_next_event().is_none(),
+            "pending storage is not an empty result"
+        );
+        db.refresh_subscriptions().unwrap();
+        assert!(
+            subscription.try_next_event().is_none(),
+            "refresh must preserve pending initialization"
+        );
+    } else {
+        // A never-written table has no class table id, so the layout answers
+        // its reads as absent without touching (paused) storage.
+        initial = subscription.try_next_event();
+    }
+    control.resume();
     for _ in 0..16 {
+        if initial.is_some() {
+            break;
+        }
         db.refresh_subscriptions().unwrap();
         if let Some(event) = subscription.try_next_event() {
             initial = Some(event);
@@ -97,8 +106,9 @@ fn cold_initial_subscription_waits_for_populated_snapshot() {
     assert_cold_initial_subscription(true, true);
 }
 
-/// One durable node opens over an empty store. Completion with no row changes
-/// must end loading, without publishing before storage finishes.
+/// One durable node opens over a store whose table was never written. The
+/// table has no class table id, so its empty initial reset needs no storage
+/// read and publishes while storage is still paused.
 #[test]
 fn cold_initial_subscription_completes_empty_snapshot() {
     assert_cold_initial_subscription(false, true);

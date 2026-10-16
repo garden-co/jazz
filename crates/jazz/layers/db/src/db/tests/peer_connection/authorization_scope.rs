@@ -455,6 +455,31 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
                     },
                 )
                 .unwrap();
+        } else {
+            // A never-written table has no class table id and is answered
+            // without a storage read; a deleted row keeps the cold read real.
+            let deleted = row(0x77);
+            relay
+                .insert(
+                    "todos",
+                    cells("deleted", false, author),
+                    crate::db::InsertOptions {
+                        row_id: Some(deleted),
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            relay
+                .delete(
+                    "todos",
+                    deleted,
+                    crate::db::DeleteOptions {
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
         }
         let foreground = open_db(0x76, author, &schema);
         foreground.set_non_durable_client();

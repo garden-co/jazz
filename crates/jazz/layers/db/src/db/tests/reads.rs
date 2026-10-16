@@ -30,6 +30,24 @@ fn detach_query_during_suspended_read_releases_coverage_without_reentry() {
         },
     )))
     .unwrap();
+    // A never-written table has no class table id and is answered without a
+    // storage read, so write and delete one row to make the cold read real.
+    let seeded = row(0x31);
+    let write = block_on(db.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(seeded),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+        .unwrap();
+    let write = block_on(db.delete("todos", seeded, Default::default())).unwrap();
+    db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+        .unwrap();
+    block_on(db.tick()).unwrap();
     let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
     let attachment =
         block_on(db.attach_query_with_opts_async(&prepared, ReadOpts::default(), None, None))
