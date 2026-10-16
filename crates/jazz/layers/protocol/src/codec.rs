@@ -22,8 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol_limits::PolicyExpressionLimitError;
 
+mod bridge_model_query;
 mod bridge_model_tx;
 mod bridge_wire;
+mod model_query;
 mod model_tx;
 
 /// Encoding and decoding errors.
@@ -101,6 +103,27 @@ impl From<PolicyExpressionLimitError> for CodecError {
     fn from(error: PolicyExpressionLimitError) -> Self {
         Self::ProtocolLimit(error)
     }
+}
+
+thread_local! {
+    /// First encode failure since the last [`take_encode_error`] on this thread.
+    static ENCODE_ERROR: std::cell::Cell<Option<CodecError>> = const { std::cell::Cell::new(None) };
+}
+
+/// Record a failure from inside [`WireCodec::put`], which cannot return one.
+/// The first error recorded wins until [`take_encode_error`] clears it.
+pub fn record_encode_error(err: CodecError) {
+    ENCODE_ERROR.with(|slot| {
+        let first = slot.take().unwrap_or(err);
+        slot.set(Some(first));
+    });
+}
+
+/// Take (and clear) the first encode failure recorded on this thread. A
+/// caller encoding a value checks this afterwards and discards the bytes when
+/// it is `Some`.
+pub fn take_encode_error() -> Option<CodecError> {
+    ENCODE_ERROR.with(std::cell::Cell::take)
 }
 
 /// Read one byte.

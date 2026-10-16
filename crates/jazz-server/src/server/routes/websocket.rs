@@ -1135,7 +1135,8 @@ pub(crate) fn encode_ws_frame_batches(
             // at the frame limit can fit by itself.
             jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
         } else if !candidate_fits {
-            return jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame)).map(|_| Vec::new());
+            return jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))
+                .map(|_| Vec::new());
         }
         current.push(frame.clone());
     }

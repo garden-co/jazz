@@ -6830,10 +6830,7 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let snapshot = node.borrow().catalogue_snapshot()?;
-    let catalogue_fingerprint = *blake3::hash(
-        &crate::codec::encode(&snapshot),
-    )
-    .as_bytes();
+    let catalogue_fingerprint = *blake3::hash(&crate::codec::encode(&snapshot)).as_bytes();
     if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
         transport
             .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))

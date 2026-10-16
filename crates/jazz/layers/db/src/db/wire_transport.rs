@@ -747,9 +747,7 @@ fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
     use SyncMessage::*;
     let (tag, bytes) = match message {
         // Every part of one update shares its subscription's stream.
-        ViewUpdate(view) | ViewUpdatePart(view) => {
-            (0, crate::codec::encode(&view.subscription))
-        }
+        ViewUpdate(view) | ViewUpdatePart(view) => (0, crate::codec::encode(&view.subscription)),
         SubscribeRejected { subscription, .. } => (0, crate::codec::encode(subscription)),
         AuthorizationScopeView { request_id, .. }
         | AuthorizationScopeAggregateReceipt { request_id, .. }
