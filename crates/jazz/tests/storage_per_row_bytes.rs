@@ -199,7 +199,7 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
         .filter_map(|name| {
             jazz::groove::storage::class_table_id(&name)
                 .ok()
-                .map(|id| (id, name))
+                .map(|id| (id, name.to_owned()))
         })
         .collect::<BTreeMap<_, _>>();
     let mut names = BTreeMap::new();
