@@ -585,6 +585,9 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
+    /// Only schemas ranked no later than this may lie on the path
+    /// (`compiled_lens_path_within`).
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -592,6 +595,7 @@ struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
     table: String,
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -817,7 +821,10 @@ struct SchemaCatalogue {
         SchemaVersionId,
         BTreeMap<
             String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+            BTreeMap<
+                (physical::PhysicalWriteTarget, bool),
+                Arc<physical::PreparedPhysicalWritePlan>,
+            >,
         >,
     >,
     /// Schema version currently used for newly authored writes.
@@ -2874,6 +2881,14 @@ fn version_indirect_descriptors(
         for position in 0..version.application_cell_count() {
             if let Some(value) = version.cell_at(position) {
                 collect_indirect_descriptors(&value, &mut descriptors);
+            }
+        }
+        for extra in version.extra_cells() {
+            let record = extra.record().borrowed();
+            for index in 0..extra.record().descriptor().fields().len() {
+                if let Ok(Value::Nullable(Some(value))) = record.get_idx(index) {
+                    collect_indirect_descriptors(&value, &mut descriptors);
+                }
             }
         }
     }

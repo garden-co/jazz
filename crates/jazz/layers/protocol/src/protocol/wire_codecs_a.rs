@@ -157,13 +157,13 @@ crate::wire_struct! {
     for PeerPayloadInventory { complete_tx_payloads, authorization_progress, opening_pending }
 }
 
-/// A row as its `JVRR` v3 envelope, written as one length-prefixed byte
-/// string (postcard spelled it with `serialize_bytes`).
-pub(super) struct WireRow;
+/// A row and its union cells as one `JVRR` v3 envelope, written as one
+/// length-prefixed byte string (postcard spelled it with `serialize_bytes`).
+pub(super) struct RowBlob;
 
-impl Wire<OwnedRecord> for WireRow {
-    fn put(&self, buf: &mut Vec<u8>, record: &OwnedRecord) {
-        match version_record_wire_row::encode(record) {
+impl Wire<super::WireRow> for RowBlob {
+    fn put(&self, buf: &mut Vec<u8>, row: &super::WireRow) {
+        match version_record_wire_row::encode_row(row) {
             Ok(bytes) => put_bytes(buf, &bytes),
             Err(error) => record_encode_error(CodecError::Encode {
                 message: error.to_string(),
@@ -171,8 +171,8 @@ impl Wire<OwnedRecord> for WireRow {
         }
     }
 
-    fn get(&self, data: &[u8], offset: &mut usize) -> Result<OwnedRecord, CodecError> {
-        version_record_wire_row::decode(get_bytes(data, offset)?).map_err(|error| {
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<super::WireRow, CodecError> {
+        version_record_wire_row::decode_row(get_bytes(data, offset)?).map_err(|error| {
             CodecError::DecodeError {
                 message: error.to_string(),
             }
@@ -182,7 +182,7 @@ impl Wire<OwnedRecord> for WireRow {
 
 crate::wire_struct! {
     for VersionRecord {
-        table, schema_version, branch_key, record: WireRow, authored_columns, base,
+        table, schema_version, branch_key, row: RowBlob, authored_columns, base,
         counter_signs: Bytes,
     }
 }

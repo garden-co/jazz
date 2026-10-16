@@ -3,7 +3,95 @@
 /// allocate a distinct tag for each `(schema alias, user case)` pair here.
 pub(super) fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error> {
     u32::try_from(alias.0)
-        .map_err(|_| Error::InvalidStoredValue("physical table variant tag exhausted"))
+        .ok()
+        .filter(|tag| tag & UNION_VARIANT_TAG_BIT == 0)
+        .ok_or(Error::InvalidStoredValue("physical table variant tag exhausted"))
+}
+
+/// High bit of a union row case's tag (SPEC 10 §10.3, "Union row cases").
+const UNION_VARIANT_TAG_BIT: u32 = 1 << 31;
+
+/// The Groove case of a row stored in the physical union layout of `alias`'s
+/// schema version: that schema's own cells, then every other column of the
+/// table's lineage known when it was registered (`union_extra_columns`).
+pub(super) fn union_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error> {
+    Ok(groove_variant_tag(alias)? | UNION_VARIANT_TAG_BIT)
+}
+
+/// The schema alias a row case belongs to, whether it is the schema's own
+/// authored case or its union case.
+pub(super) fn schema_alias_for_variant_tag(tag: u32) -> SchemaVersionAlias {
+    SchemaVersionAlias(u64::from(tag & !UNION_VARIANT_TAG_BIT))
+}
+
+/// Each published schema version's place in the catalogue order that every
+/// node replicates from its Core: a lineage's target at its catalogue
+/// position, and the authority genesis (a lineage source that is no
+/// lineage's target) before them all. Local aliases follow the order a node
+/// happened to learn schemas in (a client's own schema first), so they cannot
+/// order union layouts. A schema version only this node knows has no rank.
+pub(super) fn catalogue_ranks<'a>(
+    lineages: impl IntoIterator<Item = &'a StagedSchemaLineage>,
+) -> BTreeMap<SchemaVersionId, u64> {
+    let mut ranks = BTreeMap::new();
+    let mut sources = BTreeSet::new();
+    for lineage in lineages {
+        ranks.insert(lineage.publication.schema.id, lineage.catalogue_seq);
+        sources.extend(
+            lineage
+                .publication
+                .predecessors
+                .iter()
+                .map(|predecessor| predecessor.lens.source),
+        );
+    }
+    for source in sources {
+        ranks.entry(source).or_insert(0);
+    }
+    ranks
+}
+
+/// The physical columns a union row of `schema_version`'s table carries
+/// beyond that schema's own columns: every column of the same physical table
+/// that a schema version ranked before it in the catalogue maps
+/// (`catalogue_ranks`), so every node that knows the schema derives the same
+/// set and it is fixed once the schema is published. Sorted by physical
+/// column id, the order of the union case's trailing fields. Empty for an
+/// unpublished schema, and when the schema maps every such column, in which
+/// case the schema's own case is the union layout and no union case exists.
+pub(super) fn union_extra_columns(
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    ranks: &BTreeMap<SchemaVersionId, u64>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+) -> Result<Vec<PhysicalColumnId>, Error> {
+    let own = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue("union layout table mapping missing"))?;
+    let Some(rank) = ranks.get(&schema_version).copied() else {
+        return Ok(Vec::new());
+    };
+    let own_columns = own.columns.values().copied().collect::<BTreeSet<_>>();
+    let mut extras = BTreeSet::new();
+    for (candidate, mapping) in physical_mappings {
+        if ranks.get(candidate).is_none_or(|candidate_rank| *candidate_rank > rank) {
+            continue;
+        }
+        for table in mapping.tables.values() {
+            if table.table_id != own.table_id {
+                continue;
+            }
+            extras.extend(
+                table
+                    .columns
+                    .values()
+                    .copied()
+                    .filter(|column| !own_columns.contains(column)),
+            );
+        }
+    }
+    Ok(extras.into_iter().collect())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +160,7 @@ fn physical_mapping_has_enum_boundary(
             .is_some_and(|paths| !paths.is_empty())
 }
 
-fn value_type_has_enum_boundary(value_type: &records::ValueType) -> bool {
+pub(super) fn value_type_has_enum_boundary(value_type: &records::ValueType) -> bool {
     use records::ValueType;
     match value_type {
         ValueType::EnumTag(_) | ValueType::Enum(_) => true,
@@ -586,6 +674,15 @@ pub(super) fn physical_current_composite_index_name(column_ids: &[PhysicalColumn
 
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {
     format!("_app_{}", column_id.0)
+}
+
+/// The inverse of `physical_user_column_field`.
+pub(super) fn physical_column_id_for_user_field(name: &str) -> Option<PhysicalColumnId> {
+    let digits = name.strip_prefix("_app_")?;
+    if digits.is_empty() || digits.starts_with('0') && digits.len() > 1 {
+        return None;
+    }
+    digits.parse().ok().map(PhysicalColumnId)
 }
 
 pub(super) fn physical_history_projection_target(

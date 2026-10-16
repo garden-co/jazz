@@ -199,6 +199,7 @@ fn encoded_len(value: &impl crate::codec::WireCodec) -> usize {
 }
 
 /// Relation-IR projections keep their postcard form.
+#[cfg(feature = "testing")]
 fn postcard_len(value: &impl serde::Serialize) -> usize {
     postcard::to_allocvec(value).map_or(0, |bytes| bytes.len())
 }
