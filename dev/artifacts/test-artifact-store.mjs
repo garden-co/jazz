@@ -321,7 +321,12 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
       try {
         renameSync(stage, destination);
       } catch (error) {
-        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        if (
+          error.code !== "EEXIST" &&
+          error.code !== "ENOTEMPTY" &&
+          !(error.code === "EACCES" && existsSync(destination))
+        )
+          throw error;
         removeOwnedStage(stage);
       }
     } finally {
