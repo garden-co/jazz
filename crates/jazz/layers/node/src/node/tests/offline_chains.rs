@@ -710,79 +710,93 @@ fn fate_for(messages: &[SyncMessage], tx: TxId) -> Option<&Fate> {
     })
 }
 
-/// The predecessor Core named in its `RetryLater` answer for `tx`.
-fn retry_later_for(messages: &[SyncMessage], tx: TxId) -> Option<TxId> {
-    messages.iter().find_map(|message| match message {
-        SyncMessage::RetryLater { tx_id, awaiting } if *tx_id == tx => Some(*awaiting),
-        _ => None,
-    })
+/// Whether Core refused `tx` among `messages` as arriving after a later
+/// write of its own writer (`INV-HIST-23`).
+fn refused_as_late(messages: &[SyncMessage], tx: TxId) -> bool {
+    matches!(
+        fate_for(messages, tx),
+        Some(Fate::Rejected(RejectionReason::MalformedCommit(reason)))
+            if reason.contains("arrived after a later write of its writer")
+    )
 }
 
-/// INV-HIST-20: a chained write that reaches Core before its predecessor
-/// is an ordering race, not an unresolvable base. Core stores nothing for
-/// it and answers `RetryLater` naming the predecessor; once the
-/// predecessor is decided, the writer's resend is accepted.
+/// INV-HIST-20: Core never waits for a pending predecessor. A writer's
+/// writes reach Core in order, so a predecessor Core has not decided never
+/// arrives: the chained write applies as written over Core's row, like a
+/// write whose predecessor Core rejected. The base is not guessed.
+///
+/// INV-HIST-23: the predecessor arriving afterwards anyway is a protocol
+/// violation. Core refuses it and the row keeps the newer write.
 ///
 /// ```text
-/// carol ═offline═ e1 title="c1", e2 title="c2"
-/// carol ──e2──► core   RetryLater(awaiting e1), nothing stored
-/// carol ──e1──► core   e1 accepted
-/// carol ──e2──► core   e2 accepted   title=c2
+/// carol ═offline═ e1 title="c1", e2 body="c2"
+/// carol ──e2──► core   e2 accepted   title=base body=c2
+/// carol ──e1──► core   e1 rejected (late)   row unchanged
 /// ```
 #[test]
-fn chained_write_arriving_before_its_predecessor_is_asked_to_retry() {
+fn chained_write_over_an_unknown_predecessor_applies_and_the_late_predecessor_is_refused() {
     let target = row(0x90);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
-    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("title", "c2")]);
+    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "c2")]);
+    let SyncMessage::CommitUnit { versions, .. } = &e2_unit else {
+        panic!("expected a commit unit");
+    };
+    assert_eq!(versions[0].base().pending, Some(e1), "e2 is chained on e1");
     let early = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(fate_for(&early, e2), None, "no fate for e2: {early:?}");
-    assert_eq!(retry_later_for(&early, e2), Some(e1));
-    // A resend before e1 gets the same answer, not a conflict.
-    let resent = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&resent, e2), Some(e1));
+    assert_eq!(fate_for(&early, e2), Some(&Fate::Accepted), "{early:?}");
+    let image = todo_cells("base", "c2");
+    assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Global)[&target], image);
+    assert!(core.parking.parked_commit_units.is_empty());
+    // A redelivery of e2 is the same accepted write.
+    let resent = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&resent, e2), Some(&Fate::Accepted));
     let late = core.apply_sync_message_settled(e1_unit).unwrap();
-    assert_eq!(fate_for(&late, e1), Some(&Fate::Accepted));
-    assert_eq!(fate_for(&late, e2), None, "Core held nothing for e2");
-    let retried = core.apply_sync_message_settled(e2_unit).unwrap();
-    assert_eq!(fate_for(&retried, e2), Some(&Fate::Accepted));
-    assert_eq!(
-        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
-        todo_cells("c2", "base")
-    );
-    assert!(!flagged(&mut core, target, e2), "e2 continues e1");
+    assert!(refused_as_late(&late, e1), "{late:?}");
+    assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Global)[&target], image);
+    assert!(!flagged(&mut core, target, e2), "nobody else wrote the row");
 }
 
-/// INV-HIST-20: Core stores nothing for a write whose predecessor it does
-/// not know: no transaction, no row change, no parked copy.
+/// INV-HIST-23: the late-predecessor check also finds the writer's later
+/// write when another writer's accepted write is newer than it, by reading
+/// the row's history after the late write's base.
+///
+/// ```text
+/// carol ──e2──► core   e2 accepted
+/// dave  ──d───► core   d accepted (the row's current image)
+/// carol ──e1──► core   e1 rejected (late)
+/// ```
 #[test]
-fn core_stores_nothing_for_a_write_whose_predecessor_is_unknown() {
+fn late_predecessor_behind_another_writers_write_is_refused() {
     let target = row(0x9a);
-    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
-    let carol = &mut writers[0].1;
-    let (e1, _) = offline_edit(carol, target, 100, &[("title", "c1")]);
-    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("title", "c2")]);
-    let before = rows_at(&mut core, "todos", DurabilityTier::Local);
-    let answer = core.apply_sync_message_settled(e2_unit).unwrap();
-    assert_eq!(answer, vec![SyncMessage::RetryLater { tx_id: e2, awaiting: e1 }]);
-    assert_eq!(core.transaction_state_settled(e2), None);
-    assert_eq!(core.transaction_state_settled(e1), None);
-    assert!(core.parking.parked_commit_units.is_empty());
-    assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Local), before);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "c2")]);
+    let accepted = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&accepted, e2), Some(&Fate::Accepted));
+    let dave = accept_edit(&mut core, &mut writers[1].1, target, 102, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(e1_unit).unwrap();
+    assert!(refused_as_late(&late, e1), "{late:?}");
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("dave", "c2")
+    );
+    // dave had not seen carol's e2, which Core accepted before his write.
+    assert!(flagged(&mut core, target, dave));
 }
 
 /// INV-HIST-20: Core may hold the predecessor as Pending (here relayed
-/// before Core decided it). A chained write over it is asked to retry until
-/// Core decides the predecessor, then applies after it.
+/// before Core decided it). That is not a fate either: the chained write
+/// applies as written, and the predecessor arriving for a decision later
+/// is refused as late.
 ///
 /// ```text
 /// core  ◄─relay── e1 (stored Pending)
-/// carol ──e2──► core   RetryLater(awaiting e1)
-/// carol ──e1──► core   e1 accepted
 /// carol ──e2──► core   e2 accepted
+/// carol ──e1──► core   e1 rejected (late)
 /// ```
 #[test]
-fn chained_write_over_a_predecessor_core_holds_pending_is_asked_to_retry() {
+fn chained_write_over_a_predecessor_core_holds_pending_applies() {
     let target = row(0x91);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let (e1, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
@@ -803,13 +817,10 @@ fn chained_write_over_a_predecessor_core_holds_pending_is_asked_to_retry() {
         core.transaction_state_settled(e1).map(|(fate, ..)| fate),
         Some(Fate::Pending)
     );
-    let early = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&early, e2), Some(e1), "{early:?}");
-    assert_eq!(core.transaction_state_settled(e2), None);
-    let decided = core.apply_sync_message_settled(e1_unit).unwrap();
-    assert_eq!(fate_for(&decided, e1), Some(&Fate::Accepted));
-    let retried = core.apply_sync_message_settled(e2_unit).unwrap();
-    assert_eq!(fate_for(&retried, e2), Some(&Fate::Accepted));
+    let applied = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&applied, e2), Some(&Fate::Accepted), "{applied:?}");
+    let late = core.apply_sync_message_settled(e1_unit).unwrap();
+    assert!(refused_as_late(&late, e1), "{late:?}");
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("c2", "c2")
@@ -846,25 +857,22 @@ fn with_malformed_timestamps(unit: SyncMessage) -> SyncMessage {
 }
 
 /// INV-HIST-20, INV-HIST-21: once Core refuses the predecessor (here before
-/// admission, as a malformed authored version), the retried write applies
+/// admission, as a malformed authored version), the chained write applies
 /// over the settled row, which the rejected predecessor never reached. Its
 /// base resolves to the predecessor's own base, the seed, which is still the
 /// record before it, so it is not maybe conflicting.
 ///
 /// ```text
-/// carol ──e2──► core              RetryLater(awaiting e1)
 /// carol ──e1 (malformed)──► core  e1 rejected
 /// carol ──e2──► core              e2 accepted   body=c2
 /// ```
 #[test]
-fn chained_write_retried_after_a_rejected_predecessor_applies_over_the_settled_row() {
+fn chained_write_after_a_rejected_predecessor_applies_over_the_settled_row() {
     let target = row(0x94);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let carol = &mut writers[0].1;
     let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
     let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
-    let early = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&early, e2), Some(e1));
     let decided = core
         .apply_sync_message_settled(with_malformed_timestamps(e1_unit))
         .unwrap();
@@ -872,8 +880,8 @@ fn chained_write_retried_after_a_rejected_predecessor_applies_over_the_settled_r
         fate_for(&decided, e1),
         Some(Fate::Rejected(RejectionReason::MalformedCommit(_)))
     ));
-    let retried = core.apply_sync_message_settled(e2_unit).unwrap();
-    assert_eq!(fate_for(&retried, e2), Some(&Fate::Accepted));
+    let applied = core.apply_sync_message_settled(e2_unit).unwrap();
+    assert_eq!(fate_for(&applied, e2), Some(&Fate::Accepted));
     assert_eq!(
         rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
         todo_cells("base", "c2")
@@ -883,32 +891,49 @@ fn chained_write_retried_after_a_rejected_predecessor_applies_over_the_settled_r
     assert_eq!(e2_conflict.resolved_base, e2_conflict.previous);
 }
 
-/// INV-HIST-20: a two-level chain that reaches Core last write first: each
-/// write is asked to retry for the one before it, and the resends in chain
-/// order are accepted in order.
+/// INV-HIST-23: a two-level chain whose last write reaches Core first. It
+/// applies as written; both of its predecessors then arrive late and are
+/// refused, so the row never goes back to an older image.
 ///
 /// ```text
-/// carol ──e3──► core   RetryLater(awaiting e2)
-/// carol ──e2──► core   RetryLater(awaiting e1)
-/// carol ──e1, e2, e3──► core   accepted in order   title=c3
+/// carol ──e3──► core       e3 accepted   title=c3
+/// carol ──e1, e2──► core   both rejected (late)
 /// ```
 #[test]
-fn two_level_chain_arriving_backwards_is_retried_in_order() {
+fn two_level_chain_arriving_backwards_keeps_the_newest_write() {
     let target = row(0x95);
     let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let carol = &mut writers[0].1;
     let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
     let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
     let (e3, e3_unit) = offline_edit(carol, target, 102, &[("title", "c3")]);
-    let answer = core.apply_sync_message_settled(e3_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&answer, e3), Some(e2));
-    let answer = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&answer, e2), Some(e1));
+    let answer = core.apply_sync_message_settled(e3_unit).unwrap();
+    assert_eq!(fate_for(&answer, e3), Some(&Fate::Accepted));
+    for (tx, unit) in [(e2, e2_unit), (e1, e1_unit)] {
+        let answer = core.apply_sync_message_settled(unit).unwrap();
+        assert!(refused_as_late(&answer, tx), "{answer:?}");
+    }
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target],
+        todo_cells("c3", "base")
+    );
+}
+
+/// The ordinary case: a chain that reaches Core in order is accepted in
+/// order, and nothing in it is refused as late.
+#[test]
+fn chain_arriving_in_order_is_accepted_in_order() {
+    let target = row(0x96);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = &mut writers[0].1;
+    let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
+    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
+    let (e3, e3_unit) = offline_edit(carol, target, 102, &[("title", "c3")]);
     let mut order = Vec::new();
     for unit in [e1_unit, e2_unit, e3_unit] {
         for message in core.apply_sync_message_settled(unit).unwrap() {
-            assert!(!matches!(message, SyncMessage::RetryLater { .. }), "{message:?}");
-            if let SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } = message {
+            if let SyncMessage::FateUpdate { tx_id, fate, .. } = message {
+                assert_eq!(fate, Fate::Accepted, "{tx_id:?}");
                 order.push(tx_id);
             }
         }
@@ -923,51 +948,11 @@ fn two_level_chain_arriving_backwards_is_retried_in_order() {
     }
 }
 
-/// Core keeps nothing for a write it asked to retry, so a Core restart in
-/// between changes nothing: the writer resends its pending writes and the
-/// chain converges.
-///
-/// ```text
-/// carol ──e2──► core   RetryLater(awaiting e1)
-/// core restarts
-/// carol ──e2, e1, e2──► core   retry, then e1 and e2 accepted
-/// ```
+/// A session that may not make the write at all (its identity is not the
+/// write's author, or it is anonymous) is refused, even though its write
+/// names a predecessor Core never saw: an unknown predecessor admits nothing.
 #[test]
-fn retried_writes_converge_after_a_core_restart() {
-    let target = row(0x96);
-    let (mut writers, core_dir, mut core) = core_with_seeded_todo(target, 1);
-    let carol = &mut writers[0].1;
-    let (e1, e1_unit) = offline_edit(carol, target, 100, &[("title", "c1")]);
-    let (e2, e2_unit) = offline_edit(carol, target, 101, &[("body", "c2")]);
-    let answer = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&answer, e2), Some(e1));
-    drop(core);
-    let mut core = reopen_node_at(&core_dir, node(9), two_column_schema());
-    assert_eq!(core.transaction_state_settled(e2), None, "a retried write is never stored");
-    let resent = core.apply_sync_message_settled(e2_unit.clone()).unwrap();
-    assert_eq!(retry_later_for(&resent, e2), Some(e1));
-    let mut fates = core.apply_sync_message_settled(e1_unit).unwrap();
-    assert_eq!(fate_for(&fates, e1), Some(&Fate::Accepted));
-    fates.extend(core.apply_sync_message_settled(e2_unit).unwrap());
-    assert_eq!(fate_for(&fates, e2), Some(&Fate::Accepted));
-    let image = todo_cells("c1", "c2");
-    assert_eq!(rows_at(&mut core, "todos", DurabilityTier::Global)[&target], image);
-    // carol converges on Core's image once the fates arrive.
-    for message in fates {
-        carol.apply_sync_message_settled(message).unwrap();
-    }
-    sync_table_rows_to(&mut core, carol, "todos");
-    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
-        assert_eq!(rows_at(carol, "todos", tier)[&target], image);
-    }
-}
-
-/// The cheap admission checks run before the predecessor check: a session
-/// that may not make the write at all (its identity is not the write's
-/// author, or it is anonymous) is refused rather than asked to retry, even
-/// though its write names a predecessor Core never saw.
-#[test]
-fn unadmitted_writer_is_refused_before_the_predecessor_check() {
+fn unadmitted_writer_is_refused_over_an_unknown_predecessor() {
     let target = row(0x97);
     let (_writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
     let (_erin_dir, mut erin) = open_node_with_schema(node(0x30), two_column_schema());
@@ -1011,7 +996,6 @@ fn unadmitted_writer_is_refused_before_the_predecessor_check() {
                 Some(&Fate::Rejected(RejectionReason::AuthorizationDenied)),
                 "{identity:?}"
             );
-            assert_eq!(retry_later_for(&messages, w), None);
         }
     }
 }
@@ -1526,4 +1510,363 @@ fn enum_cells_apply_by_arrival_under_a_branched_registry() {
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>();
     assert_eq!(rows[&target], status(0));
+}
+
+/// Core's superseded-writes marker of `writer` for `target` in `todos`.
+fn superseded_marker(core: &NodeState, target: RowUuid, writer: NodeUuid) -> Option<TxTime> {
+    let todos = core
+        .physical_table_id_for_schema(two_column_schema().version_id(), "todos")
+        .unwrap();
+    let key = [
+        Value::U64(todos.0),
+        Value::Bytes(BranchKey::default().canonical_bytes()),
+        Value::Uuid(target.0),
+        Value::Uuid(writer.0),
+    ];
+    let store = core
+        .database
+        .direct_record_store(crate::schema::SUPERSEDED_WRITES_STORE)
+        .unwrap();
+    crate::local_executor::block_on(store.get(&key))
+        .unwrap()
+        .map(|record| match record.get_idx(0).unwrap() {
+            Value::U64(time) => TxTime(time),
+            other => panic!("marker is not a time: {other:?}"),
+        })
+}
+
+/// Run Core's late-write check for `unit`'s single version against the
+/// row's current image, and the history records it read.
+fn late_check_cost(
+    core: &mut NodeState,
+    unit: &SyncMessage,
+    current_seq: GlobalTime,
+    current_writer: TxId,
+) -> (bool, groove::db::StorageReadMetrics) {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected a commit unit");
+    };
+    let version = &versions[0];
+    let batch = core.database.open_batch();
+    core.reset_storage_read_metrics();
+    let refusal = core
+        .late_write_refusal(
+            &batch,
+            version.schema_version(),
+            version.table(),
+            version.branch_key(),
+            version.row_uuid(),
+            version.base(),
+            tx.tx_id,
+            Some(current_seq),
+            Some(current_writer),
+        )
+        .resolve()
+        .unwrap();
+    (refusal.is_some(), core.take_storage_read_metrics())
+}
+
+/// INV-HIST-23, cost: the late-write check reads the writes Core accepted
+/// since the write's base, never the row's whole history. dave edits the
+/// row 60 times; carol syncs, edits twice offline, and her second edit
+/// arrives first; dave edits twice more. Checking carol's late first edit
+/// reads only the three records after her base, as does an on-time write
+/// over the same stale base; a write without a base reads no history record
+/// at all.
+///
+/// ```text
+/// dave  ──d1..d60──► core                 60 records
+/// carol (synced at d60) ═offline═ c1, c2
+/// carol ──c2──► core   accepted           marker: carol through c1
+/// dave  ──d61, d62──► core
+/// carol ──c1──► core   late: reads c2, d61, d62 only
+/// ```
+#[test]
+fn late_write_check_reads_only_the_writes_since_the_base() {
+    let target = row(0x9b);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    for index in 0..60 {
+        accept_edit(
+            &mut core,
+            &mut writers[1].1,
+            target,
+            200 + index,
+            &[("body", &format!("d{index}"))],
+        );
+    }
+    sync_table_rows_to(&mut core, &mut writers[0].1, "todos");
+    let carol = writers[0].1.node_uuid;
+    let (c1, c1_unit) = offline_edit(&mut writers[0].1, target, 300, &[("title", "c1")]);
+    let (c2, c2_unit) = offline_edit(&mut writers[0].1, target, 301, &[("title", "c2")]);
+    assert_eq!(fate_for(&core.apply_sync_message_settled(c2_unit).unwrap(), c2), Some(&Fate::Accepted));
+    assert_eq!(
+        superseded_marker(&core, target, carol),
+        Some(c1.time),
+        "c2 passed over c1, which Core had not decided"
+    );
+    accept_edit(&mut core, &mut writers[1].1, target, 302, &[("body", "d61")]);
+    let d62 = accept_edit(&mut core, &mut writers[1].1, target, 303, &[("body", "d62")]);
+    let current = core.transaction_state_settled(d62).unwrap().1.unwrap();
+    assert!(row_conflicts(&mut core, target).len() > 60);
+
+    let (late, metrics) = late_check_cost(&mut core, &c1_unit, current, d62);
+    assert!(late, "c1 arrived after carol's c2");
+    assert_eq!(metrics.history_rows.ranges, 1, "{metrics:?}");
+    assert_eq!(metrics.history_rows.reads, 3, "c2, d61 and d62: {metrics:?}");
+
+    // A write of dave's over the same stale base (d60) is not late, and
+    // reads the same three records.
+    let (_, on_time) = offline_edit(&mut writers[1].1, target, 304, &[("title", "d")]);
+    let c1_base = match &c1_unit {
+        SyncMessage::CommitUnit { versions, .. } => versions[0].base(),
+        _ => unreachable!(),
+    };
+    let stale = with_base(
+        on_time,
+        crate::protocol::RowBase {
+            seq: c1_base.seq,
+            pending: None,
+        },
+    );
+    let (late, metrics) = late_check_cost(&mut core, &stale, current, c2);
+    assert!(!late);
+    assert_eq!(metrics.history_rows.reads, 3, "{metrics:?}");
+
+    // A write without a base seq reads the writer's marker, not history.
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x31), two_column_schema());
+    let (_, blind) = offline_edit(&mut frank, target, 305, &[("title", "frank")]);
+    let (late, metrics) = late_check_cost(&mut core, &blind, current, d62);
+    assert!(!late);
+    assert_eq!(metrics.history_rows.reads, 0, "{metrics:?}");
+    assert_eq!(metrics.history_rows.ranges, 0, "{metrics:?}");
+
+    let answer = core.apply_sync_message_settled(c1_unit).unwrap();
+    assert!(refused_as_late(&answer, c1), "{answer:?}");
+}
+
+/// INV-HIST-23: a write without a base (frank never loaded the row) that
+/// reaches Core after its chained successor, with another writer's write
+/// in between, is refused as late through the marker Core recorded when it
+/// applied the successor over it.
+///
+/// ```text
+/// frank (never loaded the row) ═offline═ f1 title="f1", f2 body="f2" (chained on f1)
+/// frank ──f2──► core   accepted   marker: frank through f1
+/// dave  ──d───► core   accepted   (the row's current image)
+/// frank ──f1──► core   rejected (late)
+/// ```
+#[test]
+fn late_write_without_a_base_is_refused_through_its_writers_marker() {
+    let target = row(0x9c);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x32), two_column_schema());
+    let (f1, f1_unit) = offline_edit(&mut frank, target, 100, &[("title", "f1")]);
+    let (f2, f2_unit) = offline_edit(&mut frank, target, 101, &[("body", "f2")]);
+    let SyncMessage::CommitUnit { versions, .. } = &f1_unit else {
+        unreachable!()
+    };
+    assert!(versions[0].base().is_empty(), "f1 has no base");
+    let SyncMessage::CommitUnit { versions, .. } = &f2_unit else {
+        unreachable!()
+    };
+    assert_eq!(versions[0].base().pending, Some(f1));
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted));
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    accept_edit(&mut core, &mut writers[0].1, target, 102, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(f1_unit).unwrap();
+    assert!(refused_as_late(&late, f1), "{late:?}");
+    assert_eq!(
+        rows_at(&mut core, "todos", DurabilityTier::Global)[&target].get("title"),
+        Some(&v("dave"))
+    );
+}
+
+/// The ordinary chain, each write over a predecessor Core accepted, records
+/// no marker: only a write that passes over a predecessor Core never
+/// decided does.
+#[test]
+fn chain_over_accepted_predecessors_records_no_marker() {
+    let target = row(0x9d);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 2);
+    let carol = writers[0].1.node_uuid;
+    let (_, e1_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "c1")]);
+    let (_, e2_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "c2")]);
+    assert_accepted(&core_fate(&mut core, e1_unit));
+    // Another writer's write makes carol's chain stale, so the check looks
+    // the predecessor up rather than reading it off the row's image.
+    accept_edit(&mut core, &mut writers[1].1, target, 102, &[("title", "dave")]);
+    assert_accepted(&core_fate(&mut core, e2_unit));
+    assert_eq!(superseded_marker(&core, target, carol), None);
+}
+
+/// `todos` renamed to `tasks` (and `title` to `name`) by a later schema.
+fn renamed_two_column_tasks_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("name", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .allow_all(),
+    )
+}
+
+/// INV-HIST-23 across a table rename: the marker names the row's table by
+/// its physical id, which the rename keeps, so a write made under the old
+/// schema is refused as late through the marker its successor recorded
+/// under the new one.
+///
+/// ```text
+/// frank (v1, todos) ═offline═ f1 title="f1"
+/// frank (v2, tasks) ═offline═ f2 name="f2" (chained on f1)
+/// frank ──f2──► core   accepted   marker: frank through f1
+/// dave  ──d───► core   accepted   (the row's current image)
+/// frank ──f1──► core   rejected (late)
+/// ```
+#[test]
+fn superseded_marker_survives_a_table_rename() {
+    let target = row(0x9e);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let base = two_column_schema();
+    let renamed = SchemaVersion::new(renamed_two_column_tasks_schema());
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        core.physical_table_id_for_schema(renamed.id, "tasks").unwrap(),
+        core.physical_table_id_for_schema(base.version_id(), "todos").unwrap(),
+        "a rename keeps the physical table"
+    );
+
+    let frank = node(0x34);
+    let (_v1_dir, mut frank_v1) = open_node_with_schema(frank, base);
+    let (f1, f1_unit) = offline_edit(&mut frank_v1, target, 100, &[("title", "f1")]);
+    let (_v2_dir, mut frank_v2) = open_node_with_schema(frank, renamed_two_column_tasks_schema());
+    let (f2, f2_unit) = frank_v2
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("tasks", target, 101)
+                .cells(BTreeMap::from([("name".to_owned(), v("f2"))])),
+        )
+        .unwrap();
+    assert!(f1 < f2);
+    let f2_unit = with_base(
+        f2_unit,
+        crate::protocol::RowBase {
+            seq: None,
+            pending: Some(f1),
+        },
+    );
+
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    accept_edit(&mut core, &mut writers[0].1, target, 102, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(f1_unit).unwrap();
+    assert!(refused_as_late(&late, f1), "{late:?}");
+}
+
+/// `unit` with its base seq far above any seq Core assigned: Core refuses
+/// it (`INV-HIST-20`) before it could pass anything over.
+fn with_unnameable_base(unit: SyncMessage, pending: Option<TxId>) -> SyncMessage {
+    with_base(
+        unit,
+        crate::protocol::RowBase {
+            seq: Some(GlobalTime(1_000_000_000)),
+            pending,
+        },
+    )
+}
+
+/// A write chained on a predecessor Core already refused records no
+/// marker: the redelivery of the refused write is deduplicated, and its
+/// writer's writes before it were decided before it.
+#[test]
+fn chain_over_a_refused_predecessor_records_no_marker() {
+    let target = row(0x9f);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let carol = writers[0].1.node_uuid;
+    let (x, x_unit) = offline_edit(&mut writers[0].1, target, 100, &[("title", "x")]);
+    let (z, z_unit) = offline_edit(&mut writers[0].1, target, 101, &[("body", "z")]);
+    let refused = core
+        .apply_sync_message_settled(with_unnameable_base(x_unit, None))
+        .unwrap();
+    assert!(
+        matches!(fate_for(&refused, x), Some(Fate::Rejected(_))),
+        "{refused:?}"
+    );
+    let answer = core.apply_sync_message_settled(z_unit).unwrap();
+    assert_eq!(fate_for(&answer, z), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(superseded_marker(&core, target, carol), None);
+}
+
+/// INV-HIST-23 through a refused link: when Core refuses a write whose own
+/// predecessor it never saw, the refusal records the marker, so the write
+/// chained on the refused one needs none and the never-seen predecessor is
+/// still refused as late when it arrives.
+///
+/// ```text
+/// frank (never loaded the row) ═offline═ y, x (chained on y), z (chained on x)
+/// frank ──x──► core   rejected (base unnameable)   marker: frank through y
+/// frank ──z──► core   accepted                     no new marker
+/// dave  ──d──► core   accepted
+/// frank ──y──► core   rejected (late)
+/// ```
+#[test]
+fn refusal_of_a_chained_write_records_its_predecessors_marker() {
+    let target = row(0xa0);
+    let (mut writers, _core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x35), two_column_schema());
+    let (y, y_unit) = offline_edit(&mut frank, target, 100, &[("title", "y")]);
+    let (x, x_unit) = offline_edit(&mut frank, target, 101, &[("body", "x")]);
+    let (z, z_unit) = offline_edit(&mut frank, target, 102, &[("title", "z")]);
+    let refused = core
+        .apply_sync_message_settled(with_unnameable_base(x_unit, Some(y)))
+        .unwrap();
+    assert!(
+        matches!(fate_for(&refused, x), Some(Fate::Rejected(_))),
+        "{refused:?}"
+    );
+    assert_eq!(superseded_marker(&core, target, y.node), Some(y.time));
+    let z_unit = with_base(
+        z_unit,
+        crate::protocol::RowBase {
+            seq: None,
+            pending: Some(x),
+        },
+    );
+    let answer = core.apply_sync_message_settled(z_unit).unwrap();
+    assert_eq!(fate_for(&answer, z), Some(&Fate::Accepted), "{answer:?}");
+    assert_eq!(
+        superseded_marker(&core, target, y.node),
+        Some(y.time),
+        "z passed over a refused predecessor and wrote nothing"
+    );
+    accept_edit(&mut core, &mut writers[0].1, target, 103, &[("title", "dave")]);
+    let late = core.apply_sync_message_settled(y_unit).unwrap();
+    assert!(refused_as_late(&late, y), "{late:?}");
 }

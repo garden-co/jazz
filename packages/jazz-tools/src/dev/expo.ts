@@ -1,4 +1,4 @@
-import { buildInspectorLink } from "./inspector-link.js";
+import { logInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -28,9 +28,7 @@ export async function withJazz(
   const managed = await runtime.initialize(options);
 
   if (!hasLoggedInspectorLink) {
-    console.log(
-      `[jazz] Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
-    );
+    logInspectorLink(managed);
     hasLoggedInspectorLink = true;
   }
 

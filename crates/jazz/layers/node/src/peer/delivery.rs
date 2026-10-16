@@ -103,17 +103,6 @@ pub(super) fn replacement_removals(
         .collect()
 }
 
-pub(super) fn filter_program_facts_for_result_table(
-    facts: Vec<ProgramFactEntry>,
-    _result_table_filter: Option<&str>,
-    _output_tables: &BTreeMap<String, TableSchema>,
-) -> Vec<ProgramFactEntry> {
-    facts
-        .into_iter()
-        .filter(ProgramFactEntry::is_peer_source_closure_fact)
-        .collect()
-}
-
 pub(super) fn apply_contribution_add<'a>(
     state: &mut PeerSubscriptionState,
     contribution: impl IntoIterator<Item = &'a ResultMemberEntry>,

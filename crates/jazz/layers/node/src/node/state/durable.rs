@@ -601,25 +601,6 @@ where
         Ok(())
     }
 
-    /// Retired scope stores are disposable caches, never native data. Keep their
-    /// registered store identities so historical roots open, but interpret no
-    /// JPFK/JSIR payload, policy key, cursor or generation during recovery.
-    async fn discard_legacy_subscription_scopes(&self) -> Result<(), Error> {
-        for name in [KNOWN_STATE_FACTS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
-            let store = self.database.direct_record_store(name)?;
-            let deletes = store
-                .prefix_entries(&[])
-                .await?
-                .into_iter()
-                .map(|entry| DirectRecordStoreWrite::Delete { key: entry.key })
-                .collect::<Vec<_>>();
-            if !deletes.is_empty() {
-                store.write_many(&deletes).await?;
-            }
-        }
-        Ok(())
-    }
-
     #[doc(hidden)]
     pub async fn close(&mut self) -> Result<(), Error> {
         self.database.flush().await?;
@@ -676,9 +657,7 @@ where
                 );
             }
         }
-        let applied = self.apply_node_batch(batch).await?;
-        let persisted = self.database.persist_with_progress(&applied).await;
-        self.database.finish_persistence(persisted)?;
+        self.apply_and_persist_node_batch(batch).await?;
         self.rejections.rejected_transactions.remove(&tx_id);
         Ok(())
     }

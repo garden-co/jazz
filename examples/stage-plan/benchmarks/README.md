@@ -42,6 +42,13 @@ nightly CodSpeed run measures them on main; the benchmark smoke gate compiles
 them on every PR; run them locally with
 `cargo bench -p jazz-example-stage-plan-benchmark --bench nightly`.
 
+The `_sqlite` cases repeat the per-merge storage-bound cases (add, check off,
+bulk complete and reopen the task list; open the board and a task's detail;
+the 30,000-row activity page; move a card) on SQLite with WAL and
+`synchronous=NORMAL`, the store the native relay uses on React Native, Swift and
+Kotlin. They replace the SQLite engine runs of the retired realistic benchmark
+workflow, so a SQLite-only regression shows up in the nightly history.
+
 Dropped because a CodSpeed case above measures the same operation: the
 in-memory twins of the board, task-detail, profile-S activity page and
 intersection-delta reads; `update_activity_policy_no_subscription_memory` and

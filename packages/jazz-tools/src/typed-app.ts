@@ -16,7 +16,6 @@ import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
-  PROVENANCE_MAGIC_COLUMNS,
   magicColumnType,
   type ProvenanceMagicColumn,
   type NoExplicitIdColumn,
@@ -1822,5 +1821,3 @@ function canonicalJson(value: unknown): string {
   }
   return `unknown:${String(value)}`;
 }
-
-export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

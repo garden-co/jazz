@@ -1,4 +1,5 @@
 import type { BackendAuth } from "./enrollment.js";
+import { createListeners, toError } from "../runtime/util.js";
 /** Framework-independent account selection. Credentials live in handles, never snapshots. */
 export interface AccountIdentity {
   readonly issuer: string;
@@ -63,7 +64,7 @@ export class AccountManager<Auth> {
     error: undefined,
   });
   private generation = 0;
-  private listeners = new Set<() => void>();
+  private listeners = createListeners("Account state observer failed");
 
   /** @internal Public factories supply the verified enrollment adapter. */
   constructor(
@@ -79,16 +80,11 @@ export class AccountManager<Auth> {
   }
 
   readonly getSnapshot = (): AccountSnapshot => this.snapshot;
-  readonly subscribe = (listener: () => void): (() => void) => {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  };
+  readonly subscribe = this.listeners.subscribe;
 
   /** @internal Surface host storage failure without changing the selected account. */
   reportPersistenceError(cause: unknown): void {
-    const error = cause instanceof Error ? cause : new Error(String(cause));
+    const error = toError(cause);
     this.publish({ ...this.snapshot, error });
   }
 
@@ -203,7 +199,7 @@ export class AccountManager<Auth> {
       this.publish({ account, pending: undefined, error: undefined });
       return outcome === account ? account : undefined;
     } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const error = toError(cause);
       if (generation === this.generation) {
         this.publish({ ...this.snapshot, pending: undefined, error });
       }
@@ -231,7 +227,7 @@ export class AccountManager<Auth> {
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       return account;
     } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const error = toError(cause);
       if (generation === this.generation) {
         this.publish({ ...this.snapshot, pending: undefined, error });
       }
@@ -241,12 +237,6 @@ export class AccountManager<Auth> {
 
   private publish(snapshot: AccountSnapshot): void {
     this.snapshot = Object.freeze(snapshot);
-    for (const listener of [...this.listeners]) {
-      try {
-        listener();
-      } catch (error) {
-        console.error("Account state observer failed", error);
-      }
-    }
+    this.listeners.notify();
   }
 }
