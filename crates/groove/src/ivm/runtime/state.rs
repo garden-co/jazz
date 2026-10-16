@@ -41,6 +41,13 @@ pub struct RuntimeStats {
     pub recursive_accumulated_encoded_bytes: usize,
     pub logical_nodes_requested: u64,
     pub deduped_graph_nodes: usize,
+    /// Join inputs compiled as keyed table lookups instead of whole-table
+    /// arrangements.
+    pub keyed_join_inputs: u64,
+    pub lookup_count: usize,
+    pub lookup_keys: usize,
+    pub lookup_rows: usize,
+    pub lookup_encoded_bytes: usize,
 }
 
 impl RuntimeStats {

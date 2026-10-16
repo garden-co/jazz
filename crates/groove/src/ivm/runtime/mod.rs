@@ -252,6 +252,14 @@ pub struct IvmRuntime {
     next_subscription_id: u64,
     next_shape_id: u64,
     logical_nodes_requested: u64,
+    /// Join inputs compiled as keyed table lookups ([`keyed_lookup`]).
+    keyed_join_inputs_rewritten: u64,
+    /// While compiling a graph: the builders a join may not read by key in,
+    /// those inside a recursive relation, whose evaluator cannot probe
+    /// storage. `None` outside a compilation that may key joins.
+    keyed_join_scope: Option<HashSet<usize>>,
+    /// Whether joins against stored tables read them by key; on by default.
+    keyed_joins_enabled: bool,
     auto_direct_family_enabled: bool,
     /// Whether plain ordered outputs receive generic root positions (insert
     /// indices and moves). A consumer that never reads them turns this off,
@@ -376,6 +384,9 @@ impl IvmRuntime {
             next_subscription_id: 1,
             next_shape_id: 1,
             logical_nodes_requested: 0,
+            keyed_join_inputs_rewritten: 0,
+            keyed_join_scope: None,
+            keyed_joins_enabled: true,
             auto_direct_family_enabled: true,
             plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
@@ -456,6 +467,13 @@ impl IvmRuntime {
 
     pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
         self.collect_tick_runtime_stats = enabled;
+    }
+
+    /// Whether graphs compiled from now on read a join's stored-table input
+    /// by the other input's keys instead of arranging the whole table
+    /// ([`keyed_lookup`]). Already compiled graphs keep their plan.
+    pub fn set_keyed_joins_enabled(&mut self, enabled: bool) {
+        self.keyed_joins_enabled = enabled;
     }
 
     pub fn graph(&self) -> &IvmGraph {
@@ -545,8 +563,10 @@ use evaluator::*;
 mod record_projection;
 use record_projection::*;
 mod key_encoding;
+mod keyed_lookup;
 pub(crate) use key_encoding::encode_key_part;
 use key_encoding::*;
+use keyed_lookup::KeyedJoinKind;
 pub(crate) mod index_ids;
 pub(crate) use index_ids::{
     IndexIdRegistry, SharedIndexIds, durable_index_key_prefix, split_durable_index_key,

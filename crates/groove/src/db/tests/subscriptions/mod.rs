@@ -981,6 +981,9 @@ async fn direct_write_advances_transitive_hydration_predecessors_without_failing
     let mut database = Database::new(albums_artists_schema(), storage.clone())
         .await
         .unwrap();
+    // The join must read the artists source H1 hydrates, not probe artists
+    // by key on its own.
+    database.set_keyed_joins_enabled(false);
     let mut seed = database.open_batch();
     seed.insert(
         "albums",

@@ -889,6 +889,10 @@ async fn assert_auto_family_matches_direct_with_prepared_count<S1, S2>(
     let mut familied = IvmRuntime::new(schema.clone()).unwrap();
     let mut direct = IvmRuntime::new(schema).unwrap();
     direct.set_auto_direct_family_enabled(false);
+    // These runtimes tick deltas that never reach storage, while a keyed
+    // join probes storage for its entering keys.
+    familied.set_keyed_joins_enabled(false);
+    direct.set_keyed_joins_enabled(false);
 
     let mut familied_subscriptions = Vec::with_capacity(families.len());
     let mut direct_subscriptions = Vec::with_capacity(families.len());
@@ -2530,6 +2534,9 @@ async fn stale_as_of_state_rejects_wrong_or_backward_logical_time() {
 async fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     let schema = albums_artists_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    // Keyed joins read artists by each join's own keys instead; this covers
+    // the whole-table plan's sharing.
+    runtime.set_keyed_joins_enabled(false);
     let storage =
         Rc::new(MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families"));
     let first = runtime

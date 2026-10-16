@@ -56,9 +56,13 @@ fn schema() -> DatabaseSchema {
     ])
 }
 
+/// Oracles here are the whole-table plans, so joins are not keyed
+/// automatically (`keyed_join.rs` covers that).
 async fn open_db() -> Database {
     let storage = MemoryStorage::new(&["items", "refs", "marks"]).expect("valid families");
-    Database::new(schema(), storage).await.unwrap()
+    let mut db = Database::new(schema(), storage).await.unwrap();
+    db.set_keyed_joins_enabled(false);
+    db
 }
 
 fn marks_of_branch(branch: u64) -> GraphBuilder {
@@ -468,6 +472,7 @@ mod cold_probe {
     fn an_entering_key_probed_from_cold_storage_converges() {
         let (storage, control) = TestStorage::controlled(&["items", "refs", "marks"]);
         let mut db = block_on(Database::new(schema(), storage.clone())).unwrap();
+        db.set_keyed_joins_enabled(false);
         block_on(apply(&mut db, |b| {
             b.insert("items", vec![Value::U64(1), Value::U64(1)]);
             b.insert("items", vec![Value::U64(2), Value::U64(9)]);

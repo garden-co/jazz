@@ -840,6 +840,13 @@ where
         self.database.runtime_stats()
     }
 
+    /// Test/bench-only switch between keyed and whole-table join plans for
+    /// queries compiled from now on (`Database::set_keyed_joins_enabled`).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_keyed_joins_enabled_for_test(&mut self, enabled: bool) {
+        self.database.set_keyed_joins_enabled(enabled);
+    }
+
     /// Return accumulated storage-read metrics since the last reset.
     pub fn storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.storage_read_metrics()

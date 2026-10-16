@@ -26,6 +26,21 @@ struct LookupStateContents {
     rows: HashMap<Vec<u8>, BTreeMap<Vec<u8>, Bytes>>,
 }
 
+impl LookupState {
+    /// Live keys, held rows, and the rows' encoded bytes.
+    pub(in crate::ivm::runtime) fn footprint(&self) -> (usize, usize, usize) {
+        let rows = self.0.rows.values().map(BTreeMap::len).sum();
+        let bytes = self
+            .0
+            .rows
+            .values()
+            .flat_map(|rows| rows.iter())
+            .map(|(key, row)| key.len() + row.len())
+            .sum();
+        (self.0.keys.len(), rows, bytes)
+    }
+}
+
 impl LookupStateContents {
     fn live(&self, key: &[u8]) -> bool {
         self.keys.get(key).is_some_and(|count| *count > 0)

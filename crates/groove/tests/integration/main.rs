@@ -19,6 +19,8 @@ mod chunk_provider;
 mod direct_metadata_progress;
 #[path = "../inline_records_snapshot.rs"]
 mod inline_records_snapshot;
+#[path = "../keyed_join.rs"]
+mod keyed_join;
 #[path = "../large_value_leaf_codec.rs"]
 mod large_value_leaf_codec;
 #[path = "../large_value_query.rs"]
