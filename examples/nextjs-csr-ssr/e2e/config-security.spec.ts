@@ -23,6 +23,18 @@ test("the browser test server uses an available port independently of developmen
     const url = new URL(config.use!.baseURL!);
     const port = Number(url.port);
     assert.ok(Number.isInteger(port) && port > 0 && port !== 3000);
+    const workerURL = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "--eval",
+        `const { default: config } = await import(${JSON.stringify(new URL("../playwright.config.ts", import.meta.url).href)}); process.stdout.write(config.use.baseURL);`,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(workerURL, url.origin, "workers must inherit the server's selected port");
     const webServer = config.webServer;
     assert.ok(webServer && !Array.isArray(webServer));
     assert.equal(webServer.url, url.origin);
