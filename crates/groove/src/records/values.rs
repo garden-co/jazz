@@ -364,7 +364,14 @@ impl ScalarEnumSchema {
         )
     }
 
-    fn from_parts(registry_id: u64, name: String, variants: Vec<String>) -> Result<Self, Error> {
+    /// Rebuild a schema from its serialized parts with the same validation as
+    /// deserialization. Hidden: for the hand-written sync-wire codec.
+    #[doc(hidden)]
+    pub fn from_parts(
+        registry_id: u64,
+        name: String,
+        variants: Vec<String>,
+    ) -> Result<Self, Error> {
         Self::validate_variants(&name, &variants)?;
         Ok(Self {
             registry_id,
@@ -1416,11 +1423,17 @@ impl ValueType {
         matches!(self, Self::Internal(_))
     }
 
-    pub(crate) fn raw_string() -> Self {
+    /// The engine-only raw-string physical type. Hidden: exposed only so the
+    /// hand-written sync-wire codec can spell every `ValueType` it may carry.
+    #[doc(hidden)]
+    pub fn raw_string() -> Self {
         Self::Internal(InternalValueType(InternalValueTypeRepr::RawString))
     }
 
-    pub(crate) fn raw_bytes() -> Self {
+    /// The engine-only raw-bytes physical type. Hidden: exposed only so the
+    /// hand-written sync-wire codec can spell every `ValueType` it may carry.
+    #[doc(hidden)]
+    pub fn raw_bytes() -> Self {
         Self::Internal(InternalValueType(InternalValueTypeRepr::RawBytes))
     }
 
