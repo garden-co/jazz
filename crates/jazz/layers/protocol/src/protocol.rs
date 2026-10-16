@@ -7768,6 +7768,125 @@ mod tests {
         assert_ne!(base.cmp(&authored), Ordering::Equal);
     }
 
+    /// Union cells (`UnionExtraCells`) on a Core image: a `NULL` cell and a
+    /// value both survive the wire, and admission (`validate_receipt`)
+    /// rejects entries out of `(schema, table)` order or repeated, a
+    /// non-nullable cell and a cell that is not an application column. A
+    /// commit unit, whose versions are authored writes, never carries them.
+    #[test]
+    fn union_cells_round_trip_and_admission_rejects_non_canonical_entries() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let image = VersionRecord::from_cells(
+            &table,
+            schema_id(2),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let nullable_text = ValueType::Nullable(Box::new(ValueType::String));
+        let cells = |fields: &[(&str, ValueType)], values: &[Value]| {
+            let descriptor = RecordDescriptor::new(
+                fields
+                    .iter()
+                    .map(|(name, value_type)| (*name, value_type.clone())),
+            );
+            OwnedRecord::new(descriptor.create(values).unwrap(), descriptor)
+        };
+        let legacy = |schema: u8, value: Option<&str>| {
+            UnionExtraCells::new(
+                schema_id(schema),
+                "todos",
+                cells(
+                    &[
+                        ("_app_legacy", nullable_text.clone()),
+                        ("_app_note", nullable_text.clone()),
+                    ],
+                    &[
+                        Value::Nullable(
+                            value.map(|value| Box::new(Value::String(value.to_owned()))),
+                        ),
+                        Value::Nullable(None),
+                    ],
+                ),
+            )
+        };
+
+        let union = image
+            .clone()
+            .with_extra_cells(vec![legacy(3, Some("x")), legacy(1, None)]);
+        union.validate_receipt().unwrap();
+        let decoded: VersionRecord =
+            postcard::from_bytes(&postcard::to_allocvec(&union).unwrap()).unwrap();
+        assert_eq!(decoded, union);
+        assert_eq!(decoded.extra_cells()[0].schema_version(), schema_id(1));
+        assert_eq!(
+            decoded.extra_cells()[0]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(None),
+            "a NULL union cell stays NULL"
+        );
+        assert_eq!(
+            decoded.extra_cells()[1]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(Some(Box::new(Value::String("x".to_owned()))))
+        );
+
+        let mut unordered = union.clone();
+        unordered.row.extras.reverse();
+        assert!(
+            unordered.validate_receipt().is_err(),
+            "entries out of order"
+        );
+        let mut repeated = union.clone();
+        repeated.row.extras = vec![legacy(1, None), legacy(1, Some("x"))];
+        assert!(repeated.validate_receipt().is_err(), "entry repeated");
+        let not_nullable = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("_app_legacy", ValueType::String)],
+                &[Value::String("x".to_owned())],
+            ),
+        )]);
+        assert!(
+            not_nullable.validate_receipt().is_err(),
+            "non-nullable cell"
+        );
+        let not_app = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("row_uuid", nullable_text.clone())],
+                &[Value::Nullable(None)],
+            ),
+        )]);
+        assert!(
+            not_app.validate_receipt().is_err(),
+            "not an application cell"
+        );
+
+        assert_eq!(
+            crate::protocol_limits::commit_unit_limit_violation(&[image]),
+            None
+        );
+        assert!(
+            crate::protocol_limits::commit_unit_limit_violation(&[union])
+                .is_some_and(|reason| reason.contains("carries union cells")),
+            "a commit unit carrying union cells is rejected"
+        );
+    }
+
     /// A `VersionRecord` ends with `base` (two postcard options), then
     /// `counter_signs` (a postcard byte string: varint length, raw bytes). An
     /// image or a patch with no base and no negative counter op ends in

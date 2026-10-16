@@ -68,7 +68,7 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",
   "groove.ordered-kv.v1",
-  "jazz.node-storage.v1",
+  "jazz.node-storage.v2",
 ] as const;
 
 /**

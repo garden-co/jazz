@@ -436,10 +436,10 @@ where
                 let projected = if previous_schema == write_schema_version {
                     Some(table_schema.name.clone())
                 } else {
-                    self.translate_cells(
+                    self.translate_version_cells(
                         previous_schema,
                         write_schema_version,
-                        previous.table(),
+                        previous,
                         &mut inherited,
                     )?
                 };
@@ -842,7 +842,7 @@ where
         let authored_table = self.table_in_schema_ref(content.table(), authored_schema)?;
         let mut cells = self.materialized_cells_for_version(authored_table, &content)?;
         let Some(projected_table) =
-            self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
+            self.translate_version_cells(authored_schema, schema_version, &content, &mut cells)?
         else {
             return Ok(None);
         };

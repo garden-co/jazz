@@ -9,13 +9,17 @@ requires exactly one Jazz-owned format marker in addition to Groove's base:
 
 | Root                | Jazz marker                 | Additional Groove family  |
 | ------------------- | --------------------------- | ------------------------- |
-| Client, relay, Core | `jazz.node-storage.v1`      | `groove.durable-index.v2` |
+| Client, relay, Core | `jazz.node-storage.v2`      | `groove.durable-index.v2` |
 | Server catalogue    | `jazz.catalogue-storage.v1` | None                      |
 | Account registry    | `jazz.account-storage.v1`   | None                      |
 
-Node format v1 covers branch keys, catalogue state, linear row history,
-transactions (including the boolean `is_partial`), durability, touched-row
-lists, and all other node-owned records. Catalogue format v1 covers entry
+Node format v2 covers branch keys, catalogue state, linear row history
+(including union row cases, SPEC 10 §10.3), transactions (including the
+boolean `is_partial`), durability, touched-row lists, and all other
+node-owned records. Node format v1 was the same layout without union row
+cases; a v1 build refuses a v2 root at open instead of failing at its first
+union row (`dev/proofs/linear-history-storage-compatibility.md`). Catalogue
+format v1 covers entry
 keys, entry envelopes and persisted catalogue payloads. Account format v1
 covers journal keys and command records. None inherits another Jazz profile.
 
@@ -28,7 +32,7 @@ manifest members. This separates encoding documentation from root admission.
 `storage_codec_profile::tests::root_profiles_have_pinned_manifest_bytes`
 pins all three exact `JSM1` manifests (memory adapter version 1, no parameters):
 
-- node: `d7d6deed3eb1df36a1c7ec2968bd0d91de937e753111abfdc96cef83804faf85`
+- node: `7cd0739970bc1c9ce3952b8c31391d5a551c9065f6cda25cef38e0c86242bc27`
 - catalogue: `92b82965f6a8d36cd85299b6f8c1af345ddec20b52f09b24b27cdde68cc792db`
 - account: `815ca7a4044e7888ff605cc7a7f7ed00c5e8f36b9bfdd7c9f131e8cdc9008e1b`
 

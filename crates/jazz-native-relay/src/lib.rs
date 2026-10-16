@@ -15009,7 +15009,7 @@ mod tests {
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         // A root from the build before the compact durable index and the
         // consolidated node-storage profile: it lacks
-        // `groove.durable-index.v2` and `jazz.node-storage.v1`, which this
+        // `groove.durable-index.v2` and `jazz.node-storage.v2`, which this
         // build requires.
         let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
             .with_additional_codecs([

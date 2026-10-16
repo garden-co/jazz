@@ -161,7 +161,9 @@ The concrete v1 byte contracts are:
   in the row's own `use` and only when union cells follow; then `count` is at
   least 1, and the entries are in strictly ascending
   `(schema version, table)` order, each a non-empty record of that schema's
-  nullable `_app_<column>` cells. An entry's own `use` has the bit clear. Every other
+  nullable `_app_<column>` cells, in that schema's column order with each
+  column once (a receiver rejects any other order). An entry's own `use` has
+  the bit clear. Every other
   row is `JVRR 0x03 use(row) row-bytes` with the bit clear, so it pays nothing
   for the union grammar. The row's canonical bytes consume the remainder.
   Each sync message starts with an empty table; the encoder defines a

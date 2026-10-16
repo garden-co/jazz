@@ -2317,3 +2317,375 @@ fn originator_reads_its_write_from_a_union_image_in_another_schema() {
         "alice reads her own dueDate from Core's image"
     );
 }
+
+/// A one-table `todos` lens from `base` to `evolved`.
+fn todos_lens(base: &JazzSchema, evolved: &JazzSchema, ops: Vec<LensOp>) -> MigrationLens {
+    MigrationLens::new(
+        base.version_id(),
+        SchemaVersion::new(evolved.clone()).id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops,
+        }],
+    )
+    .expect("valid migration lens")
+}
+
+/// A copy (`CopyColumn`) is a column of its own, also when it is an extra of
+/// the row's union layout. v2 copies `title` into `displayTitle`; v3 is a
+/// sibling of v2 (both descend from v1) that adds `dueDate`, so v3 ranks
+/// last and Core lays the row out in v3's union case, where `displayTitle`
+/// is an extra. alice's v2 writes of `displayTitle` are stored there: v2
+/// reads them back at Core and at a receiver, not the projection of `title`.
+///
+/// ```text
+/// v1 {title} ──copy title→displayTitle──► v2 {title, displayTitle}
+///    └────────add dueDate───────────────► v3 {title, dueDate}   (ranked last)
+/// alice (v2) ──{a, Custom}──► core     v2 reads {a, Custom}
+/// alice (v2) ──displayTitle=Custom2──► core   v2 reads {a, Custom2}; v3 {a, ""}
+/// ```
+#[test]
+fn copy_target_write_is_stored_in_a_sibling_union_layout() {
+    let v1 = todos_schema(&[("title", PublicColumnType::Text)]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("displayTitle", PublicColumnType::Text),
+    ]);
+    let v3 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v2_id, v3_id) = (v2.version_id(), v3.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![LensOp::CopyColumn {
+            from: "title".to_owned(),
+            to: "displayTitle".to_owned(),
+        }],
+    );
+    publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(v3.clone()),
+        todos_lens(
+            &v1,
+            &v3,
+            vec![LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("v3 publishes as a sibling of v2");
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let target = row(0x95);
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[("title", v("a")), ("displayTitle", v("Custom"))],
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[("title", v("a")), ("displayTitle", v("Custom"))]),
+    );
+    write_todo(&mut alice, &mut core, target, 20, &[("displayTitle", v("Custom2"))]);
+    let v2_row = todo_row(&[("title", v("a")), ("displayTitle", v("Custom2"))]);
+    let v3_row = todo_row(&[("title", v("a")), ("dueDate", v(""))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        v2_row,
+        "alice's accepted displayTitle is stored, not replaced by the copy of title"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v3_id)[&target], v3_row);
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver sees alice's displayTitle"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut receiver, "todos", v3_id)[&target], v3_row);
+}
+
+/// Which extras a union case stores is fixed when its schema is published.
+/// Rows sit in G's union case with E's `notes` stored; then H is published
+/// with both G and E as predecessors, which adds lens routes between them.
+/// The stored `notes` stays readable for E at Core and at a receiver that
+/// learns the catalogue (and so H) before the rows, and a later G write,
+/// laid out under H, keeps it.
+///
+/// ```text
+/// v1 {title} ──add notes──► E {title, notes}
+///    └───────add dueDate──► G {title, dueDate}          (ranked after E)
+/// G, E ──────────────────► H {title, dueDate, notes}   (published later)
+/// alice (G) ──{a, 10-01}──► core
+/// carol (E) ──notes=n─────► core     row in G's union case, notes stored
+/// publish H                          E reads {a, n}; G reads {a, 10-01}
+/// alice (G) ──title=b─────► core     E reads {b, n}
+/// ```
+#[test]
+fn stored_union_extras_survive_a_later_schema_with_several_predecessors() {
+    let v1 = todos_schema(&[("title", PublicColumnType::Text)]);
+    let e = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("notes", PublicColumnType::Text),
+    ]);
+    let g = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let h = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+        ("notes", PublicColumnType::Text),
+    ]);
+    let (e_id, g_id) = (e.version_id(), g.version_id());
+    let add = |column: &str| LensOp::AddColumn {
+        column: column.to_owned(),
+        default: v(""),
+    };
+    let (_core_dir, mut core) =
+        core_with_descendant_table_schema(v1.clone(), e.clone(), "todos", vec![add("notes")]);
+    publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(g.clone()),
+        todos_lens(&v1, &g, vec![add("dueDate")]),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("G publishes as a sibling of E");
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), g.clone());
+    let (_carol_dir, mut carol) = open_node_with_schema(node(2), e.clone());
+    let target = row(0x96);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[("title", v("a")), ("dueDate", v("10-01"))],
+    );
+    write_todo(&mut carol, &mut core, target, 20, &[("notes", v("n"))]);
+    let e_row = |title: &str| todo_row(&[("title", v(title)), ("notes", v("n"))]);
+    let g_row = |title: &str| todo_row(&[("title", v(title)), ("dueDate", v("10-01"))]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", e_id)[&target], e_row("a"));
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("a"));
+
+    let publication = core
+        .author_schema_from_predecessors(
+            SchemaVersion::new(h.clone()),
+            vec![
+                crate::protocol::SchemaPredecessor {
+                    lens: todos_lens(&g, &h, vec![add("notes")]),
+                    new_tables: Vec::new(),
+                    dropped_tables: Vec::new(),
+                },
+                crate::protocol::SchemaPredecessor {
+                    lens: todos_lens(&e, &h, vec![add("dueDate")]),
+                    new_tables: Vec::new(),
+                    dropped_tables: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+    let catalogue_seq = core.active_catalogue_seq() + 1;
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq,
+        publication: Box::new(publication),
+    })
+    .expect("H publishes with G and E as predecessors");
+
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", e_id)[&target],
+        e_row("a"),
+        "carol's notes stays stored in G's union case after H"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("a"));
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", e_id)[&target],
+        e_row("a"),
+        "a receiver that knows H admits and reads Core's G union image"
+    );
+
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", e_id)[&target], e_row("b"));
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("b"));
+}
+
+/// A receiver admits a Core image's union cells only as exactly the
+/// layout's stored extras, each entry in its schema's column order and
+/// typed as that schema's cells (SPEC 10 §10.3, SPEC 16). Here v2 drops
+/// v1's `legacy`, so Core's image of bob's v1 write is v2's union case
+/// carrying `legacy` from v1. A tampered entry is refused before anything
+/// of the row is stored; the untampered one is admitted.
+#[test]
+fn receivers_reject_union_cells_that_are_not_the_layouts_stored_extras() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let v1_id = v1.version_id();
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x93);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let bundles = version_bundles_for_update(&update);
+    let (bundle_index, version_index) = bundles
+        .iter()
+        .enumerate()
+        .find_map(|(bundle_index, bundle)| {
+            bundle
+                .versions
+                .iter()
+                .position(|version| !version.extra_cells().is_empty())
+                .map(|version_index| (bundle_index, version_index))
+        })
+        .expect("Core's image is a union row");
+    let image = bundles[bundle_index].versions[version_index].clone();
+    let fields = image.extra_cells()[0]
+        .record()
+        .descriptor()
+        .fields()
+        .iter()
+        .map(|field| field.name.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (image.extra_cells().len(), image.extra_cells()[0].schema_version(), fields),
+        (1, v1_id, vec!["_app_legacy".to_owned()]),
+        "the image carries exactly v1's legacy"
+    );
+    let request = crate::protocol::RowVersionRef::new(
+        image.table().to_owned(),
+        image.row_uuid(),
+        bundles[bundle_index].tx.tx_id,
+    );
+    let text = |value: &str| Value::Nullable(Some(Box::new(v(value))));
+    let nullable = |value_type| records::ValueType::Nullable(Box::new(value_type));
+    let entry = |cells: Vec<(&str, records::ValueType, Value)>| {
+        let descriptor = records::RecordDescriptor::new(
+            cells
+                .iter()
+                .map(|(name, value_type, _)| ((*name).to_owned(), value_type.clone())),
+        );
+        let values = cells.into_iter().map(|(_, _, value)| value).collect::<Vec<_>>();
+        crate::protocol::UnionExtraCells::new(
+            v1_id,
+            "todos",
+            records::OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+        )
+    };
+    let receive = |extras: Option<Vec<crate::protocol::UnionExtraCells>>| {
+        let mut bundles = bundles.clone();
+        if let Some(extras) = extras {
+            bundles[bundle_index].versions[version_index] = image.clone().with_extra_cells(extras);
+        }
+        let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1.clone());
+        receiver
+            .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+            .unwrap();
+        receiver
+            .apply_row_version_payloads_for_requests(&[request.clone()], bundles)
+            .resolve()
+            .map(|_| ())
+    };
+
+    const NOT_EXTRAS: &str = "row version union cells are not its schema's union extras";
+    const NOT_SCHEMA: &str = "row version union cells do not match their schema";
+    for (case, expected, extras) in [
+        (
+            "a column of the layout itself",
+            NOT_EXTRAS,
+            vec![entry(vec![("_app_title", nullable(records::ValueType::String), text("a"))])],
+        ),
+        (
+            "cells out of the schema's column order",
+            NOT_SCHEMA,
+            vec![entry(vec![
+                ("_app_legacy", nullable(records::ValueType::String), text("x")),
+                ("_app_title", nullable(records::ValueType::String), text("a")),
+            ])],
+        ),
+        (
+            "a cell of the wrong type",
+            NOT_SCHEMA,
+            vec![entry(vec![(
+                "_app_legacy",
+                nullable(records::ValueType::Bool),
+                Value::Nullable(Some(Box::new(Value::Bool(true)))),
+            )])],
+        ),
+        (
+            "an extra the layout does not store besides the one it does",
+            NOT_EXTRAS,
+            vec![entry(vec![
+                ("_app_done", nullable(records::ValueType::Bool), Value::Nullable(None)),
+                ("_app_legacy", nullable(records::ValueType::String), text("x")),
+            ])],
+        ),
+    ] {
+        let result = receive(Some(extras));
+        assert!(
+            matches!(result, Err(Error::MalformedViewUpdate(message)) if message == expected),
+            "{case}: {result:?}"
+        );
+    }
+    receive(None).expect("Core's own union cells are admitted");
+}

@@ -47,7 +47,7 @@ fn assert_legacy_profile_refused(
     result: Result<(), StorageError>,
     old: &groove::storage::StorageCodecProfile,
 ) {
-    let mut expected_missing = vec!["jazz.node-storage.v1"];
+    let mut expected_missing = vec!["jazz.node-storage.v2"];
     if !old.codec_ids().any(|id| id == DURABLE_INDEX_V2) {
         expected_missing.insert(0, DURABLE_INDEX_V2);
     }
@@ -83,7 +83,7 @@ fn alpha54_missing() -> Vec<String> {
         DURABLE_INDEX_V2.to_owned(),
         "groove.large-value.v2".to_owned(),
         "groove.ordered-chunk-storage.v2".to_owned(),
-        "jazz.node-storage.v1".to_owned(),
+        "jazz.node-storage.v2".to_owned(),
     ]
 }
 
@@ -194,7 +194,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                               missing [groove.durable-index.v2,
-///                                                        jazz.node-storage.v1]
+///                                                        jazz.node-storage.v2]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
@@ -294,7 +294,7 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 ///
 /// ```text
 /// dave's pre-index-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                              missing [groove.durable-index.v2, jazz.node-storage.v1]
+///                                              missing [groove.durable-index.v2, jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durable_index_family_is_refused() {
@@ -329,7 +329,7 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 ///
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                                  missing [jazz.node-storage.v1]
+///                                                  missing [jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durability_v2_family_is_refused() {

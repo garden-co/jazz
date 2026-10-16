@@ -145,7 +145,7 @@ Core sequences keeps it.
 ### Durable codec profile
 
 Each persistent Jazz root declares one complete Jazz storage format:
-`jazz.node-storage.v1` for clients, relays and Core; `jazz.catalogue-storage.v1`
+`jazz.node-storage.v2` for clients, relays and Core; `jazz.catalogue-storage.v1`
 for the independent server catalogue; `jazz.account-storage.v1` for the account
 journal. All compose Groove's mandatory base codecs; node roots additionally
 require `groove.durable-index.v2`. Auxiliary roots do not inherit node formats.

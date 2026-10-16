@@ -119,7 +119,7 @@ const ALPHA54_MISSING = [
   "groove.durable-index.v2",
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",
-  "jazz.node-storage.v1",
+  "jazz.node-storage.v2",
 ];
 const ALPHA54_UNKNOWN = [
   "groove.large-value.v1",

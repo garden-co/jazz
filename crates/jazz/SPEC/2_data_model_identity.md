@@ -437,7 +437,7 @@ The `is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
 selected fragments, so `n_total_writes` is not an authoritative total. A
 complete payload clears the flag; later fragments do not downgrade it.
 False does not guarantee that every row remains cached after eviction.
-This encoding receipt is covered by the `jazz.node-storage.v1` root profile.
+This encoding receipt is covered by the `jazz.node-storage.v2` root profile.
 Roots with the former nullable string field lack that profile marker and are refused
 at manifest admission, without migration or a physical epoch/wire bump.
 Fate/global time and durability remain separate lattice observations:

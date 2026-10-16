@@ -1400,7 +1400,7 @@ where
         }) => {
             assert!(missing.is_empty(), "{missing:?}");
             assert!(
-                unknown.iter().any(|codec| codec == "jazz.node-storage.v1")
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v2")
                     && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
                 "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
             );
@@ -2356,7 +2356,7 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// ```text
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                       missing [groove.durable-index.v2,
-///                                                        jazz.node-storage.v1]
+///                                                        jazz.node-storage.v2]
 /// ```
 #[test]
 fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
@@ -2429,7 +2429,7 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                     "groove.durable-index.v2".to_owned(),
                     "groove.large-value.v2".to_owned(),
                     "groove.ordered-chunk-storage.v2".to_owned(),
-                    "jazz.node-storage.v1".to_owned(),
+                    "jazz.node-storage.v2".to_owned(),
                 ],
                 "{store}"
             );

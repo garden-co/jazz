@@ -584,6 +584,9 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
+    /// Only schemas ranked no later than this may lie on the path
+    /// (`compiled_lens_path_within`).
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -591,6 +594,7 @@ struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
     table: String,
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

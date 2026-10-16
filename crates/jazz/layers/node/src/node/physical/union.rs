@@ -43,6 +43,20 @@ where
         target_table: &str,
         target_name: &str,
     ) -> Result<Option<LensCellSource>, Error> {
+        self.lens_cell_source_within(source, source_table, target_schema, target_table, target_name, None)
+    }
+
+    /// `lens_cell_source` along a path through schemas ranked no later than
+    /// `within` only (`compiled_lens_path_within`).
+    fn lens_cell_source_within(
+        &mut self,
+        source: SchemaVersionId,
+        source_table: &str,
+        target_schema: SchemaVersionId,
+        target_table: &str,
+        target_name: &str,
+        within: Option<u64>,
+    ) -> Result<Option<LensCellSource>, Error> {
         let source_columns = self.table_in_schema(source_table, source)?.columns;
         let source_mapping = self
             .catalogue
@@ -70,7 +84,9 @@ where
                 .then(|| derived.remove(target_name))
                 .flatten());
         }
-        let Some(path) = self.compiled_lens_path(source, target_schema, source_table)? else {
+        let Some(path) =
+            self.compiled_lens_path_within(source, target_schema, source_table, within)?
+        else {
             return Ok(None);
         };
         if path.target_table != target_table {
@@ -165,29 +181,49 @@ where
     }
 
     /// The union extras of `layout`'s `layout_table` whose cells a union row
-    /// actually holds: the lineage columns no lens path derives from one of
-    /// `layout`'s own columns (a column `layout` dropped, or one a sibling
-    /// schema added). A lineage column the layout carries on under a new
-    /// physical id (a bijective transform) or copies is derived from the
-    /// layout's cell by readers, as for any other row of the layout, so the
-    /// union row leaves its field null.
+    /// actually holds: every lineage column the layout does not carry on.
+    /// That is a column `layout` dropped, one a sibling schema added, and a
+    /// copy (`CopyColumn`) target, which is a column of its own (SPEC 4 §4.6).
+    /// A lineage column the layout carries on under a new physical id (a
+    /// rename chain or a bijective transform) is derived from the layout's
+    /// cell by readers, as for any other row of the layout, so the union row
+    /// leaves its field null.
+    ///
+    /// The lens path is taken through schemas ranked no later than `layout`
+    /// only. Those schemas and their lenses are all published before
+    /// `layout`, so the set is fixed with `layout`'s union case: a later
+    /// schema with several predecessors cannot open a shorter route that
+    /// would turn a stored extra into a derived one (or the reverse) under
+    /// existing union rows, and every node that knows `layout` derives the
+    /// same set.
     pub(super) fn union_stored_extras(
         &mut self,
         layout: SchemaVersionId,
         layout_table: &str,
     ) -> Result<Vec<PhysicalColumnId>, Error> {
+        let ranks = self.catalogue_ranks();
         let extras = union_extra_columns(
             &self.catalogue.physical_mappings,
-            &self.catalogue_ranks(),
+            &ranks,
             layout,
             layout_table,
         )?;
+        let Some(within) = ranks.get(&layout).copied() else {
+            return Ok(extras);
+        };
         let mut stored = Vec::with_capacity(extras.len());
         for id in extras {
             let (schema, table, column) = self.union_column_definer(layout, layout_table, id)?;
             if !matches!(
-                self.lens_cell_source(layout, layout_table, schema, &table, &column)?,
-                Some(LensCellSource::Column { .. })
+                self.lens_cell_source_within(
+                    layout,
+                    layout_table,
+                    schema,
+                    &table,
+                    &column,
+                    Some(within)
+                )?,
+                Some(LensCellSource::Column { copied: false, .. })
             ) {
                 stored.push(id);
             }
@@ -426,8 +462,9 @@ where
 
     /// The physical cells a received version's union cells name, keyed by
     /// this node's physical column ids: each entry's schema version must be
-    /// known, its table must be `table_id`'s lineage, and each cell must be
-    /// a column of that table with that schema's exact wire type.
+    /// known, its table must be `table_id`'s lineage, and its cells must be
+    /// columns of that table, in strictly increasing column order, each with
+    /// that schema's exact wire type.
     pub(super) fn union_cells_from_wire(
         &mut self,
         version: &crate::protocol::VersionRecord,
@@ -450,6 +487,9 @@ where
             }
             let descriptor = table.wire_record_descriptor();
             let record = extra.record().borrowed();
+            // Cells are in the schema's column order, each column once: the
+            // encoder's only spelling (`union_extra_cells_for_wire`).
+            let mut previous_index = None;
             for (field_index, field) in extra.record().descriptor().fields().iter().enumerate() {
                 let index = table
                     .columns
@@ -458,6 +498,10 @@ where
                         Some(crate::schema::app_storage_column_name(&column.name).as_str()) == field.name.as_deref()
                     })
                     .ok_or_else(malformed)?;
+                if previous_index.is_some_and(|previous| previous >= index) {
+                    return Err(malformed());
+                }
+                previous_index = Some(index);
                 if descriptor.fields()[WireRowRecord::USER_CELLS + index].value_type
                     != field.value_type
                 {

@@ -610,12 +610,19 @@ last among those mapping the table (ch. 4 §4.6, "Across schema versions").
 That need not be the write's own schema, nor name the table as the write
 does, so a post-image replaces the write's pending record by its physical
 row (table, branch, row), not by its name or schema. An extra is
-**stored** when no lens path from `G` derives it from one of `G`'s own
-columns; an extra the path does derive (a column `G` carries on under a new
-physical id, or copies) stays null, and readers derive it from `G`'s cell as
-for any `G` row. Reading a union row as schema `R`: a column of `R` that is a
-stored extra reads that field; any other column takes the `G` → `R`
-projection.
+**derived** when the lens path from `G` carries it on from one of `G`'s own
+columns (a rename chain or a bijective transform); it stays null, and readers
+derive it from `G`'s cell as for any `G` row. Every other extra is
+**stored**: a column `G` dropped, a sibling's column, and a copy
+(`CopyColumn`) target, which is a column of its own (ch. 4 §4.6) whose
+writes a lens from `G` would otherwise overwrite with the source's value.
+The lens path is taken through schema versions ranked no later than `G`
+only, so the stored set is fixed with `G`'s union case: a later schema with
+several predecessors cannot open a shorter route that turns a stored extra
+into a derived one (or the reverse) under existing union rows. Reading a
+union row as schema `R`, by any read path: a column of `R` that is a stored
+extra reads that field (null reads as absent); any other column takes the
+`G` → `R` projection.
 
 On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
 travel as `UnionExtraCells`, one entry per schema version defining them, each
