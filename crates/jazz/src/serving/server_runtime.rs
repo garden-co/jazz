@@ -1944,7 +1944,7 @@ fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
 fn inbound_frame_phase(frame: &[u8]) -> String {
     // Diagnostic naming is not admission. Do not perform receipt validation
     // or canonical re-encoding before the actual connection decoder runs.
-    let Ok(frame) = postcard::from_bytes::<WireFrame>(frame) else {
+    let Ok((frame, _)) = crate::codec::decode_prefix::<WireFrame>(frame) else {
         return "malformed wire frame".to_owned();
     };
     match frame {

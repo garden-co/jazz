@@ -353,6 +353,9 @@ impl<T: WireCodec> Wire<T> for Auto {
 }
 
 /// Encode a value.
+///
+/// Infallible codecs only: an encoder that records an error (see
+/// [`record_encode_error`]) needs an entry point that takes it.
 pub fn encode<T: WireCodec>(value: &T) -> Vec<u8> {
     let mut buf = Vec::new();
     value.put(&mut buf);
@@ -386,6 +389,55 @@ pub fn decode_exact<T: WireCodec>(bytes: &[u8]) -> Result<T, CodecError> {
         });
     }
     Ok(value)
+}
+
+/// Largest scratch buffer kept between encodes.
+const MAX_RETAINED_SCRATCH_BYTES: usize = 1 << 20;
+
+thread_local! {
+    static SCRATCH: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// Run `f` with this thread's empty scratch buffer. Encoding into it and
+/// copying out once gives an exact-size result without growing a fresh
+/// allocation, and measuring an encoding allocates nothing in steady state.
+/// Nested calls get a buffer of their own.
+pub fn with_scratch<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    let mut buf = SCRATCH.with(std::cell::Cell::take);
+    buf.clear();
+    let result = f(&mut buf);
+    if buf.capacity() <= MAX_RETAINED_SCRATCH_BYTES {
+        SCRATCH.with(|scratch| scratch.set(buf));
+    }
+    result
+}
+
+thread_local! {
+    static ENCODE_ERROR: std::cell::Cell<Option<CodecError>> = const { std::cell::Cell::new(None) };
+}
+
+/// Record that a value could not be encoded. [`WireCodec::put`] cannot fail,
+/// so an encoder that can (a row whose descriptor does not encode) records
+/// its error here and writes nothing; the entry point that started the
+/// encode takes it with [`take_encode_error`]. The first error is kept.
+pub fn record_encode_error(error: CodecError) {
+    ENCODE_ERROR.with(|slot| {
+        let previous = slot.take();
+        slot.set(Some(previous.unwrap_or(error)));
+    });
+}
+
+/// Take the error recorded by [`record_encode_error`] since the last take.
+pub fn take_encode_error() -> Option<CodecError> {
+    ENCODE_ERROR.with(std::cell::Cell::take)
+}
+
+/// Encoded length of a value, measured in the scratch buffer.
+pub fn encoded_len<T: WireCodec>(value: &T) -> Result<usize, CodecError> {
+    with_scratch(|buf| {
+        value.put(buf);
+        take_encode_error().map_or(Ok(buf.len()), Err)
+    })
 }
 
 /// Append an unsigned LEB128 varint.

@@ -10,9 +10,7 @@ pub mod channel_credit;
 pub mod channels;
 pub mod stream_backend;
 
-use postcard::{take_from_bytes, to_allocvec};
-use serde::{Deserialize, Serialize};
-
+use crate::codec::{CodecError, WireCodec};
 use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::{SyncMessage, with_message_descriptor_table};
 use crate::protocol_limits::{
@@ -318,9 +316,9 @@ impl WireInboundContext {
         )
     }
 
-    pub fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    pub fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, CodecError> {
         if self.trusted_encoder {
-            postcard::from_bytes(bytes)
+            crate::codec::decode_prefix(bytes).map(|(frame, _)| frame)
         } else {
             decode_frame(bytes)
         }
@@ -473,8 +471,8 @@ impl WireError {
 }
 
 /// Serialize a wire frame with the canonical Jazz frame codec.
-pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
-    to_allocvec(frame)
+pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, CodecError> {
+    Ok(crate::codec::encode(frame))
 }
 
 /// Whether encoded frame bytes carry a [`WireFrame::ChannelCredit`] grant,
@@ -486,12 +484,16 @@ pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
 }
 
 /// Decode a wire frame serialized by [`encode_frame`].
-pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, CodecError> {
     if validate_wire_frame_len(bytes.len()).is_err() {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
+        return Err(FRAME_TOO_LARGE);
     }
-    decode_postcard_exact(bytes)
+    crate::codec::decode_exact(bytes)
 }
+
+const FRAME_TOO_LARGE: CodecError = CodecError::Invalid {
+    context: "wire frame length",
+};
 
 /// Exercise the owning v6 frame and payload decoders for the generated-host
 /// compatibility matrix.
@@ -559,25 +561,33 @@ pub fn validate_frames_for_artifact_corpus(
 /// Every row version in the message shares one descriptor table: a row
 /// descriptor is written once, at its first use, and later rows reference it
 /// (`JVRR` v3, SPEC 16).
-pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, CodecError> {
     // Our encoder owns correctness; do not decode/revalidate its input rows.
-    if matches!(message, SyncMessage::ViewUpdate(_)) {
-        // A view update can carry a whole snapshot. Growing the buffer while
-        // encoding it holds the old and new allocation at each doubling and
-        // leaves up to twice its bytes queued, so size it exactly first.
-        let len = encoded_sync_message_len(message)?;
-        return with_message_descriptor_table(|| {
-            postcard::to_extend(message, Vec::with_capacity(len))
-        });
-    }
-    with_message_descriptor_table(|| to_allocvec(message))
+    // A view update can carry a whole snapshot: encoding it into a growing
+    // buffer would hold the old and new allocation at each doubling and leave
+    // up to twice its bytes queued, so it is encoded into the reused scratch
+    // buffer and copied out at its exact size.
+    with_encoded_sync_message(message, <[u8]>::to_vec)
 }
 
-/// Exact byte length `encode_sync_message` would produce, without allocating
-/// or copying the encoding. For diagnostics that only need the size.
-pub fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
+/// Exact byte length `encode_sync_message` would produce. For diagnostics
+/// and size checks that only need the size.
+pub fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, CodecError> {
+    with_encoded_sync_message(message, <[u8]>::len)
+}
+
+fn with_encoded_sync_message<R>(
+    message: &SyncMessage,
+    f: impl FnOnce(&[u8]) -> R,
+) -> Result<R, CodecError> {
     with_message_descriptor_table(|| {
-        postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+        crate::codec::with_scratch(|buf| {
+            message.put(buf);
+            match crate::codec::take_encode_error() {
+                Some(error) => Err(error),
+                None => Ok(f(buf)),
+            }
+        })
     })
 }
 
@@ -603,29 +613,30 @@ pub fn encode_sync_message_for_features(
 }
 
 /// Decode a semantic sync message serialized by [`encode_sync_message`].
-pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, CodecError> {
     if validate_logical_message_len(bytes.len()).is_err() {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
+        return Err(CodecError::Invalid {
+            context: "sync message length",
+        });
     }
     // Wire receipts and replay fixtures name bytes, not only deserialized
-    // values. `decode_postcard_exact` already rejects any alternate postcard
-    // representation of the same transaction/version message.
-    let message: SyncMessage = with_message_descriptor_table(|| decode_postcard_exact(bytes))?;
+    // values. `decode_exact` rejects any alternate representation of the same
+    // transaction/version message.
+    let message: SyncMessage = with_message_descriptor_table(|| crate::codec::decode_exact(bytes))?;
     message
         .validate_wire_contract()
-        .map_err(|_| postcard::Error::DeserializeBadOption)?;
+        .map_err(|_| CodecError::Invalid {
+            context: "sync message wire contract",
+        })?;
     Ok(message)
 }
 
 /// Decode output from a topology-trusted encoder without representation checks.
 /// Trust is assigned locally when the transport is installed, never on the wire.
 #[doc(hidden)]
-pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    with_message_descriptor_table(|| postcard::from_bytes(bytes))
+pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, CodecError> {
+    with_message_descriptor_table(|| crate::codec::decode_prefix(bytes).map(|(message, _)| message))
 }
-
-pub use crate::postcard_exact::decode_postcard_exact;
-pub use crate::postcard_exact::encodes_exactly;
 
 /// Decode one canonical WebSocket carrier of raw wire frames without first
 /// allocating an attacker-declared outer `Vec`.
@@ -637,69 +648,62 @@ pub use crate::postcard_exact::encodes_exactly;
 /// boundary for every WebSocket adapter, so no adapter can accidentally use
 /// postcard's general-purpose `Vec` decoder before enforcing the protocol
 /// cardinality limit.
-pub fn decode_websocket_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+pub fn decode_websocket_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, CodecError> {
+    const BATCH: CodecError = CodecError::Invalid {
+        context: "websocket frame batch",
+    };
     if validate_wire_frame_len(bytes.len()).is_err() {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
+        return Err(BATCH);
     }
 
-    let mut remaining = bytes;
-    let count = take_canonical_postcard_usize(&mut remaining)?;
+    let offset = &mut 0;
+    let count = crate::codec::get_len(bytes, offset)?;
     if count == 0 || count > MAX_WIRE_BATCH_FRAMES {
-        return Err(postcard::Error::DeserializeBadEncoding);
+        return Err(BATCH);
     }
 
     let mut frames = Vec::with_capacity(count);
     for _ in 0..count {
-        let frame_len = take_canonical_postcard_usize(&mut remaining)?;
+        let frame_len = crate::codec::get_len(bytes, offset)?;
         if validate_wire_frame_len(frame_len).is_err() {
-            return Err(postcard::Error::DeserializeUnexpectedEnd);
+            return Err(BATCH);
         }
-        if frame_len > remaining.len() {
-            return Err(postcard::Error::DeserializeUnexpectedEnd);
-        }
-        let (frame, tail) = remaining.split_at(frame_len);
-        frames.push(frame.to_vec());
-        remaining = tail;
+        frames.push(crate::codec::read_bytes(bytes, offset, frame_len)?.to_vec());
     }
 
-    if remaining.is_empty() {
+    if *offset == bytes.len() {
         Ok(frames)
     } else {
-        Err(postcard::Error::DeserializeBadEncoding)
+        Err(BATCH)
     }
 }
 
 /// Encode one canonical, complete WebSocket carrier of raw wire frames.
 ///
-/// The physical carrier ceiling includes postcard's outer count and each
+/// The physical carrier ceiling includes the outer count and each
 /// frame-length prefix, so a raw frame at the frame ceiling can still be too
 /// large to carry by itself.
-pub fn encode_websocket_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, postcard::Error> {
+pub fn encode_websocket_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, CodecError> {
+    const BATCH: CodecError = CodecError::Invalid {
+        context: "websocket frame batch",
+    };
     if frames.is_empty()
         || frames.len() > MAX_WIRE_BATCH_FRAMES
         || frames
             .iter()
             .any(|frame| validate_wire_frame_len(frame.len()).is_err())
     {
-        return Err(postcard::Error::SerializeBufferFull);
+        return Err(BATCH);
     }
 
-    let encoded = to_allocvec(frames)?;
+    let mut encoded = Vec::new();
+    crate::codec::put_seq(&mut encoded, frames, |buf, frame| {
+        crate::codec::put_bytes(buf, frame)
+    });
     if validate_wire_frame_len(encoded.len()).is_err() {
-        return Err(postcard::Error::SerializeBufferFull);
+        return Err(BATCH);
     }
     Ok(encoded)
-}
-
-fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::Error> {
-    let source = *bytes;
-    let (value, remaining) = take_from_bytes::<usize>(source)?;
-    let consumed = source.len() - remaining.len();
-    if !encodes_exactly(&value, &source[..consumed]) {
-        return Err(postcard::Error::DeserializeBadEncoding);
-    }
-    *bytes = remaining;
-    Ok(value)
 }
 
 /// Decode a semantic message only when its required capabilities were
@@ -720,7 +724,7 @@ pub fn decode_sync_message_for_features(
 }
 
 /// Decode a semantic sync message for receiver apply.
-pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, CodecError> {
     decode_sync_message(bytes)
 }
 
@@ -868,12 +872,11 @@ fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
 /// before it decodes the rest (SPEC 8 §8.1.1, "Forward compatibility of tagged
 /// unions"). Returns `None` when the bytes do not start with that prefix.
 pub fn wire_hello_version_range(bytes: &[u8]) -> Option<(u16, u16)> {
-    let (tag, rest) = take_from_bytes::<u32>(bytes).ok()?;
-    if tag != 0 {
+    let offset = &mut 0;
+    if u32::get(bytes, offset).ok()? != 0 {
         return None;
     }
-    let ((min, max), _) = take_from_bytes::<(u16, u16)>(rest).ok()?;
-    Some((min, max))
+    Some((u16::get(bytes, offset).ok()?, u16::get(bytes, offset).ok()?))
 }
 
 /// Decode a peer's handshake frame, reporting a foreign wire version as

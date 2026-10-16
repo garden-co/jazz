@@ -738,7 +738,7 @@ struct InboundViewParts {
 /// allocation; ordinary updates stop here.
 fn exceeds_routed_payload_limit(view: &ViewUpdatePayload) -> bool {
     // Measure the payload as a message: the variant tag is one byte.
-    postcard::experimental::serialized_size(view).map_or(true, |bytes| {
+    crate::codec::encoded_len(view).map_or(true, |bytes| {
         bytes.saturating_add(1) > super::routed_messages::max_routed_payload_bytes()
     })
 }
@@ -748,9 +748,9 @@ fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
     let (tag, bytes) = match message {
         // Every part of one update shares its subscription's stream.
         ViewUpdate(view) | ViewUpdatePart(view) => {
-            (0, postcard::to_allocvec(&view.subscription).unwrap())
+            (0, crate::codec::encode(&view.subscription))
         }
-        SubscribeRejected { subscription, .. } => (0, postcard::to_allocvec(subscription).unwrap()),
+        SubscribeRejected { subscription, .. } => (0, crate::codec::encode(subscription)),
         AuthorizationScopeView { request_id, .. }
         | AuthorizationScopeAggregateReceipt { request_id, .. }
         | AuthorizationScopeUnavailable { request_id }

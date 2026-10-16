@@ -51,9 +51,9 @@ pub enum WebSocketClientError {
     HandshakeTimeout,
     UnexpectedHandshakeMessage,
     EncodePrelude(serde_json::Error),
-    EncodeHello(postcard::Error),
-    DecodeBatch(postcard::Error),
-    DecodeFrame(postcard::Error),
+    EncodeHello(jazz::codec::CodecError),
+    DecodeBatch(jazz::codec::CodecError),
+    DecodeFrame(jazz::codec::CodecError),
     Negotiation(WireError),
     ServerRejected(String),
     ServerWireError(WireError),
@@ -442,7 +442,7 @@ impl WebSocketTransport {
                 .with_authority(client_endpoint.node, client_endpoint.epoch),
         );
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
-        let batch = postcard::to_allocvec(&vec![encoded_hello])
+        let batch = jazz::wire::encode_websocket_frame_batch(&[encoded_hello])
             .map_err(WebSocketClientError::EncodeHello)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(batch.into())))
             .await

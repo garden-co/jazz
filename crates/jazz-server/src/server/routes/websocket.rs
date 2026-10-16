@@ -1077,7 +1077,7 @@ fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
 }
 
 #[cfg(test)]
-fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
+fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, jazz::codec::CodecError> {
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
     encoded_frames
         .iter()
@@ -1085,7 +1085,7 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
         .collect()
 }
 
-fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, jazz::codec::CodecError> {
     jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
@@ -1118,7 +1118,9 @@ async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<
 }
 
 /// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
-pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+pub(crate) fn encode_ws_frame_batches(
+    frames: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>, jazz::codec::CodecError> {
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {
@@ -1133,7 +1135,7 @@ pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>
             // at the frame limit can fit by itself.
             jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
         } else if !candidate_fits {
-            return Err(postcard::Error::SerializeBufferFull);
+            return jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame)).map(|_| Vec::new());
         }
         current.push(frame.clone());
     }
@@ -2659,7 +2661,7 @@ mod tests {
         let error = encode_ws_frame_batches(&[vec![0; MAX_WIRE_FRAME_BYTES + 1]])
             .expect_err("oversized frame should not be batched");
 
-        assert!(matches!(error, postcard::Error::SerializeBufferFull));
+        assert!(matches!(error, jazz::codec::CodecError::Invalid { .. }));
     }
 
     async fn open_negotiated_ws(
