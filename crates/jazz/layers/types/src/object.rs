@@ -511,8 +511,8 @@ mod tests {
     }
 
     /// Alice's two retained versions keep distinct portable keys even when
-    /// their logical row is the same. This lower-layer test pins binding bytes;
-    /// public history subscriptions are not enabled yet.
+    /// their logical row is the same. This lower-layer test pins exact binding
+    /// bytes, which public subscription tests deliberately treat as opaque.
     #[test]
     fn result_key_preserves_full_transaction_identity() {
         let fixture: serde_json::Value =

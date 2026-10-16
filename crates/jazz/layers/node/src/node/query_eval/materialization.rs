@@ -1300,11 +1300,11 @@ where
                 // relation aliases and are checked against their own schema.
                 continue;
             }
-            let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
+            let table = self.table_in_schema(row.table(), shape.schema_version())?;
             let projection = (index < snapshot.root_count && row.table() == query.table)
                 .then_some(query.select.as_deref())
                 .flatten();
-            if !current_row_has_required_subscription_cells(row, table, projection) {
+            if !current_row_has_required_subscription_cells(row, &table, projection) {
                 return Ok(false);
             }
         }

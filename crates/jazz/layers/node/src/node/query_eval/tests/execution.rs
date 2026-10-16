@@ -1518,8 +1518,8 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
 
 /// Alice queries three retained versions with equal projected values. Every
 /// version keeps its transaction identity through collection and pagination.
-/// This uses the normal query compiler and maintained reducer directly because
-/// the public history-subscription entry point is intentionally still disabled.
+/// This lower-layer test pins collector keys and hidden payload layouts before
+/// public materialization; end-to-end behavior is covered by jazz-testkit.
 #[test]
 fn history_query_collector_preserves_version_keys_and_windows() {
     let schema = public_query_eval_schema(

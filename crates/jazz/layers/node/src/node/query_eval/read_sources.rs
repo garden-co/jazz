@@ -45,6 +45,8 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// a variant target invalidates table inputs, so reuse it across the main
     /// source, access path, and metadata sidecars of one compiled program.
     pub(super) current_projection_targets: BTreeMap<SourceId, String>,
+    /// Refresh dependencies of programs embedded inside resolved sources.
+    pub(super) nested_program_dependencies: lowering::PolicyDependencyFootprint,
     /// Whether these sources feed a policy-authorization subplan, which an
     /// exclusive transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
@@ -5484,7 +5486,7 @@ where
         binding: &Binding,
         access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<(), Error> {
-        let table = self.table_in_schema_ref(table_name, schema_version)?;
+        let table = self.table_in_schema(table_name, schema_version)?;
         let equalities = literal_equalities_for_filters(filters, binding)?;
         if let Some(access_path) = select_current_access_path(&table, &equalities)
             && matches!(access_path, CurrentAccessPath::PrimaryKey(_))

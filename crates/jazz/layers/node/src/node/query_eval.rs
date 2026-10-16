@@ -1492,10 +1492,11 @@ where
             .table
             .starts_with(crate::schema::history::HISTORY_PREFIX)
         {
-            if !matches!(output, CurrentQueryProgramOutput::AppRows) {
-                return Err(history::unsupported(
-                    "maintained or structured history results",
-                ));
+            if !matches!(
+                output,
+                CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::MaintainedView
+            ) {
+                return Err(history::unsupported("structured history results"));
             }
             if authorization_mode != QueryAuthorizationMode::TrustedServing {
                 return Err(history::unsupported(
@@ -4081,6 +4082,13 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
+        if shape
+            .query()
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            return Err(history::unsupported("peer subscriptions"));
+        }
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
         // remain addressed by the selected root row. Flat public join output
@@ -4764,8 +4772,22 @@ where
         // coordinate follows the row's authored schema across a table rename.
         let mut witness_table_names = BTreeMap::new();
         for logical_name in tables.keys() {
+            let stored_name = logical_name
+                .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                .unwrap_or(logical_name);
+            if stored_name != logical_name {
+                let physical_table = *maintained
+                    .physical_tables
+                    .get(&stored_name.to_owned().into())
+                    .ok_or(Error::InvalidStoredValue(
+                        "history source has no physical table identity",
+                    ))?;
+                maintained
+                    .physical_tables
+                    .insert(logical_name.clone().into(), physical_table);
+            }
             let table_id =
-                self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
+                self.physical_table_id_for_schema(shape.schema_version(), stored_name)?;
             for (schema_id, mapping) in &self.catalogue.physical_mappings {
                 let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
                     continue;

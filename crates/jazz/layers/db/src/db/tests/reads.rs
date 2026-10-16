@@ -8115,9 +8115,9 @@ fn history_query_rejects_unbounded_reads_and_deferred_modes() {
     }
     let result = block_on(db.subscribe(&prepared, ReadOpts::default()));
     let error = match result {
-        Ok(_) => panic!("history subscriptions must be rejected"),
+        Ok(_) => panic!("client-local history without serving authorization must be rejected"),
         Err(error) => error,
     };
     assert_eq!(error.code, ErrorCode::Query);
-    assert!(error.message.contains("history subscriptions"));
+    assert!(error.message.contains("client-local history"));
 }

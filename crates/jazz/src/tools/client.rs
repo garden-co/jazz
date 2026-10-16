@@ -330,6 +330,7 @@ struct ClientDb {
 #[derive(Clone)]
 struct PublicQueryDecoder {
     schema: Rc<Schema>,
+    core_schema: Rc<crate::schema::JazzSchema>,
 }
 
 struct ClientDbInner {
@@ -735,6 +736,27 @@ impl Backend {
         .mergeable_tx_id())
     }
 
+    fn restore(
+        &self,
+        identity: Option<CoreWriteIdentity>,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: Option<crate::db::RowCells>,
+        updated_at_ms: Option<u64>,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        Ok(crate::local_executor::block_on(self.0.restore(
+            table,
+            row_id,
+            cells,
+            crate::db::RestoreOptions {
+                identity: identity.unwrap_or_default(),
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
+    }
+
     async fn prepare_query(
         &self,
         query: &crate::query::Query,
@@ -868,6 +890,21 @@ impl Backend {
         crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).delete(
             table,
             row_id,
+            Default::default(),
+        ))
+    }
+
+    fn exclusive_restore(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: Option<crate::db::RowCells>,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).restore(
+            table,
+            row_id,
+            cells,
             Default::default(),
         ))
     }
@@ -1049,6 +1086,7 @@ impl ClientDb {
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(TickSchedulerImpl::default());
         let has_upstream = server_url.is_some();
+        let core_schema = Rc::new(schema.clone());
         let inner = ClientDbInner::open(
             schema,
             storage,
@@ -1071,6 +1109,7 @@ impl ClientDb {
             inner,
             query_decoder: PublicQueryDecoder {
                 schema: Rc::new(public_schema),
+                core_schema,
             },
         }))
     }
@@ -1163,6 +1202,19 @@ impl ClientDb {
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         self.ensure_tick_driver_running()?;
+        // A projected history result still needs its version to form a stable
+        // public key. Decode values against the caller's original projection.
+        let mut query = query;
+        if query
+            .table
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && let Some(columns) = &mut query.select
+            && !columns
+                .iter()
+                .any(|column| column == crate::schema::history::TRANSACTION_ID_COLUMN)
+        {
+            columns.push(crate::schema::history::TRANSACTION_ID_COLUMN.to_owned());
+        }
         ClientDbInner::handle_query(&self.inner, query, opts, wait_for_coverage, scope).await
     }
 
@@ -1381,6 +1433,51 @@ impl ClientDb {
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
         tx.has_writes = true;
+        Ok(())
+    }
+
+    fn restore(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        cells: Option<crate::db::RowCells>,
+        identity: Option<CoreWriteIdentity>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<CoreTxId> {
+        let mut inner = self.inner.borrow_mut();
+        let write = inner
+            .backend()?
+            .restore(
+                identity,
+                table,
+                CoreRowUuid(*row_id.uuid()),
+                cells,
+                updated_at_ms,
+            )
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
+        inner.remember_write(write);
+        Ok(write)
+    }
+
+    fn stage_restore(
+        &self,
+        table: &str,
+        transaction_id: OpenTransactionId,
+        row_id: ObjectId,
+        cells: Option<crate::db::RowCells>,
+    ) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.ensure_transaction_open(transaction_id)?;
+        inner
+            .backend()?
+            .exclusive_restore(transaction_id, table, CoreRowUuid(*row_id.uuid()), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        inner
+            .transactions
+            .get_mut(&transaction_id)
+            .expect("transaction open checked above")
+            .has_writes = true;
         Ok(())
     }
 
@@ -2154,10 +2251,9 @@ impl ClientDbInner {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let mut stream =
-            db.0.subscribe_remote_answer(prepared, opts)
-                .await
-                .map_err(|error| JazzError::Query(error.to_string()))?;
+        let mut stream = StackSafeFuture::new(db.0.subscribe_remote_answer(prepared, opts))
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let outcome = async {
             loop {
                 let event = stream.next_event().await.ok_or_else(|| {
@@ -2909,6 +3005,13 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             .map(core_to_public_value)
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
+        CoreValue::Tuple(values) => Ok(Value::Row {
+            id: None,
+            values: values
+                .into_iter()
+                .map(core_to_public_value)
+                .collect::<Result<Vec<_>>>()?,
+        }),
         CoreValue::Record(record) => {
             let identity_index = ["row_uuid", "id"]
                 .into_iter()
@@ -3355,6 +3458,34 @@ impl JazzClient {
 }
 
 impl PublicQueryDecoder {
+    fn projected_column_names(&self, query: &Query, table: &TableSchema) -> Result<Vec<String>> {
+        if let Some(columns) = &query.select {
+            return Ok(columns.clone());
+        }
+        if let Some(base) = query
+            .table
+            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+        {
+            let source = self
+                .core_schema
+                .tables()
+                .iter()
+                .find(|table| table.name == base)
+                .ok_or_else(|| JazzError::Query(format!("unknown table {}", query.table)))?;
+            return Ok(crate::schema::history::HistoryRelationSchema::new(source)
+                .columns()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect());
+        }
+        Ok(table
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name.as_str().to_owned())
+            .collect())
+    }
+
     fn core_rows_to_public(
         &self,
         query: &Query,
@@ -3363,7 +3494,11 @@ impl PublicQueryDecoder {
         let table = query.table.as_str();
         let schema = self.schema.as_ref();
         let table_schema = schema
-            .get(&TableName::new(table))
+            .get(&TableName::new(
+                table
+                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                    .unwrap_or(table),
+            ))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if query.aggregate.is_some() {
             return rows
@@ -3419,14 +3554,7 @@ impl PublicQueryDecoder {
                 })
                 .collect();
         }
-        let columns = query.select.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_string())
-                .collect()
-        });
+        let columns = self.projected_column_names(query, table_schema)?;
         let rows = rows
             .into_iter()
             .map(|row| {
@@ -3482,8 +3610,44 @@ impl PublicQueryDecoder {
     ) -> Result<Vec<QueryResult>> {
         let keys = rows
             .iter()
-            .map(|row| ResultKey::from_occurrence(crate::db::subscription_row_occurrence_id(row)))
-            .collect::<Vec<_>>();
+            .map(|row| {
+                if query
+                    .table
+                    .starts_with(crate::schema::history::HISTORY_PREFIX)
+                {
+                    let Some(CoreValue::Tuple(version)) =
+                        row.application_field(crate::schema::history::TRANSACTION_ID_COLUMN)
+                    else {
+                        return Err(JazzError::Query(
+                            "history result is missing its transaction identity".into(),
+                        ));
+                    };
+                    let [CoreValue::U64(time), CoreValue::Uuid(node)] = version.as_slice() else {
+                        return Err(JazzError::Query(
+                            "invalid history transaction identity".into(),
+                        ));
+                    };
+                    Ok(ResultKey::from_occurrence(OutputOccurrenceId::history(
+                        ObjectId::from_uuid(row.row_uuid().0),
+                        crate::time::TxTime(*time),
+                        crate::ids::NodeUuid(*node),
+                    )))
+                } else {
+                    Ok(ResultKey::from_occurrence(
+                        crate::db::subscription_row_occurrence_id(row),
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.core_rows_to_query_results_with_keys(query, rows, keys)
+    }
+
+    fn core_rows_to_query_results_with_keys(
+        &self,
+        query: &Query,
+        rows: Vec<crate::node::CurrentRow>,
+        keys: Vec<ResultKey>,
+    ) -> Result<Vec<QueryResult>> {
         let names = self.query_result_column_names(query)?;
         let values = self.core_rows_to_public(query, rows)?;
         keys.into_iter()
@@ -3511,7 +3675,11 @@ impl PublicQueryDecoder {
         let schema = self.schema.as_ref();
         let table = query.table.as_str();
         let table_schema = schema
-            .get(&TableName::new(table))
+            .get(&TableName::new(
+                table
+                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                    .unwrap_or(table),
+            ))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if let Some(aggregate) = &query.aggregate {
             let mut names = aggregate.group_by.iter().cloned().collect::<Vec<_>>();
@@ -3552,14 +3720,7 @@ impl PublicQueryDecoder {
             }
             return Ok(names);
         }
-        let mut names = query.select.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_owned())
-                .collect()
-        });
+        let mut names = self.projected_column_names(query, table_schema)?;
         names.extend(
             query
                 .array_subqueries
@@ -3596,7 +3757,11 @@ impl PublicQueryDecoder {
         );
         #[cfg(feature = "testing")]
         let public = {
-            let fields = match self.core_rows_to_query_results(query, vec![row.row.clone()]) {
+            let fields = match self.core_rows_to_query_results_with_keys(
+                query,
+                vec![row.row.clone()],
+                vec![ResultKey::from_occurrence(row.occurrence_id.clone())],
+            ) {
                 Ok(mut results) => results
                     .pop()
                     .map(|result| result.fields)
@@ -3695,6 +3860,15 @@ impl PublicQueryDecoder {
         row: &crate::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
+        if table.starts_with(crate::schema::history::HISTORY_PREFIX)
+            && crate::schema::history::HistoryMetadataColumn::contains(column)
+        {
+            return row
+                .application_field(column)
+                .ok_or_else(|| JazzError::Query(format!("row missing history column {column}")))
+                .and_then(core_to_public_value)
+                .map(Some);
+        }
         let value = match column {
             "$canRead" => {
                 return Err(JazzError::Query(format!(
@@ -4205,6 +4379,40 @@ impl JazzClient {
                 let tx_id = self.db.delete(table, object_id, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
+        }
+    }
+
+    /// Restore a deleted row, preserving its content when `values` is `None`.
+    /// Supplying values replaces its content atomically. Uses the same session
+    /// and transaction context as other mutations, including write policies.
+    /// Returns `None` when staged in an open transaction.
+    pub fn restore(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        values: Option<Vec<(String, Value)>>,
+    ) -> Result<Option<TransactionId>> {
+        let cells = values
+            .map(|values| self.core_cells(table, values.into_iter().collect()))
+            .transpose()?;
+        let updated_at_ms = self.write_updated_at()?;
+        if let Some(transaction_id) = self
+            .write_context
+            .as_ref()
+            .and_then(|ctx| ctx.transaction_id)
+        {
+            self.db
+                .stage_restore(table, transaction_id, object_id, cells)?;
+            Ok(None)
+        } else {
+            let tx_id = self.db.restore(
+                table,
+                object_id,
+                cells,
+                self.write_identity()?,
+                updated_at_ms,
+            )?;
+            Ok(Some(core_batch_id(tx_id)))
         }
     }
 

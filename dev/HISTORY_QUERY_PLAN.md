@@ -31,8 +31,10 @@ adds a result; losing current read permission retracts the row's history.
 
 ### Initial Rust boundary
 
-- Ordinary prepared queries over locally retained history on any node;
-  subscriptions follow in a later implementation step.
+- Ordinary prepared queries over locally retained history on any node.
+  Trusted local subscriptions use `Db::subscribe_for_identity` with
+  `ReadTier::LocalOnly`. Client-local evaluation and peer history delivery
+  remain unsupported until authority-covered history inputs are implemented.
 - Exact branch selection using existing branch bindings; no implicit union of
   all branches or synthesized history of a composed branch view.
 - Accepted, settled content images. Pending authored patches are not exposed as
@@ -205,8 +207,16 @@ naming the specific missing access pattern.
 
 ## Subscription behavior and completeness
 
-Use the same prepared relational program for reads and subscriptions. Maintain
-dependencies on the selected row's history and current policy proofs. Publish
+Trusted local subscriptions are supported through `Db::subscribe_for_identity`
+with `ReadTier::LocalOnly`. The Rust `JazzClient` exposes this through a
+session-scoped backend client (`for_session`) and its existing local query and
+subscription options. Both query results and deltas preserve version-aware
+`ResultKey`s, including when metadata is omitted from the projection. They use
+the same prepared relational program as reads, including on non-history-complete
+nodes. `Db::subscribe` uses client-local authorization and still rejects history; peer subscriptions are also rejected.
+Neither path may silently read unscoped history or claim complete coverage.
+
+Maintain dependencies on the selected row's history and current policy proofs. Publish
 changes at normal transaction boundaries without exposing a partially updated
 authorization state.
 
@@ -258,12 +268,24 @@ support does not claim to implement this coverage protocol.
    Equal projected values therefore retain separate version keys. Ordinary
    one-shot order-key retention still applies, but history no longer forces
    all metadata into the payload to preserve multiplicity.
-4. **Rust subscriptions.** Version-aware identity, binding-codec support,
-   collector lowering, and maintained result decoding are implemented. Next
-   enable the public subscription entry point and its history source facts.
-   Reuse the same program, with incremental history, current-row authorization
-   and policy dependencies over locally available history. Subscriptions remain
-   disabled until that path is complete.
+4. **Rust subscriptions.** Trusted local subscriptions are implemented using
+   the ordinary maintained program. History sources supply version and settlement
+   metadata for its fact terminals; virtual table names resolve to their base
+   physical identities. Embedded authorization programs contribute their refresh
+   dependencies, including permission tables. Typed occurrence keys survive
+   facade validation. The normal write-ingress path drains local subscriptions
+   even when the write was applied eagerly without a deferred publication receipt.
+   The Rust client decodes virtual history columns using the shared history
+   descriptor. Its existing value carriers represent `$seq` as a `u64` in
+   `Value::Timestamp` and `$transactionId` as a `Value::Row` containing the
+   packed time (`Value::Timestamp`) and node UUID. These existing carriers preserve
+   the exact unsigned values; the packed transaction time is not converted to
+   Unix milliseconds. `JazzClient::restore` supports preserving or replacing
+   content, session authorization and transaction staging. Jazz-testkit uses the
+   existing `JazzServer`/`JazzClient` harness to exercise writes, settlement,
+   queries and subscriptions for equal projections, pagination, partial replicas,
+   deletion/restoration and permission revocation/restoration.
+   Authority-covered peer delivery remains deferred.
 5. **TypeScript surface.** Carry the same virtual names through query builders,
    validation, adapters, WASM/NAPI/native codecs, and bindings. Infer history
    application columns plus `$transactionId: TxId` and `$seq: bigint`, preserve
@@ -315,8 +337,8 @@ unchanged. Direct `OutputOccurrenceId` serialization delegates to `ResultKey`,
 including inside removed rows and internal result members. The old lossy
 `(root, joined)` encoding and redundant `TypedRow` member variant are removed;
 there is no compatibility reader for those retired representations. Binding-codec
-support alone does not enable history queries in the TypeScript API or history
-subscriptions.
+support alone does not enable the TypeScript history-query API or peer history
+delivery. Trusted local Rust history subscriptions use the same encoded keys.
 
 No new persistent history index or storage rewrite is intended. If content
 eligibility requires a storage change, resolve that explicitly before release.

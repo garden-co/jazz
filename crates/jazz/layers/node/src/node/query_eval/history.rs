@@ -86,6 +86,15 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 )]),
             ))
             .await?;
+        self.nested_program_dependencies.tables.extend(
+            visibility_program
+                .lowered
+                .targeted_refresh_tables
+                .iter()
+                .cloned(),
+        );
+        self.nested_program_dependencies.uncertain |=
+            visibility_program.lowered.targeted_refresh_uncertain;
         let authorized =
             lowering::lowered_terminal_graph(&visibility_program, "policy.authorized_rows")?
                 .project(["row_uuid"]);
@@ -99,19 +108,18 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .filter(PredicateExpr::gt("seq", Value::U64(0)));
         let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
         let history_fields = descriptor_field_names(&history_descriptor)?;
-        let history = history
-            .project_fields(history_fields.iter().map(|name| {
-                let mut field = ProjectField::named(name);
-                if name == "authored_columns" {
-                    field.expression =
-                        groove::ivm::ProjectExpr::Required(groove::ivm::FieldRef::name(name));
-                }
-                field
-            }))
-            .filter(PredicateExpr::Neq {
+        // Complete received images may omit authored-column metadata. Preserve
+        // that representation; only an explicit deletion-only image is excluded.
+        let history = history.filter(PredicateExpr::Or(vec![
+            PredicateExpr::is_null("authored_columns"),
+            PredicateExpr::Neq {
                 field: "authored_columns".to_owned(),
-                value: Value::Array(vec![Value::U64(DELETION_COLUMN_ID.0)]).into(),
-            });
+                value: Value::Nullable(Some(Box::new(Value::Array(vec![Value::U64(
+                    DELETION_COLUMN_ID.0,
+                )]))))
+                .into(),
+            },
+        ]));
 
         // Metadata lookups are keyed by versions already selected under the
         // exact row prefix; neither transaction nor node tables are scanned.
@@ -152,6 +160,14 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     ProjectField::renamed("right.uuid", "transaction_node"),
                 ]),
         );
+        let needs_version_witnesses = request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses);
+        let needs_settle_position = request
+            .requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::SettlePosition);
         let projection = |stored_author: bool| {
             let mut fields = vec![ProjectField::named("row_uuid")];
             fields.extend(base_table.columns.iter().map(|column| {
@@ -192,6 +208,26 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 ProjectField::named("tx_node_id"),
                 ProjectField::named("transaction_node"),
             ]);
+            if needs_version_witnesses {
+                fields.extend([
+                    ProjectField::named("schema_version"),
+                    ProjectField::named("authored_columns"),
+                    ProjectField::named("created_by"),
+                    ProjectField::named("created_at"),
+                    ProjectField::renamed(
+                        if stored_author {
+                            "updated_by"
+                        } else {
+                            "transaction_author"
+                        },
+                        "updated_by",
+                    ),
+                    ProjectField::named("updated_at"),
+                ]);
+            }
+            if needs_settle_position {
+                fields.push(ProjectField::nullable("seq", "settle_position"));
+            }
             fields
         };
         let graph = GraphBuilder::union([
@@ -205,7 +241,26 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .project_fields(projection(false)),
         ]);
         let descriptor = self.node.database.graph_output_descriptor(&graph)?;
-        let metadata = BTreeMap::new();
+        let mut metadata = BTreeMap::new();
+        if needs_version_witnesses {
+            metadata.insert(
+                SourceMetadataRequirement::VersionWitnesses,
+                SourceMetadataFields::VersionWitnesses {
+                    schema_version_field: "schema_version".to_owned(),
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node_id".to_owned(),
+                    branch_or_prefix_field: None,
+                },
+            );
+        }
+        if needs_settle_position {
+            metadata.insert(
+                SourceMetadataRequirement::SettlePosition,
+                SourceMetadataFields::SettlePosition {
+                    settle_position_field: "settle_position".to_owned(),
+                },
+            );
+        }
         Ok(ResolvedSource {
             stored_column_ids: BTreeMap::new(),
             table_schema: table.into(),

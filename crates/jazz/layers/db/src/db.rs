@@ -6326,7 +6326,9 @@ fn apply_maintained_update_to_snapshot(
                 let candidates = snapshot_index
                     .roots
                     .keys_unordered()
-                    .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
+                    .filter(|candidate| {
+                        Some(candidate.root_source().uuid().as_bytes().as_slice()) == root_bytes
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 match candidates.as_slice() {
@@ -6918,7 +6920,7 @@ fn terminal_subscription_output_row(
             format!("invalid terminal root key: {error}"),
         )
     })?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
+    if occurrence_id.root_source().uuid() != &row_uuid {
         return Err(Error::new(
             ErrorCode::Protocol,
             "terminal root payload key does not match its addressed result",
@@ -7101,8 +7103,7 @@ fn subscription_outputs_with_occurrence_sidecar(
         .zip(occurrence_ids)
         .enumerate()
         .map(|(index, (row, occurrence_id))| {
-            let bytes = occurrence_id.canonical_bytes();
-            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+            if occurrence_id.root_source().uuid() != &row.row_uuid().0 {
                 return Err(Error::new(
                     ErrorCode::Protocol,
                     "maintained root occurrence sidecar root does not match row",

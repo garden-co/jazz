@@ -408,9 +408,9 @@ pub struct PolicyAuthorizationGraph {
 }
 
 #[derive(Clone, Debug, Default)]
-struct PolicyDependencyFootprint {
-    tables: BTreeSet<String>,
-    uncertain: bool,
+pub(super) struct PolicyDependencyFootprint {
+    pub(super) tables: BTreeSet<String>,
+    pub(super) uncertain: bool,
 }
 
 impl PolicyDependencyFootprint {
@@ -987,6 +987,7 @@ where
             bounded_deletion_register,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
+            nested_program_dependencies: Default::default(),
             policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
             transaction_overlay,
         };
@@ -1017,7 +1018,12 @@ where
                 .lowered
                 .targeted_refresh_tables
                 .extend(policy_dependency_footprint.tables);
-            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain;
+            program
+                .lowered
+                .targeted_refresh_tables
+                .extend(resolver.nested_program_dependencies.tables);
+            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain
+                || resolver.nested_program_dependencies.uncertain;
         }
         resolver
             .node
@@ -1068,6 +1074,7 @@ where
                 bounded_deletion_register: None,
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
+                nested_program_dependencies: Default::default(),
                 policy_subplan: false,
                 transaction_overlay: TransactionWriteOverlay::default(),
             };

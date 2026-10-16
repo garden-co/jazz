@@ -3167,6 +3167,18 @@ fn decode_typed_version_witness(
     } else {
         None
     };
+    // History sources retain packed provenance timestamps; current sources
+    // expose Unix milliseconds. Both witnesses reconstruct the authored image.
+    let provenance_time = |value, message| {
+        if table
+            .name
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        {
+            Ok(TxTime(value))
+        } else {
+            TxTime::from_physical_ms(value).map_err(|_| super::Error::InvalidStoredValue(message))
+        }
+    };
     let parts = VersionRowParts {
         table: table.name.clone(),
         branch_key,
@@ -3180,24 +3192,17 @@ fn decode_typed_version_witness(
         created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
-        // Current-row provenance is public Unix milliseconds. Witness state
-        // needs the corresponding history form only to identify/materialize
-        // the authored version, whose provenance HLC always has counter zero.
-        created_at: TxTime::from_physical_ms(record_u64_idx(record, plan.created_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness created_at_ms exceeds packed HLC range",
-                )
-            })?,
+        created_at: provenance_time(
+            record_u64_idx(record, plan.created_at_idx)?,
+            "maintained witness created_at_ms exceeds packed HLC range",
+        )?,
         updated_by: RowAuthor::from_record(record.get_record(plan.updated_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
-        updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness updated_at_ms exceeds packed HLC range",
-                )
-            })?,
+        updated_at: provenance_time(
+            record_u64_idx(record, plan.updated_at_idx)?,
+            "maintained witness updated_at_ms exceeds packed HLC range",
+        )?,
         cells: BTreeMap::new(),
         authored_columns,
         deletion,
