@@ -291,6 +291,12 @@ pub(crate) fn bind_template_graphs_inner(
     }
     Ok(graphs
         .iter()
-        .map(|root| (*rewritten[&std::ptr::from_ref(root)]).clone())
+        .map(|root| {
+            Arc::unwrap_or_clone(
+                rewritten
+                    .remove(&std::ptr::from_ref(root))
+                    .expect("rewritten root"),
+            )
+        })
         .collect())
 }
