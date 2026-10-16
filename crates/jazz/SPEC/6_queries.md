@@ -616,15 +616,16 @@ source-id vector above. A `UNION ALL` relation arm additionally contributes its
 stable normalized arm label immediately before that arm's source-row id. This
 typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
-`ResultKey`. Every ResultKey uses one complete version-1 typed encoding:
-`1 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
-(position:u32be | label_length:u32be | label:utf8)*`, where source position
-zero is the root and joined sources are positions one through `joined_count`.
-Ordinary results carry
-zero joined rows and arms; ordinary joins carry zero arms; union occurrences
-carry their ordered arm records. Empty, duplicate-position, or out-of-range
-discriminators are malformed. The former concatenated-UUID and tag-2 encodings
-are unreleased superseded formats and MUST be rejected.
+`ResultKey`. All ResultKeys use one encoding:
+`2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
+(position:u32be | label_length:u32be | label:utf8)* | has_transaction:u8 |
+[tx_time:u64be | tx_node:16]`, where source position zero is the root and joined
+sources are positions one through `joined_count`. The transaction flag is 0
+for current results and 1 for a history root. Other flag values are malformed.
+Ordinary results carry zero joined rows and arms; ordinary joins carry zero
+arms; union occurrences carry their ordered arm records. Empty,
+duplicate-position, or out-of-range discriminators are malformed. Previous
+encodings MUST be rejected; Rust and TypeScript migrate together.
 Nested non-recursive unions compose their stable semantic arm labels into one
 typed path component; sibling insertion or reordering therefore does not rekey
 unchanged arms. Sibling arm labels MUST be non-empty and unique within their
@@ -638,11 +639,18 @@ labels supplied by their normalized source. A builder without such declared
 identity MUST reject that shape; it MUST NOT invent an ordinal merely to retain
 duplicate derivations.
 
+A history root's optional transaction uses the full packed HLC and originating
+node UUID, with no node-local aliases. History joins and union arms remain
+unsupported. `fixtures/result-key.json` pins a history key and the binding golden
+fixture covers current and union keys. These ephemeral keys are neither
+persisted nor sent by the active peer protocol, so no backward-compatible
+decoder or storage migration is required.
+
 Public subscription transports MUST carry the opaque versioned `ResultKey`
 sidecar aligned with added, updated, and removed rows. They MUST validate the
 alignment and key encoding before applying a delta. Serializing the legacy
 two-field `OutputOccurrenceId` alone is insufficient because its byte-compatible
-form intentionally does not carry typed union-arm discriminators.
+form intentionally does not carry typed union-arm or history-version discriminators.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`

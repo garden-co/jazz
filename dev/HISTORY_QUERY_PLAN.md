@@ -248,8 +248,12 @@ support does not claim to implement this coverage protocol.
    was not selected. This increment does not publish result keys or
    change their encoding; version-aware maintained keys belong to the next
    step. Enable the admitted shapes above and fail closed for the rest.
-4. **Rust subscriptions.** Reuse the same program, with incremental history,
-   current-row authorization and policy dependencies over locally available history.
+4. **Rust subscriptions.** First add version-aware occurrence identities and
+   binding-codec support (implemented). Next carry these identities through
+   lowering and maintained result materialization, then enable subscriptions.
+   Reuse the same program, with incremental history, current-row authorization
+   and policy dependencies over locally available history. Subscriptions remain
+   disabled until that path is complete.
 5. **TypeScript surface.** Carry the same virtual names through query builders,
    validation, adapters, WASM/NAPI/native codecs, and bindings. Infer history
    application columns plus `$transactionId: TxId` and `$seq: bigint`, preserve
@@ -283,13 +287,23 @@ revocations. Do not interpret an empty local result as proof of complete history
 
 ## Compatibility and validation
 
-Using ordinary table-name strings avoids adding a public source-selector wire
-field, but does not make all changes automatically wire-compatible. Audit query
-fingerprints, source identities, result keys, binding codecs, and persisted
-subscription state. Preserve existing current-query bytes where possible.
-Any changed durable/wire encoding needs a name/version, byte fixtures, and a
-compatibility write-up before landing. Old peers must reject unsupported
-history semantics, not interpret a history source as current data.
+All results use one ResultKey encoding, with an optional root transaction:
+`2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
+(position:u32be | label_length:u32be | label:utf8)* | has_transaction:u8 |
+[tx_time:u64be | tx_node:16]`.
+Current rows, joins, and unions set `has_transaction` to 0. History roots set it
+to 1 and carry the full packed HLC and originating-node UUID; `$seq` and
+projected values do not participate. History joins and unions remain unsupported.
+The shared `result-key.json` fixture pins a history key including the full
+`u64` range; the binding golden fixture covers current rows and union results.
+
+Result keys are ephemeral binding values, not persisted data or active peer
+messages. Rust and TypeScript migrate together to this one format, rejecting
+previous encodings. No compatibility decoder or database migration is needed.
+Stored row/history bytes, the active peer source-closure protocol, and the
+legacy serialized `OutputOccurrenceId` carrier are unchanged. Binding-codec
+support alone does not enable history queries in the TypeScript API or history
+subscriptions.
 
 No new persistent history index or storage rewrite is intended. If content
 eligibility requires a storage change, resolve that explicitly before release.

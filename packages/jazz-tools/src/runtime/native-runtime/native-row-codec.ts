@@ -190,8 +190,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
 
 function readResultKey(reader: PostcardReaderLike): Uint8Array {
   const key = reader.bytes();
-  if (key[0] !== 1 || !validTypedResultKey(key.subarray(1))) {
-    throw new Error("malformed ResultKey v1");
+  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed ResultKey");
   }
   return key;
 }
@@ -203,7 +203,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
       (bytes[offset + 2]! << 8) |
       bytes[offset + 3]!) >>>
     0;
-  if (bytes.length < 24) return false;
+  if (bytes.length < 25) return false;
   let cursor = 16;
   const joined = readU32(cursor);
   cursor += 4;
@@ -230,6 +230,13 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     }
     previousPosition = position;
     cursor += length;
+  }
+  const hasTransaction = bytes[cursor++];
+  if (hasTransaction === 1) {
+    if (joined !== 0 || discriminators !== 0) return false;
+    cursor += 24;
+  } else if (hasTransaction !== 0) {
+    return false;
   }
   return cursor === bytes.length;
 }

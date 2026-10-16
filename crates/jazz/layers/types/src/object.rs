@@ -1,3 +1,4 @@
+use crate::{ids::NodeUuid, time::TxTime};
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -86,15 +87,19 @@ mod occurrence {
         /// Stable typed derivation discriminators keyed by joined-source position.
         /// Empty for the ordinary row-only identity and omitted from its wire form.
         // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
-        // ResultKey owns the complete typed V1 sidecar envelope and must never add
+        // ResultKey owns the complete versioned sidecar envelope and must never add
         // a positional postcard field here.
         #[serde(skip)]
         union_arms: SmallVec<[(usize, String); 1]>,
+        /// Portable content transaction for a history root. Like union arms,
+        /// this is carried by ResultKey, never the legacy postcard carrier.
+        #[serde(skip)]
+        root_version: Option<(TxTime, NodeUuid)>,
     }
 
     impl OutputOccurrenceId {
         pub fn has_typed_discriminators(&self) -> bool {
-            !self.union_arms.is_empty()
+            !self.union_arms.is_empty() || self.root_version.is_some()
         }
 
         pub fn root_source(&self) -> ObjectId {
@@ -114,6 +119,7 @@ mod occurrence {
                 root,
                 joined: joined.into_iter().collect(),
                 union_arms: SmallVec::new(),
+                root_version: None,
             }
         }
 
@@ -133,6 +139,7 @@ mod occurrence {
                 root,
                 joined,
                 union_arms,
+                root_version: None,
             })
         }
 
@@ -142,7 +149,21 @@ mod occurrence {
                 root,
                 joined: SmallVec::new(),
                 union_arms: SmallVec::new(),
+                root_version: None,
             }
+        }
+
+        /// Identify one retained content version without synthesizing a row UUID.
+        pub fn history(root: ObjectId, time: TxTime, node: NodeUuid) -> Self {
+            Self {
+                root_version: Some((time, node)),
+                ..Self::single_source(root)
+            }
+        }
+
+        /// Full portable transaction identity of a historical root, if any.
+        pub fn root_version(&self) -> Option<(TxTime, NodeUuid)> {
+            self.root_version
         }
 
         /// Source rows contributed after the root, in declared join order.
@@ -155,9 +176,15 @@ mod occurrence {
         /// Each component is a fixed-width UUID, so concatenating root followed by
         /// joined rows is unambiguous; byte length records the number of joined
         /// sources and component position records declared join position.
+        /// History roots use their versioned ResultKey bytes so the transaction
+        /// remains part of identity, independently of the selected row fields.
         pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
-            if !self.union_arms.is_empty() {
-                return self.typed_canonical_bytes();
+            if self.has_typed_discriminators() {
+                let mut bytes = self.typed_canonical_bytes();
+                if self.root_version.is_some() {
+                    bytes.insert(0, RESULT_KEY_WIRE_VERSION);
+                }
+                return bytes;
             }
             let mut bytes = SmallVec::with_capacity((self.joined.len() + 1) * 16);
             bytes.extend_from_slice(self.root.uuid().as_bytes());
@@ -180,6 +207,11 @@ mod occurrence {
                 bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
                 bytes.extend_from_slice(label.as_bytes());
             }
+            bytes.push(u8::from(self.root_version.is_some()));
+            if let Some((time, node)) = self.root_version {
+                bytes.extend_from_slice(&time.0.to_be_bytes());
+                bytes.extend_from_slice(node.0.as_bytes());
+            }
             bytes
         }
     }
@@ -195,7 +227,7 @@ mod occurrence {
     /// row id would recreate the flat-join collapse this type prevents.
     impl PartialEq<ObjectId> for OutputOccurrenceId {
         fn eq(&self, other: &ObjectId) -> bool {
-            self.joined.is_empty() && self.union_arms.is_empty() && self.root == *other
+            self.joined.is_empty() && !self.has_typed_discriminators() && self.root == *other
         }
     }
 
@@ -217,7 +249,7 @@ pub use occurrence::OutputOccurrenceId;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResultKey(OutputOccurrenceId);
 
-const RESULT_KEY_WIRE_VERSION: u8 = 1;
+const RESULT_KEY_WIRE_VERSION: u8 = 2;
 
 impl Serialize for ResultKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -242,13 +274,10 @@ impl<'de> Deserialize<'de> for ResultKey {
             return Err(serde::de::Error::custom("unsupported ResultKey version"));
         };
         let identity = &encoded[1..];
-        if version != RESULT_KEY_WIRE_VERSION {
-            return Err(serde::de::Error::custom(
-                "unsupported or malformed ResultKey identity",
-            ));
-        }
-        decode_typed_result_key(identity)
-            .ok_or_else(|| serde::de::Error::custom("malformed ResultKey V1 identity"))
+        let key = (version == RESULT_KEY_WIRE_VERSION)
+            .then(|| decode_typed_result_key(identity))
+            .flatten();
+        key.ok_or_else(|| serde::de::Error::custom("unsupported or malformed ResultKey identity"))
     }
 }
 
@@ -303,10 +332,24 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         previous_position = Some(position);
         union_arms.push((position, label));
     }
+    let root_version = match take(identity, &mut cursor, 1)?[0] {
+        0 => None,
+        1 if joined.is_empty() && union_arms.is_empty() => {
+            let time = TxTime(u64::from_be_bytes(
+                take(identity, &mut cursor, 8)?.try_into().ok()?,
+            ));
+            let node = NodeUuid(Uuid::from_slice(take(identity, &mut cursor, 16)?).ok()?);
+            Some((time, node))
+        }
+        _ => return None,
+    };
     if cursor != identity.len() {
         return None;
     }
-    OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(ResultKey)
+    match root_version {
+        Some((time, node)) => Some(ResultKey(OutputOccurrenceId::history(root, time, node))),
+        None => OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(ResultKey),
+    }
 }
 
 impl ResultKey {
@@ -328,7 +371,7 @@ impl ResultKey {
         &self.0
     }
 
-    /// Return the source row id when this result is a plain, single-row result.
+    /// Return the logical source row id for a single-source result, including history.
     pub fn row_id(&self) -> Option<ObjectId> {
         self.0.joined.is_empty().then_some(self.0.root)
     }
@@ -410,8 +453,62 @@ mod tests {
         assert_ne!(id1, id2);
     }
 
+    /// Alice's two retained versions keep distinct portable keys even when
+    /// their logical row is the same. This lower-layer test pins binding bytes;
+    /// public history subscriptions are not enabled yet.
     #[test]
-    fn result_key_v1_is_complete_for_ordinary_joined_and_union_occurrences() {
+    fn result_key_preserves_full_transaction_identity() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/result-key.json")).unwrap();
+        let root = ObjectId::from_uuid(Uuid::parse_str(fixture["root"].as_str().unwrap()).unwrap());
+        let node = NodeUuid(Uuid::parse_str(fixture["node"].as_str().unwrap()).unwrap());
+        let time = TxTime(fixture["time"].as_str().unwrap().parse().unwrap());
+        let occurrence = OutputOccurrenceId::history(root, time, node);
+        let key = ResultKey::from_occurrence(occurrence.clone());
+        let bytes: Vec<u8> = serde_json::from_value(fixture["key"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(&key).unwrap(), fixture["key"]);
+        assert_eq!(
+            serde_json::from_value::<ResultKey>(fixture["key"].clone()).unwrap(),
+            key
+        );
+        // Postcard's byte-string length prefix is 50, followed by the same bytes.
+        let mut postcard = vec![50];
+        postcard.extend_from_slice(&bytes);
+        assert_eq!(postcard::to_allocvec(&key).unwrap(), postcard);
+        assert_eq!(postcard::from_bytes::<ResultKey>(&postcard).unwrap(), key);
+        assert_eq!(occurrence.root_version(), Some((time, node)));
+        assert_eq!(occurrence.canonical_bytes().as_slice(), bytes);
+        assert_eq!(key.row_id(), Some(root));
+        assert_ne!(key, root);
+        assert_ne!(key, ResultKey::from(root));
+        for other in [
+            OutputOccurrenceId::history(root, TxTime(time.0 - 1), node),
+            OutputOccurrenceId::history(root, time, NodeUuid(Uuid::from_bytes([0x33; 16]))),
+        ] {
+            assert_ne!(occurrence.canonical_bytes(), other.canonical_bytes());
+            assert_ne!(key, ResultKey::from_occurrence(other));
+        }
+        for length in 0..bytes.len() {
+            assert!(
+                serde_json::from_value::<ResultKey>(serde_json::json!(&bytes[..length])).is_err()
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(trailing)).is_err());
+        let mut invalid_flag = bytes.clone();
+        invalid_flag[25] = 2;
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid_flag)).is_err());
+        // A versioned root cannot disguise a joined/union history shape.
+        for offset in [17, 21] {
+            let mut invalid = bytes.clone();
+            invalid[offset] = 1;
+            assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn result_key_is_complete_for_ordinary_joined_and_union_occurrences() {
         let root = ObjectId::from_uuid(Uuid::from_u128(1));
         let joined = ObjectId::from_uuid(Uuid::from_u128(2));
         let plain = ResultKey(OutputOccurrenceId::new(root, [joined]));
@@ -419,11 +516,12 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&plain).expect("encode plain key"))
                 .expect("inspect plain key");
         assert_eq!(plain_wire[0], RESULT_KEY_WIRE_VERSION);
-        let mut expected_v1 = Vec::from(root.uuid().as_bytes());
-        expected_v1.extend_from_slice(&1_u32.to_be_bytes());
-        expected_v1.extend_from_slice(joined.uuid().as_bytes());
-        expected_v1.extend_from_slice(&0_u32.to_be_bytes());
-        assert_eq!(&plain_wire[1..], expected_v1);
+        let mut expected = Vec::from(root.uuid().as_bytes());
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(joined.uuid().as_bytes());
+        expected.extend_from_slice(&0_u32.to_be_bytes());
+        expected.push(0);
+        assert_eq!(&plain_wire[1..], expected);
 
         let typed = ResultKey(
             OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
@@ -513,9 +611,10 @@ mod tests {
         zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
         zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
         zero_arm.truncate(41);
+        zero_arm.push(0);
         assert_eq!(
             serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm))
-                .expect("ordinary joined V1 is valid"),
+                .expect("ordinary joined key is valid"),
             ResultKey(OutputOccurrenceId::new(root, [joined]))
         );
 
@@ -539,7 +638,8 @@ mod tests {
 
         let mut invalid_utf8 = vec![RESULT_KEY_WIRE_VERSION];
         invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
-        *invalid_utf8.last_mut().expect("typed key has arm label") = 0xff;
+        let label_end = invalid_utf8.len() - 2;
+        invalid_utf8[label_end] = 0xff;
         assert!(
             serde_json::from_value::<ResultKey>(serde_json::json!(invalid_utf8)).is_err(),
             "typed discriminator labels must be valid UTF-8"
@@ -559,6 +659,10 @@ mod tests {
             serde_json::from_value::<ResultKey>(serde_json::json!(superseded_uuid_vector)).is_err()
         );
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!([2_u8])).is_err());
+        let mut old = vec![1];
+        old.extend_from_slice(root.uuid().as_bytes());
+        old.extend_from_slice(&[0; 8]);
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(old)).is_err());
     }
 
     #[test]

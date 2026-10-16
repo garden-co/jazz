@@ -338,7 +338,7 @@ export function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new JournaledMap<string, T>();
   private terminalRows = new JournaledMap<string, WasmRow>();
-  /** Exact ordered Groove root key -> opaque ResultKey V1 sidecar address. */
+  /** Exact ordered Groove root key -> opaque ResultKey sidecar address. */
   private terminalOccurrenceAddresses = new JournaledMap<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new JournaledMap<string, number>();
@@ -482,7 +482,7 @@ export class SubscriptionManager<T extends { id: string }> {
       const registerOccurrence = (sidecar: Uint8Array) => {
         const orderedKey = orderedTerminalKeyForTypedOccurrence(sidecar);
         if (!orderedKey) {
-          throw new Error("malformed or noncanonical ResultKey V1 terminal occurrence key");
+          throw new Error("malformed or noncanonical ResultKey terminal occurrence key");
         }
         const id = publicResultKey(sidecar);
         return { id, address: this.registerTerminalOccurrenceAddress(orderedKey, id) };
@@ -946,14 +946,14 @@ export class SubscriptionManager<T extends { id: string }> {
 }
 
 /**
- * Reconstruct the exact Groove ordered root key from a complete ResultKey V1.
+ * Reconstruct the exact Groove ordered root key from a complete ResultKey.
  * This is metadata-driven: a terminal key is accepted as typed only when it
  * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
  * discriminators. It intentionally does not infer meaning from a string in an
  * arbitrary ordered key.
  */
 function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array | undefined {
-  if (sidecar[0] !== 1 || sidecar.byteLength < 25) return undefined;
+  if (sidecar[0] !== 2 || sidecar.byteLength < 26) return undefined;
   let cursor = 1;
   const root = sidecar.subarray(cursor, (cursor += 16));
   const joinedCount = readU32Be(sidecar, cursor);
@@ -987,8 +987,18 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     previousPosition = position;
     arms.set(position, sidecar.subarray(cursor, (cursor += length)));
   }
+  const hasTransaction = sidecar[cursor++];
+  let transaction: Uint8Array | undefined;
+  if (hasTransaction === 1) {
+    if (joinedCount !== 0 || discriminatorCount !== 0) return undefined;
+    transaction = sidecar.subarray(cursor, cursor + 24);
+    cursor += 24;
+  } else if (hasTransaction !== 0) {
+    return undefined;
+  }
   if (cursor !== sidecar.byteLength) return undefined;
 
+  if (transaction) return undefined; // History terminal lowering is not enabled yet.
   const ordered: number[] = [];
   const rootArm = arms.get(0);
   if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
@@ -1030,8 +1040,8 @@ function terminalKeyId(encoded: readonly number[]): string {
   }
   // Groove terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
-  // occurrence sidecar uses the equivalent V1 ResultKey (`1, root UUID,
-  // joined count, joined UUIDs, label count`). Normalize only this exact
+  // occurrence sidecar uses the equivalent ResultKey (`2, root UUID,
+  // joined count, joined UUIDs, label count, transaction flag`). Normalize only this exact
   // physical form so terminal patches meet the same full occurrence identity
   // that seeded the subscription state.
   if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
@@ -1042,8 +1052,8 @@ function terminalKeyId(encoded: readonly number[]): string {
       }
       uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
-    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16);
-    occurrence[0] = 1;
+    const occurrence = new Uint8Array(26 + (uuids.length - 1) * 16);
+    occurrence[0] = 2;
     occurrence.set(uuids[0]!, 1);
     new DataView(occurrence.buffer).setUint32(17, uuids.length - 1);
     let cursor = 21;
@@ -1212,7 +1222,7 @@ function readUuid(bytes: Uint8Array, offset: number): string {
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 25 && bytes[0] === 1 && isZeroFrom(bytes, 17)) return readUuid(bytes, 1);
+  if (bytes.length === 26 && bytes[0] === 2 && isZeroFrom(bytes, 17)) return readUuid(bytes, 1);
   return `result:${bytesToHex(bytes)}`;
 }
 

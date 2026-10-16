@@ -82,7 +82,7 @@ function typedResultKey(
   joined: readonly Uint8Array[],
   discriminators: ReadonlyArray<readonly [number, string]>,
 ): Uint8Array {
-  const bytes = [1, ...root];
+  const bytes = [2, ...root];
   pushU32Be(bytes, joined.length);
   for (const value of joined) bytes.push(...value);
   pushU32Be(bytes, discriminators.length);
@@ -92,11 +92,12 @@ function typedResultKey(
     pushU32Be(bytes, encoded.byteLength);
     bytes.push(...encoded);
   }
+  bytes.push(0);
   return Uint8Array.from(bytes);
 }
 
 function occurrenceKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...uuidBytes(id), 0, 0, 0, 0, 0, 0, 0, 0]);
+  return Uint8Array.from([2, ...uuidBytes(id), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function runtimeAddedRecord(
@@ -311,7 +312,7 @@ describe("SubscriptionManager", () => {
           emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "typed", 1, sidecar)] }),
           transform,
         ),
-      ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+      ).toThrow(/malformed or noncanonical ResultKey terminal occurrence key/);
       expect(manager.all()).toEqual([]);
     };
 
@@ -843,7 +844,7 @@ describe("SubscriptionManager", () => {
         }),
         transformIncluded,
       ),
-    ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+    ).toThrow(/malformed or noncanonical ResultKey terminal occurrence key/);
     expect(manager.all()).toEqual(before);
 
     // A bulk frame (32+ changes) that removes, moves and adds, then fails.
