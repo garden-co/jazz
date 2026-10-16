@@ -904,9 +904,10 @@ pub struct PeerPayloadInventory {
 /// identity. The row uses the explicit `JVRR` v3 envelope: a reference into
 /// the enclosing message's descriptor table (defining the persisted schema
 /// descriptor inline on its first use) plus canonical record bytes, never
-/// runtime `OwnedRecord` serde. The receiver validates that descriptor against
-/// the declared schema before translating columns into its node-local
-/// physical catalogue.
+/// runtime `OwnedRecord` serde. A Core union image's `UnionExtraCells` travel
+/// in the same envelope, flagged by its head (SPEC 16). The receiver
+/// validates each descriptor against the declared schema before translating
+/// columns into its node-local physical catalogue.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct VersionRecord {
     table: groove::Intern<String>,
@@ -915,7 +916,7 @@ pub struct VersionRecord {
     #[serde(default)]
     branch_key: BranchKey,
     /// The row, and the union cells of a Core image (`UnionExtraCells`),
-    /// in one `JVRR` envelope.
+    /// in one `JVRR` v3 blob.
     #[serde(with = "version_record_wire_row")]
     row: WireRow,
     /// `None` denotes a legacy or lens-translated payload whose authored
@@ -1033,32 +1034,37 @@ pub(crate) use version_record_wire_row::with_message_descriptor_table;
 mod version_record_wire_row {
     use super::*;
 
-    // Version 3 (alpha.60): the persisted descriptor is defined once per
-    // sync message and referenced by later rows (#3380). After the magic, a
-    // canonical unsigned LEB128 `reference` follows:
+    // Version 3 (alpha.60). The persisted descriptor is defined once per
+    // sync message and referenced by later rows (#3380), and a Core union
+    // image carries its union cells (`UnionExtraCells`) in the same blob:
     //
-    // - `0` defines the next descriptor-table entry inline: descriptor byte
-    //   length as little-endian `U32`, then exactly that many Groove
-    //   persisted-descriptor bytes;
-    // - `k > 0` reuses table entry `k - 1`, defined earlier in the message.
+    //   blob  = "JVRR\x03" use(row) [union] row-bytes
+    //   use   = head [u32 descriptor length, descriptor]
+    //   union = count entry{count}
+    //   entry = schema version (16 bytes) | u32 table length | table (UTF-8)
+    //           | use(cells) | u32 cell-bytes length | cell bytes
     //
-    // Canonical row bytes consume the remainder. A row encoded outside a
-    // message (no table in scope) always defines its descriptor inline.
-    // Version 2 (every row repeats its descriptor) and version 1 (the DAG
-    // row with `parents`) are rejected rather than reinterpreted.
+    // `head` and `count` are canonical (shortest) unsigned LEB128 and `u32`
+    // lengths are little-endian. `head` is `reference << 1 | union`:
+    //
+    // - `reference == 0` defines the next descriptor-table entry inline (the
+    //   descriptor length and bytes follow); `reference == k > 0` reuses
+    //   table entry `k - 1`, defined earlier in the message;
+    // - `union` is set only in the row's own `use` and only when union cells
+    //   follow; then `count >= 1` and the entries are in strictly ascending
+    //   `(schema version, table)` order (admission checks the order).
+    //
+    // Every row without union cells is `"JVRR\x03" use row-bytes` with the
+    // low head bit clear. The row's canonical bytes consume the remainder. A
+    // blob encoded outside a message (no table in scope) defines every
+    // descriptor inline. Version 2 (every row repeats its descriptor) and
+    // version 1 (the DAG row with `parents`) are rejected rather than
+    // reinterpreted.
     const MAGIC: &[u8; 5] = b"JVRR\x03";
     /// Largest descriptor-table reference (`u32` table index plus one).
     const MAX_REFERENCE: u64 = u32::MAX as u64 + 1;
-    // Version 3: a version 2 row followed by its union cells. Only a row
-    // with union cells uses it; every other row keeps its version 2 bytes.
-    //
-    //   "JVRR\x03" | u32 descriptor length | descriptor | u32 row length | row
-    //   | u32 entry count (>= 1) | entries
-    //   entry: schema version (16 bytes) | u32 table length | table (UTF-8)
-    //          | u32 descriptor length | descriptor | u32 row length | row
-    //
-    // Lengths are little-endian; the blob ends exactly after the last entry.
-    const MAGIC_WITH_EXTRAS: &[u8; 5] = b"JVRR\x03";
+    /// Largest `head` (a maximal reference with the union bit set).
+    const MAX_HEAD: u64 = (MAX_REFERENCE << 1) | 1;
 
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
@@ -1240,8 +1246,8 @@ mod version_record_wire_row {
     }
 
     /// Read one canonical (shortest) unsigned LEB128 value no larger than
-    /// [`MAX_REFERENCE`], returning it and the remaining bytes.
-    fn take_leb128(bytes: &[u8]) -> Option<(u64, &[u8])> {
+    /// `max`, returning it and the remaining bytes.
+    fn take_leb128(bytes: &[u8], max: u64) -> Option<(u64, &[u8])> {
         let mut value = 0u64;
         for (index, &byte) in bytes.iter().enumerate().take(5) {
             value |= u64::from(byte & 0x7f) << (7 * index);
@@ -1250,155 +1256,55 @@ mod version_record_wire_row {
                 if index > 0 && byte == 0 {
                     return None;
                 }
-                return (value <= MAX_REFERENCE).then(|| (value, &bytes[index + 1..]));
+                return (value <= max).then(|| (value, &bytes[index + 1..]));
             }
         }
         None
     }
 
-    pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
-        let proof = descriptor_for_encode(record.descriptor())?;
-        let descriptor = &proof.encoded;
+    /// Append `descriptor`'s `use`: a table reference when this message
+    /// already defined it, else an inline definition (SPEC 16).
+    fn put_use(
+        bytes: &mut Vec<u8>,
+        descriptor: &RecordDescriptor,
+        union: bool,
+    ) -> Result<(), groove::records::Error> {
+        let proof = descriptor_for_encode(descriptor)?;
+        let encoded = &proof.encoded;
         let reference = ENCODE_TABLE.with(|table| {
             let mut table = table.borrow_mut();
             let table = table.as_mut()?;
-            if let Some(index) = table.by_encoded.get(descriptor) {
+            if let Some(index) = table.by_encoded.get(encoded) {
                 return Some(u64::from(*index) + 1);
             }
             let index = u32::try_from(table.by_encoded.len()).ok()?;
-            table.by_encoded.insert(descriptor.clone(), index);
+            table.by_encoded.insert(encoded.clone(), index);
             None
         });
-        if let Some(reference) = reference {
-            let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + record.raw().len());
-            bytes.extend_from_slice(MAGIC);
-            push_leb128(&mut bytes, reference);
-            bytes.extend_from_slice(record.raw());
-            return Ok(bytes);
+        let reference = reference.unwrap_or(0);
+        push_leb128(bytes, (reference << 1) | u64::from(union));
+        if reference == 0 {
+            put_len(bytes, encoded.len())?;
+            bytes.extend_from_slice(encoded);
         }
-        let length =
-            u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
-        let mut bytes =
-            Vec::with_capacity(MAGIC.len() + 1 + 4 + descriptor.len() + record.raw().len());
-        bytes.extend_from_slice(MAGIC);
-        push_leb128(&mut bytes, 0);
-        bytes.extend_from_slice(&length.to_le_bytes());
-        bytes.extend_from_slice(descriptor);
-        bytes.extend_from_slice(record.raw());
-        Ok(bytes)
-    }
-
-    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), groove::records::Error> {
-        let length = u32::try_from(length).map_err(|_| groove::records::Error::LengthOverflow)?;
-        bytes.extend_from_slice(&length.to_le_bytes());
         Ok(())
     }
 
-    fn put_record(bytes: &mut Vec<u8>, record: &OwnedRecord) -> Result<(), groove::records::Error> {
-        let proof = descriptor_for_encode(record.descriptor())?;
-        put_len(bytes, proof.encoded.len())?;
-        bytes.extend_from_slice(&proof.encoded);
-        put_len(bytes, record.raw().len())?;
-        bytes.extend_from_slice(record.raw());
-        Ok(())
-    }
-
-    /// The envelope of a row: version 2 without union cells, else version 3.
-    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, groove::records::Error> {
-        if row.extras.is_empty() {
-            return encode(&row.record);
-        }
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC_WITH_EXTRAS);
-        put_record(&mut bytes, &row.record)?;
-        put_len(&mut bytes, row.extras.len())?;
-        for extra in &row.extras {
-            bytes.extend_from_slice(extra.schema_version.0.as_bytes());
-            put_len(&mut bytes, extra.table.len())?;
-            bytes.extend_from_slice(extra.table.as_bytes());
-            put_record(&mut bytes, &extra.record)?;
-        }
-        Ok(bytes)
-    }
-
-    struct Cursor<'a> {
-        bytes: &'a [u8],
-    }
-
-    impl<'a> Cursor<'a> {
-        fn take(&mut self, length: usize) -> Result<&'a [u8], groove::records::Error> {
-            if self.bytes.len() < length {
-                return Err(groove::records::Error::NonCanonicalRecord);
-            }
-            let (head, tail) = self.bytes.split_at(length);
-            self.bytes = tail;
-            Ok(head)
-        }
-
-        fn len(&mut self) -> Result<usize, groove::records::Error> {
-            let bytes = self.take(4)?;
-            Ok(u32::from_le_bytes(bytes.try_into().expect("four bytes")) as usize)
-        }
-
-        fn record(&mut self) -> Result<OwnedRecord, groove::records::Error> {
-            let length = self.len()?;
-            let descriptor = descriptor_for_decode(self.take(length)?)?.canonical;
-            let length = self.len()?;
-            Ok(OwnedRecord::new(self.take(length)?.to_vec(), descriptor))
-        }
-    }
-
-    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, groove::records::Error> {
+    /// Read one `use`: its descriptor, its union bit, and the bytes after it.
+    fn take_use(body: &[u8]) -> Result<(RecordDescriptor, bool, &[u8]), groove::records::Error> {
         let invalid = || groove::records::Error::NonCanonicalRecord;
-        if !bytes.starts_with(MAGIC_WITH_EXTRAS) {
-            return Ok(WireRow {
-                record: decode(bytes)?,
-                extras: Vec::new(),
-            });
-        }
-        let mut cursor = Cursor {
-            bytes: &bytes[MAGIC_WITH_EXTRAS.len()..],
-        };
-        let record = cursor.record()?;
-        let count = cursor.len()?;
-        if count == 0 {
-            return Err(invalid());
-        }
-        let mut extras = Vec::new();
-        for _ in 0..count {
-            let schema_version = SchemaVersionId(uuid::Uuid::from_bytes(
-                cursor.take(16)?.try_into().map_err(|_| invalid())?,
-            ));
-            let length = cursor.len()?;
-            let table = std::str::from_utf8(cursor.take(length)?).map_err(|_| invalid())?;
-            let record = cursor.record()?;
-            extras.push(UnionExtraCells::new(schema_version, table, record));
-        }
-        if !cursor.bytes.is_empty() {
-            return Err(invalid());
-        }
-        Ok(WireRow { record, extras })
-    }
-
-    pub(super) fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
-        let invalid = || groove::records::Error::NonCanonicalRecord;
-        let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
-        let (reference, body) = take_leb128(body).ok_or_else(invalid)?;
+        let (head, body) = take_leb128(body, MAX_HEAD).ok_or_else(invalid)?;
+        let (reference, union) = (head >> 1, head & 1 == 1);
         if reference > 0 {
             let index = usize::try_from(reference - 1).map_err(|_| invalid())?;
             let descriptor = DECODE_TABLE
                 .with(|table| table.borrow().as_ref()?.entries.get(index).copied())
                 .ok_or_else(invalid)?;
-            return Ok(OwnedRecord::new(body.to_vec(), descriptor));
+            return Ok((descriptor, union, body));
         }
-        let length = u32::from_le_bytes(
-            body.get(..4)
-                .ok_or_else(invalid)?
-                .try_into()
-                .map_err(|_| invalid())?,
-        ) as usize;
-        let end = 4usize.checked_add(length).ok_or_else(invalid)?;
-        let proof = descriptor_for_decode(body.get(4..end).ok_or_else(invalid)?)?;
+        let (length, body) = take_len(body)?;
+        let encoded = body.get(..length).ok_or_else(invalid)?;
+        let proof = descriptor_for_decode(encoded)?;
         let defined = DECODE_TABLE.with(|table| {
             let mut table = table.borrow_mut();
             let Some(table) = table.as_mut() else {
@@ -1413,8 +1319,102 @@ mod version_record_wire_row {
         if !defined {
             return Err(invalid());
         }
-        let raw = body.get(end..).ok_or_else(invalid)?;
-        Ok(OwnedRecord::new(raw.to_vec(), proof.canonical))
+        Ok((proof.canonical, union, &body[length..]))
+    }
+
+    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), groove::records::Error> {
+        let length = u32::try_from(length).map_err(|_| groove::records::Error::LengthOverflow)?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        Ok(())
+    }
+
+    fn take_len(body: &[u8]) -> Result<(usize, &[u8]), groove::records::Error> {
+        let (length, body) = body
+            .split_first_chunk::<4>()
+            .ok_or(groove::records::Error::NonCanonicalRecord)?;
+        Ok((u32::from_le_bytes(*length) as usize, body))
+    }
+
+    fn take(body: &[u8], length: usize) -> Result<(&[u8], &[u8]), groove::records::Error> {
+        body.split_at_checked(length)
+            .ok_or(groove::records::Error::NonCanonicalRecord)
+    }
+
+    fn encode_parts(
+        record: &OwnedRecord,
+        extras: &[UnionExtraCells],
+    ) -> Result<Vec<u8>, groove::records::Error> {
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + 4 + record.raw().len());
+        bytes.extend_from_slice(MAGIC);
+        put_use(&mut bytes, record.descriptor(), !extras.is_empty())?;
+        if !extras.is_empty() {
+            push_leb128(&mut bytes, extras.len() as u64);
+            for extra in extras {
+                bytes.extend_from_slice(extra.schema_version.0.as_bytes());
+                put_len(&mut bytes, extra.table.len())?;
+                bytes.extend_from_slice(extra.table.as_bytes());
+                put_use(&mut bytes, extra.record.descriptor(), false)?;
+                put_len(&mut bytes, extra.record.raw().len())?;
+                bytes.extend_from_slice(extra.record.raw());
+            }
+        }
+        bytes.extend_from_slice(record.raw());
+        Ok(bytes)
+    }
+
+    /// A row without union cells.
+    pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
+        encode_parts(record, &[])
+    }
+
+    /// A row and its union cells, if any, in one blob.
+    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, groove::records::Error> {
+        encode_parts(&row.record, &row.extras)
+    }
+
+    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, groove::records::Error> {
+        let invalid = || groove::records::Error::NonCanonicalRecord;
+        let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
+        let (descriptor, union, mut body) = take_use(body)?;
+        let mut extras = Vec::new();
+        if union {
+            let (count, rest) = take_leb128(body, MAX_REFERENCE).ok_or_else(invalid)?;
+            if count == 0 {
+                return Err(invalid());
+            }
+            body = rest;
+            for _ in 0..count {
+                let (schema_version, rest) = body.split_first_chunk::<16>().ok_or_else(invalid)?;
+                let (length, rest) = take_len(rest)?;
+                let (table, rest) = take(rest, length)?;
+                let table = std::str::from_utf8(table).map_err(|_| invalid())?;
+                let (cells, nested_union, rest) = take_use(rest)?;
+                if nested_union {
+                    return Err(invalid());
+                }
+                let (length, rest) = take_len(rest)?;
+                let (raw, rest) = take(rest, length)?;
+                extras.push(UnionExtraCells::new(
+                    SchemaVersionId(uuid::Uuid::from_bytes(*schema_version)),
+                    table,
+                    OwnedRecord::new(raw.to_vec(), cells),
+                ));
+                body = rest;
+            }
+        }
+        Ok(WireRow {
+            record: OwnedRecord::new(body.to_vec(), descriptor),
+            extras,
+        })
+    }
+
+    /// A row that must carry no union cells.
+    pub(super) fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
+        let row = decode_row(bytes)?;
+        if !row.extras.is_empty() {
+            return Err(groove::records::Error::NonCanonicalRecord);
+        }
+        Ok(row.record)
     }
 
     #[cfg(test)]
@@ -1517,11 +1517,13 @@ mod version_record_wire_row {
             }
         }
 
-        // A row without union cells keeps its version 2 bytes; one with them
-        // round-trips through version 3, and every truncation or trailing
-        // byte of that envelope is rejected.
+        // One grammar for both kinds of row. A row without union cells has
+        // the head's union bit clear and is exactly `encode`'s bytes; a Core
+        // union image sets it and carries its entries between the row's
+        // descriptor and its row bytes. Every truncation before the row
+        // bytes is rejected, and `decode` refuses union cells.
         #[test]
-        fn union_cells_use_the_v3_envelope_and_round_trip() {
+        fn union_cells_share_the_v3_envelope_and_round_trip() {
             let row = union_row();
             let plain = encode_row(&super::super::WireRow {
                 record: row.record.clone(),
@@ -1529,25 +1531,56 @@ mod version_record_wire_row {
             })
             .unwrap();
             assert_eq!(plain, encode(&row.record).unwrap());
-            assert!(plain.starts_with(MAGIC));
+            assert_eq!(&plain[..6], b"JVRR\x03\x00");
 
             let bytes = encode_row(&row).unwrap();
-            assert!(bytes.starts_with(MAGIC_WITH_EXTRAS));
+            assert_eq!(&bytes[..6], b"JVRR\x03\x01", "inline definition, union bit");
             assert_eq!(decode_row(&bytes).unwrap(), row);
-            // `decode` alone accepts only version 2.
             assert!(decode(&bytes).is_err());
-            for end in MAGIC_WITH_EXTRAS.len()..bytes.len() {
+            let row_bytes = bytes.len() - row.record.raw().len();
+            assert_eq!(&bytes[row_bytes..], row.record.raw());
+            for end in MAGIC.len()..row_bytes {
                 assert!(decode_row(&bytes[..end]).is_err(), "truncated at {end}");
             }
-            let mut trailing = bytes.clone();
-            trailing.push(0);
-            assert!(decode_row(&trailing).is_err());
 
-            // A version 3 envelope with no union cells is not canonical.
-            let mut empty = MAGIC_WITH_EXTRAS.to_vec();
-            put_record(&mut empty, &row.record).unwrap();
-            put_len(&mut empty, 0).unwrap();
+            // Union cells with no entry, and an entry whose own descriptor
+            // claims union cells, are not the encoder's spelling.
+            let descriptor_end = plain.len() - row.record.raw().len();
+            let mut empty = bytes[..descriptor_end].to_vec();
+            empty.push(0);
+            empty.extend_from_slice(row.record.raw());
             assert!(decode_row(&empty).is_err());
+            let cells_head = descriptor_end + 1 + 16 + 4 + "todos".len();
+            assert_eq!(bytes[cells_head], 0);
+            let mut nested = bytes.clone();
+            nested[cells_head] = 1;
+            assert!(decode_row(&nested).is_err());
+
+            // Inside one message the second image references both the row's
+            // and the cells' descriptors defined by the first.
+            let rows =
+                with_message_descriptor_table(|| [&row, &row].map(|row| encode_row(row).unwrap()));
+            let cells = &row.extras[0];
+            assert_eq!(
+                rows[1],
+                [
+                    b"JVRR\x03\x03\x01".as_slice(),
+                    cells.schema_version().0.as_bytes(),
+                    &5u32.to_le_bytes(),
+                    b"todos",
+                    &[4],
+                    &(cells.record().raw().len() as u32).to_le_bytes(),
+                    cells.record().raw(),
+                    row.record.raw(),
+                ]
+                .concat()
+            );
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|bytes| decode_row(bytes).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(decoded, [row.clone(), row]);
         }
 
         #[test]
@@ -1560,7 +1593,7 @@ mod version_record_wire_row {
                 b"JVRR\x04\x00".to_vec(),
                 b"JVRR\x03\x00\xff\xff\xff\xff".to_vec(),
                 // A table reference outside any message scope.
-                b"JVRR\x03\x01".to_vec(),
+                b"JVRR\x03\x02".to_vec(),
             ] {
                 let wire = postcard::to_allocvec(&bytes).unwrap();
                 assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
@@ -1751,8 +1784,9 @@ mod version_record_wire_row {
 
         // Pinned `JVRR` v3 bytes (#3380): inside one message scope the first
         // row defines its descriptor and every later row with the same
-        // descriptor names it by table reference. A different descriptor
-        // defines the next entry. Outside a scope every row defines inline.
+        // descriptor names it by table reference (head `reference << 1`, the
+        // union bit clear). A different descriptor defines the next entry.
+        // Outside a scope every row defines inline.
         #[test]
         fn message_descriptor_table_defines_once_and_references_after() {
             let first = u64_record("value", 7);
@@ -1770,7 +1804,7 @@ mod version_record_wire_row {
                 .concat()
             };
             let reference = |index: u8, record: &OwnedRecord| {
-                [b"JVRR\x03".as_slice(), &[index], record.raw()].concat()
+                [b"JVRR\x03".as_slice(), &[index << 1], record.raw()].concat()
             };
             let other_bytes =
                 groove::records::encode_persisted_record_descriptor(other.descriptor()).unwrap();
@@ -1785,7 +1819,7 @@ mod version_record_wire_row {
             assert_eq!(rows[4], reference(2, &other));
             assert_eq!(
                 rows[1],
-                [b"JVRR\x03\x01".as_slice(), &8u64.to_le_bytes()].concat()
+                [b"JVRR\x03\x02".as_slice(), &8u64.to_le_bytes()].concat()
             );
 
             let decoded = with_message_descriptor_table(|| {
@@ -1825,13 +1859,16 @@ mod version_record_wire_row {
             };
             let with_reference =
                 |reference: &[u8]| [b"JVRR\x03".as_slice(), reference, record.raw()].concat();
-            assert!(decode_all(&[defined.clone(), with_reference(&[1])]).is_ok());
+            assert!(decode_all(&[defined.clone(), with_reference(&[2])]).is_ok());
             // Forward reference, unknown entry, duplicate definition.
-            assert!(decode_all(&[with_reference(&[1]), defined.clone()]).is_err());
-            assert!(decode_all(&[defined.clone(), with_reference(&[2])]).is_err());
+            assert!(decode_all(&[with_reference(&[2]), defined.clone()]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[4])]).is_err());
             assert!(decode_all(&[defined.clone(), defined.clone()]).is_err());
+            // The union bit on a row without union cells: its row bytes do
+            // not parse as union entries.
+            assert!(decode_all(&[defined.clone(), with_reference(&[3])]).is_err());
             // Overlong and out-of-range references.
-            assert!(decode_all(&[defined.clone(), with_reference(&[0x81, 0x00])]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x82, 0x00])]).is_err());
             assert!(decode_all(&[defined.clone(), with_reference(&[0x80, 0x00])]).is_err());
             assert!(
                 decode_all(&[
@@ -1843,24 +1880,28 @@ mod version_record_wire_row {
             // Each message starts with an empty table, and nested scopes
             // restore the outer table.
             assert!(decode_all(&[defined.clone()]).is_ok());
-            assert!(decode_all(&[with_reference(&[1])]).is_err());
+            assert!(decode_all(&[with_reference(&[2])]).is_err());
             with_message_descriptor_table(|| {
                 decode(&defined).unwrap();
-                assert!(decode_all(&[with_reference(&[1])]).is_err());
-                decode(&with_reference(&[1])).unwrap();
+                assert!(decode_all(&[with_reference(&[2])]).is_err());
+                decode(&with_reference(&[2])).unwrap();
             });
         }
 
         #[test]
         fn leb128_references_round_trip_at_boundaries() {
-            for value in [0, 1, 127, 128, 16383, 16384, MAX_REFERENCE] {
+            for value in [0, 1, 127, 128, 16383, 16384, MAX_REFERENCE, MAX_HEAD] {
                 let mut bytes = Vec::new();
                 push_leb128(&mut bytes, value);
-                assert_eq!(take_leb128(&bytes), Some((value, &[][..])), "{value}");
+                assert_eq!(
+                    take_leb128(&bytes, MAX_HEAD),
+                    Some((value, &[][..])),
+                    "{value}"
+                );
             }
             let mut bytes = Vec::new();
-            push_leb128(&mut bytes, MAX_REFERENCE + 1);
-            assert_eq!(take_leb128(&bytes), None);
+            push_leb128(&mut bytes, MAX_HEAD + 1);
+            assert_eq!(take_leb128(&bytes, MAX_HEAD), None);
         }
 
         #[test]

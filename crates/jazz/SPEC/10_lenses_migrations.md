@@ -620,8 +620,9 @@ projection.
 On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
 travel as `UnionExtraCells`, one entry per schema version defining them, each
 a record of that schema's authored cells (`_app_<column>`, nullable). The
-row and its entries use the `JVRR` v3 envelope; every row without entries
-keeps the v2 bytes. A receiver validates each cell against its schema and
+entries travel inside the row's `JVRR` v3 blob, flagged by its descriptor
+head (ch. 16); a row without entries leaves the flag clear and carries
+nothing extra. A receiver validates each cell against its schema and
 stores the image unchanged, in `G`'s union case: its entries must be exactly
 `G`'s stored extras there, as the shared catalogue order guarantees. The image
 keeps its identity, so what the receiver serves or compares later is Core's
