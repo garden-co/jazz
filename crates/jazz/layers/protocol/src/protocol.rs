@@ -3804,7 +3804,7 @@ mod supporting_table_name {
         pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
     }
 
-    fn intern(name: Cow<'_, str>) -> Intern<String> {
+    pub(super) fn intern(name: Cow<'_, str>) -> Intern<String> {
         LAST.with(|last| {
             if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
                 return found;
@@ -7656,6 +7656,7 @@ mod tests {
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod supporting_set_test_oracle;
+mod wire_codecs_b;
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
