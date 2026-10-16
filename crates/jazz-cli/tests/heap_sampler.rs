@@ -41,7 +41,7 @@ fn allocate(count: usize, size: usize) -> Vec<Vec<u8>> {
     (0..count).map(|_| vec![1u8; size]).collect()
 }
 
-/// About 256 MiB allocated in mixed sizes, half of it kept: the samples'
+/// About 264 MiB allocated in mixed sizes, half of it kept: the samples'
 /// weights add up to the bytes still in use, and they are forgotten once
 /// that memory is freed.
 ///
@@ -59,12 +59,19 @@ fn estimates_live_bytes_and_forgets_freed_memory() {
     let mut kept = Vec::new();
     for round in 0..64 {
         let small = allocate(2048, 1024 + round);
+        let near_mean = allocate(2, MEAN as usize + round);
         let large = allocate(2, 1 << 20);
         kept.extend(small.into_iter().step_by(2));
+        kept.extend(near_mean.into_iter().step_by(2));
         kept.extend(large.into_iter().step_by(2));
     }
-    let live: usize = kept.iter().map(Vec::capacity).sum();
-    let deviation = estimate_deviation(kept.iter().map(Vec::capacity), MEAN);
+    // `kept`'s own buffer is live too, and big enough to be sampled.
+    let sizes = || {
+        let buffer = kept.capacity() * size_of::<Vec<u8>>();
+        kept.iter().map(Vec::capacity).chain([buffer])
+    };
+    let live: usize = sizes().sum();
+    let deviation = estimate_deviation(sizes(), MEAN);
     assert!(
         6.0 * deviation < live as f64 * 0.1,
         "enough samples to estimate within 10%"
