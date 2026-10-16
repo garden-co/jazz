@@ -17,18 +17,29 @@ const MAGIC: &[u8; 4] = b"JSM1";
 
 /// The closed, mandatory Groove-owned epoch-one payload families.
 ///
-/// `groove.large-value.v1` is one inseparable family: the V1 scalar
+/// `groove.large-value.v2` is one inseparable family: the V1 scalar
 /// descriptor and `NodeRef` records select the same V1 node envelope that is
 /// also decoded before a descriptor is available. `groove.ordered-chunk-
-/// storage.v1` is separate because its install-receipt wrapper belongs to the
+/// storage.v2` is separate because its install-receipt wrapper belongs to the
 /// generic ordered chunk adapter and can evolve independently of the value
 /// tree codec. Higher layers compose this base with their own opaque IDs;
 /// Groove does not interpret those additions.
 pub const GROOVE_EPOCH_1_CODECS: &[&str] = &[
-    "groove.large-value.v1",
-    "groove.ordered-chunk-storage.v1",
+    "groove.large-value.v2",
+    "groove.ordered-chunk-storage.v2",
     "groove.ordered-kv.v1",
 ];
+
+/// Groove's durable secondary-index layout (`indices` family): entries keyed
+/// by a LEB128 numeric index id plus the concatenated, single-escaped index key
+/// parts, with an empty value (unique indexes store the primary-key columns
+/// the index lacks), and the `\0groove-index-id\0` registry that assigns ids.
+///
+/// It is not part of [`GROOVE_EPOCH_1_CODECS`] because only roots that declare
+/// schema indexes carry it; such a root composes it into its profile, so a
+/// root written by the earlier name-prefixed layout is refused at manifest
+/// admission instead of being misread.
+pub const GROOVE_DURABLE_INDEX_V2_CODEC: &str = "groove.durable-index.v2";
 
 /// A closed, deterministic set of persistent payload codecs required by one
 /// storage root.
@@ -155,6 +166,10 @@ impl StorageEpochManifest {
     /// ordering and omitted/default fields must not change a durable manifest.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
+        self.encode_structure()
+    }
+
+    fn encode_structure(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::from(*MAGIC);
         bytes.extend_from_slice(&self.epoch.to_be_bytes());
         bytes.extend_from_slice(&self.adapter.version.to_be_bytes());
@@ -174,6 +189,15 @@ impl StorageEpochManifest {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let manifest = Self::decode_structure(bytes)?;
+        require_groove_epoch_1_codecs(&manifest.required_codecs)?;
+        Ok(manifest)
+    }
+
+    /// Decodes a canonical manifest without requiring this build's mandatory
+    /// Groove codecs, so admission can name a root's missing and unknown
+    /// families instead of failing with a generic layout error.
+    fn decode_structure(bytes: &[u8]) -> Result<Self, Error> {
         let mut input = bytes;
         if take(&mut input, 4)? != MAGIC {
             return Err(invalid("manifest magic is invalid"));
@@ -208,9 +232,9 @@ impl StorageEpochManifest {
             required_codecs: codecs,
             parameters,
         };
-        manifest.validate()?;
+        manifest.validate_structure()?;
         // Require one canonical encoding rather than merely an equivalent map.
-        if manifest.encode()? != bytes {
+        if manifest.encode_structure()? != bytes {
             return Err(invalid("manifest is noncanonical"));
         }
         Ok(manifest)
@@ -218,9 +242,27 @@ impl StorageEpochManifest {
 
     /// Validates an existing root before the caller mutates any ordinary state.
     pub fn admit_existing(&self, bytes: &[u8]) -> Result<ManifestOpenReceipt, Error> {
-        let found = Self::decode(bytes)?;
+        // A root written with retired Groove families (for example
+        // `groove.large-value.v1`) is well formed; report its inventory
+        // difference as the typed codec error rather than a layout error.
+        let found = Self::decode_structure(bytes)?;
         if found.epoch != self.epoch {
             return Err(invalid("unsupported storage epoch"));
+        }
+        if found.required_codecs != self.required_codecs {
+            return Err(Error::UnsupportedStorageCodecs {
+                epoch: found.epoch,
+                missing: self
+                    .required_codecs
+                    .difference(&found.required_codecs)
+                    .cloned()
+                    .collect(),
+                unknown: found
+                    .required_codecs
+                    .difference(&self.required_codecs)
+                    .cloned()
+                    .collect(),
+            });
         }
         if found != *self {
             return Err(invalid(
@@ -241,6 +283,11 @@ impl StorageEpochManifest {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        self.validate_structure()?;
+        require_groove_epoch_1_codecs(&self.required_codecs)
+    }
+
+    fn validate_structure(&self) -> Result<(), Error> {
         if self.epoch != STORAGE_EPOCH_1 {
             return Err(invalid("unsupported storage epoch"));
         }
@@ -254,7 +301,6 @@ impl StorageEpochManifest {
         if self.required_codecs.is_empty() {
             return Err(invalid("manifest codec profile is empty"));
         }
-        require_groove_epoch_1_codecs(&self.required_codecs)?;
         for key in self.parameters.keys() {
             valid_id("parameter ID", key)?;
         }
@@ -384,15 +430,15 @@ mod tests {
     }
     #[test]
     fn epoch_1_manifest_has_frozen_golden_bytes() {
-        assert_eq!(manifest().encode().unwrap(), b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic");
+        assert_eq!(manifest().encode().unwrap(), b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic");
     }
 
     #[test]
     fn epoch_1_codec_corpus_round_trips_committed_bytes_exactly() {
         // This is the backend-neutral semantic-to-byte corpus. The companion
         // fixture records the settlement commit/checksum and is intentionally
-        // not regenerated by tests: changing these bytes is an epoch change.
-        let committed = b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        // not regenerated by tests: changes require a versioned codec contract.
+        let committed = b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         let semantic = manifest();
         assert_eq!(semantic.encode().unwrap(), committed);
         assert_eq!(StorageEpochManifest::decode(committed).unwrap(), semantic);
@@ -403,6 +449,36 @@ mod tests {
                 .unwrap(),
             committed
         );
+    }
+
+    /// Alice's v1 scalar root must fail before Bob's v2 reader sees any rows.
+    /// This byte-level boundary is invisible through ordinary value queries.
+    #[test]
+    fn scalar_v1_root_is_refused_before_scalar_decoding() {
+        let previous = b"JSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        assert!(matches!(manifest().admit_existing(previous),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+            if missing == ["groove.large-value.v2", "groove.ordered-chunk-storage.v2"]
+                && unknown == ["groove.large-value.v1", "groove.ordered-chunk-storage.v1"]));
+        // Decoding a manifest as this build's own still requires the base.
+        assert!(matches!(StorageEpochManifest::decode(previous),
+            Err(Error::InvalidStorageLayout(message))
+            if message == "codec profile omits mandatory Groove epoch-one codec"));
+    }
+
+    /// Alice's old receipt wrapper must be refused before Bob reads chunk bytes.
+    /// Manifest admission is tested directly because it precedes database APIs.
+    #[test]
+    fn ordered_chunk_v1_root_is_refused_before_chunk_decoding() {
+        let previous = manifest().encode().unwrap();
+        let previous = String::from_utf8(previous).unwrap().replace(
+            "groove.ordered-chunk-storage.v2",
+            "groove.ordered-chunk-storage.v1",
+        );
+        assert!(matches!(manifest().admit_existing(previous.as_bytes()),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+            if missing == ["groove.ordered-chunk-storage.v2"]
+                && unknown == ["groove.ordered-chunk-storage.v1"]));
     }
 
     #[test]
@@ -512,6 +588,42 @@ mod tests {
         let mut corrupt = expected.encode().unwrap();
         corrupt[0] = b'X';
         assert!(expected.admit_existing(&corrupt).is_err());
+    }
+    /// A canonical root written with another codec inventory is refused with
+    /// the typed error that names both sides' versioned family IDs.
+    #[test]
+    fn codec_inventory_mismatch_names_missing_and_unknown_families() {
+        let old_profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["app.row.v1"])
+            .unwrap();
+        let new_profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["app.row.v2"])
+            .unwrap();
+        let parameters = BTreeMap::from([("key-order".into(), b"unsigned-lexicographic".to_vec())]);
+        let old_root = StorageEpochManifest::epoch_1_with_codec_profile(
+            "memory",
+            1,
+            parameters.clone(),
+            &old_profile,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let current =
+            StorageEpochManifest::epoch_1_with_codec_profile("memory", 1, parameters, &new_profile)
+                .unwrap();
+        match current.admit(Some(&old_root)) {
+            Err(Error::UnsupportedStorageCodecs {
+                epoch,
+                missing,
+                unknown,
+            }) => {
+                assert_eq!(epoch, 1);
+                assert_eq!(missing, vec!["app.row.v2".to_owned()]);
+                assert_eq!(unknown, vec!["app.row.v1".to_owned()]);
+            }
+            other => panic!("expected a typed codec-inventory refusal, got {other:?}"),
+        }
     }
     #[test]
     fn planted_unknown_epoch_cannot_be_accepted() {

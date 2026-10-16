@@ -8,7 +8,6 @@ use jazz::groove::storage::{
     BoxedStorage, OrderedKvStorage, OwnedWriteOperation, StorageCodecProfile, StorageFactory,
     WriteManyOutcome,
 };
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::ObjectId;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
@@ -344,14 +343,9 @@ fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
 
 /// Closed manifest profile for the server's independent catalogue root.
 ///
-/// The catalogue has the same Jazz-owned durable families as an app runtime,
-/// plus its own opaque entry payload codec. Keeping this constructor shared by
-/// production and physical-layout fixtures prevents a stale Groove-only
-/// manifest from masquerading as an accepted Jazz store.
+/// Catalogue payloads evolve independently of node and account records.
 pub(crate) fn catalogue_storage_codec_profile() -> CatalogueStorageResult<StorageCodecProfile> {
-    epoch_1_storage_codec_profile()
-        .and_then(|profile| profile.with_additional_codecs(["jazz.server-catalogue-entry.v1"]))
-        .map_err(storage_error)
+    jazz::storage_codec_profile::catalogue_storage_codec_profile().map_err(storage_error)
 }
 
 #[cfg(test)]

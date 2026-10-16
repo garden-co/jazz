@@ -62,10 +62,7 @@ use crate::protocol::{
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
-use crate::protocol_limits::{
-    MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_registration_size,
-};
+use crate::protocol_limits::{MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_shape_registration_size};
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
     ValidatedQuery, relation_query_to_query,
@@ -85,6 +82,7 @@ pub mod channel_endpoint;
 mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
+mod view_update_parts;
 mod wire_transport;
 pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
@@ -1704,7 +1702,10 @@ pub type MutationErrorCallback = Rc<dyn Fn(&MutationErrorEvent) + 'static>;
 pub mod sync_autopsy {
     use super::*;
 
-    const MAX_EVENTS: usize = 512;
+    // Large enough to span a writer's burst plus a waiter's polling: one
+    // process-wide ring shared by every node, so a poll loop's frames must
+    // not evict the upload history an autopsy is meant to explain.
+    const MAX_EVENTS: usize = 8192;
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static EVENTS: LazyLock<Mutex<VecDeque<String>>> =
@@ -1815,7 +1816,7 @@ where
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     row_id_source_guarantees_fresh: bool,
-    next_now_ms: Rc<Cell<u64>>,
+    next_now_ms: Rc<WriteClock>,
     /// Set only on the private clone owned by one queued mutation operation.
     reserved_tx_id: Option<TxId>,
     /// True only for a future accepted while the shared owner was Open. Such
@@ -1931,6 +1932,48 @@ impl StreamingValueUploadCleanupTicket {
 pub(super) struct UpstreamUploadDestination {
     remote_node: [u8; 16],
     link_identity: AuthorSubject,
+}
+
+/// Physical-millisecond source for writes whose caller supplies no time.
+///
+/// Linear history stamps every plain column with
+/// `min(tx physical ms, seq physical ms)` (SPEC 4.6), so an application
+/// runtime must tick its HLC from the wall clock: a per-runtime counter
+/// restarts near zero on every open and is not comparable across writers, so
+/// a later write would lose last-writer-wins to an earlier one from a runtime
+/// that merely counted further. Hosts that supply their own time on every
+/// write (the TypeScript runtime passes `Date.now()`, the native relay its
+/// host clock) never consult this. The deterministic counter remains the
+/// default for embedders and tests that need reproducible transaction ids;
+/// `Db::use_wall_clock_for_writes` selects the wall clock.
+struct WriteClock {
+    next_counter_ms: Cell<u64>,
+    wall: Cell<bool>,
+}
+
+impl Default for WriteClock {
+    fn default() -> Self {
+        Self {
+            next_counter_ms: Cell::new(1),
+            wall: Cell::new(false),
+        }
+    }
+}
+
+impl WriteClock {
+    fn next_now_ms(&self) -> u64 {
+        if self.wall.get() {
+            return web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+                .unwrap_or(0)
+                .min(crate::time::HLC_MAX_PHYSICAL_MS);
+        }
+        let next = self.next_counter_ms.get();
+        self.next_counter_ms.set(next + 1);
+        next
+    }
 }
 
 #[doc(hidden)]
@@ -2241,12 +2284,11 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
             // latest wire fate only covers the interval before a repair-ready
             // route can reconstruct and emit it. Never replace a terminal
             // fate with a later non-terminal progress update.
-            if terminal
-                || candidate
-                    .held_fate
-                    .as_ref()
-                    .is_none_or(|held| !local_fate_is_terminal(held))
-            {
+            let replace = match candidate.held_fate.as_ref() {
+                Some(held) if local_fate_is_terminal(held) => terminal,
+                _ => true,
+            };
+            if replace {
                 candidate.held_fate = Some(fate.clone());
             }
             return true;
@@ -2337,12 +2379,8 @@ where
                         (
                             tx.n_total_writes,
                             versions.len(),
-                            versions
-                                .iter()
-                                .flat_map(crate::protocol::VersionRecord::parents)
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .collect::<Vec<_>>(),
+                            // Linear history: replay order is transaction order.
+                            Vec::<TxId>::new(),
                         )
                     };
                     units.insert(tx_id, unit);
@@ -2383,6 +2421,44 @@ where
     }
 
     Ok((statuses, units, complete_units))
+}
+
+/// The pending units recovery uploads, keyed by transaction so the caller
+/// queues them in one transaction-ordered pass: complete units (`complete`,
+/// whose causal closure is present) and blocked ones (the unit the replay
+/// plan kept for a root that is not complete, or the route's retained unit)
+/// alike. A blocked unit is therefore never queued behind a later complete
+/// unit of its writer (SPEC 14, `INV-HIST-23`).
+///
+/// A transaction is in `complete` exactly when the plan marked it
+/// `Complete`, and only roots not marked so take a blocked or retained unit,
+/// so no transaction gets both. Were it to, its complete unit is kept, as
+/// when complete units were queued first.
+fn local_replay_upload_order(
+    pending: &BTreeSet<TxId>,
+    complete: &[(TxId, SyncMessage)],
+    roots: &BTreeSet<TxId>,
+    statuses: &BTreeMap<TxId, LocalReplayStatus>,
+    blocked: &BTreeMap<TxId, SyncMessage>,
+    retained: &BTreeMap<TxId, SyncMessage>,
+) -> BTreeMap<TxId, SyncMessage> {
+    let mut uploads = BTreeMap::new();
+    for (tx_id, unit) in complete {
+        if pending.contains(tx_id) {
+            uploads.entry(*tx_id).or_insert_with(|| unit.clone());
+        }
+    }
+    for tx_id in roots {
+        if !pending.contains(tx_id)
+            || matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete))
+        {
+            continue;
+        }
+        if let Some(unit) = blocked.get(tx_id).or_else(|| retained.get(tx_id)) {
+            uploads.entry(*tx_id).or_insert_with(|| unit.clone());
+        }
+    }
+    uploads
 }
 
 pub(super) async fn restore_local_subscriber_replay<S>(
@@ -2436,12 +2512,22 @@ where
         .iter()
         .filter_map(|pending| pending.unit.as_ref().map(|_| pending.tx_id))
         .collect::<BTreeSet<_>>();
-    for (tx_id, unit) in replay_units {
+    let uploads = local_replay_upload_order(
+        &pending_set,
+        &replay_units,
+        &roots,
+        &statuses,
+        &blocked_units,
+        &retained_replay_units,
+    );
+    for (_, unit) in replay_units {
         // A reopened main-thread runtime has no transaction history. Send
         // accepted causal ancestors before each pending unit so the latter
         // can be ingested before its Local ack or later authority fate.
-        downstream_fates.borrow_mut().push(unit.clone());
-        if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
+        downstream_fates.borrow_mut().push(unit);
+    }
+    for (tx_id, unit) in uploads {
+        if outbox_units.insert(tx_id) {
             // Durable recovery omits exclusive snapshot/read evidence. A live
             // sibling may already retain the exact authored unit; never
             // replace that unit with its redacted history replay.
@@ -2469,14 +2555,7 @@ where
             .get(&tx_id)
             .cloned()
             .or_else(|| retained_replay_units.get(&tx_id).cloned());
-        register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
-        if pending_set.contains(&tx_id)
-            && let Some(unit) = unit
-        {
-            if outbox_units.insert(tx_id) {
-                queue_pending_upload_in(outbox, tx_id, Some(unit));
-            }
-        }
+        register_local_replay_route(routes, tx_id, downstream_fates, author, unit);
     }
     queue_local_acknowledgements(routes, node).await;
     release_local_replay_fates(routes);
@@ -3262,6 +3341,7 @@ mod node_runtime;
 use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
+mod read_barrier;
 mod row_availability;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
@@ -3660,7 +3740,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::SubscribeRejected { .. }
             | SyncMessage::CatalogueAck(_)
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
-            | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::AuthorizationScopeView { .. }
             | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
@@ -4841,12 +4920,204 @@ struct ScalarReconciliation {
     retry_delay_ms: u64,
 }
 
+/// First-settlement deletion reconciliation for one strict Global stream.
+///
+/// Query programs carry no deletion witnesses: a deletion reaches a client
+/// only as a row delta on a coverage that was live when it happened. A row
+/// this client retained from an earlier, closed read can therefore be live
+/// locally while the authority's settled answer omits it. Such omitted rows
+/// are probed through the ordinary current-rows path and their images
+/// (including deletions) are ingested. A stream whose local and authority
+/// views agree never leaves `Unchecked` for `Pending`.
+///
+/// Reconciliation is reliable, not best-effort (INV-SYNC-48): the stream only
+/// *withholds its first settlement* for at most `DELETION_DISCOVERY_LIMIT`.
+/// Past that bound, or when the stream closes first, outstanding discovery
+/// moves to the runtime and outstanding rows stay in the runtime's
+/// [`HeldRowChecks`] until the authority answers each one.
+/// Bound on how long a strict stream's first settlement may wait for
+/// reconciliation before settling on the authority's answer alone. The
+/// reconciliation itself continues past it.
+const DELETION_DISCOVERY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a candidate discovery needs once its stream is gone.
+struct DeletionDiscoverySpec {
+    shape: ValidatedQuery,
+    binding: Binding,
+    author: AuthorSubject,
+    claims: BTreeMap<String, Value>,
+    context: crate::protocol::PolicyBindingKey,
+    /// Rows in the settled authority answer: readable, so never probed.
+    authoritative: BTreeSet<RowUuid>,
+}
+
+impl DeletionDiscoverySpec {
+    fn same_discovery(&self, other: &Self) -> bool {
+        self.shape == other.shape
+            && self.binding == other.binding
+            && self.author == other.author
+            && self.context == other.context
+    }
+}
+
+#[derive(Default)]
+enum DeletionReconciliation {
+    /// The query shape or stream kind is outside the reconciled pilot, or
+    /// the stream settled before any check was needed.
+    #[default]
+    Disabled,
+    /// No settled authority answer has been compared yet.
+    Unchecked,
+    /// The authority answer settled before this stream's own receiver graph
+    /// installed that closure. Discovery waits for that per-stream progress
+    /// (never for a globally idle runtime).
+    Deferred {
+        since: web_time::Instant,
+        spec: Box<DeletionDiscoverySpec>,
+    },
+    /// The authority answer settled; a Local-tier graph of the same query is
+    /// still producing the client's candidate inventory.
+    Discovering {
+        maintained: LocalMaintainedViewSubscription,
+        runtime_token: u64,
+        since: web_time::Instant,
+        spec: Box<DeletionDiscoverySpec>,
+    },
+    /// Local rows the authority omitted, not yet handed to the runtime's
+    /// [`HeldRowChecks`].
+    Pending {
+        rows: Vec<crate::protocol::CurrentRowCoordinate>,
+        context: crate::protocol::PolicyBindingKey,
+        since: web_time::Instant,
+    },
+    /// The rows are in [`HeldRowChecks`]; settlement is withheld until each
+    /// resolves or the settlement bound passes.
+    Probing {
+        rows: Vec<(String, RowUuid)>,
+        since: web_time::Instant,
+    },
+    /// The views agreed, the probe resolved, or settlement stopped waiting;
+    /// settle as usual.
+    Done,
+}
+
+impl DeletionReconciliation {
+    fn waiting_since(&self) -> Option<web_time::Instant> {
+        match self {
+            Self::Deferred { since, .. }
+            | Self::Discovering { since, .. }
+            | Self::Pending { since, .. }
+            | Self::Probing { since, .. } => Some(*since),
+            Self::Disabled | Self::Unchecked | Self::Done => None,
+        }
+    }
+}
+
+/// One held row the authority has not yet answered as deleted, readable or
+/// unavailable. Owned by the runtime, not by the stream that found it.
+struct HeldRowCheck {
+    coordinate: crate::protocol::CurrentRowCoordinate,
+    context: crate::protocol::PolicyBindingKey,
+    attempts: u32,
+    retry_at: Option<web_time::Instant>,
+}
+
+struct HeldRowProbe {
+    rows: Vec<(String, RowUuid)>,
+    deadline: web_time::Instant,
+    future: Pin<Box<dyn Future<Output = row_availability::CurrentRowsResult>>>,
+}
+
+/// Runtime-owned deletion reconciliation that outlives the strict stream
+/// which discovered it (INV-SYNC-48). Rows are deduplicated per
+/// `(table, row)`; an unanswered probe (Unknown, dropped receipt, timeout,
+/// disconnect) is retried with backoff, immediately on a new upstream link,
+/// and never while no upstream is admitted. A row whose local coordinate
+/// changes is dropped: its new version is what later reads reconcile.
+#[derive(Default)]
+struct HeldRowChecks {
+    rows: BTreeMap<(String, RowUuid), HeldRowCheck>,
+    active: Option<HeldRowProbe>,
+    /// Discoveries whose stream closed or stopped waiting before its
+    /// candidate inventory was complete. Only `Deferred` and `Discovering`.
+    discoveries: Vec<DeletionReconciliation>,
+    upstream_connection: Option<u64>,
+}
+
+impl HeldRowChecks {
+    fn enqueue(
+        &mut self,
+        rows: Vec<crate::protocol::CurrentRowCoordinate>,
+        context: &crate::protocol::PolicyBindingKey,
+    ) -> Vec<(String, RowUuid)> {
+        let mut keys = Vec::with_capacity(rows.len());
+        for coordinate in rows {
+            let key = (coordinate.table.clone(), coordinate.row);
+            let replace = self
+                .rows
+                .get(&key)
+                .is_none_or(|existing| existing.coordinate != coordinate);
+            if replace {
+                self.rows.insert(
+                    key.clone(),
+                    HeldRowCheck {
+                        coordinate,
+                        context: context.clone(),
+                        attempts: 0,
+                        retry_at: None,
+                    },
+                );
+            }
+            keys.push(key);
+        }
+        keys
+    }
+
+    /// Hand a stream's unfinished discovery to the runtime. A discovery of
+    /// the same query and context supersedes the older authority answer;
+    /// the redundant one is returned so its discovery graph can be released.
+    #[must_use]
+    fn adopt_discovery(
+        &mut self,
+        reconciliation: DeletionReconciliation,
+    ) -> Option<DeletionReconciliation> {
+        let spec = match &reconciliation {
+            DeletionReconciliation::Deferred { spec, .. }
+            | DeletionReconciliation::Discovering { spec, .. } => spec,
+            _ => return None,
+        };
+        if let Some(existing) = self
+            .discoveries
+            .iter_mut()
+            .find_map(|existing| match existing {
+                DeletionReconciliation::Deferred { spec: existing, .. }
+                | DeletionReconciliation::Discovering { spec: existing, .. }
+                    if existing.same_discovery(spec) =>
+                {
+                    Some(existing)
+                }
+                _ => None,
+            })
+        {
+            existing.authoritative = spec.authoritative.clone();
+            return Some(reconciliation);
+        }
+        self.discoveries.push(reconciliation);
+        None
+    }
+
+    fn retry_delay(attempts: u32) -> std::time::Duration {
+        std::time::Duration::from_millis((250u64 << attempts.min(7)).min(30_000))
+    }
+}
+
 struct SubscriptionState {
     /// Set synchronously by stream finalization, before its async cleanup is
     /// drained. Refresh observes this independently owned cell before it can
     /// install a replacement maintained subscription.
     closed: Rc<Cell<bool>>,
     terminal_rows: bool,
+    deletion_reconciliation: DeletionReconciliation,
     scalar_reconciliation_enabled: bool,
     scalar_authority_revision: u64,
     scalar_reconciliation: ScalarReconciliation,

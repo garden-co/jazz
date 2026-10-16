@@ -6,12 +6,12 @@ settled durable format.
 - epoch: `1`
 - settlement baseline: `8b946278e` (the current settlement baseline; alpha
   stores before it are unsupported)
-- codec registry, in canonical order: `groove.large-value.v1`,
-  `groove.ordered-chunk-storage.v1`, `groove.ordered-kv.v1`
+- codec registry, in canonical order: `groove.large-value.v2`,
+  `groove.ordered-chunk-storage.v2`, `groove.ordered-kv.v1`
 - semantic sample: adapter `memory`, format version `1`, the registry above,
   and parameter `key-order=unsigned-lexicographic`
 - SHA-256 of the committed byte sample:
-  `3e1bcd1af5b49b5ba8257cd312e9be0d65adaa214e5df9e53a538246c75eae3f`
+  `8263c3cd137f63742d76a17b95de0ef126cf35627834613cf0a17164f5a8ffd9`
 - committed bytes: asserted verbatim by
   `storage::manifest::tests::epoch_1_codec_corpus_round_trips_committed_bytes_exactly`
 

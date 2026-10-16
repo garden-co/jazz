@@ -490,7 +490,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
         .unwrap();
     // Exercise the explicit immutable-row envelope before local catalogue translation.
     let wire = crate::wire::encode_sync_message(&unit).unwrap();
-    assert!(wire.windows(5).any(|bytes| bytes == b"JVRR\x01"));
+    assert!(wire.windows(6).any(|bytes| bytes == b"JVRR\x03\x00"));
     let unit = crate::wire::decode_sync_message(&wire).unwrap();
     receiver.apply_sync_message_settled(unit).unwrap();
     let stored = receiver.query_versions_for_tx(tx_id).unwrap();
@@ -981,11 +981,14 @@ fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
     assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
-fn delete_catalogue_pointer(node: &mut NodeState, revision: u64) {
+fn delete_active_schema(node: &mut NodeState) {
     let mut batch = node.database.open_batch();
     batch.delete(
-        "jazz_catalogue_pointer",
-        groove::db::PrimaryKeyValue::U64(revision),
+        "jazz_catalogue",
+        groove::db::PrimaryKeyValue::Composite(vec![
+            groove::db::PrimaryKeyValue::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
+            groove::db::PrimaryKeyValue::Uuid(uuid::Uuid::nil()),
+        ]),
     );
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
 let persisted = crate::local_executor::block_on(applied.persist());
@@ -1799,7 +1802,30 @@ fn dynamic_catalogue_reopen_rejects_catalogue_stripped_history() {
     }
 }
 
-/// The completion record joins the exact write pointer and active lineage
+/// Alice's initialized catalogue must retain its active selection. Deleting
+/// that durable record must fail reopen instead of reconstructing revision zero.
+/// This storage-corruption test needs direct access to the catalogue record.
+#[test]
+fn catalogue_reopen_rejects_missing_active_selection() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().expect("create receiver store");
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut receiver = NodeState::new(node(0x9b), schema.clone(), storage).unwrap();
+    delete_active_schema(&mut receiver);
+    drop(receiver);
+
+    for _ in 0..2 {
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        assert!(matches!(
+            crate::local_executor::block_on(NodeState::new(node(0x9b), schema.clone(), storage)),
+            Err(Error::InvalidStoredValue("catalogue active schema missing"))
+        ));
+    }
+}
+
+/// The completion record joins the active schema selection and active lineage
 /// high-water.  Removing either side, or changing the receipt, must reject a
 /// fresh recovery before normal catalogue open can repair missing metadata.
 #[test]
@@ -1813,7 +1839,7 @@ fn dynamic_catalogue_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
         .expect("open explicit uninitialized receiver");
     let snapshot = catalogue_snapshot_fixture();
     receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()).unwrap();
-    delete_catalogue_pointer(&mut receiver, snapshot.current_write_schema.revision);
+    delete_active_schema(&mut receiver);
     drop(receiver);
 
     assert!(matches!(
@@ -2384,40 +2410,32 @@ fn lineage_equality_preserves_content_and_declaration_multiplicity() {
     }
 }
 
-/// Opening an old receiver upgrades storage before any snapshot is received.
-/// Internal because creating an old durable layout requires writing catalogue records.
+/// Alice reopens a receiver before another snapshot arrives. Its selection
+/// and revision survive, and stale or conflicting authority selections fail.
 #[test]
-fn legacy_receiver_upgrades_active_schema_during_open() {
+fn receiver_preserves_active_schema_and_revision_during_open() {
     let base = schema();
     let (_authority_dir, authority) = open_node_with_schema(node(0xc8), base.clone());
     let mut current = authority.catalogue_snapshot().unwrap();
-    current.current_write_schema.revision = 2;
-    let mut legacy = current.clone();
-    legacy.current_write_schema.revision = 7;
+    current.current_write_schema.revision = 8;
+    let mut previous = current.clone();
+    previous.current_write_schema.revision = 7;
     let dir = tempfile::tempdir().unwrap();
     let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
-    receiver.apply_trusted_catalogue_snapshot_settled(legacy)
+    receiver.apply_trusted_catalogue_snapshot_settled(previous)
         .unwrap();
-    // Old receivers stored the selected permissions in the schema payload and had no active-schema record.
-    delete_catalogue_record(&mut receiver, b"active_schema", uuid::Uuid::nil());
-    write_catalogue_record(
-        &mut receiver,
-        b"schema",
-        base.version_id().0,
-        codec::encode_catalogue_schema(&SchemaVersion::new(base)).unwrap(),
-    );
     drop(receiver);
 
     let receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
-    assert_eq!(receiver.current_write_schema().unwrap().revision, 0);
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 7);
     assert_eq!(receiver.catalogue_snapshot().unwrap().schemas, current.schemas);
     drop(receiver);
-    // The conversion is durable even if no server has connected yet.
+    // Repeated opens retain the authority revision without another snapshot.
     let mut receiver = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
-    assert_eq!(receiver.current_write_schema().unwrap().revision, 0);
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 7);
     receiver.apply_trusted_catalogue_snapshot_settled(current.clone())
         .unwrap();
-    assert_eq!(receiver.current_write_schema().unwrap().revision, 2);
+    assert_eq!(receiver.current_write_schema().unwrap().revision, 8);
     let mut conflicting = current.clone();
     conflicting.schemas[0] =
         SchemaVersion::new(conflicting.schemas[0].schema.without_permissions());
@@ -2433,7 +2451,7 @@ fn legacy_receiver_upgrades_active_schema_during_open() {
     );
     drop(receiver);
     let mut reopened = fresh_dynamic_catalogue_open(dir.path(), node(0xc9)).unwrap();
-    assert_eq!(reopened.current_write_schema().unwrap().revision, 2);
+    assert_eq!(reopened.current_write_schema().unwrap().revision, 8);
     assert!(
         reopened
             .apply_trusted_catalogue_snapshot_settled(stale)

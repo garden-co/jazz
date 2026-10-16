@@ -497,6 +497,93 @@ pub enum RejectionReason {
     MalformedCommit(String),
 }
 
+impl RejectionReason {
+    /// Physical payload type shared by transaction audit and retry records.
+    #[doc(hidden)]
+    pub fn storage_value_type() -> groove::records::ValueType {
+        use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "jazz_rejection_reason",
+                [
+                    EnumCase::new("client_clock_too_far_ahead", RecordDescriptor::default()),
+                    EnumCase::new("authorization_denied", RecordDescriptor::default()),
+                    EnumCase::new("exclusive_conflict", RecordDescriptor::default()),
+                    EnumCase::new("causality_violation", RecordDescriptor::default()),
+                    EnumCase::new(
+                        "cascade",
+                        RecordDescriptor::new([(
+                            "root",
+                            ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid]),
+                        )]),
+                    ),
+                    EnumCase::new(
+                        "malformed_commit",
+                        RecordDescriptor::new([("message", ValueType::String)]),
+                    ),
+                ],
+            )
+            .expect("fixed rejection reason schema"),
+        ))
+    }
+
+    /// Encode only the payload belonging to this rejection kind.
+    #[doc(hidden)]
+    pub fn to_storage_value(&self) -> Result<Value, groove::records::Error> {
+        use groove::records::{EnumValue, ValueType};
+        let (tag, fields) = match self {
+            Self::ClientClockTooFarAhead => (0, vec![]),
+            Self::AuthorizationDenied => (1, vec![]),
+            Self::ExclusiveConflict => (2, vec![]),
+            Self::CausalityViolation => (3, vec![]),
+            Self::Cascade { root } => (
+                4,
+                vec![Value::Tuple(vec![
+                    Value::U64(root.time.0),
+                    Value::Uuid(root.node.0),
+                ])],
+            ),
+            Self::MalformedCommit(message) => (5, vec![Value::String(message.clone())]),
+        };
+        let ValueType::Enum(schema) = Self::storage_value_type() else {
+            unreachable!()
+        };
+        Ok(Value::Enum(EnumValue::create(
+            tag,
+            schema.case(tag)?.payload,
+            &fields,
+        )?))
+    }
+
+    /// Decode the exact case payload; missing or unrelated fields are invalid.
+    #[doc(hidden)]
+    pub fn from_storage_value(value: Value) -> Result<Self, groove::records::Error> {
+        use groove::records::{Error, ValueType};
+        let Value::Enum(value) = value else {
+            return Err(Error::NonCanonicalRecord);
+        };
+        let ValueType::Enum(schema) = Self::storage_value_type() else {
+            unreachable!()
+        };
+        let payload = schema.case(value.tag())?.payload;
+        let fields = payload.bind(value.record().raw()).to_values()?;
+        if payload.create(&fields)? != value.record().raw() {
+            return Err(Error::NonCanonicalRecord);
+        }
+        match (value.tag(), fields.as_slice()) {
+            (0, []) => Ok(Self::ClientClockTooFarAhead),
+            (1, []) => Ok(Self::AuthorizationDenied),
+            (2, []) => Ok(Self::ExclusiveConflict),
+            (3, []) => Ok(Self::CausalityViolation),
+            (4, [root]) => Ok(Self::Cascade {
+                root: tx_id_from_value(root.clone()).map_err(|_| Error::NonCanonicalRecord)?,
+            }),
+            (5, [Value::String(message)]) => Ok(Self::MalformedCommit(message.clone())),
+            _ => Err(Error::NonCanonicalRecord),
+        }
+    }
+}
+
 /// Highest durability tier this node has observed for a transaction.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
@@ -612,31 +699,13 @@ impl HistoryEntry {
         self.transaction.durability
     }
 
-    /// Direct parent transaction ids for this version.
-    pub fn parents(&self) -> Vec<TxId> {
-        let field = self
-            .version
-            .descriptor()
-            .field_index("parents")
-            .expect("history record has parents");
-        tx_ids_from_value(
-            self.version
-                .borrowed()
-                .get_idx(field)
-                .expect("valid history parents"),
-        )
-        .expect("valid history parent refs")
-    }
-
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
-        if self.is_register_record() {
-            return None;
-        }
-        let user_cells = self
-            .version
-            .descriptor()
-            .field_index("updated_at")
+        // User cells follow the row image's `_deletion` cell.
+        let descriptor = self.version.descriptor();
+        let user_cells = descriptor
+            .field_index("_deletion")
+            .or_else(|| descriptor.field_index("updated_at"))
             .map_or(HistoryRowRecord::USER_CELLS, |idx| idx + 1);
         self.version
             .borrowed()
@@ -657,14 +726,7 @@ impl HistoryEntry {
 
     /// Deletion-register event, if this is a deletion layer version.
     pub fn deletion(&self) -> Option<DeletionEvent> {
-        if !self.is_register_record() {
-            return None;
-        }
-        let field = self
-            .version
-            .descriptor()
-            .field_index("_deletion")
-            .expect("register history has deletion field");
+        let field = self.version.descriptor().field_index("_deletion")?;
         deletion_from_value(
             self.version
                 .borrowed()
@@ -691,10 +753,6 @@ impl HistoryEntry {
     /// Whether this version is globally current on this node.
     pub fn is_globally_current(&self) -> bool {
         self.is_globally_current
-    }
-
-    fn is_register_record(&self) -> bool {
-        self.version.descriptor().field_index("_deletion").is_some()
     }
 }
 
@@ -806,17 +864,6 @@ impl RejectedVersion {
                 .get_uuid(RejectedVersionRowRecord::FIELD_ROW_UUID_IDX)
                 .expect("valid rejected row uuid"),
         )
-    }
-
-    /// Direct parent transaction ids.
-    pub fn parents(&self) -> Vec<TxId> {
-        tx_ids_from_value(
-            self.record
-                .borrowed()
-                .get_idx(RejectedVersionRowRecord::FIELD_PARENTS_IDX)
-                .expect("valid rejected parents"),
-        )
-        .expect("valid rejected parents")
     }
 
     /// Cell value by application-schema column position.
@@ -948,27 +995,11 @@ groove::define_record! {
         1 => tx_time: u64,
         2 => tx_node_id: u64,
         3 => schema_version: u64,
-        4 => parents: ParentRefs,
-        5 => created_by: RowAuthor,
-        6 => created_at: u64,
-        7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
+        4 => created_by: RowAuthor,
+        5 => created_at: u64,
+        6 => updated_by: RowAuthor,
+        7 => updated_at: u64,
         .. user_cells,
-    }
-}
-
-groove::define_record! {
-    struct RegisterRowRecord {
-        0 => row_uuid: RowUuid,
-        1 => tx_time: u64,
-        2 => tx_node_id: u64,
-        3 => schema_version: u64,
-        4 => parents: ParentRefs,
-        5 => created_by: RowAuthor,
-        6 => created_at: u64,
-        7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
-        9 => _deletion: Value,
     }
 }
 
@@ -978,10 +1009,8 @@ groove::define_record! {
         1 => node_id: u64,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: RejectionReasonTag,
-        5 => cascade_root: Option<Value>,
-        6 => reason_detail: Option<String>,
-        7 => user_metadata: Option<String>,
+        4 => rejection_reason: groove::records::EnumValue,
+        5 => user_metadata: Option<String>,
     }
 }
 
@@ -990,71 +1019,16 @@ groove::define_record! {
         0 => tx_time: u64,
         1 => tx_node_id: u64,
         2 => row_uuid: RowUuid,
-        3 => layer: Vec<u8>,
-        4 => parents: ParentRefs,
-        5 => _deletion: Option<Value>,
+        3 => _deletion: Option<Value>,
         .. user_cells,
     }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParentRefs(Vec<TxId>);
-
-impl groove::records::RecordField for ParentRefs {
-    fn read(
-        record: &groove::records::BorrowedRecord<'_>,
-        idx: usize,
-    ) -> Result<Self, groove::records::Error> {
-        tx_ids_from_value(record.get_idx(idx)?)
-            .map(Self)
-            .map_err(|_| groove::records::Error::TypeMismatch {
-                expected: groove::records::ValueType::Array(Box::new(
-                    groove::records::ValueType::Tuple(vec![
-                        groove::records::ValueType::U64,
-                        groove::records::ValueType::Uuid,
-                    ]),
-                )),
-            })
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Array(self.0.iter().map(|parent| tx_id_value(*parent)).collect())
-    }
-
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Array;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RejectionReasonTag {
-    ClientClockTooFarAhead,
-    AuthorizationDenied,
-    ExclusiveConflict,
-    CausalityViolation,
-    Cascade,
-    MalformedCommit,
-}
-
-groove::impl_record_field_enum!(RejectionReasonTag {
-    RejectionReasonTag::ClientClockTooFarAhead = 0,
-    RejectionReasonTag::AuthorizationDenied = 1,
-    RejectionReasonTag::ExclusiveConflict = 2,
-    RejectionReasonTag::CausalityViolation = 3,
-    RejectionReasonTag::Cascade = 4,
-    RejectionReasonTag::MalformedCommit = 5,
-});
 
 fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, &'static str> {
     match value {
         0 => Ok(TxKind::Mergeable),
         1 => Ok(TxKind::Exclusive),
         _ => Err("unknown tx kind"),
-    }
-}
-
-fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, &'static str> {
-    match value {
-        Value::Array(values) => values.into_iter().map(tx_id_from_value).collect(),
-        _ => Err("parents"),
     }
 }
 
@@ -1074,10 +1048,6 @@ fn tx_id_from_value(value: Value) -> Result<TxId, &'static str> {
     }
 }
 
-fn tx_id_value(tx_id: TxId) -> Value {
-    Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
-}
-
 fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static str> {
     match value {
         Value::Nullable(None) => Ok(None),
@@ -1090,41 +1060,76 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
     }
 }
 
-fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, &'static str> {
-    match value {
-        Value::Nullable(None) => Ok(None),
-        Value::Nullable(Some(value)) => tx_id_from_value(*value).map(Some),
-        _ => Err("tx id nullable"),
-    }
-}
-
 fn rejection_reason_from_rejected_record(
     record: groove::records::BorrowedRecord<'_>,
 ) -> Result<RejectionReason, &'static str> {
-    let tag = record
-        .get_enum(RejectedTransactionRowRecord::FIELD_REJECTION_REASON_IDX)
-        .map_err(|_| "reason")?;
-    match tag {
-        0 => Ok(RejectionReason::ClientClockTooFarAhead),
-        1 => Ok(RejectionReason::AuthorizationDenied),
-        2 => Ok(RejectionReason::ExclusiveConflict),
-        3 => Ok(RejectionReason::CausalityViolation),
-        4 => Ok(RejectionReason::Cascade {
-            root: nullable_tx_id_value(
-                record
-                    .get_idx(RejectedTransactionRowRecord::FIELD_CASCADE_ROOT_IDX)
-                    .map_err(|_| "cascade root")?,
-            )?
-            .ok_or("cascade root")?,
-        }),
-        5 => Ok(RejectionReason::MalformedCommit(
-            record
-                .get_nullable_string(RejectedTransactionRowRecord::FIELD_REASON_DETAIL_IDX)
-                .map_err(|_| "reason detail")?
-                .unwrap_or_default()
-                .to_owned(),
-        )),
-        _ => Err("reason"),
+    RejectionReason::from_storage_value(
+        record
+            .get_idx(RejectedTransactionRowRecord::FIELD_REJECTION_REASON_IDX)
+            .map_err(|_| "reason")?,
+    )
+    .map_err(|_| "reason")
+}
+
+#[cfg(test)]
+mod rejection_storage_tests {
+    use super::*;
+    use groove::records::{EnumValue, RecordDescriptor, ValueType};
+
+    /// Alice's rejection keeps its exact case payload across storage.
+    /// Codec-level coverage is needed to construct invalid bytes unavailable
+    /// through the transaction API.
+    #[test]
+    fn rejection_storage_round_trips_all_cases_and_rejects_wrong_payloads() {
+        let root = TxId::new(TxTime(42), NodeUuid::from_bytes([7; 16]));
+        for (reason, expected) in [
+            (RejectionReason::ClientClockTooFarAhead, vec![0]),
+            (RejectionReason::AuthorizationDenied, vec![1]),
+            (RejectionReason::ExclusiveConflict, vec![2]),
+            (RejectionReason::CausalityViolation, vec![3]),
+            (
+                RejectionReason::Cascade { root },
+                [vec![4, 0, 0, 0, 0, 0, 0, 0, 42], vec![7; 16]].concat(),
+            ),
+            (
+                RejectionReason::MalformedCommit("invalid parent".into()),
+                b"\x05\x00invalid parent".to_vec(),
+            ),
+            (RejectionReason::MalformedCommit(String::new()), vec![5, 0]),
+        ] {
+            let descriptor =
+                RecordDescriptor::new([("reason", RejectionReason::storage_value_type())]);
+            let bytes = descriptor
+                .create(&[reason.to_storage_value().unwrap()])
+                .unwrap();
+            assert_eq!(bytes, expected);
+            let stored = descriptor.bind(&bytes).get_idx(0).unwrap();
+            assert_eq!(RejectionReason::from_storage_value(stored).unwrap(), reason);
+            if !matches!(reason, RejectionReason::MalformedCommit(_)) {
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                assert!(
+                    descriptor
+                        .bind(&trailing)
+                        .get_idx(0)
+                        .and_then(RejectionReason::from_storage_value)
+                        .is_err()
+                );
+            }
+        }
+
+        for tag in [4, 5, 6] {
+            let missing =
+                Value::Enum(EnumValue::create(tag, RecordDescriptor::default(), &[]).unwrap());
+            assert!(RejectionReason::from_storage_value(missing).is_err());
+        }
+        let unexpected = RecordDescriptor::new([("unexpected", ValueType::U64)]);
+        for tag in 0..4 {
+            let unrelated =
+                Value::Enum(EnumValue::create(tag, unexpected, &[Value::U64(1)]).unwrap());
+            assert!(RejectionReason::from_storage_value(unrelated).is_err());
+        }
+        assert!(RejectionReason::from_storage_value(Value::EnumTag(0)).is_err());
     }
 }
 

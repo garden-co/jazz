@@ -28,6 +28,7 @@ use jazz::tools::{
 use jazz::tx::DurabilityTier;
 use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_sqlite::SqliteStorage;
 use tempfile::TempDir;
 
 const USERS: usize = 10;
@@ -533,6 +534,37 @@ impl Fixture<RocksDbStorage> {
 
     pub fn rocksdb_profile_s() -> (TempDir, Self) {
         Self::rocksdb(3_000, 12_000, 9_000)
+    }
+}
+
+/// The mobile store (the native relay's SQLite, WAL with `synchronous=NORMAL`).
+impl Fixture<SqliteStorage> {
+    pub fn sqlite(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
+        let schema = schema(false);
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().expect("create W1 SQLite benchmark directory");
+        let storage = SqliteStorage::open_with_durability(
+            dir.path().join("board.sqlite"),
+            &family_refs,
+            jazz_storage_sqlite::Durability::WalNoSync,
+        )
+        .expect("open W1 SQLite benchmark storage");
+        (
+            dir,
+            Self::new(
+                tasks,
+                comments,
+                activity_events,
+                schema,
+                storage,
+                WriteIdentity::Database,
+            ),
+        )
+    }
+
+    pub fn sqlite_profile_s() -> (TempDir, Self) {
+        Self::sqlite(3_000, 12_000, 9_000)
     }
 }
 

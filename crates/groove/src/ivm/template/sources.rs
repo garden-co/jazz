@@ -65,6 +65,9 @@ fn is_external_leaf(graph: &GraphBuilder) -> bool {
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::TypedTemplate { .. }
         | GraphBuilder::TemplateInput { input: Some(_), .. } => true,
+        // A lookup reads its table by the keys of its input: the whole
+        // subtree is one source, like a table or index read.
+        GraphBuilder::Lookup { .. } => true,
         // The ordinary compiler proves a direct-table winner's primary
         // key and chooses its comparison semantics. Keep that proof
         // attached to the fresh leaf, not to an arbitrary input slot.

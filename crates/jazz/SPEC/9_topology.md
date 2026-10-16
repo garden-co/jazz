@@ -50,10 +50,12 @@ roots without that exact profile before interpreting or rewriting records.
 There is no compatibility decoder or automatic migration for the preceding
 profile: its tag 2 had a different meaning, and its Global tag was 3.
 Historical physical fixtures remain immutable rejection receipts, including
-published alpha.54/alpha.56 and the previous current-producer corpora.
+published alpha.54/alpha.56 and the pre-linear corpora; the current-producer
+corpus is regenerated in the current format (SPEC 2 §2.7.1).
 
-Wire protocol v5 carries the same compact core durability tags. Its handshake
-roles are `Client=0`, `Core=1`, `Relay=2`; it admits only exact v5 peers.
+Wire protocol v5 introduced the same compact core durability tags, and v6
+(linear row-state history, ch. 8) keeps them. Their handshake roles are
+`Client=0`, `Core=1`, `Relay=2`; a current peer admits only exact v6 peers.
 The Rust tools facade encodes `Local=0`, `GlobalServer=1`. These byte-level
 contracts are pinned independently; serializers' default ordering is not the
 compatibility contract. Read-view keys use `JRVK` version 2 because their tier

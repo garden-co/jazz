@@ -3,7 +3,7 @@
 //! The wire layer is intentionally thinner than [`crate::protocol`]: it owns
 //! link/session negotiation, feature discovery, binary framing, and structured
 //! protocol errors. Channel payloads carry the canonical encoding of
-//! [`crate::protocol::SyncMessage`]; current v5 byte fixtures pin both the
+//! [`crate::protocol::SyncMessage`]; current v6 byte fixtures pin both the
 //! transport frames and semantic messages.
 
 pub mod channel_credit;
@@ -14,7 +14,7 @@ use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{AuthorSubject, NodeUuid};
-use crate::protocol::SyncMessage;
+use crate::protocol::{SyncMessage, with_message_descriptor_table};
 use crate::protocol_limits::{
     MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
 };
@@ -24,14 +24,14 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 5;
+pub const WIRE_PROTOCOL_VERSION: u16 = 6;
 
-/// Frozen v5 full-frame artifact rejection corpus. NAPI and WASM execute every
+/// Frozen v6 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
 /// rejection cases, through this module's production decoders. This is
 /// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
-    include_str!("../../../fixtures/wire_frame_artifact_corpus_v5.json");
+    include_str!("../../../fixtures/wire_frame_artifact_corpus_v6.json");
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -59,9 +59,9 @@ pub enum WireFrame {
     Hello(WireHello),
     /// Structured protocol/session error.
     Error(WireError),
-    /// One ordered channel extent. Postcard-v1 enum tag 2 within wire v5.
+    /// One ordered channel extent. Postcard-v1 enum tag 2 within wire v6.
     Channel(WireChannelEnvelope),
-    /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v5.
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v6.
     ChannelCredit(WireChannelCredit),
 }
 
@@ -493,7 +493,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     decode_postcard_exact(bytes)
 }
 
-/// Exercise the owning v5 frame and payload decoders for the generated-host
+/// Exercise the owning v6 frame and payload decoders for the generated-host
 /// compatibility matrix.
 ///
 /// This deliberately has no transport, queue, or session side effects.  The
@@ -519,6 +519,14 @@ pub fn validate_frames_for_artifact_corpus(
     let mut receiver = stream_backend::OrderedChannelBackend::new(context.clone())?;
     let mut pending = std::collections::BTreeSet::new();
     for bytes in frames {
+        // A Hello's version range is read before its version-scoped body
+        // (`INV-WIRE-2`), as a real peer does.
+        if wire_hello_version_range(bytes).is_some() {
+            decode_hello_frame(bytes)
+                .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+                .map_err(|error| format!("hello negotiation rejected: {}", error.message))?;
+            continue;
+        }
         match decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))? {
             WireFrame::Hello(hello) => {
                 negotiate_wire(&hello, negotiated_features)
@@ -547,6 +555,10 @@ pub fn validate_frames_for_artifact_corpus(
 }
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
+///
+/// Every row version in the message shares one descriptor table: a row
+/// descriptor is written once, at its first use, and later rows reference it
+/// (`JVRR` v3, SPEC 16).
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
     // Our encoder owns correctness; do not decode/revalidate its input rows.
     if matches!(message, SyncMessage::ViewUpdate(_)) {
@@ -554,15 +566,19 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
         // encoding it holds the old and new allocation at each doubling and
         // leaves up to twice its bytes queued, so size it exactly first.
         let len = encoded_sync_message_len(message)?;
-        return postcard::to_extend(message, Vec::with_capacity(len));
+        return with_message_descriptor_table(|| {
+            postcard::to_extend(message, Vec::with_capacity(len))
+        });
     }
-    to_allocvec(message)
+    with_message_descriptor_table(|| to_allocvec(message))
 }
 
 /// Exact byte length `encode_sync_message` would produce, without allocating
 /// or copying the encoding. For diagnostics that only need the size.
 pub fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
-    postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+    with_message_descriptor_table(|| {
+        postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+    })
 }
 
 /// Serialize a semantic message only when its required capabilities were
@@ -594,7 +610,7 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     // Wire receipts and replay fixtures name bytes, not only deserialized
     // values. `decode_postcard_exact` already rejects any alternate postcard
     // representation of the same transaction/version message.
-    let message: SyncMessage = decode_postcard_exact(bytes)?;
+    let message: SyncMessage = with_message_descriptor_table(|| decode_postcard_exact(bytes))?;
     message
         .validate_wire_contract()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
@@ -605,7 +621,7 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
 /// Trust is assigned locally when the transport is installed, never on the wire.
 #[doc(hidden)]
 pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    postcard::from_bytes(bytes)
+    with_message_descriptor_table(|| postcard::from_bytes(bytes))
 }
 
 pub use crate::postcard_exact::decode_postcard_exact;
@@ -829,26 +845,69 @@ pub enum TransportError {
     Failed(String),
 }
 
+fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
+    if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedProtocolVersion,
+        WireRetry::Never,
+        format!(
+            "unsupported wire protocol advertisement: remote {min}..={max}, expected {}..={}",
+            WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION
+        ),
+    ))
+}
+
+/// The cross-version prefix of a `Hello` frame: the `WireFrame::Hello` tag and
+/// the advertised `min_protocol_version..=max_protocol_version` range.
+///
+/// This prefix, and the complete `WireFrame::Error` layout with its baseline
+/// codes, are the only bytes every wire version shares. Everything after the
+/// range is scoped to the advertised version, so a receiver reads the range
+/// before it decodes the rest (SPEC 8 §8.1.1, "Forward compatibility of tagged
+/// unions"). Returns `None` when the bytes do not start with that prefix.
+pub fn wire_hello_version_range(bytes: &[u8]) -> Option<(u16, u16)> {
+    let (tag, rest) = take_from_bytes::<u32>(bytes).ok()?;
+    if tag != 0 {
+        return None;
+    }
+    let ((min, max), _) = take_from_bytes::<(u16, u16)>(rest).ok()?;
+    Some((min, max))
+}
+
+/// Decode a peer's handshake frame, reporting a foreign wire version as
+/// `UnsupportedProtocolVersion` before decoding the version-scoped body.
+///
+/// A peer on another wire version may lay out the rest of its `Hello`
+/// differently. Decoding that body with this version's layout would turn a
+/// version mismatch into `MalformedFrame` and hide the actionable error from
+/// both sides.
+pub fn decode_hello_frame(bytes: &[u8]) -> Result<WireHello, WireError> {
+    if let Some((min, max)) = wire_hello_version_range(bytes) {
+        check_wire_protocol_range(min, max)?;
+    }
+    match decode_frame(bytes) {
+        Ok(WireFrame::Hello(hello)) => Ok(hello),
+        Ok(_) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            "expected the first wire frame to be WireFrame::Hello",
+        )),
+        Err(error) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("malformed WireFrame::Hello: {error}"),
+        )),
+    }
+}
+
 /// Negotiate the sole wire version and optional feature intersection.
 pub fn negotiate_wire(
     remote: &WireHello,
     local_features: WireFeatures,
 ) -> Result<WireNegotiated, WireError> {
-    if remote.min_protocol_version != WIRE_PROTOCOL_VERSION
-        || remote.max_protocol_version != WIRE_PROTOCOL_VERSION
-    {
-        return Err(WireError::new(
-            WireErrorCode::UnsupportedProtocolVersion,
-            WireRetry::Never,
-            format!(
-                "unsupported wire protocol advertisement: remote {}..={}, expected {}..={}",
-                remote.min_protocol_version,
-                remote.max_protocol_version,
-                WIRE_PROTOCOL_VERSION,
-                WIRE_PROTOCOL_VERSION
-            ),
-        ));
-    }
+    check_wire_protocol_range(remote.min_protocol_version, remote.max_protocol_version)?;
     let features = remote.features & local_features;
     Ok(WireNegotiated {
         protocol_version: WIRE_PROTOCOL_VERSION,
@@ -1546,7 +1605,8 @@ mod tests {
             // postcard directly to construct the malformed bytes so this
             // exercises receive-side validation rather than merely proving
             // the guarded sender rejects its own invalid value.
-            let encoded = to_allocvec(&message).expect("serialize malformed fixture bytes");
+            let encoded = with_message_descriptor_table(|| to_allocvec(&message))
+                .expect("serialize malformed fixture bytes");
             assert!(
                 decode_sync_message(&encoded).is_err(),
                 "malformed runs must be rejected at either view-update seam"
@@ -1599,7 +1659,7 @@ mod tests {
         // Deliberately bypass `encode_sync_message`: this helper is used only
         // for receiver-boundary tests of malformed data which a remote peer
         // can serialize without our sender-side guard.
-        decode_sync_message(&to_allocvec(&message).unwrap())
+        decode_sync_message(&with_message_descriptor_table(|| to_allocvec(&message)).unwrap())
     }
 
     fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
@@ -1620,9 +1680,12 @@ mod tests {
     // a redundant receipt pass or prove the locally selected trust boundary.
     #[test]
     fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
-        let message = SyncMessage::RowVersionPayloads {
-            version_bundles: version_bundles(2),
-        };
+        let message = view_update_with_carriers(
+            version_bundles(2)
+                .into_iter()
+                .map(VersionCarrier::Bundle)
+                .collect(),
+        );
         crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
         let payload = encode_sync_message(&message).unwrap();
         assert_eq!(
@@ -1639,6 +1702,76 @@ mod tests {
         let session = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
         assert_eq!(session.decode_semantic_payload(&payload).unwrap(), message);
         assert!(crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()) > 0);
+    }
+
+    // Byte-level: the descriptor table is a wire encoding property (#3380).
+    /// A 1k-row x 10-column view update writes its row descriptor once: the
+    /// first row defines it and every later row references it, so the message
+    /// is smaller than the per-row-descriptor encoding by at least one
+    /// descriptor per extra row, and it decodes back to the same rows.
+    #[test]
+    fn view_update_rows_share_one_descriptor_definition() {
+        let columns = (0..10)
+            .map(|column| ColumnSchema::new(format!("column_{column}"), ColumnType::String))
+            .collect::<Vec<_>>();
+        let table = TableSchema::new("wide", columns);
+        let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+        let node = NodeUuid::from_bytes([0x11; 16]);
+        let author = AuthorSubject::for_test_bytes([0x55; 16]);
+        let bundles = (0..1_000u64)
+            .map(|index| {
+                let cells = (0..10)
+                    .map(|column| (format!("column_{column}"), format!("{index}-{column}")))
+                    .collect::<BTreeMap<_, _>>();
+                let mut bundle = version_bundles(1).remove(0);
+                bundle.tx.tx_id = TxId::new(TxTime(1_000 + index), node);
+                bundle.versions = vec![
+                    VersionRecord::from_cells(
+                        &table,
+                        schema_version,
+                        RowUuid::from_bytes(uuid::Uuid::from_u128(u128::from(index)).into_bytes()),
+                        author,
+                        1_000 + index,
+                        author,
+                        1_000 + index,
+                        &cells,
+                        None,
+                    )
+                    .unwrap(),
+                ];
+                bundle
+            })
+            .collect::<Vec<_>>();
+        let descriptor = groove::records::encode_persisted_record_descriptor(
+            bundles[0].versions[0].record().descriptor(),
+        )
+        .unwrap();
+        let message = view_update_with_carriers(
+            crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
+        );
+
+        let encoded = encode_sync_message(&message).unwrap();
+        assert_eq!(encoded.len(), encoded_sync_message_len(&message).unwrap());
+        let definitions = encoded
+            .windows(descriptor.len())
+            .filter(|window| *window == descriptor.as_slice())
+            .count();
+        assert_eq!(definitions, 1);
+        // Without a message scope every row defines its descriptor inline,
+        // which is the previous per-row layout's size.
+        let per_row = to_allocvec(&message).unwrap();
+        assert!(
+            encoded.len() + 999 * descriptor.len() <= per_row.len(),
+            "table {} bytes vs per-row {} bytes ({} byte descriptor)",
+            encoded.len(),
+            per_row.len(),
+            descriptor.len()
+        );
+        assert_eq!(decode_sync_message(&encoded).unwrap(), message);
+        assert_eq!(decode_sync_message_trusted(&encoded).unwrap(), message);
+        // Per-row inline definitions of one descriptor are not this
+        // encoder's spelling and are rejected.
+        assert!(decode_sync_message(&per_row).is_err());
     }
 
     fn version_bundles(count: usize) -> Vec<VersionBundle> {
@@ -1668,7 +1801,6 @@ mod tests {
                             &table,
                             schema_version,
                             RowUuid::from_bytes([index as u8; 16]),
-                            Vec::new(),
                             author,
                             1_000 + index as u64,
                             author,
@@ -1949,17 +2081,6 @@ mod tests {
                 global_time: Some(GlobalTime(7)),
                 durability: Some(DurabilityTier::Global),
             },
-            SyncMessage::FetchRowVersions {
-                requests: vec![crate::protocol::RowVersionRef::new(
-                    "todos",
-                    RowUuid::from_bytes([0x77; 16]),
-                    tx_id,
-                )],
-                delegated_session: None,
-            },
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
-            },
         ]
     }
 
@@ -2085,10 +2206,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v5_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v6_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 5,
-            max_protocol_version: 5,
+            min_protocol_version: 6,
+            max_protocol_version: 6,
             features: FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2155,8 +2276,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v5() {
-        for (min_protocol_version, max_protocol_version) in [(0, 5), (4, 5), (5, 15)] {
+    fn negotiation_rejects_version_ranges_even_when_they_include_v6() {
+        for (min_protocol_version, max_protocol_version) in
+            [(0, 6), (3, 6), (4, 6), (5, 6), (6, 15)]
+        {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2172,10 +2295,36 @@ mod tests {
         }
     }
 
-    /// Alice's v5 Core rejects Bob's v3 Core before predecessor snapshot decoding.
-    /// This internal boundary test pins negotiation, which row equality cannot observe.
+    /// Alice's v6 Core rejects Bob's v5 Core, which carries read-tier durability
+    /// tags but predates linear row-state history, before any payload decoding.
+    /// Internal boundary coverage is required because old bytes cannot be authored by v6 APIs.
     #[test]
-    fn wire_v5_rejects_single_predecessor_v3_peers() {
+    fn wire_v6_rejects_v5_read_tier_peers_before_linear_history_decode() {
+        let old = decode_frame(&[0, 5, 5, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v4 Core, which predates linear row-state
+    /// history and the compact durability tags, before any row payload decoding.
+    #[test]
+    fn wire_v6_rejects_dag_history_v4_peers() {
+        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v3 Core before predecessor snapshot decoding.
+    #[test]
+    fn wire_v6_rejects_single_predecessor_v3_peers() {
         let hello = WireHello {
             min_protocol_version: 3,
             max_protocol_version: 3,
@@ -2186,22 +2335,11 @@ mod tests {
         assert!(negotiate_wire(&hello, 0).is_err());
     }
 
-    /// Alice rejects Bob's previous wire layout before interpreting its tier tags.
-    /// Internal boundary coverage is required because old bytes cannot be authored by v5 APIs.
+    /// Alice's v6 Core rejects Bob's v2 Core before policy snapshot decoding.
+    /// This internal boundary test pins negotiation, which row equality cannot observe.
     #[test]
-    fn wire_v5_rejects_v4_before_compact_durability_decode() {
-        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
-        let WireFrame::Hello(hello) = old else {
-            panic!("historical Hello")
-        };
-        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
-        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
-        assert_eq!(error.retry, WireRetry::Never);
-    }
-
-    #[test]
-    fn wire_v5_rejects_v2_before_policy_snapshot_decode() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+    fn wire_v6_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         let remote = WireHello {
             min_protocol_version: 2,
             max_protocol_version: 2,
@@ -2217,13 +2355,13 @@ mod tests {
             negotiate_wire(&current, current_wire_features())
                 .unwrap()
                 .protocol_version,
-            5
+            6
         );
     }
 
     #[test]
-    fn wire_v5_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+    fn wire_v6_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2240,7 +2378,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v5_rejects_v15_peer_before_payload_decode() {
+    fn wire_v6_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2250,11 +2388,122 @@ mod tests {
         };
 
         let error = negotiate_wire(&v15_peer, current_wire_features())
-            .expect_err("v15 encoding must fail during the v5 handshake");
+            .expect_err("v15 encoding must fail during the v6 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 5);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Bob's later wire version keeps the cross-version `Hello` prefix but may
+    /// lay out the rest differently. Alice reads only the prefix and reports a
+    /// version mismatch instead of a malformed frame (#2468).
+    #[test]
+    fn hello_version_range_is_read_before_the_version_scoped_body() {
+        let current = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Core,
+            current_wire_features(),
+        )))
+        .unwrap();
+        assert_eq!(
+            wire_hello_version_range(&current),
+            Some((WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION))
+        );
+        assert_eq!(
+            decode_hello_frame(&current).unwrap().role,
+            WirePeerRole::Core
+        );
+
+        let next = WIRE_PROTOCOL_VERSION + 1;
+        for (min, max) in [(next, next), (WIRE_PROTOCOL_VERSION, next), (1, 1)] {
+            let mut foreign = postcard::to_allocvec(&(0u32, min, max)).unwrap();
+            foreign.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
+            assert!(
+                decode_frame(&foreign).is_err(),
+                "body is not this version's layout"
+            );
+            assert_eq!(wire_hello_version_range(&foreign), Some((min, max)));
+            let error = decode_hello_frame(&foreign).unwrap_err();
+            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(error.retry, WireRetry::Never);
+            assert!(
+                validate_frame_for_artifact_corpus(&foreign, FEATURE_NONE)
+                    .unwrap_err()
+                    .contains("unsupported wire protocol advertisement")
+            );
+        }
+    }
+
+    #[test]
+    fn hello_decoder_keeps_exact_decoding_for_this_version() {
+        let mut suffixed = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        suffixed.push(0);
+        assert_eq!(
+            decode_hello_frame(&suffixed).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+
+        let error_frame = encode_frame(&WireFrame::Error(WireError::new(
+            WireErrorCode::Internal,
+            WireRetry::Never,
+            "",
+        )))
+        .unwrap();
+        assert_eq!(wire_hello_version_range(&error_frame), None);
+        assert_eq!(
+            decode_hello_frame(&error_frame).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+        assert_eq!(wire_hello_version_range(&[]), None);
+        assert_eq!(wire_hello_version_range(&[0, 6]), None);
+    }
+
+    /// The bytes every wire version shares: the `Hello` version prefix and the
+    /// complete `Error` frame with its baseline codes and retries. A peer that
+    /// rejects a foreign version answers with these, so they can never change
+    /// in any later version (SPEC 8 §8.1.1, #2468).
+    #[test]
+    fn cross_version_handshake_bytes_are_frozen() {
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        assert_eq!(
+            &hello[..3],
+            &[0, WIRE_PROTOCOL_VERSION as u8, WIRE_PROTOCOL_VERSION as u8]
+        );
+
+        let codes = [
+            (WireErrorCode::UnsupportedProtocolVersion, 0u8),
+            (WireErrorCode::UnsupportedFeature, 1),
+            (WireErrorCode::MalformedFrame, 2),
+            (WireErrorCode::AuthFailed, 3),
+            (WireErrorCode::Backpressure, 4),
+            (WireErrorCode::Internal, 5),
+            (WireErrorCode::NotReady, 6),
+        ];
+        let retries = [
+            (WireRetry::Never, 0u8),
+            (WireRetry::AfterAuth, 1),
+            (WireRetry::AfterResume, 2),
+            (WireRetry::Later, 3),
+        ];
+        for (code, code_tag) in codes {
+            for (retry, retry_tag) in retries {
+                let frame = WireFrame::Error(WireError::new(code, retry, "v"));
+                let bytes = encode_frame(&frame).unwrap();
+                assert_eq!(bytes, [1, code_tag, retry_tag, 1, b'v']);
+                assert_eq!(decode_frame(&bytes).unwrap(), frame);
+            }
+        }
+        for unassigned in [[1, 7, 0, 0], [1, 0, 4, 0]] {
+            assert!(decode_frame(&unassigned).is_err());
+        }
     }
 
     #[test]

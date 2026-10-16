@@ -56,8 +56,8 @@ use crate::protocol::{
     VersionBundleScope, VersionCarrier,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_ROW_VERSIONS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_REGISTRATION_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_FRAGMENT_REASSEMBLY_IDLE_MS, MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_REGISTRATION_BYTES,
+    MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, Predicate, RelationOrderBy,
@@ -69,14 +69,12 @@ use crate::time::{GlobalTime, TxTime};
 use crate::tx::TxId;
 use crate::wire::{
     WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame, WireRetry, WireSession,
-    WireTransport, current_wire_features, decode_frame, decode_sync_message, encode_frame,
-    encode_sync_message,
+    WireTransport, current_wire_features, decode_frame, encode_frame,
 };
 
 use super::peer_connection::{
-    PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
-    aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
-    send_subscriber_with_sync_context,
+    SubscriberConnectionState, UpstreamConnectionState, aggregate_authorization_scope_bounds,
+    authorization_scope_receipt_matches_transport_context, send_subscriber_with_sync_context,
 };
 
 #[test]
@@ -140,9 +138,11 @@ mod lifecycle;
 mod mutations;
 mod node_runtime;
 mod peer_connection;
+mod read_your_writes;
 mod reads;
 mod reference_metadata_migration;
 mod subscriptions;
 mod support;
 mod transactions;
+mod upload_order;
 mod wire_transport;

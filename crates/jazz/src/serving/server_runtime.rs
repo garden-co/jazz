@@ -18,7 +18,7 @@ use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
 use crate::protocol::MigrationLens;
 use crate::schema::JazzSchema;
 use crate::serving::{
-    AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
+    AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession, ShellResult,
     StorageConfig,
 };
 use crate::tools::native_transport_connector::{
@@ -1168,12 +1168,8 @@ impl ServerRuntimeHandle {
     pub async fn trusted_catalogue_snapshot(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {
-        self.run(move |shell| {
-            shell
-                .trusted_catalogue_snapshot()
-                .map_err(|error| error.to_string())
-        })
-        .await
+        self.run(move |shell| shell.trusted_catalogue_snapshot())
+            .await
     }
 
     /// Validate a deployment against the live physical catalogue without mutation.
@@ -1182,12 +1178,8 @@ impl ServerRuntimeHandle {
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
-        self.run(move |shell| {
-            shell
-                .validate_deployment_snapshot(snapshot)
-                .map_err(|error| error.to_string())
-        })
-        .await
+        self.run(move |shell| shell.validate_deployment_snapshot(snapshot))
+            .await
     }
 
     /// Atomically install the complete committed administrative deployment.
@@ -1198,12 +1190,8 @@ impl ServerRuntimeHandle {
     ) -> Result<(), String> {
         let result = self
             .run(move |shell| {
-                shell
-                    .apply_trusted_catalogue_snapshot(snapshot)
-                    .map_err(|error| error.to_string())?;
-                shell
-                    .set_permissions_ready(true)
-                    .map_err(|error| error.to_string())
+                shell.apply_trusted_catalogue_snapshot(snapshot)?;
+                shell.set_permissions_ready(true)
             })
             .await;
         if result.is_ok() {
@@ -1220,12 +1208,8 @@ impl ServerRuntimeHandle {
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
-        self.run(move |shell| {
-            shell
-                .apply_trusted_catalogue_snapshot(snapshot)
-                .map_err(|error| error.to_string())
-        })
-        .await
+        self.run(move |shell| shell.apply_trusted_catalogue_snapshot(snapshot))
+            .await
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -1245,12 +1229,7 @@ impl ServerRuntimeHandle {
     pub async fn trusted_catalogue_snapshot_for_test(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {
-        self.run(move |shell| {
-            shell
-                .trusted_catalogue_snapshot()
-                .map_err(|error| error.to_string())
-        })
-        .await
+        self.trusted_catalogue_snapshot().await
     }
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
@@ -1429,16 +1408,14 @@ impl ServerRuntimeHandle {
     ) -> Result<ServerSession, String> {
         let (session, credits) = self
             .run(move |shell| {
-                let session = shell
-                    .accept_subscriber_session_with_claims_and_trust_and_context(
-                        identity,
-                        claims,
-                        trust,
-                        negotiated_features,
-                        session_context,
-                        link_admission,
-                    )
-                    .map_err(|error| error.to_string())?;
+                let session = shell.accept_subscriber_session_with_claims_and_trust_and_context(
+                    identity,
+                    claims,
+                    trust,
+                    negotiated_features,
+                    session_context,
+                    link_admission,
+                )?;
                 Ok((session, shell.session_channel_credits(session).ok()))
             })
             .await?;
@@ -1463,9 +1440,7 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
-                shell
-                    .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
-                    .map_err(|error| error.to_string())
+                shell.publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
             })
             .await;
         if result.is_ok() {
@@ -1481,12 +1456,8 @@ impl ServerRuntimeHandle {
         revision: u64,
         schema: JazzSchema,
     ) -> Result<(), String> {
-        self.run(move |shell| {
-            shell
-                .validate_schema_activation(revision, schema)
-                .map_err(|error| error.to_string())
-        })
-        .await
+        self.run(move |shell| shell.validate_schema_activation(revision, schema))
+            .await
     }
 
     /// Install the catalogue's active schema and permissions at one authority revision.
@@ -1501,11 +1472,7 @@ impl ServerRuntimeHandle {
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
-            .run(move |shell| {
-                shell
-                    .activate_schema(revision, schema, permissions)
-                    .map_err(|error| error.to_string())
-            })
+            .run(move |shell| shell.activate_schema(revision, schema, permissions))
             .await;
         if result.is_ok() {
             notify_shell_activity(&activity_tx);
@@ -1682,13 +1649,7 @@ impl ServerRuntimeHandle {
                 if reply.is_closed() {
                     return;
                 }
-                let result = match shell.tick_async().await {
-                    Ok(()) => shell
-                        .take_frames(session)
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error.to_string()),
-                };
-                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                let (result, made_progress) = tick_and_take(shell, session).await;
                 let _ = reply.send(result);
                 if made_progress {
                     notify_shell_activity(&activity_tx);
@@ -1702,21 +1663,8 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         self.run_async(move |shell| {
             Box::pin(async move {
-                let result = match shell.tick_async().await {
-                    Ok(()) => shell
-                        .take_frames(session)
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error.to_string()),
-                };
-                // Progress-based re-arm: a tick that yielded frames may have more
-                // behind it (large resets span many ticks), so schedule another.
-                // Empty ticks do NOT re-arm — that unconditional re-arm was the
-                // consolidation-spin feeder. One notification must never buy an
-                // unbounded loop, and delivery must never stall mid-reset; frames
-                // produced is exactly the signal that separates the two.
-                if let Ok(frames) = &result
-                    && !frames.is_empty()
-                {
+                let (result, made_progress) = tick_and_take(shell, session).await;
+                if made_progress {
                     notify_shell_activity(&activity_tx);
                 }
                 result
@@ -1732,9 +1680,7 @@ impl ServerRuntimeHandle {
     ) -> Result<(), String> {
         let activity_tx = self.inner.activity_tx.clone();
         self.run(move |shell| {
-            let result = shell
-                .connect_upstream(transport)
-                .map_err(|error| error.to_string());
+            let result = shell.connect_upstream(transport);
             if result.is_ok() {
                 notify_shell_activity(&activity_tx);
             }
@@ -1839,14 +1785,14 @@ impl ServerRuntimeHandle {
 
     async fn run<T>(
         &self,
-        run_on_shell: impl FnOnce(&mut InMemoryServerShell) -> Result<T, String> + Send + 'static,
+        run_on_shell: impl FnOnce(&mut InMemoryServerShell) -> ShellResult<T> + Send + 'static,
     ) -> Result<T, String>
     where
         T: Send + 'static,
     {
         let (reply, response) = oneshot::channel();
         self.send(ServerShellCommand::Run(Box::new(move |shell| {
-            let _ = reply.send(run_on_shell(shell));
+            let _ = reply.send(run_on_shell(shell).map_err(|error| error.to_string()));
         })))?;
         response
             .await
@@ -1875,6 +1821,35 @@ impl ServerRuntimeHandle {
             .await
             .map_err(|_| "server shell thread dropped async response".to_owned())?
     }
+}
+
+/// Tick once and take one session's frames, reporting whether to re-arm.
+///
+/// Progress-based re-arm: a tick that yielded frames may have more behind it
+/// (large resets span many ticks), so schedule another. Empty ticks do NOT
+/// re-arm — that unconditional re-arm was the consolidation-spin feeder. One
+/// notification must never buy an unbounded loop, and delivery must never
+/// stall mid-reset; frames produced is exactly the signal that separates the
+/// two.
+///
+/// "Produced" covers every session, not only this one: the tick serves all
+/// connections, so it can queue another session's update while this session
+/// receives nothing. Only that session's own activity wake drains it, so
+/// announce it here. The counter advances only when a tick queues new output,
+/// so a session that never drains its backlog cannot re-arm an empty tick.
+async fn tick_and_take(
+    shell: &mut InMemoryServerShell,
+    session: ServerSession,
+) -> (Result<Vec<AbiBytes>, String>, bool) {
+    let queued_before = shell.session_frames_queued();
+    let result = shell
+        .tick_async()
+        .await
+        .and_then(|()| shell.take_frames(session))
+        .map_err(|error| error.to_string());
+    let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty())
+        || shell.session_frames_queued() != queued_before;
+    (result, made_progress)
 }
 
 fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
@@ -2658,15 +2633,11 @@ mod tests {
             .run_async(move |shell| {
                 Box::pin(async move {
                     let state = shell.sessions[failed.transport].as_ref().unwrap();
-                    match &state.connection {
-                        super::super::ShellPeerConnection::Memory(connection)
-                        | super::super::ShellPeerConnection::Durable(connection) => {
-                            connection
-                                .lock()
-                                .await
-                                .set_incomplete_receive_timeout_for_test(20);
-                        }
-                    }
+                    state
+                        .connection
+                        .lock()
+                        .await
+                        .set_incomplete_receive_timeout_for_test(20);
                     Ok(())
                 })
             })

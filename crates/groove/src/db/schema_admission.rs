@@ -181,6 +181,18 @@ impl Database {
         // any storage/decode error, requires reopening instead of using a
         // partially rebuilt instance.
         self.poisoned = true;
+        // Declared indexes' id registrations become durable before any
+        // rebuilt entry that uses them.
+        let registrations = self.ivm_runtime.index_ids().borrow().pending();
+        if !registrations.is_empty() {
+            self.storage
+                .write_many(registrations.operations().to_vec())
+                .await?;
+            self.ivm_runtime
+                .index_ids()
+                .borrow_mut()
+                .mark_persisted(&registrations);
+        }
         self.ivm_runtime
             .rebuild_declared_indexes(&self.storage)
             .await?;

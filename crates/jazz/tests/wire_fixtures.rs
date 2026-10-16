@@ -13,7 +13,7 @@ use jazz::ids::{
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
     MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRefEntry,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
     VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
@@ -38,11 +38,11 @@ use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_message_frames_v5.json"
+    "/fixtures/wire_message_frames_v6.json"
 );
 const HELLO_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/fixtures/wire_hello_frames_v5.json"
+    "/fixtures/wire_hello_frames_v6.json"
 );
 const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -624,35 +624,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
             })),
         ),
-        (
-            "fetch_row_versions_todos",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: None,
-            },
-        ),
-        (
-            "fetch_row_versions_delegated_session_claim_snapshot",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: Some(DelegatedSessionBinding {
-                    identity: AuthorSubject::for_test_bytes([0x74; 16]),
-                    claims: BTreeMap::from([(
-                        "user_id".to_owned(),
-                        Value::String("delegated-repair-user".to_owned()),
-                    )]),
-                }),
-            },
-        ),
-        (
-            "row_version_payloads_empty",
-            "RowVersionPayloads",
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
-            },
-        ),
     ]
     .into_iter()
     .map(|(name, family, mut message)| {
@@ -673,6 +644,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
+    // A non-final part of an oversized update (tag 28): the update's payload
+    // shape, with the inventory reserved for the final `ViewUpdate`.
+    let SyncMessage::ViewUpdate(mut part) = snapshot.clone() else {
+        unreachable!()
+    };
+    part.peer_payload_inventory = PeerPayloadInventory::default();
     let SyncMessage::ViewUpdate(mut delta) = snapshot.clone() else {
         unreachable!()
     };
@@ -689,6 +666,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "view_update_physical_delta",
         "ViewUpdate",
         SyncMessage::ViewUpdate(delta),
+    ));
+    messages.push((
+        "view_update_part_non_final",
+        "ViewUpdatePart",
+        SyncMessage::ViewUpdatePart(part),
     ));
     let (_, _, snapshot) = messages
         .iter()
@@ -750,7 +732,6 @@ fn mixed_version_carriers(
                         table,
                         schema_version,
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
-                        Vec::new(),
                         author,
                         100 + index,
                         author,
@@ -803,7 +784,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v5",
+        fixture_set: "jazz-wire-message-frames-v6",
         codec: "postcard Vec<Vec<u8>> of WireFrame::Channel carrying encode_sync_message(..)",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: 0,
@@ -876,7 +857,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         .collect();
 
     HelloManifest {
-        fixture_set: "jazz-wire-hello-frames-v5",
+        fixture_set: "jazz-wire-hello-frames-v6",
         codec: "postcard WireFrame::Hello(WireHello)",
         fixtures,
     }
@@ -893,14 +874,14 @@ fn wire_hello_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_hello_frames_v5.json");
+    let expected = include_str!("../fixtures/wire_hello_frames_v6.json");
     assert_eq!(actual, expected, "wire Hello fixtures changed");
 }
 
 #[test]
 fn wire_hello_frame_fixtures_decode_exactly() {
     let fixture_manifest: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v6.json"))
             .expect("wire Hello fixture manifest deserializes");
     for fixture in fixture_manifest.fixtures {
         let frame_bytes = parse_hex(&fixture.frame_hex);
@@ -974,11 +955,11 @@ fn channel_frames(payload: Vec<u8>, version: u16) -> Vec<Vec<u8>> {
     frames
 }
 
-/// Pin the final compact v5 tag as well as the message families in the corpus.
-/// A byte-level codec test is needed because public round trips alone would
-/// accept accidental renumbering.
+/// Pin the compact tag v6 shares with post-cleanup v5, as well as the message
+/// families in the corpus. A byte-level codec test is needed because public
+/// round trips alone would accept accidental renumbering.
 #[test]
-fn current_rows_cancel_uses_compact_v5_tag() {
+fn current_rows_cancel_uses_compact_tag() {
     let message = SyncMessage::CurrentRowsCancel {
         request_id: jazz::protocol::PermissionAdviceRequestId([0x42; 16]),
     };
@@ -986,6 +967,150 @@ fn current_rows_cancel_uses_compact_v5_tag() {
     expected.extend_from_slice(&[0x42; 16]);
     assert_eq!(encode_sync_message(&message).unwrap(), expected);
     assert_eq!(decode_sync_message(&expected).unwrap(), message);
+}
+
+/// Wire protocol v6 (linear row-state history over v5's compact durability
+/// tags) refuses every pre-v6 peer at the Hello handshake with the typed
+/// `UnsupportedProtocolVersion`/`Never` error, before any payload is decoded.
+///
+/// Actors: `alice` runs a v6 Core; `bob` still runs a v3 build (alpha.54 to
+/// alpha.57), `carol` a v4 build (multiple schema predecessors, version DAG
+/// history) and `dave` a v5 build (read tiers: compact durability tags, no
+/// Edge role, version DAG history). Their frozen Hello frames, and bob's
+/// Subscribe frame, are replayed verbatim; dave's are every frame of the
+/// frozen `wire_hello_frames_v5.json` corpus.
+///
+/// ```text
+/// bob(v3)   ──Hello 3..=3──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// carol(v4) ──Hello 4..=4──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// dave(v5)  ──Hello 5..=5──► alice(v6) ──✗ UnsupportedProtocolVersion, retry Never
+/// bob(v3)   ──Message v3──► alice(v6) ──✗ no whole-message frame in v6 (never decoded)
+/// bob(v3)   ──ExactVersionSet (tag 2) in a v6 channel message──► ✗ reserved tag, not a Watermark
+/// ```
+///
+/// Exact frames are not a public database API, so this is a codec-level
+/// receipt: the inputs are the bytes the v3, v4 and v5 fixture sets froze.
+#[test]
+fn pre_v6_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
+    assert_eq!(WIRE_PROTOCOL_VERSION, 6);
+    let frozen_v5: HelloManifest =
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
+            .expect("frozen v5 Hello corpus parses");
+    assert_eq!(frozen_v5.fixture_set, "jazz-wire-hello-frames-v5");
+    assert!(!frozen_v5.fixtures.is_empty());
+    let mut old_hellos = vec![
+        // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3 (bob).
+        (3, "000303000000".to_owned()),
+        (
+            3,
+            "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+        (
+            3,
+            "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+        // The same fixture set at wire v4 (carol).
+        (4, "000404000000".to_owned()),
+        (
+            4,
+            "000404010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+        (
+            4,
+            "000404f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02".to_owned(),
+        ),
+    ];
+    // A v3/v4 relay advertised the retired role tag 3 (v5 renumbered Relay to
+    // 2), so its Hello fails frame decoding before negotiation is reached.
+    for hex_frame in [
+        "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "00040488020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+    ] {
+        assert!(
+            jazz::wire::decode_frame(&parse_hex(hex_frame)).is_err(),
+            "an old relay Hello must not decode: {hex_frame}"
+        );
+    }
+    // Every frame of the frozen read-tiers v5 corpus (dave).
+    old_hellos.extend(
+        frozen_v5
+            .fixtures
+            .into_iter()
+            .map(|fixture| (5, fixture.frame_hex)),
+    );
+    for (version, hex_frame) in old_hellos {
+        let WireFrame::Hello(hello) = jazz::wire::decode_frame(&parse_hex(&hex_frame))
+            .expect("an old Hello is a canonical frame")
+        else {
+            panic!("expected a Hello frame");
+        };
+        assert_eq!(
+            (hello.min_protocol_version, hello.max_protocol_version),
+            (version, version)
+        );
+        let error = jazz::wire::negotiate_wire(&hello, jazz::wire::current_wire_features())
+            .expect_err("alice's v6 Core must refuse an old Hello");
+        assert_eq!(
+            error.code,
+            jazz::wire::WireErrorCode::UnsupportedProtocolVersion
+        );
+        assert_eq!(error.retry, jazz::wire::WireRetry::Never);
+        assert!(
+            error
+                .message
+                .contains(&format!("remote {version}..={version}, expected 6..=6")),
+            "{}",
+            error.message
+        );
+    }
+
+    // bob's frozen v3 whole-message Subscribe frame never reaches the
+    // semantic decoder: v6 has no whole-message frame (WireFrame tag 1 is
+    // `Error` since the obsolete message framing was removed).
+    let bob_v3_subscribe = parse_hex(
+        "0103010048061022222222222222222222222222222222102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000000000",
+    );
+    assert!(
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &bob_v3_subscribe,
+            jazz::wire::current_wire_features(),
+        )
+        .is_err(),
+        "a v3 message frame must not be admitted on a v6 link"
+    );
+
+    // Even re-wrapped in a v6 channel message, bob's pre-v6 `ExactVersionSet`
+    // declaration (tag 2) is a reserved tag rather than a `Watermark` prefix.
+    // The v3 frame is `[tag 1][version 3][features 1][no session][len 0x48]`
+    // followed by the semantic payload.
+    assert_eq!(&bob_v3_subscribe[..5], &[1, 3, 1, 0, 0x48]);
+    let mut exact_version_set = bob_v3_subscribe[5..].to_vec();
+    assert_eq!(exact_version_set.len(), 0x48);
+    assert_eq!(
+        exact_version_set.split_off(exact_version_set.len() - 2),
+        [0, 0]
+    );
+    exact_version_set.extend_from_slice(&[1, 2, 0, 0]);
+    assert!(decode_sync_message(&exact_version_set).is_err());
+    assert!(jazz::wire::decode_sync_message_trusted(&exact_version_set).is_err());
+    let rewrapped = channel_frames(exact_version_set, WIRE_PROTOCOL_VERSION);
+    assert!(
+        jazz::wire::validate_frames_for_artifact_corpus(
+            &rewrapped,
+            jazz::wire::current_wire_features()
+        )
+        .is_err()
+    );
+    let watermark = jazz::protocol::KnownStateDeclaration::Watermark {
+        position: GlobalTime(7),
+        authorization_progress: None,
+        supporting_revision: [0x51; 16],
+    };
+    assert_eq!(
+        postcard::to_allocvec(&watermark).unwrap(),
+        [&[3, 7, 0][..], &[0x51; 16][..]].concat(),
+        "Watermark is frozen at tag 3"
+    );
 }
 
 #[test]
@@ -999,7 +1124,7 @@ fn wire_message_frame_fixtures_are_current() {
         return;
     }
 
-    let expected = include_str!("../fixtures/wire_message_frames_v5.json");
+    let expected = include_str!("../fixtures/wire_message_frames_v6.json");
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
@@ -1012,7 +1137,7 @@ fn wire_message_frame_fixtures_are_current() {
 #[test]
 fn wire_message_frame_fixtures_decode_to_expected_messages() {
     let fixture_manifest: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v5.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v6.json"))
             .expect("wire fixture manifest deserializes");
 
     for (fixture, (name, message_family, expected)) in fixture_manifest
@@ -1071,10 +1196,39 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     assert!(decode_sync_message(&bytes).is_err());
 }
 
+/// Retired `SyncMessage` tags stay reserved: a payload under one never
+/// decodes, so a peer that still sends it is refused instead of read as
+/// another message. Tag 29 was the authority's retry-later answer
+/// (`{ tx_id, awaiting }`); its frozen pre-retirement payload is pinned here.
+#[test]
+fn retired_sync_message_tags_are_rejected() {
+    let retired_retry_later =
+        parse_hex("1d0c10111111111111111111111111111111110b1011111111111111111111111111111111");
+    assert_eq!(retired_retry_later[0], 29);
+    assert!(
+        decode_sync_message(&retired_retry_later).is_err(),
+        "tag 29 is reserved and must not decode"
+    );
+    for tag in [14_u8, 15, 29] {
+        let mut bytes = retired_retry_later.clone();
+        bytes[0] = tag;
+        assert!(
+            decode_sync_message(&bytes).is_err(),
+            "reserved SyncMessage tag {tag} must not decode"
+        );
+        assert!(
+            decode_sync_message(&[tag]).is_err(),
+            "reserved SyncMessage tag {tag} must not decode without a payload"
+        );
+    }
+}
+
 #[test]
 fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
     let messages = wire_fixture_messages();
-    for name in ["subscribe_empty_todos_binding", "fetch_row_versions_todos"] {
+    // `FetchRowVersions` (tag 14) is retired in wire v6, so `Subscribe` is the
+    // only direct-policy message left to pin; its retired fixtures are gone.
+    for name in ["subscribe_empty_todos_binding"] {
         let (_, _, message) = messages
             .iter()
             .find(|(candidate, _, _)| *candidate == name)
@@ -1118,16 +1272,16 @@ fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
 #[test]
 fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     let corpus: WireFrameArtifactCorpus = serde_json::from_str(include_str!(
-        "../fixtures/wire_frame_artifact_corpus_v5.json"
+        "../fixtures/wire_frame_artifact_corpus_v6.json"
     ))
     .expect("artifact corpus manifest parses");
-    assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v5");
+    assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v6");
 
     let hello: HelloManifest =
-        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v5.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames_v6.json"))
             .expect("Hello fixture manifest parses");
     let messages: Manifest =
-        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v5.json"))
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames_v6.json"))
             .expect("message fixture manifest parses");
     let negotiated_features = jazz::wire::current_wire_features();
     let executed = execute_complete_artifact_frames(&hello, &messages, negotiated_features)
@@ -1554,12 +1708,12 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                     Row {
                         row_id: todo_one_id,
                         deleted: false,
-                        raw: &todo_one,
+                        raw: std::borrow::Cow::Borrowed(&todo_one),
                     },
                     Row {
                         row_id: todo_two_id,
                         deleted: false,
-                        raw: &todo_two,
+                        raw: std::borrow::Cow::Borrowed(&todo_two),
                     },
                 ],
             },
@@ -1569,7 +1723,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
-                    raw: &note,
+                    raw: std::borrow::Cow::Borrowed(&note),
                 }],
             },
             // Batching is contiguous only: returning to `todos` after `notes`
@@ -1580,7 +1734,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
-                    raw: &deleted_todo,
+                    raw: std::borrow::Cow::Borrowed(&deleted_todo),
                 }],
             },
         ],
@@ -1599,7 +1753,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
-                raw: &todo_one,
+                raw: std::borrow::Cow::Borrowed(&todo_one),
             }],
         }],
         updated: vec![RowBatch {
@@ -1608,7 +1762,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,
-                raw: &note,
+                raw: std::borrow::Cow::Borrowed(&note),
             }],
         }],
         removed: vec![RemovedRowPayload {

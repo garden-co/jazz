@@ -569,10 +569,10 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("accepts the exact v5 Core advertisement for compact durability tags", async () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(5);
+  it("accepts the exact v6 Core advertisement for linear row-state history", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(6);
     const { carrier, socket } = carrierForTest();
-    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 5)]));
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 6)]));
     await expect(carrier.ready()).resolves.toBeDefined();
     carrier.close();
   });
@@ -585,10 +585,14 @@ describe("websocket frame carrier", () => {
       [2, 3],
       [3, 3],
       [3, 4],
+      [3, 15],
       [4, 4],
       [4, 5],
-      [5, 15],
+      [5, 5],
+      [5, 6],
       [4, 15],
+      [5, 15],
+      [6, 15],
       [1, 15],
       [12, 12],
     ]) {
@@ -607,6 +611,28 @@ describe("websocket frame carrier", () => {
       );
       expect(socket.closed).toBe(true);
     }
+  });
+
+  it("reports a later-version server Hello as a version mismatch, whatever its body (#2468)", async () => {
+    // Only the tag and version range are shared across wire versions. A later
+    // server may lay out the rest of its Hello differently.
+    const next = WIRE_PROTOCOL_VERSION + 1;
+    const writer = new PostcardWriter();
+    writer.u64(0); // WireFrame::Hello
+    writer.u64(next);
+    writer.u64(next);
+    writer.u64(0x7f); // a body this version cannot parse
+    writer.u64(0x3fff);
+    writer.u64(42);
+    const laterHello = writer.finish();
+
+    expect(isWireHello(laterHello)).toBe(true);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([laterHello]));
+    await expect(carrier.ready()).rejects.toThrow(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${next}..=${next}`,
+    );
+    expect(socket.closed).toBe(true);
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -969,7 +995,7 @@ type RustWireHelloFixtureManifest = {
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v5.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireFixtureManifest;
@@ -978,7 +1004,7 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
 function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v5.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireHelloFixtureManifest;

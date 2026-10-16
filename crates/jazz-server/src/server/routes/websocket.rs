@@ -28,12 +28,16 @@ use jazz::wire::{
 };
 use tokio::sync::mpsc;
 
-use crate::server::ServerState;
+use crate::server::shutdown::ActiveWebSocketGuard;
+use crate::server::{ServerState, WebSocketEntryRefused};
 
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
+const WS_AT_CAPACITY_RETRY_AFTER_SECS: u64 = 5;
+const WS_KEEPALIVE_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug)]
 pub(crate) struct WebSocketAdmissionState {
@@ -61,19 +65,46 @@ pub(super) async fn ws_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> Response {
-    if state.shutdown.is_shutting_down() {
-        return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(jazz::tools::transport_error::ErrorResponse::internal(
-                "server is shutting down".to_string(),
-            )),
-        )
-            .into_response();
-    }
+    // Reserve the connection slot before upgrading, so a server at its
+    // connection cap refuses with a plain HTTP status the client already
+    // retries with backoff, instead of accepting a socket it cannot afford.
+    let websocket_guard = match state
+        .shutdown
+        .try_enter_websocket_within(state.max_websocket_connections)
+    {
+        Ok(guard) => guard,
+        Err(WebSocketEntryRefused::ShuttingDown) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(jazz::tools::transport_error::ErrorResponse::internal(
+                    "server is shutting down".to_string(),
+                )),
+            )
+                .into_response();
+        }
+        Err(WebSocketEntryRefused::AtCapacity) => {
+            tracing::warn!(
+                max_websocket_connections = state.max_websocket_connections,
+                "refusing websocket upgrade: server is at its connection cap"
+            );
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    WS_AT_CAPACITY_RETRY_AFTER_SECS.to_string(),
+                )],
+                axum::Json(jazz::tools::transport_error::ErrorResponse {
+                    error: "server is at its websocket connection cap".to_string(),
+                    code: jazz::tools::transport_error::ErrorCode::RateLimited,
+                }),
+            )
+                .into_response();
+        }
+    };
 
     ws.max_frame_size(WS_MAX_FRAME_BYTES)
         .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
+        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers, websocket_guard))
 }
 
 #[derive(Clone, Debug)]
@@ -632,12 +663,13 @@ async fn handle_ws_connection(
     mut socket: WebSocket,
     state: Arc<ServerState>,
     request_headers: HeaderMap,
+    _websocket_guard: ActiveWebSocketGuard,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
-    let Some(_websocket_guard) = state.shutdown.try_enter_websocket() else {
+    if state.shutdown.is_shutting_down() {
         close_ws_for_shutdown(&mut socket).await;
         return;
-    };
+    }
 
     let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
         return;
@@ -680,18 +712,13 @@ async fn handle_ws_connection(
         return;
     };
 
-    let Some(WireFrame::Hello(remote_hello)) = decode_single_ws_frame(&first).ok() else {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::MalformedFrame,
-                WireRetry::Never,
-                "websocket expects first wire frame to be WireFrame::Hello",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
+    let remote_hello = match decode_ws_hello(&first) {
+        Ok(hello) => hello,
+        Err(error) => {
+            send_ws_error(&mut socket, error).await;
+            let _ = socket.close().await;
+            return;
+        }
     };
 
     let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
@@ -868,10 +895,32 @@ async fn handle_ws_connection(
     });
     let _writer_guard = SocketWriterGuard(writer.abort_handle());
     let _ = core_server_shell.request_wire_tick(session);
+    // A peer that stops reading and writing, such as a half-open TCP link,
+    // would otherwise hold its session and budgets until the OS gives up.
+    // Ping on a fixed cadence and drop the link once nothing at all has
+    // arrived for the idle timeout; every WebSocket client answers pings.
+    let mut last_inbound = tokio::time::Instant::now();
+    let mut keepalive = tokio::time::interval_at(
+        last_inbound + WS_KEEPALIVE_PING_INTERVAL,
+        WS_KEEPALIVE_PING_INTERVAL,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     'connection: loop {
         tokio::select! {
             _ = &mut writer_terminal => break,
+            _ = keepalive.tick() => {
+                if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
+                    tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
+                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY, reason: "websocket idle timeout".into(),
+                    }))]);
+                    break;
+                }
+                // A full writer queue already proves the link is busy; the
+                // next tick pings again.
+                let _ = writer_tx.try_send(vec![Message::Ping(Default::default())]);
+            }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
                 else if account_identity.is_some() {
@@ -936,7 +985,9 @@ async fn handle_ws_connection(
                     }
                 }
             }
-            msg = socket_reader.next() => match msg {
+            msg = socket_reader.next() => {
+                last_inbound = tokio::time::Instant::now();
+                match msg {
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                         queue_ws_error(&writer_tx, error.into_wire());
@@ -962,6 +1013,7 @@ async fn handle_ws_connection(
                     if writer_tx.try_send(vec![Message::Pong(payload)]).is_err() { break; }
                 }
                 _ => {}
+                }
             },
             changed = activity_rx.changed() => {
                 if changed.is_err() || core_server_shell.request_wire_tick(session).is_err() { break; }
@@ -1002,14 +1054,29 @@ fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
     }
 }
 
-fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    match decode_ws_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => Ok(frames.remove(0)),
-        Ok(_) => Err(postcard::Error::DeserializeBadEncoding),
-        Err(_) => jazz::wire::decode_frame(bytes),
-    }
+/// Decode the opening `Hello`, which arrives as a one-frame batch or a bare
+/// frame. A peer on another wire version gets `UnsupportedProtocolVersion`
+/// even when the rest of its `Hello` uses that version's layout.
+fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
+    let not_hello = || {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            "websocket expects first wire frame to be WireFrame::Hello",
+        )
+    };
+    let frame = match decode_ws_encoded_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
+        Ok(_) => return Err(not_hello()),
+        Err(_) => bytes.to_vec(),
+    };
+    jazz::wire::decode_hello_frame(&frame).map_err(|error| match error.code {
+        WireErrorCode::UnsupportedProtocolVersion => error,
+        _ => not_hello(),
+    })
 }
 
+#[cfg(test)]
 fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
     encoded_frames
@@ -1050,7 +1117,8 @@ async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<
     send_ws_encoded_frames(socket, &encoded).await
 }
 
-fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+/// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
+pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {
@@ -1102,7 +1170,7 @@ mod tests {
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{DurabilityTier, Fate, TxId};
+    use jazz::tx::{Fate, TxId};
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -1152,15 +1220,38 @@ mod tests {
             WirePeerRole::Client,
             current_wire_features(),
         ));
+        let WireFrame::Hello(hello) = &frame else {
+            unreachable!()
+        };
         let raw = encode_frame(&frame).expect("encode raw handshake frame");
-        assert_eq!(decode_single_ws_frame(&raw).unwrap(), frame);
+        assert_eq!(&decode_ws_hello(&raw).unwrap(), hello);
 
         let mut suffixed = raw;
         suffixed.push(0);
-        assert!(
-            decode_single_ws_frame(&suffixed).is_err(),
+        assert_eq!(
+            decode_ws_hello(&suffixed).unwrap_err().code,
+            WireErrorCode::MalformedFrame,
             "a raw frame plus a suffix must not acquire a second handshake interpretation"
         );
+    }
+
+    /// Bob runs a later wire version whose `Hello` body has a different
+    /// layout. Alice's server reads only the shared version prefix and answers
+    /// with the frozen `UnsupportedProtocolVersion` error Bob can decode,
+    /// rather than `MalformedFrame` (SPEC 8 §8.1.1, #2468).
+    #[test]
+    fn later_wire_version_hello_gets_unsupported_version_not_malformed() {
+        let next = WIRE_PROTOCOL_VERSION + 1;
+        let mut later_hello = postcard::to_allocvec(&(0u32, next, next)).unwrap();
+        // A body this version cannot parse: an unknown role and extra fields.
+        later_hello.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
+        let batch = postcard::to_allocvec(&vec![later_hello.clone()]).unwrap();
+
+        for bytes in [later_hello, batch] {
+            let error = decode_ws_hello(&bytes).unwrap_err();
+            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(error.retry, WireRetry::Never);
+        }
     }
 
     #[test]
@@ -4274,6 +4365,60 @@ mod tests {
             ws_live_admissions_for(&state, key),
             WS_PER_IDENTITY_CONNECTION_CAP
         );
+    }
+
+    // Route-boundary test: the process connection cap refuses the upgrade
+    // itself with a retryable HTTP status, and a closed socket frees its slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn websocket_upgrades_beyond_the_connection_cap_get_503() {
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(ws_public_schema_convert())
+            .with_max_websocket_connections(2)
+            .build()
+            .await
+            .expect("build capped websocket server state")
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+
+        let first =
+            open_negotiated_ws_session(addr, &state, AuthorSubject::for_test_bytes([1; 16])).await;
+        let _second =
+            open_negotiated_ws_session(addr, &state, AuthorSubject::for_test_bytes([2; 16])).await;
+
+        match connect_async(ws_url(addr, state.app_id)).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                );
+                assert!(
+                    response
+                        .headers()
+                        .contains_key(axum::http::header::RETRY_AFTER),
+                    "a refused upgrade must tell the client when to retry"
+                );
+            }
+            Err(other) => panic!("expected an HTTP 503 refusal, got {other}"),
+            Ok(_) => panic!("an upgrade beyond the connection cap must be refused"),
+        }
+
+        drop(first);
+        tokio::time::timeout(WS_SETTLE_DEADLINE, async {
+            while state.shutdown.active_websockets() >= 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("closing a socket frees its connection slot");
+        let _third =
+            open_negotiated_ws_session(addr, &state, AuthorSubject::for_test_bytes([3; 16])).await;
     }
 
     // Internal route-boundary test: the admission cap belongs to each

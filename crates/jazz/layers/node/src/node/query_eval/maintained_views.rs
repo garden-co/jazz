@@ -191,6 +191,13 @@ pub struct LocalMaintainedViewSubscriptionFootprint {
     pub total_heap_bytes: usize,
 }
 
+/// Encoded postcard size of `value`, the footprint's proxy for its heap
+/// bytes; an unencodable value counts as zero.
+#[cfg(feature = "testing")]
+fn postcard_len(value: &impl serde::Serialize) -> usize {
+    postcard::to_allocvec(value).map_or(0, |bytes| bytes.len())
+}
+
 impl LocalMaintainedViewSubscription {
     #[doc(hidden)]
     pub fn subscription_id(&self) -> groove::ivm::SubscriptionId {
@@ -250,38 +257,15 @@ impl LocalMaintainedViewSubscription {
             .map(|(name, schema)| name.len() + std::mem::size_of_val(schema))
             .sum::<usize>()
             + self.tables.len() * 96;
-        let result_set_bytes = self
-            .result_set
-            .iter()
-            .map(|member| {
-                postcard::to_allocvec(member)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
-            + self.result_set.len() * 64;
+        let result_set_bytes =
+            self.result_set.iter().map(postcard_len).sum::<usize>() + self.result_set.len() * 64;
         let result_payloads_bytes = self
             .result_payloads
             .iter()
-            .map(|(member, payload)| {
-                postcard::to_allocvec(member)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-                    + postcard::to_allocvec(payload)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or(0)
-            })
+            .map(|(member, payload)| postcard_len(member) + postcard_len(payload))
             .sum::<usize>()
             + self.result_payloads.len() * 96;
-        let program_facts_bytes = self
-            .program_facts
-            .iter()
-            .map(|fact| {
-                postcard::to_allocvec(fact)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
+        let program_facts_bytes = self.program_facts.iter().map(postcard_len).sum::<usize>()
             + self.program_facts.len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
@@ -294,22 +278,14 @@ impl LocalMaintainedViewSubscription {
             + self
                 .result_relation_projection
                 .as_ref()
-                .map(|columns| {
-                    postcard::to_allocvec(columns)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or_default()
-                })
+                .map(postcard_len)
                 .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
             + self
                 .result_relation_projections
                 .as_ref()
-                .map(|projections| {
-                    postcard::to_allocvec(projections)
-                        .map(|bytes| bytes.len())
-                        .unwrap_or_default()
-                })
+                .map(postcard_len)
                 .unwrap_or_default()
             + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {
@@ -569,61 +545,30 @@ where
         .map(|(update, _)| update)
     }
 
-    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
-    #[doc(hidden)]
-    pub async fn drain_local_maintained_view_subscription_preserving_rows(
-        &mut self,
-        local: &mut LocalMaintainedViewSubscription,
-        authoritative_result_key: Option<AuthorityResultKey>,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
-    ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
-        self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
-            local,
-            authoritative_result_key,
-            preserved_row_keys,
-            None,
-        )
-        .await
-    }
-
     #[doc(hidden)]
     pub async fn drain_local_maintained_view_subscription_preserving_rows_with_waker(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_result_key: Option<AuthorityResultKey>,
-        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        _preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
-        let (transitions, suppressed_authoritative_change) = self
+        // The drain no longer preserves rows or suppresses authoritative
+        // changes; the parameter and the constant `false` keep the caller API.
+        let Some(transitions) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_result_key,
-                preserved_row_keys,
                 progress_waker,
             )
-            .await?;
-        let Some(transitions) = transitions else {
-            return Ok((None, suppressed_authoritative_change));
+            .await?
+        else {
+            return Ok((None, false));
         };
         let update = self
             .apply_local_maintained_view_transitions(local, transitions)
             .await?;
-        Ok((Some(update), suppressed_authoritative_change))
-    }
-
-    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
-    #[doc(hidden)]
-    pub async fn drain_local_maintained_view_subscription_state(
-        &mut self,
-        local: &mut LocalMaintainedViewSubscription,
-        authoritative_result_key: Option<AuthorityResultKey>,
-    ) -> Result<bool, Error> {
-        self.drain_local_maintained_view_subscription_state_with_waker(
-            local,
-            authoritative_result_key,
-            None,
-        )
-        .await
+        Ok((Some(update), false))
     }
 
     #[doc(hidden)]
@@ -633,11 +578,10 @@ where
         authoritative_result_key: Option<AuthorityResultKey>,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
-        let (Some(transitions), _) = self
+        let Some(transitions) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_result_key,
-                &BTreeSet::new(),
                 progress_waker,
             )
             .await?
@@ -673,15 +617,14 @@ where
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
-        let (transitions, _) = self
+        let transitions = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 Some(authority_result_key.clone()),
-                &BTreeSet::new(),
                 progress_waker,
             )
-            .await?;
-        let transitions = transitions.unwrap_or_default();
+            .await?
+            .unwrap_or_default();
         // Keep the retained receiver snapshot in lockstep with the exact same
         // terminal batch the caller publishes.  `false` avoids a second
         // facade materialization; state still folds terminal ordering/moves.
@@ -1136,7 +1079,7 @@ where
             .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.layer() == VersionLayer::Deletion {
+        if version.is_deleted() {
             return Ok(None);
         }
         let row = self
@@ -1222,15 +1165,8 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_result_key: Option<AuthorityResultKey>,
-        _preserved_row_keys: &BTreeSet<(String, RowUuid)>,
         progress_waker: Option<&std::task::Waker>,
-    ) -> Result<
-        (
-            Option<super::maintained_subscription_view::ResultTransitions>,
-            bool,
-        ),
-        Error,
-    > {
+    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
         if let Some(authority_result_key) = authoritative_result_key.as_ref()
             && self.local_maintained_authority_reconciliation_due(local, authority_result_key)
         {
@@ -1245,7 +1181,7 @@ where
                 // yet. Do not drain/publish the graph's opening state as a
                 // strict remote result; the runtime will retain the pending
                 // authority reset and try again once the manifest arrives.
-                return Ok((None, false));
+                return Ok(None);
             }
         }
         self.drive_ready_query_runtime_with_waker(progress_waker)
@@ -1254,7 +1190,7 @@ where
         // chunks. Its terminal is incomplete until that work finishes, so do
         // not drain (and let the caller publish) a partial authority state.
         if authoritative_result_key.is_some() && self.covered_receiver_evaluation_pending(local) {
-            return Ok((None, false));
+            return Ok(None);
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut payload_states = BTreeMap::<
@@ -1357,7 +1293,7 @@ where
             fact_states.is_empty(),
             &terminal_operations,
         ) {
-            return Ok((None, false));
+            return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed: false,
@@ -1414,7 +1350,7 @@ where
                 })
                 .collect();
         }
-        Ok((Some(transitions), false))
+        Ok(Some(transitions))
     }
 
     async fn apply_local_maintained_view_transitions(

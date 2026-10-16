@@ -63,10 +63,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted,
             mergeable_open_cells("inserted", "initial-note"),
             None,
-            Vec::new(),
-            Some(101),
-            false,
-        )
+            Some(101),)
         .unwrap();
     actual
         .tx_patch_mergeable(
@@ -93,22 +90,9 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             deleted,
             BTreeMap::new(),
             Some(DeletionEvent::Deleted),
-            Vec::new(),
-            Some(104),
-            false,
-        )
+            Some(104),)
         .unwrap();
 
-    let staged_content_parents = actual
-        .local_content_winner_tx_id("todos", restored)
-        .unwrap()
-        .into_iter()
-        .collect();
-    let staged_deletion_parents = actual
-        .local_deletion_winner_tx_id("todos", restored)
-        .unwrap()
-        .into_iter()
-        .collect();
     actual
         .tx_write_mergeable(
             open_tx,
@@ -116,10 +100,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             restored,
             mergeable_open_cells("restored", "restored-note"),
             None,
-            staged_content_parents,
-            Some(105),
-            true,
-        )
+            Some(105),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -128,10 +109,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             restored,
             BTreeMap::new(),
             Some(DeletionEvent::Restored),
-            staged_deletion_parents,
-            Some(105),
-            true,
-        )
+            Some(105),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -140,10 +118,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted_then_deleted,
             mergeable_open_cells("doomed", "doomed-note"),
             None,
-            Vec::new(),
-            Some(106),
-            false,
-        )
+            Some(106),)
         .unwrap();
     actual
         .tx_write_mergeable(
@@ -152,10 +127,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             inserted_then_deleted,
             BTreeMap::new(),
             Some(DeletionEvent::Deleted),
-            Vec::new(),
-            None,
-            false,
-        )
+            None,)
         .unwrap();
 
     assert_eq!(
@@ -221,12 +193,10 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
         MergeableCommit::new("todos", restored, 105)
             .made_by(author)
             .permission_subject(author)
-            .parents(vec![intervening_content])
             .cells(mergeable_open_cells("restored", "restored-note")),
         MergeableCommit::new("todos", restored, 105)
             .made_by(author)
             .permission_subject(author)
-            .parents(vec![intervening_deletion])
             .deletion(DeletionEvent::Restored),
         MergeableCommit::new("todos", inserted_then_deleted, 201)
             .made_by(author)
@@ -303,10 +273,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
         staged,
         title_cells("staged"),
         None,
-        Vec::new(),
-        Some(50),
-        false,
-    )
+        Some(50),)
     .unwrap();
 
     assert_eq!(
@@ -345,10 +312,7 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
             row(0x91),
             title_cells("valid first"),
             None,
-            Vec::new(),
-            Some(50),
-            false,
-        )
+            Some(50),)
         .unwrap();
         core.tx_write_mergeable(
             batch,
@@ -360,10 +324,7 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
                 title_cells("invalid second")
             },
             deletion,
-            Vec::new(),
-            Some(HLC_MAX_PHYSICAL_MS + 1),
-            false,
-        )
+            Some(HLC_MAX_PHYSICAL_MS + 1),)
         .unwrap();
 
         assert!(matches!(
@@ -377,4 +338,233 @@ fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock(
         assert!(core.row_history("todos", row(0x92)).unwrap().is_empty());
         assert!(core.open_tx.open_transactions.contains_key(&batch));
     }
+}
+
+#[test]
+fn mergeable_open_staging_keeps_the_row_write_index_exact() {
+    // Staging looks rows up through an index instead of scanning every staged
+    // write; deletes that unstage earlier writes must keep it exact.
+    let (_dir, mut core) = open_node_with_schema(node(0x62), mergeable_open_test_schema());
+    let author = user(0x72);
+    let open_tx = OpenTransactionId::new();
+    core.open_mergeable(open_tx, author, Some(author)).unwrap();
+    for ordinal in 1..=40 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            mergeable_open_cells(format!("title-{ordinal}"), "note"),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    for ordinal in 10..=19 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            BTreeMap::new(),
+            Some(DeletionEvent::Deleted),
+            None,
+        )
+        .unwrap();
+        core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+    }
+    for ordinal in 10..=14 {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            mergeable_open_cells(format!("again-{ordinal}"), "note"),
+            None,
+            None,
+        )
+        .unwrap();
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row(ordinal),
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            None,
+        )
+        .unwrap();
+        core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+    }
+
+    let open = core.open_tx(open_tx).unwrap();
+    open.assert_write_positions_consistent();
+    let staged = |ordinal| {
+        open.writes
+            .iter()
+            .filter(|write| write.row_uuid == row(ordinal))
+            .map(|write| write.deletion)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(staged(1), vec![None]);
+    assert_eq!(staged(15), vec![Some(DeletionEvent::Deleted)]);
+    assert_eq!(staged(10), staged(14));
+}
+
+#[test]
+fn mergeable_open_staging_compacts_unstaged_writes_in_staging_order() {
+    // Deleting or restoring a staged row unstages its earlier writes without
+    // shifting later ones; compaction must keep the index and order exact.
+    let (_dir, mut core) = open_node_with_schema(node(0x63), mergeable_open_test_schema());
+    let author = user(0x73);
+    let open_tx = OpenTransactionId::new();
+    core.open_mergeable(open_tx, author, Some(author)).unwrap();
+    let rows = (1..=200).map(row).collect::<Vec<_>>();
+    for (ordinal, &row_uuid) in rows.iter().enumerate() {
+        core.tx_write_mergeable(
+            open_tx,
+            "todos",
+            row_uuid,
+            mergeable_open_cells(format!("title-{ordinal}"), "note"),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    for deletion in [DeletionEvent::Deleted, DeletionEvent::Restored] {
+        for &row_uuid in rows.iter().rev() {
+            core.tx_write_mergeable(
+                open_tx,
+                "todos",
+                row_uuid,
+                BTreeMap::new(),
+                Some(deletion),
+                None,
+            )
+            .unwrap();
+        }
+        core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+    }
+
+    let open = core.open_tx(open_tx).unwrap();
+    assert_eq!(open.writes.len(), rows.len());
+    assert_eq!(
+        open.writes
+            .iter()
+            .map(|write| (write.row_uuid, write.deletion))
+            .collect::<Vec<_>>(),
+        rows.iter()
+            .rev()
+            .map(|&row_uuid| (row_uuid, Some(DeletionEvent::Restored)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn mergeable_open_staging_keeps_same_row_id_in_two_tables_apart() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("note", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("title", PublicColumnType::Text)
+                    .column("note", PublicColumnType::Text),
+            ),
+    );
+    let (_dir, mut core) = open_node_with_schema(node(0x64), schema);
+    let author = user(0x74);
+    let open_tx = OpenTransactionId::new();
+    let shared = row(1);
+    core.open_mergeable(open_tx, author, Some(author)).unwrap();
+    for table in ["todos", "notes"] {
+        core.tx_write_mergeable(
+            open_tx,
+            table,
+            shared,
+            mergeable_open_cells(table, "first"),
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    core.tx_write_mergeable(
+        open_tx,
+        "todos",
+        shared,
+        BTreeMap::new(),
+        Some(DeletionEvent::Deleted),
+        None,
+    )
+    .unwrap();
+    core.tx_write_mergeable(
+        open_tx,
+        "notes",
+        shared,
+        mergeable_open_cells("notes", "second"),
+        None,
+        None,
+    )
+    .unwrap();
+    core.open_tx(open_tx).unwrap().assert_write_positions_consistent();
+
+    assert_eq!(core.tx_read(open_tx, "todos", shared).unwrap(), None);
+    assert_eq!(
+        core.tx_read(open_tx, "notes", shared).unwrap(),
+        Some(mergeable_open_cells("notes", "second"))
+    );
+    assert!(core.tx_current_rows(open_tx, "todos").unwrap().is_empty());
+    assert_eq!(
+        core.tx_current_rows(open_tx, "notes").unwrap(),
+        vec![(shared, mergeable_open_cells("notes", "second"))]
+    );
+}
+
+#[test]
+fn mergeable_open_fresh_insert_reads_and_updates_its_own_write() {
+    // A known-fresh insert is staged through the same row index as any other
+    // write, so reads and later writes in the transaction must find it.
+    let (_dir, mut core) = open_node_with_schema(node(0x65), mergeable_open_test_schema());
+    let author = user(0x75);
+    let open_tx = OpenTransactionId::new();
+    let fresh = row(1);
+    core.open_mergeable(open_tx, author, Some(author)).unwrap();
+    let schema_version = core.current_write_schema().unwrap().schema;
+    core.tx_write_mergeable_in_schema(
+        open_tx,
+        schema_version,
+        "todos",
+        fresh,
+        mergeable_open_cells("fresh", "note"),
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        core.tx_read(open_tx, "todos", fresh).unwrap(),
+        Some(mergeable_open_cells("fresh", "note"))
+    );
+
+    core.tx_write_mergeable(
+        open_tx,
+        "todos",
+        fresh,
+        mergeable_open_cells("updated", "note"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        core.tx_read(open_tx, "todos", fresh).unwrap(),
+        Some(mergeable_open_cells("updated", "note"))
+    );
+    assert_eq!(
+        core.tx_current_rows(open_tx, "todos").unwrap(),
+        vec![(fresh, mergeable_open_cells("updated", "note"))]
+    );
+    let open = core.open_tx(open_tx).unwrap();
+    open.assert_write_positions_consistent();
+    let staged = open.writes.iter().collect::<Vec<_>>();
+    assert_eq!(staged.len(), 1);
+    assert!(staged[0].known_fresh_row);
 }

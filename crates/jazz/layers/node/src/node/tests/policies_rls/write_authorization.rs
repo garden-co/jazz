@@ -216,10 +216,7 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         coalesced_row,
         owner_cells(author, "coalesced insert"),
         None,
-        Vec::new(),
-        Some(25),
-        false,
-    ))
+        Some(25),))
     .unwrap();
     crate::local_executor::block_on(core.tx_patch_mergeable(
         open_tx,
@@ -330,7 +327,6 @@ fn authority_read_for_write_check_is_mergeable_only() {
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 11)
                 .made_by(user(0xa5))
-                .parents(vec![base])
                 .cells(BTreeMap::from([(
                     "title".to_owned(),
                     Value::String("after".to_owned()),
@@ -402,7 +398,6 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, updated_at_ms)
                 .made_by(author)
-                .parents(vec![insert])
                 .cells(title_cells("updated")),
         )
         .unwrap();
@@ -559,9 +554,9 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         )
         .unwrap();
 
-    // The first six transaction reads are part of validation and acceptance;
-    // The seventh after Accepted persists.
-    storage.fail_after_transaction_reads(6);
+    // The first five transaction reads are part of validation and acceptance;
+    // the sixth comes after Accepted persists.
+    storage.fail_after_transaction_reads(5);
     let error = core
         .finalize_local_mergeable_commit_settled(tx_id)
         .unwrap_err();
