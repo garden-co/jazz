@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Bound each lane to two package tasks so browser suites retain scheduling
-# headroom alongside Node tests. Jazz Tools also caps Vitest at four file
+# headroom alongside Node tests. Jazz Tools also caps Vitest at two file
 # workers; all suites reuse the artifact build completed before this script starts.
 set -u
 
