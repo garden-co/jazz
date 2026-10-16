@@ -1,5 +1,8 @@
 import { assertRelationshipDeclaration } from "./relationships.js";
-import { validateTransformDependencies } from "./runtime/column-transforms.js";
+import {
+  columnTransformDependencies,
+  validateTransformDependencies,
+} from "./runtime/column-transforms.js";
 import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyTypedColumnBuilder,
@@ -1750,13 +1753,18 @@ function columnTransformsForTable(
       } as ColumnTransform;
     }
   }
-  return Object.keys(transforms).length > 0 ? transforms : undefined;
+  if (Object.keys(transforms).length === 0) return undefined;
+  columnTransformDependencies(transforms);
+  return transforms;
 }
 
-function columnTransformsForSchema(definition: SchemaDefinition): ColumnTransformRegistry {
-  const registry: ColumnTransformRegistry = {};
+function columnTransformsForSchema(
+  definition: SchemaDefinition,
+): ColumnTransformRegistry | undefined {
+  let registry: ColumnTransformRegistry | undefined;
   for (const [tableName, tableDefinition] of Object.entries(definition)) {
-    registry[tableName] = columnTransformsForTable(tableDefinition);
+    const transforms = columnTransformsForTable(tableDefinition);
+    if (transforms) (registry ??= {})[tableName] = transforms;
   }
   return registry;
 }

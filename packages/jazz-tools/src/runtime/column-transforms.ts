@@ -6,12 +6,64 @@ export interface ColumnTransform {
 export type ColumnTransformMap = Record<string, ColumnTransform>;
 export type ColumnTransformRegistry = Record<string, ColumnTransformMap | undefined>;
 
+type DependencyTransforms = Readonly<Record<string, Pick<ColumnTransform, "dependsOn">>>;
+type DependencyPlan = {
+  columns: readonly string[];
+  byColumn: ReadonlyMap<string, readonly string[]>;
+};
+const dependencyPlans = new WeakMap<DependencyTransforms, DependencyPlan>();
+const emptyContext: Readonly<Record<string, unknown>> = Object.freeze({});
+const emptyDependencies: readonly string[] = Object.freeze([]);
+
+/** The declarations are validated and copied when the table is constructed. */
+export function columnTransformDependencies(transforms: DependencyTransforms): DependencyPlan {
+  const cached = dependencyPlans.get(transforms);
+  if (cached) return cached;
+  const columns = new Set<string>();
+  const byColumn = new Map<string, readonly string[]>();
+  const visit = (column: string): readonly string[] => {
+    const previous = byColumn.get(column);
+    if (previous) return previous;
+    const dependencies = transforms[column]?.dependsOn;
+    if (!dependencies?.length) {
+      byColumn.set(column, emptyDependencies);
+      return emptyDependencies;
+    }
+    const closure = new Set<string>();
+    for (const dependency of dependencies) {
+      columns.add(dependency);
+      for (const transitive of visit(dependency)) closure.add(transitive);
+      closure.add(dependency);
+    }
+    const result = [...closure];
+    byColumn.set(column, result);
+    return result;
+  };
+  for (const column of Object.keys(transforms)) visit(column);
+  const plan = { columns: [...columns], byColumn };
+  dependencyPlans.set(transforms, plan);
+  return plan;
+}
+
+export function storedDependencyValues(
+  columns: readonly string[],
+  values: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  if (!columns.length) return emptyContext;
+  const snapshot: Record<string, unknown> = {};
+  for (const column of columns)
+    if (Object.hasOwn(values, column))
+      Object.defineProperty(snapshot, column, { value: values[column], enumerable: true });
+  return snapshot;
+}
+
 export function dependencyContext(
   transform: Pick<ColumnTransform, "dependsOn">,
   values: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
+  if (!transform.dependsOn?.length) return emptyContext;
   const context: Record<string, unknown> = {};
-  for (const column of transform.dependsOn ?? []) {
+  for (const column of transform.dependsOn) {
     if (!Object.hasOwn(values, column))
       throw new Error(`Transform dependency "${column}" is unavailable.`);
     Object.defineProperty(context, column, { value: values[column], enumerable: true });

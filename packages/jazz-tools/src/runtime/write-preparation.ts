@@ -42,6 +42,12 @@ export class WritePreparation {
 }
 
 const owners = new WeakMap<object, WritePreparation>();
+export function getOwnerPreparation(
+  client: object & { preparationOwner?: () => object },
+): WritePreparation | undefined {
+  return owners.get(client.preparationOwner?.() ?? client);
+}
+
 export function ownerPreparation(
   client: object & { preparationOwner?: () => object },
 ): WritePreparation {
@@ -49,4 +55,15 @@ export function ownerPreparation(
   let preparation = owners.get(owner);
   if (!preparation) owners.set(owner, (preparation = new WritePreparation()));
   return preparation;
+}
+
+/** Ordinary synchronous operations need no preparation object. */
+export function runAfterPreparation<T>(
+  client: object & { preparationOwner?: () => object },
+  operation: () => T | Promise<T>,
+): T | Promise<T> {
+  const preparation = getOwnerPreparation(client);
+  if (preparation?.pending) return preparation.run(operation);
+  const result = operation();
+  return result instanceof Promise ? ownerPreparation(client).run(() => result) : result;
 }

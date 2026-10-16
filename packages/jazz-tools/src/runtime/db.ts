@@ -51,12 +51,18 @@ import {
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { applyColumnTransforms, transformRow, unwrapValue } from "./row-transformer.js";
-import { ownerPreparation, WritePreparation } from "./write-preparation.js";
-import { writeRow } from "./write-row.js";
-import { resolveSelectedColumns } from "./select-projection.js";
 import {
+  applyColumnTransforms,
+  createRowTransformer,
+  transformRow,
+  unwrapValue,
+} from "./row-transformer.js";
+import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import { writeRow } from "./write-row.js";
+import {
+  columnTransformDependencies,
   dependencyContext,
+  storedDependencyValues,
   type ColumnTransform,
   type ColumnTransformMap,
   type ColumnTransformRegistry,
@@ -965,90 +971,133 @@ function prepareTransformRead<T>(
   built: NormalizedBuiltQuery,
   outputTable: string,
 ) {
-  const relations = analyzeRelations(query._schema);
-  const registry = query._columnTransformsByTable ?? {
-    [outputTable]: resolveOutputColumnTransforms(query, built.table, outputTable),
-  };
+  const outputTransforms = resolveOutputColumnTransforms(query, built.table, outputTable);
+  const outputIncludes =
+    outputTable === built.table || !Object.keys(built.includes).length ? built.includes : {};
+  const hasIncludes = Object.keys(outputIncludes).length > 0;
+  if (!outputTransforms && (!query._columnTransformsByTable || !hasIncludes)) {
+    const decode = createRowTransformer<T>(
+      query._schema,
+      outputTable,
+      outputIncludes,
+      built.select,
+    );
+    return {
+      physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
+      transform: Object.keys(built.partialSelect).length
+        ? (row: WasmRow) => applyPartialValueSelections(decode(row), built.partialSelect)
+        : decode,
+    };
+  }
+  const relations = hasIncludes ? analyzeRelations(query._schema) : undefined;
   const prepare = (
     table: string,
     select: string[],
     includes: NormalizedIncludeSpec,
     partialSelect: NormalizedBuiltQuery["partialSelect"],
   ) => {
-    const transforms = registry[table];
-    const physical = [...select];
-    const partial = { ...partialSelect };
-    const visible = resolveSelectedColumns(table, query._schema, select);
-    for (const column of visible) {
-      for (const dependency of transforms?.[column]?.dependsOn ?? []) {
-        if (select.length && dependency !== "id" && !physical.includes(dependency))
+    const transforms =
+      query._columnTransformsByTable?.[table] ??
+      (table === outputTable ? outputTransforms : undefined);
+    let physical = select;
+    let partial = partialSelect;
+    const selectAll = !select.length || select.includes("*");
+    let visibleTransforms: ColumnTransformMap | undefined;
+    let dependencies: Set<string> | undefined;
+    let hidden: string[] | undefined;
+    for (const column in transforms) {
+      if (!Object.hasOwn(transforms, column) || (!selectAll && !select.includes(column))) continue;
+      (visibleTransforms ??= {})[column] = transforms[column]!;
+      for (const dependency of transforms[column]!.dependsOn ?? []) {
+        (dependencies ??= new Set()).add(dependency);
+        if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
+          if (physical === select) physical = [...select];
           physical.push(dependency);
-        delete partial[dependency];
+          (hidden ??= []).push(dependency);
+        }
+        if (Object.hasOwn(partial, dependency)) {
+          if (partial === partialSelect) partial = { ...partialSelect };
+          delete partial[dependency];
+        }
       }
     }
-    const preparedIncludes: NormalizedIncludeSpec = {};
-    const finishIncludes: Record<
-      string,
-      (row: Record<string, unknown>) => Record<string, unknown>
-    > = {};
+    let preparedIncludes = includes;
+    const finishIncludes: Array<
+      [string, (row: Record<string, unknown>) => Record<string, unknown>]
+    > = [];
     for (const [name, include] of Object.entries(includes)) {
-      const target = relations.get(table)?.find((relation) => relation.name === name)?.toTable;
+      const target = relations?.get(table)?.find((relation) => relation.name === name)?.toTable;
       if (!target) continue;
       const prepared = prepare(target, include.select, include.includes, include.partialSelect);
-      preparedIncludes[name] = {
-        ...include,
-        select: prepared.select,
-        includes: prepared.includes,
-        partialSelect: prepared.partialSelect,
-      };
-      finishIncludes[name] = prepared.finish;
+      if (
+        prepared.select !== include.select ||
+        prepared.includes !== include.includes ||
+        prepared.partialSelect !== include.partialSelect
+      ) {
+        if (preparedIncludes === includes) preparedIncludes = { ...includes };
+        preparedIncludes[name] = {
+          ...include,
+          select: prepared.select,
+          includes: prepared.includes,
+          partialSelect: prepared.partialSelect,
+        };
+      }
+      if (prepared.finish) finishIncludes.push([name, prepared.finish]);
     }
+    const dependencyColumns = dependencies ? [...dependencies] : noWriteDependencies;
+    const hasPartial = Object.keys(partialSelect).length > 0;
+    const excluded = Object.keys(includes);
     return {
       select: physical,
       includes: preparedIncludes,
       partialSelect: partial,
-      finish(row: Record<string, unknown>): Record<string, unknown> {
-        const stored = { ...row };
-        const result = applyPartialValueSelections(row, partialSelect);
-        const visibleTransforms: ColumnTransformMap = {};
-        for (const column of visible)
-          if (transforms?.[column]) visibleTransforms[column] = transforms[column];
-        applyColumnTransforms(result, visibleTransforms, Object.keys(includes), stored);
-        for (const [name, finish] of Object.entries(finishIncludes)) {
-          const value = result[name];
-          if (Array.isArray(value)) result[name] = value.map((row) => finish(row));
-          else if (value && typeof value === "object")
-            result[name] = finish(value as Record<string, unknown>);
-        }
-        if (select.length)
-          for (const column of resolveSelectedColumns(table, query._schema, physical))
-            if (!visible.includes(column) && column !== "id") delete result[column];
-        return result;
-      },
+      finish:
+        visibleTransforms || hasPartial || finishIncludes.length
+          ? (row: Record<string, unknown>): Record<string, unknown> => {
+              const stored = visibleTransforms
+                ? storedDependencyValues(dependencyColumns, row)
+                : undefined;
+              const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
+              if (visibleTransforms)
+                applyColumnTransforms(result, visibleTransforms, excluded, stored);
+              for (const [name, finish] of finishIncludes) {
+                const value = result[name];
+                if (Array.isArray(value))
+                  for (let i = 0; i < value.length; i++) value[i] = finish(value[i]);
+                else if (value && typeof value === "object")
+                  result[name] = finish(value as Record<string, unknown>);
+              }
+              if (hidden) for (const column of hidden) delete result[column];
+              return result;
+            }
+          : undefined,
     };
   };
-  const outputIncludes = outputTable === built.table ? built.includes : {};
   const prepared = prepare(outputTable, built.select, outputIncludes, built.partialSelect);
+  const decode = createRowTransformer<Record<string, unknown>>(
+    query._schema,
+    outputTable,
+    prepared.includes,
+    prepared.select,
+    undefined,
+    false,
+    relations,
+  );
   return {
-    physical: {
-      ...built,
-      select: prepared.select,
-      partialSelect: prepared.partialSelect,
-      includes: prepared.includes,
-    },
-    transform(row: WasmRow): T {
-      return prepared.finish(
-        transformRow<Record<string, unknown>>(
-          row,
-          query._schema,
-          outputTable,
-          prepared.includes,
-          prepared.select,
-          undefined,
-          false,
-        ),
-      ) as T;
-    },
+    physical:
+      prepared.select === built.select &&
+      prepared.partialSelect === built.partialSelect &&
+      prepared.includes === built.includes
+        ? built
+        : {
+            ...built,
+            select: prepared.select,
+            partialSelect: prepared.partialSelect,
+            includes: prepared.includes,
+          },
+    transform: prepared.finish
+      ? (row: WasmRow) => prepared.finish!(decode(row)) as T
+      : (decode as (row: WasmRow) => T),
   };
 }
 type DbTransactionHandleBinding = {
@@ -1092,7 +1141,7 @@ function transformOutputColumns(
 function transformInputColumns(
   table: TableProxy<any, any, any, any, any>,
   data: unknown,
-  storedValues: Record<string, unknown> = {},
+  storedValues?: Record<string, unknown>,
   creation = false,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -1100,14 +1149,29 @@ function transformInputColumns(
     return record;
   }
 
-  const stored = { ...storedValues };
-  if (creation)
-    for (const column of table._schema[table._table]!.columns) {
-      if (Object.hasOwn(stored, column.name)) continue;
-      if (column.default !== undefined)
-        stored[column.name] = unwrapValue(column.default, column.column_type);
-      else if (column.nullable) stored[column.name] = null;
+  const transforms = table._columnTransforms;
+  let hasTransform = false;
+  let hasDependencies = false;
+  for (const column in record) {
+    if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
+    const transform = transforms[column];
+    if (transform) {
+      hasTransform = true;
+      if (transform.dependsOn?.length) hasDependencies = true;
     }
+  }
+  if (!hasTransform) return record;
+  if (!hasDependencies) {
+    const result = { ...record };
+    for (const column in record) {
+      if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
+      const transform = transforms[column];
+      if (transform)
+        result[column] = transform.to(record[column], dependencyContext(transform, record));
+    }
+    return result;
+  }
+  const stored = { ...storedValues };
   const app: Record<string, unknown> = {};
   const resolved = new Set<string>();
   const resolve = (column: string) => {
@@ -1120,6 +1184,14 @@ function transformInputColumns(
         ? transform.to(record[column], dependencyContext(transform, app))
         : record[column];
     } else {
+      if (creation && !Object.hasOwn(stored, column)) {
+        const descriptor = table._schema[table._table]!.columns.find(
+          (item) => item.name === column,
+        );
+        if (descriptor?.default !== undefined)
+          stored[column] = unwrapValue(descriptor.default, descriptor.column_type);
+        else if (descriptor?.nullable) stored[column] = null;
+      }
       if (!Object.hasOwn(stored, column))
         throw new Error(`Transform dependency "${column}" is unavailable.`);
       app[column] = transform
@@ -1137,26 +1209,26 @@ function transformInputColumns(
   return result;
 }
 
+const noWriteDependencies: readonly string[] = [];
+
 function missingWriteDependencies(
   table: TableProxy<any, any>,
   data: Record<string, unknown>,
   id?: string,
-): string[] {
-  const missing = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (column: string) => {
-    if (visited.has(column)) return;
-    visited.add(column);
-    for (const dependency of table._columnTransforms?.[column]?.dependsOn ?? []) {
+): readonly string[] {
+  if (!table._columnTransforms) return noWriteDependencies;
+  const { byColumn } = columnTransformDependencies(table._columnTransforms);
+  let missing: Set<string> | undefined;
+  for (const column of Object.keys(data)) {
+    if (data[column] === undefined) continue;
+    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
       if (dependency !== "id" || id === undefined) {
         if (!Object.hasOwn(data, dependency) || data[dependency] === undefined)
-          missing.add(dependency);
+          (missing ??= new Set()).add(dependency);
       }
-      visit(dependency);
     }
-  };
-  for (const column of Object.keys(data)) if (data[column] !== undefined) visit(column);
-  return [...missing];
+  }
+  return missing ? [...missing] : noWriteDependencies;
 }
 
 function prepareInputColumns(
@@ -1168,8 +1240,10 @@ function prepareInputColumns(
   session?: Session,
   openTransactionId?: OpenTransactionId,
   options?: InternalUpdateOptions,
+  missing?: readonly string[],
 ): Record<string, unknown> | Promise<Record<string, unknown>> {
-  const missing = missingWriteDependencies(table, data, id);
+  if (!table._columnTransforms) return data;
+  missing ??= missingWriteDependencies(table, data, id);
   const stored = id === undefined ? {} : { id };
   if (operation === "Insert" || operation === "Restore" || missing.length === 0)
     return transformInputColumns(
@@ -1214,18 +1288,16 @@ function rejectIncompleteDependencies(
   data: Record<string, unknown>,
   incomplete: readonly string[],
 ) {
-  const visit = (column: string, seen = new Set<string>()) => {
-    if (seen.has(column)) return;
-    seen.add(column);
-    for (const dependency of table._columnTransforms?.[column]?.dependsOn ?? []) {
+  if (!table._columnTransforms || !incomplete.length) return;
+  const { byColumn } = columnTransformDependencies(table._columnTransforms);
+  for (const column of Object.keys(data)) {
+    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
       if (incomplete.includes(dependency))
         throw new Error(
           `Transform dependency "${dependency}" requires a whole-value replacement in this write.`,
         );
-      visit(dependency, seen);
     }
-  };
-  for (const column of Object.keys(data)) visit(column);
+  }
 }
 
 function reserveRowId(): string {
@@ -1234,8 +1306,9 @@ function reserveRowId(): string {
 }
 
 function hasDependentTransforms(table: TableProxy<any, any>): boolean {
-  return Object.values(table._columnTransforms ?? {}).some(
-    (transform) => transform.dependsOn?.length,
+  return (
+    !!table._columnTransforms &&
+    columnTransformDependencies(table._columnTransforms).columns.length > 0
   );
 }
 
@@ -1454,8 +1527,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private bindOwnerClient(ownerClient: JazzClient): void {
     const preparation = new WritePreparation(true);
-    const owner = ownerPreparation(ownerClient);
-    const openTransactionId = owner.pending
+    const owner = getOwnerPreparation(ownerClient);
+    const openTransactionId = owner?.pending
       ? createOpenTransactionId()
       : ownerClient.beginTransaction(this.kind, this.session, this.attribution);
     const binding: DbTransactionHandleBinding = {
@@ -1464,12 +1537,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       session: this.session,
       attribution: this.attribution,
       preparation,
-      begun: !owner.pending,
+      begun: !owner?.pending,
     };
     dbTxHandleBindings.set(this, binding);
     if (!binding.begun)
       preparation.run(() =>
-        owner.run(() => {
+        owner!.run(() => {
           if (preparation.cancelled) return;
           ownerClient.beginTransaction(
             this.kind,
@@ -1548,7 +1621,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (preparation.cancelled) stage();
     else
       preparation.run(() =>
-        ownerPreparation(client).run(() => {
+        runAfterPreparation(client, () => {
           if (!preparation.cancelled) stage();
         }),
       );
@@ -1585,7 +1658,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (preparation.cancelled) stage();
     else
       preparation.run(() =>
-        ownerPreparation(client).run(() => {
+        runAfterPreparation(client, () => {
           if (!preparation.cancelled) stage();
         }),
       );
@@ -1600,7 +1673,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   ) {
     let record: Record<string, unknown>;
     try {
-      record = transformInputColumns(table, data, { id }, true);
+      record = table._columnTransforms
+        ? transformInputColumns(table, data, { id }, true)
+        : (data as Record<string, unknown>);
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
       throw error;
@@ -1694,14 +1769,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options: UpdateOptions | undefined,
     stage: (values: ReturnType<typeof toWriteRecord>) => void,
   ): void {
-    data = { ...data };
     const { ownerClient, openTransactionId, session, preparation } = this.requireBinding(operation);
+    if (
+      preparation.pending ||
+      getOwnerPreparation(ownerClient)?.pending ||
+      missingWriteDependencies(table, data, id).length
+    )
+      data = { ...data };
     if (preparation.cancelled) {
       stage({});
       return;
     }
     preparation.run(() =>
-      ownerPreparation(ownerClient).run(() => {
+      runAfterPreparation(ownerClient, () => {
         if (preparation.cancelled) return;
         let prepared: ReturnType<typeof prepareInputColumns>;
         try {
@@ -1755,7 +1835,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (preparation.cancelled) stage();
     else
       preparation.run(() =>
-        ownerPreparation(client).run(() => {
+        runAfterPreparation(client, () => {
           if (!preparation.cancelled) stage();
         }),
       );
@@ -2376,11 +2456,10 @@ export class Db {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
-    const preparation = ownerPreparation(client);
-    const id =
-      options?.id ??
-      (preparation.pending || hasDependentTransforms(table) ? reserveRowId() : undefined);
-    const transformedData = transformInputColumns(table, data, id ? { id } : {}, true);
+    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    const transformedData = table._columnTransforms
+      ? transformInputColumns(table, data, id ? { id } : undefined, true)
+      : (data as Record<string, unknown>);
     const values = toWriteRecordForOperation(
       "Insert",
       transformedData,
@@ -2388,8 +2467,10 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    const value = id ? immediateWriteRow(table, id, values) : undefined;
-    const inserted = preparation.run(() =>
+    const deferred = !!getOwnerPreparation(client)?.pending;
+    if (deferred && !id) id = reserveRowId();
+    const value = deferred ? immediateWriteRow(table, id!, values) : undefined;
+    const inserted = runAfterPreparation(client, () =>
       client.insert(
         table._table,
         values,
@@ -2406,7 +2487,7 @@ export class Db {
             client,
           )
         : inserted.mapValue((row) =>
-            id
+            value !== undefined
               ? (value as T)
               : transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
           ),
@@ -2432,7 +2513,7 @@ export class Db {
     const id =
       options?.id ??
       (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
-    return ownerPreparation(client).run(async () => {
+    return runAfterPreparation(client, async () => {
       const transformedData = transformInputColumns(table, ordinaryData, id ? { id } : {}, true);
       const values = toWriteRecordForOperation(
         "Insert",
@@ -2472,7 +2553,7 @@ export class Db {
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectIncompleteDependencies(table, ordinaryData, [column]);
     const context = this.getRuntimeOperationContext();
-    return ownerPreparation(client).run(async () => {
+    return runAfterPreparation(client, async () => {
       const transformedData = await prepareInputColumns(
         table,
         ordinaryData,
@@ -2512,7 +2593,7 @@ export class Db {
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectIncompleteDependencies(table, ordinaryData, [column]);
     const context = this.getRuntimeOperationContext();
-    return ownerPreparation(client).run(async () => {
+    return runAfterPreparation(client, async () => {
       const transformedData = await prepareInputColumns(
         table,
         ordinaryData,
@@ -2554,7 +2635,9 @@ export class Db {
     options?: RestoreOptions,
   ): WriteResult<T> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data, { id }, true);
+    const transformedData = table._columnTransforms
+      ? transformInputColumns(table, data, { id }, true)
+      : (data as Record<string, unknown>);
     const values = toWriteRecordForOperation(
       "Restore",
       transformedData,
@@ -2562,8 +2645,9 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    const value = immediateWriteRow(table, id, values);
-    const restored = ownerPreparation(client).run(() =>
+    const deferred = !!getOwnerPreparation(client)?.pending;
+    const value = deferred ? immediateWriteRow(table, id, values) : undefined;
+    const restored = runAfterPreparation(client, () =>
       client.restore(
         table._table,
         id,
@@ -2574,11 +2658,15 @@ export class Db {
       ),
     );
     return this.wrapWriteWait(
-      new WriteResult(
-        value,
-        restored instanceof Promise ? restored.then((result) => result.txId) : restored.txId,
-        client,
-      ),
+      restored instanceof Promise
+        ? new WriteResult(
+            value as T,
+            restored.then((result) => result.txId),
+            client,
+          )
+        : restored.mapValue((row) =>
+            transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
+          ),
     );
   }
 
@@ -2604,11 +2692,12 @@ export class Db {
     options?: UpdateOptions,
     stage?: (values: ReturnType<typeof toWriteRecord>) => WriteHandle,
   ): WriteHandle {
-    data = { ...data };
     const client = this.getClient(table._schema);
+    const missing = missingWriteDependencies(table, data, id);
+    if (getOwnerPreparation(client)?.pending || missing.length) data = { ...data };
     const context = this.getRuntimeOperationContext();
     const normalized = normalizeUpdateOptions(table._schema, table._table, options);
-    const result = ownerPreparation(client).run(() => {
+    const result = runAfterPreparation(client, () => {
       const submit = (record: Record<string, unknown>, transaction?: OpenTransactionId) => {
         const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
         if (stage) return stage(values);
@@ -2654,8 +2743,8 @@ export class Db {
               context?.attribution,
             );
       };
-      if (missingWriteDependencies(table, data, id).length === 0)
-        return submit(transformInputColumns(table, data, { id }));
+      if (missing.length === 0)
+        return submit(table._columnTransforms ? transformInputColumns(table, data, { id }) : data);
       const transaction = client.beginTransaction(
         "mergeable",
         context?.session,
@@ -2673,6 +2762,7 @@ export class Db {
           context?.session,
           normalized?.branch ? undefined : transaction,
           normalized,
+          missing,
         ),
       )
         .then(async (record) => {
@@ -2779,7 +2869,7 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    const result = ownerPreparation(client).run(() =>
+    const result = runAfterPreparation(client, () =>
       client.delete(
         table._table,
         id,
@@ -2957,8 +3047,8 @@ export class Db {
     options?: InternalDbQueryOptions,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const preparation = ownerPreparation(client);
-    if (preparation.pending) await preparation.drain();
+    const preparation = getOwnerPreparation(client);
+    if (preparation?.pending) await preparation.drain();
     // A newly attached browser-worker follower has no authoritative
     // namespace-wide explicit-offline state until its init handshake resolves.
     // Established runtimes return null here, preserving their synchronous
