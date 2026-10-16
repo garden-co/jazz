@@ -1,0 +1,15 @@
+type	1913
+import	1341
+function	10129
+table	7
+memory	3
+global	8
+export	3151
+elem	15632
+datacount	2
+code	2531947
+data	205201
+custom(name)	448703
+custom(producers)	142
+custom(target_features)	86
+functions 10068 code bytes 2518121

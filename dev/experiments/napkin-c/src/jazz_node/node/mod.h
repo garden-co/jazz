@@ -389,7 +389,7 @@ void jazz_node__node__record_maintained_view_removal_stream_bundle(void);
 void jazz_node__node__AuthorityResultState__drop(void *p);
 
 /* ---------------- ViewUpdateParts / publication ---------------- */
-JZ_NVEC(jazz_protocol_ResultMemberEntryVec, jazz_protocol_ResultMemberEntry);
+/* jazz_protocol_ResultMemberEntryVec: named vec declared in _ext_node-core-b.h */
 typedef struct jazz_node_ViewUpdateParts {
     jazz_protocol_SupportingRowsUpdate *wire_rows; /* Option */
     jazz_protocol_SubscriptionKey subscription;
@@ -426,7 +426,7 @@ typedef struct jazz_node_CommitUnitIngestContext {
 
 /* shared map descriptors (defined in mod.c) */
 extern const jz_btree_desc jzn_desc_str_value;    /* String -> Value */
-extern const jz_btree_desc jzn_desc_str_set;      /* set<String> */
+extern const jz_btree_desc jzn_desc_str_set;      /* set<String>; defined in physical.c (mod.c keeps a static copy) */
 extern const jz_btree_desc jzn_desc_txid_set;     /* set<TxId> */
 extern const jz_btree_desc jzn_desc_u64_set;      /* set<u64> */
 extern const jz_btree_desc jzn_desc_uuid_u64;     /* Uuid -> u64 */

@@ -9,9 +9,9 @@ void jzn_str_drop_v(void *p) { jz_str_drop((jz_str *)p); }
 static void value_drop_v(void *p) { groove__records__values__Value__drop(p); }
 int jzn_cmp_txid(const void *a, const void *b, void *ctx) { (void)ctx; return jazz_model_TxId_cmp(a, b); }
 const jz_btree_desc jzn_desc_str_value = { sizeof(jz_str), sizeof(groove_Value), jz_cmp_str, jzn_str_drop_v, value_drop_v };
-const jz_btree_desc jzn_desc_str_set = { sizeof(jz_str), 0, jz_cmp_str, jzn_str_drop_v, NULL };
+static const jz_btree_desc mod_desc_str_set = { sizeof(jz_str), 0, jz_cmp_str, jzn_str_drop_v, NULL };
 const jz_btree_desc jzn_desc_txid_set = { sizeof(jazz_model_TxId), 0, jzn_cmp_txid, NULL, NULL };
-const jz_btree_desc jzn_desc_u64_set = { sizeof(u64), 0, jz_cmp_u64, NULL, NULL };
+static const jz_btree_desc mod_desc_u64_set = { sizeof(u64), 0, jz_cmp_u64, NULL, NULL };
 const jz_btree_desc jzn_desc_uuid_u64 = { sizeof(jz_uuid), sizeof(u64), jz_cmp_uuid, NULL, NULL };
 const jz_btree_desc jzn_desc_uuid_set = { sizeof(jz_uuid), 0, jz_cmp_uuid, NULL, NULL };
 const jz_btree_desc jzn_desc_str_ptr = { sizeof(jz_str), sizeof(void *), jz_cmp_str, jzn_str_drop_v, NULL };
@@ -549,6 +549,17 @@ void jazz_node__node__AuthorityResultState__default(jazz_node_AuthorityResultSta
     out->source_closure_tag = JZN_SOURCE_CLOSURE_PENDING;
     jz_btree_init(&out->covered_input_versions, &jzn_desc_covered_inputs);
     jz_btree_init(&out->compiled_covered_input_sources, &jzn_desc_compiled_scope_tables);
+}
+
+void jazz_node__node__AuthorityResultState__drop(void *p) {
+    jazz_node_AuthorityResultState *s = p;
+    for (u32 i = 0; i < s->source_incrementals.len; i++) {
+        jz_btree_drop(&s->source_incrementals.ptr[i].adds);
+        jz_btree_drop(&s->source_incrementals.ptr[i].removes);
+    }
+    jz_free(s->source_incrementals.ptr);
+    jz_btree_drop(&s->covered_input_versions);
+    jz_btree_drop(&s->compiled_covered_input_sources);
 }
 
 /* ---------------- AuthoritySourceIncremental ---------------- */
@@ -1112,7 +1123,7 @@ static jz_err jazz_node__node__CurrentRow__project_with_column_binding(const jaz
                                                                        const jz_str *columns, u32 ncols, column_binding_fn column_binding,
                                                                        jazz_node_CurrentRow *out) {
     jz_btree selected;
-    jz_btree_init(&selected, &jzn_desc_str_set);
+    jz_btree_init(&selected, &mod_desc_str_set);
     for (u32 i = 0; i < ncols; i++) { jz_str c = jz_str_clone(&columns[i]); if (jz_btree_insert(&selected, &c, NULL, NULL)) {} }
     JZ_VEC(const jazz_model_ColumnSchema *) projected_columns = {0};
     for (u32 i = 0; i < table->columns.len; i++)
@@ -1387,7 +1398,7 @@ void jazz_node__node__MergeableCommit__new(jazz_node_MergeableCommit *out, jz_st
     out->made_by.tag = JAZZ_AUTHOR_SYSTEM;
     out->now_ms = now_ms;
     jz_btree_init(&out->cells, &jzn_desc_str_value);
-    jz_btree_init(&out->prepared_large_columns, &jzn_desc_str_set);
+    jz_btree_init(&out->prepared_large_columns, &mod_desc_str_set);
 }
 
 void jazz_node__node__MergeableCommit__drop(void *p) {
@@ -1546,6 +1557,15 @@ void jazz_node__node__version_indirect_descriptors(jazz_protocol_VersionRecord *
 }
 
 /* ---------------- ViewUpdateParts / PublishedTransaction / PublicationOutcome ---------------- */
+static void view_carrier_drop_v(void *p) { jazz_protocol__protocol__VersionCarrier__drop(*(jazz_protocol_VersionCarrier **)p); }
+void jazz_node__node__ViewUpdateParts__drop(void *p) {
+    jazz_node_ViewUpdateParts *u = p;
+    if (u->wire_rows) { jazz_protocol__protocol__SupportingRowsUpdate__drop(u->wire_rows); jz_free(u->wire_rows); u->wire_rows = NULL; }
+    jz_vec_drop(&u->version_carriers, sizeof(jazz_protocol_VersionCarrier *), view_carrier_drop_v);
+    jz_free(u->peer_complete_tx_payload_refs.ptr);
+    jz_vec_drop(&u->result_member_adds, sizeof(jazz_protocol_ResultMemberEntry), jazz_protocol__protocol__ResultMemberEntry__drop);
+    jz_vec_drop(&u->result_member_removes, sizeof(jazz_protocol_ResultMemberEntry), jazz_protocol__protocol__ResultMemberEntry__drop);
+}
 const jazz_protocol_SupportingRow *jazz_node__node__ViewUpdateParts__supporting_adds(const jazz_node_ViewUpdateParts *p, u32 *n) {
     if (!p->wire_rows) { *n = 0; return NULL; }
     return jazz_protocol__protocol__SupportingRowsUpdate__added_rows(p->wire_rows, n);

@@ -798,6 +798,10 @@ void jazz_node_Parking_clone(jazz_node_Parking *dst, const jazz_node_Parking *sr
 void jazz_node_Parking_drop(jazz_node_Parking *p);
 void jazz_node_Parking_default(jazz_node_Parking *p);
 
+/* node::LargeValueStagingPolicy / ClientRelayScope / BoxedStorage */
+typedef struct jazz_node_LargeValueStagingPolicy { u64 incoming_bytes_per_window, window_ms, max_age_ms; } jazz_node_LargeValueStagingPolicy;
+typedef struct jazz_node_ClientRelayScope jazz_node_ClientRelayScope; /* opaque here */
+typedef struct jazz_node_BoxedStorage jazz_node_BoxedStorage;         /* Box<dyn ReopenableStorage> */
 /* node::NodeState<S> (generic S erased: storage lives behind the groove Database) */
 typedef struct jazz_node_NodeState {
     jazz_types_NodeUuid node_uuid;
@@ -813,12 +817,12 @@ typedef struct jazz_node_NodeState {
         JZ_VEC(void) released_large_values;
         jz_btree pending_foreign_transactions;
     } open_tx;
-    struct { jz_btree rejected_transactions; /* TxId -> RejectedTransaction* */ jz_btree pending_cascade_parents; jz_btree pending_cascade_children; } rejections;
+    struct jazz_node_RejectionTracking { jz_btree rejected_transactions; /* TxId -> RejectedTransaction* */ jz_btree pending_cascade_parents; jz_btree pending_cascade_children; } rejections;
     groove_Database *database;       /* DatabaseSlot derefs to Database */
     void *local_chunk_reader;
     void *chunk_resolver;
-    void *detach_covered_chunk_waits;
-    struct { u64 incoming_bytes_per_window, window_ms, max_age_ms; } large_value_staging_policy;
+    bool *detach_covered_chunk_waits;  /* Rc<Cell<bool>> */
+    jazz_node_LargeValueStagingPolicy large_value_staging_policy;
     struct { u64 window_started_ms, admitted_bytes; } large_value_ingress;
     void *content_runtime_provider;
     u64 groove_runtime_token;
@@ -828,7 +832,7 @@ typedef struct jazz_node_NodeState {
     bool authoritative_scalar_exit_refresh;
     jz_hmap client_local_literal_shapes;
     jazz_model_DurabilityTier authored_commit_durability;
-    void *relay_authority_session_owner;
+    jazz_node_ClientRelayScope *relay_authority_session_owner;
     jz_btree pending_persistence;
     void *node_aliases;
     bool has_absent_node_alias; jazz_types_NodeUuid absent_node_alias;
@@ -1562,7 +1566,7 @@ groove_DbSchema jazz_model__schema__JazzSchema__lower_catalogue_meta_to_groove(c
 groove_Value jazz_model__schema__ColumnSchema__storage_value(const jazz_model_ColumnSchema *c, groove_Value v);
 bool groove__records__ValueType__as_enum_tag(const groove_ColumnType *t, u32 *variant_count);
 bool groove__records__ValueType__as_enum(const groove_ColumnType *t, u32 *case_count);
-enum { JZ_LVSK_NOT_LARGE = 0, JZ_LVSK_STRING, JZ_LVSK_BYTES, JZ_LVSK_JSON };
+enum { JZ_LVSK_NOT_LARGE = 0, JZ_LVSK_BYTES, JZ_LVSK_STRING, JZ_LVSK_JSON };
 extern const char *const jazz_model__schema__DELETION_COLUMN_NAME;
 
 /* protocol SchemaVersion / lenses / lineage */
@@ -1623,7 +1627,7 @@ void jazz_node_PendingSchemaLineage_drop(void *s);
 typedef struct jazz_node_SchemaLineageActivation { jazz_types_SchemaLineagePublicationId id; u64 catalogue_seq; } jazz_node_SchemaLineageActivation;
 typedef struct jazz_node_CatalogueBootstrapReady { jazz_types_SchemaVersionId genesis; jazz_protocol_CurrentWriteSchema current_write_schema; u64 active_catalogue_seq; } jazz_node_CatalogueBootstrapReady;
 typedef struct jazz_node_CatalogueOpenState {
-    void *storage; /* BoxedStorage */
+    jazz_node_BoxedStorage *storage;
     jz_btree schemas, lenses, schema_version_aliases, physical_mappings;
     jz_btree staged_lineages, pending_lineages, active_lineages_by_target;
     u64 active_catalogue_seq, next_physical_table_id, next_physical_column_id;
@@ -1911,11 +1915,11 @@ typedef JZ_VEC(groove_LargeValueRef *) groove_LargeValueRefVec;
 groove_LargeValueRef *groove_LargeValueRef_clone(const groove_LargeValueRef *r);
 bool groove_LargeValueRef_eq(const groove_LargeValueRef *a, const groove_LargeValueRef *b);
 void groove_LargeValueRefVec_drop(groove_LargeValueRefVec *v);
-typedef struct groove_StagedLargeValue { groove_StagedLargeValueId id; groove_LargeValueRef *value_ref; } groove_StagedLargeValue;
+typedef struct groove_StagedLargeValueAccounting { u64 encoded_bytes; u64 chunk_count; } groove_StagedLargeValueAccounting;
+typedef struct groove_StagedLargeValue { groove_StagedLargeValueId id; groove_LargeValueRef *value_ref; groove_StagedLargeValueAccounting accounting; u64 created_at_ms; } groove_StagedLargeValue;
 enum { GROOVE_LVK_STRING = 0, GROOVE_LVK_BYTES = 1, GROOVE_LVK_JSON = 2 };
 #define GROOVE_INLINE_VALUE_MAX_BYTES (64u * 1024u)
 jz_err groove__db__large_values__Database__prepare_and_stage_large_value(groove_Database *db, u32 kind, jz_slice bytes, groove_StagedLargeValue *out);
-enum { JZ_LVSK_NOT_LARGE = 0, JZ_LVSK_BYTES, JZ_LVSK_STRING, JZ_LVSK_JSON }; /* jazz_model::schema::LargeValueSemanticKind */
 static inline groove_Value gv_large(groove_LargeValueRef *r) { groove_Value v; v.tag = GV_LARGE; v.v.large = r; return v; }
 static inline groove_Value gv_nullable(groove_Value *inner) { groove_Value v; v.tag = GV_NULLABLE; v.v.nullable = inner; return v; }
 
@@ -2060,5 +2064,148 @@ void groove_LargeValueRef_drop(groove_LargeValueRef *r);
 void jazz_node__node__codec__StoredTransaction__drop(jazz_node_StoredTransaction *t);
 void jazz_protocol_SyncMessage_free(jazz_protocol_SyncMessage *m);
 void jazz_protocol_SyncMessageVec_free_boxed(void *v); /* Box<Vec<SyncMessage>> as PublicationOutcome<Vec<SyncMessage>>::value */
+
+typedef struct jazz_node_NamedStagedLargeValue { jz_str column; groove_StagedLargeValue staged; } jazz_node_NamedStagedLargeValue; /* (String, StagedLargeValue) */
+
+/* ---- state/lifecycle.rs support ---- */
+/* ActiveSessionClaimsScope<'a, S>: owns the &mut NodeState borrow */
+typedef struct jazz_node_ActiveSessionClaimsScope {
+    jazz_node_NodeState *node;
+    bool has_previous; jazz_types_AuthorSubject previous_identity; jz_btree previous_claims;
+} jazz_node_ActiveSessionClaimsScope;
+typedef struct jazz_node_SessionClaimsRevision { jazz_types_AuthorSubject identity; jz_btree claims; u64 revision; } jazz_node_SessionClaimsRevision;
+typedef JZ_VEC(jazz_node_SessionClaimsRevision) jazz_node_SessionClaimsRevisionVec;
+void jazz_types_AuthorSubject_pc_encode(jz_pc_w *w, const jazz_types_AuthorSubject *a);
+void groove_Value_pc_encode(jz_pc_w *w, const groove_Value *v);
+/* NodeState construction helpers owned by node/mod.rs */
+void jazz_node__node__RejectionTracking__default(struct jazz_node_RejectionTracking *out);
+void *jazz_node__node__NodeAliases__default(void);
+void *jazz_node__node__AheadCurrentKeys__default(void);
+void *jazz_node__node__QueryEngineReadMetrics__default(void);
+jazz_node_LargeValueStagingPolicy jazz_node__node__LargeValueStagingPolicy__default(void);
+void *jazz_engine__query_engine__QueryProgramTemplateCache__default(void);
+groove_Database *jazz_node__node__database_slot__DatabaseSlot__new(groove_Database *db);
+void jazz_node__node__NodeState__drop(jazz_node_NodeState *self);
+extern const u32 jazz_node_SUPPORTED_QUERY_PROGRAM_SIZE;
+extern const jz_btree_desc jazz_node_NS_AUTHORITY_RESULTS_DESC, jazz_node_NS_COMPILED_QUERY_PROGRAM_CACHE_DESC,
+    jazz_node_NS_FRONTIER_DOTS_DESC, jazz_node_NS_HISTORY_TX_AUTHORS_DESC, jazz_node_NS_LOCAL_AVAILABILITY_AUTHORITIES_DESC,
+    jazz_node_NS_LOCAL_AVAILABILITY_RECORDS_DESC, jazz_node_NS_LOCAL_PERMISSION_SUBJECTS_DESC, jazz_node_NS_LOCAL_UNAVAILABLE_INPUTS_DESC,
+    jazz_node_NS_OPEN_TRANSACTIONS_DESC, jazz_node_NS_OUTBOUND_BINDING_OWNERS_DESC, jazz_node_NS_OUTBOUND_SHAPE_OWNERS_DESC,
+    jazz_node_NS_PEER_SHAPE_OWNERS_DESC, jazz_node_NS_PERSISTED_WATERMARKS_DESC, jazz_node_NS_PHYSICAL_CURRENT_WINNER_PROJECTIONS_DESC,
+    jazz_node_NS_PHYSICAL_WRITE_PLAN_CACHE_DESC, jazz_node_NS_POLICY_AUTHORIZATION_GRAPH_CACHE_DESC,
+    jazz_node_NS_POLICY_AUTHORIZATION_GRAPH_REPLACEMENTS_DESC, jazz_node_NS_QUERY_SHAPE_CACHE_DESC,
+    jazz_node_NS_READ_POLICY_AUTHORIZATION_REQUEST_CACHE_DESC, jazz_node_NS_REGISTERED_BINDINGS_DESC,
+    jazz_node_NS_REGISTERED_SHAPES_DESC, jazz_node_NS_REGISTERED_SHAPE_OPTIONS_DESC, jazz_node_NS_RETAINED_ROOT_WINDOW_SOURCES_DESC,
+    jazz_node_NS_SESSION_CLAIMS_DESC, jazz_node_NS_SESSION_CLAIM_REVISIONS_DESC, jazz_node_NS_TX_VERSIONS_CACHE_DESC,
+    jazz_node_NS_VERSION_STORAGE_SOURCES_CACHE_DESC;
+extern const jz_hmap_desc jazz_node_NS_CLIENT_LOCAL_LITERAL_SHAPES_DESC, jazz_node_NS_HISTORY_TX_SEQS_DESC;
+void jazz_node_AuthoritySourceIncrementalVec_clear(void *v);
+/* node::relay_scope */
+bool jazz_node__node__relay_scope__ClientRelayScope__same_owner(const jazz_node_ClientRelayScope *a, const jazz_node_ClientRelayScope *b);
+void jazz_node__node__relay_scope__ClientRelayScope__drop(jazz_node_ClientRelayScope *s);
+/* node::codec (catalogue payloads) */
+jz_err jazz_node__node__codec__CatalogueRecordKind__from_key(u64 key, u32 *out);
+jz_uuid jazz_node__node__codec__catalogue_write_pointer_id(jazz_protocol_CurrentWriteSchema pointer);
+void jazz_node__node__codec__debug_assert_lowered_layouts(const jazz_model_JazzSchema *schema);
+jz_err jazz_node__node__codec__decode_active_schema(jz_slice bytes, jazz_node_ActiveSchema *out);
+jz_err jazz_node__node__codec__decode_catalogue_schema(jz_slice bytes, jazz_protocol_SchemaVersion *out);
+jz_err jazz_node__node__codec__decode_catalogue_lens(jz_slice bytes, jazz_protocol_MigrationLens *out);
+jz_err jazz_node__node__codec__decode_catalogue_lineage_activation(jz_slice bytes, jazz_node_SchemaLineageActivation *out);
+jz_err jazz_node__node__codec__decode_catalogue_pending_lineage(jz_slice bytes, jazz_node_PendingSchemaLineage *out);
+jz_err jazz_node__node__codec__decode_catalogue_staged_lineage(jz_slice bytes, jazz_node_StagedSchemaLineage *out);
+jz_err jazz_node__node__codec__decode_catalogue_bootstrap_ready(jz_slice bytes, jazz_node_CatalogueBootstrapReady *out);
+jz_err jazz_node__node__codec__decode_catalogue_write_pointer(jz_slice bytes, jazz_protocol_CurrentWriteSchema *out);
+jz_err jazz_node__node__codec__decode_physical_mapping(jz_slice bytes, jazz_node_SchemaPhysicalMapping *out);
+/* node::physical / ingest / recovery */
+typedef struct groove_TableSchema groove_TableSchema;
+typedef JZ_VEC(groove_TableSchema *) groove_TableSchemaVec;
+jz_err jazz_node__node__physical__physical_version_storage_tables(const jz_btree *schemas, const jz_btree *aliases,
+    const jz_btree *mappings, groove_TableSchemaVec *out);
+void groove__db__DbSchema__extend_tables(groove_DbSchema *schema, groove_TableSchemaVec tables);
+void groove_DbSchema_drop(groove_DbSchema *schema);
+jz_err jazz_node__node__physical__groove_variant_tag(jazz_types_SchemaVersionAlias alias, u32 *out);
+jz_err jazz_node__node__physical__validate_physical_variant_cases(const jz_btree *mappings, const jz_btree *aliases);
+jz_err jazz_node__node__physical__validate_physical_mapping_registries(const jz_btree *mappings, const jz_btree *aliases);
+jz_err jazz_node__node__physical__NodeState__synchronize_physical_version_tables(jazz_node_NodeState *self);
+jz_err jazz_node__node__ingest__NodeState__recover_pending_schema_lineages(jazz_node_NodeState *self);
+jz_err jazz_node__node__ingest__NodeState__validate_schema_lineage_publication(const jazz_protocol_SchemaLineagePublication *p);
+jz_err jazz_node__node__recovery__NodeState__recover_from_storage(jazz_node_NodeState *self);
+groove_LargeValueRefVec jazz_node__node__version_indirect_descriptors(const jazz_protocol_VersionRecordVec *versions);
+/* groove::db::Database lifecycle */
+typedef u32 groove_StorageLayout;
+groove_StorageLayout groove__db__StorageLayout__jazz_class_v2(void);
+jz_err groove__db__Database__new_with_storage_layout(groove_DbSchema schema, jazz_node_BoxedStorage *storage, groove_StorageLayout layout, groove_Database **out);
+jazz_node_BoxedStorage *groove__db__Database__into_storage(groove_Database *db);
+void groove__db__Database__drop(groove_Database *db);
+jz_err groove__db__Database__ensure_declared_index_generation(groove_Database *db, u64 generation);
+void groove__db__Database__set_plain_output_root_positions_enabled(groove_Database *db, bool enabled);
+jz_err groove__db__Database__prepare_for_storage_extraction(groove_Database *db);
+jz_err groove__db__Database__rebuild(groove_Database *db, groove_DbSchema schema);
+/* groove::chunks (Rc<dyn ...> handles are opaque) */
+typedef struct groove_ContentHash { u8 b[32]; } groove_ContentHash;
+typedef struct groove_Locator { u8 b[32]; } groove_Locator;
+typedef struct groove_NodeRef { groove_ContentHash object_hash; groove_Locator locator; } groove_NodeRef;
+typedef struct groove_StagedChunk { groove_NodeRef node_ref; jz_bytes encoded; } groove_StagedChunk;
+typedef JZ_VEC(groove_StagedChunk) groove_StagedChunkVec;
+void groove_StagedChunkVec_drop(groove_StagedChunkVec *v);
+void *groove__chunks__MissingChunkResolver__clone(void *r);
+void groove__chunks__MissingChunkResolver__release(void *r);
+void *groove__chunks__UnavailableChunkResolver__new(void);
+jz_err groove__chunks__LocalChunkReader__get(void *r, groove_Locator locator, groove_ContentHash expected_hash, jz_bytes *out);
+void *groove__chunks__LocalChunkReader__clone(void *r);
+void groove__chunks__LocalChunkReader__release(void *r);
+void groove__chunks__LocalChunkReader__refresh_from(void *r, void *from);
+void groove__chunks__OwnedChunkProvider__release(void *p);
+void groove__db__Database__set_missing_chunk_resolver(groove_Database *db, void *resolver);
+void *groove__db__Database__owned_chunk_provider(groove_Database *db);
+void *groove__db__Database__local_chunk_reader(groove_Database *db);
+void groove__db__Database__set_chunk_storage(groove_Database *db, void *storage);
+/* groove large-value staging */
+typedef JZ_VEC(groove_StagedLargeValue) groove_StagedLargeValueVec;
+void groove_StagedLargeValueVec_drop(groove_StagedLargeValueVec *v);
+typedef struct groove_PendingLargeValueUpload { groove_StagedLargeValueId id; u32 kind; u64 created_at_ms; } groove_PendingLargeValueUpload;
+typedef JZ_VEC(groove_PendingLargeValueUpload) groove_PendingLargeValueUploadVec;
+jz_err groove__db__Database__staged_large_values(groove_Database *db, groove_StagedLargeValueVec *out);
+jz_err groove__db__Database__evict_staged_large_value(groove_Database *db, groove_StagedLargeValueId id, bool *out);
+jz_err groove__db__Database__pending_large_value_uploads(groove_Database *db, groove_PendingLargeValueUploadVec *out);
+jz_err groove__db__Database__evict_pending_large_value_upload(groove_Database *db, groove_StagedLargeValueId id, bool *out);
+jz_err groove__db__Database__stage_large_value_chunk_batch(groove_Database *db, groove_StagedLargeValueId id, u32 kind, groove_StagedChunkVec chunks);
+jz_err groove__db__Database__stage_large_value_chunk_batch_if_current(groove_Database *db, groove_StagedLargeValueId id, u32 kind,
+    groove_StagedChunkVec chunks, bool *out);
+jz_err groove__db__Database__finalize_large_value_upload_if_current(groove_Database *db, groove_StagedLargeValueId id,
+    groove_LargeValueRef *value_ref, bool *some, groove_StagedLargeValue *out);
+jz_err groove__db__Database__consolidate_and_stage_large_value(groove_Database *db, groove_LargeValueRef *value, groove_StagedLargeValue *out);
+jz_err groove__db__Database__append_and_stage_large_value(groove_Database *db, groove_LargeValueRef *value, jz_bytes bytes, groove_StagedLargeValue *out);
+jz_err groove__db__Database__edit_and_stage_large_value(groove_Database *db, groove_LargeValueRef *value, u64 offset, u64 delete_length,
+    jz_bytes insert_bytes, groove_StagedLargeValue *out);
+jz_err groove__db__Database__read_large_value_range(const groove_Database *db, const groove_LargeValueRef *value, u64 start, u64 end, jz_bytes *out);
+jz_err groove__db__Database__read_large_text_utf16_range(const groove_Database *db, const groove_LargeValueRef *value, u64 start, u64 end, jz_str *out);
+jz_err groove__db__Database__large_text_utf16_offset_to_byte(const groove_Database *db, const groove_LargeValueRef *value, u64 offset, u64 *out);
+jz_err groove__db__Database__read_large_json_pointer(const groove_Database *db, const groove_LargeValueRef *value, const jz_str *pointer,
+    bool *some, jz_json *out);
+u32 groove__large_values__LargeValueRef__kind(const groove_LargeValueRef *r);
+u64 groove__large_values__LargeValueRef__byte_length(const groove_LargeValueRef *r);
+/* groove::records::ValueType shape inspection */
+enum {
+    GROOVE_VT_U8 = 0, GROOVE_VT_U16, GROOVE_VT_U32, GROOVE_VT_U64, GROOVE_VT_I32, GROOVE_VT_I64, GROOVE_VT_F64,
+    GROOVE_VT_BOOL, GROOVE_VT_STRING, GROOVE_VT_BYTES, GROOVE_VT_UUID, GROOVE_VT_ENUM_TAG, GROOVE_VT_TUPLE,
+    GROOVE_VT_ARRAY, GROOVE_VT_NULLABLE, GROOVE_VT_RECORD, GROOVE_VT_ENUM, GROOVE_VT_INTERNAL
+};
+groove_ValueType groove__large_values__physical_storage_value_type(u32 kind);
+bool groove_ValueType_eq(const groove_ValueType *a, const groove_ValueType *b);
+const groove_ValueType *groove__records__ValueType__inner(const groove_ValueType *t);
+const groove_ValueType *groove__records__ValueType__members(const groove_ValueType *t, u32 *n);
+const groove_RecordDescriptor *groove__records__ValueType__record_descriptor(const groove_ValueType *t);
+const void *groove__records__ValueType__enum_schema(const groove_ValueType *t);
+const void *groove__records__ValueType__enum_tag_schema(const groove_ValueType *t);
+jz_err groove__records__EnumSchema__case_payload(const void *schema, u32 tag, const groove_RecordDescriptor **out);
+jz_err groove__records__EnumTagSchema__variant(const void *schema, u8 tag);
+jz_err groove__records__EnumTagSchema__discriminant(const void *schema, const jz_str *name);
+const groove_ValueType *groove__records__RecordDescriptor__field_type(const groove_RecordDescriptor *d, u32 i);
+groove_BorrowedRecord groove__records__RecordDescriptor__bind(const groove_RecordDescriptor *d, jz_slice bytes);
+bool groove_RecordDescriptor_eq(const groove_RecordDescriptor *a, const groove_RecordDescriptor *b);
+groove_OwnedRecord *groove__records__OwnedRecord__new_arc(jz_bytes bytes, const groove_RecordDescriptor *d);
+void groove_OwnedRecord_arc_release(groove_OwnedRecord *r);
+void groove_ValueVec_drop(groove_ValueVec *v);
 
 #endif

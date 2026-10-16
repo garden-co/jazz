@@ -493,4 +493,159 @@ void jazz_node__node__NodeState__install_active_schema(jazz_node_NodeState *self
 jz_err jazz_node__node__NodeState__ensure_node_alias(jazz_node_NodeState *self, jazz_types_NodeUuid node_uuid, jazz_types_NodeAlias *out);
 jz_err jazz_node__node__NodeState__ensure_schema_version_alias(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version_id, jazz_types_SchemaVersionAlias *out);
 
+/* ---- state/commit.rs ---- */
+jz_err jazz_node__node__NodeState__ensure_large_value_stages_current(jazz_node_NodeState *self, const jz_btree *ids); /* state/lifecycle.rs */
+jz_err jazz_node__node__NodeState__enforce_large_value_staging_policy(jazz_node_NodeState *self, const groove_StagedLargeValue *staged); /* state/lifecycle.rs */
+jz_err jazz_node__node__NodeState__commit_mergeable(jazz_node_NodeState *self, jazz_node_MergeableCommit commit, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    jazz_node_MergeableCommit commit, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many(jazz_node_NodeState *self, jazz_node_MergeableCommitVec commits, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    jazz_node_MergeableCommitVec commits, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many_in_schema_at(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    jazz_node_MergeableCommitVec commits, jazz_model_TxId reserved, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_at(jazz_node_NodeState *self, jazz_node_MergeableCommit commit, jazz_types_TxTime made_at, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many_at(jazz_node_NodeState *self, jazz_node_MergeableCommitVec commits, jazz_types_TxTime made_at, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many_at_with_schema_versions(jazz_node_NodeState *self, jazz_node_SchemaCommitVec commits,
+    jazz_types_TxTime made_at, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_many_at_with_schema_versions_and_provenance(jazz_node_NodeState *self, jazz_node_SchemaCommitVec commits,
+    jazz_types_TxTime made_at, jazz_model_ContributionMergeProvenance *contribution_merge_in /* NULL = None, moved */, jazz_node_PublishedTransaction *out);
+jz_err jazz_node__node__NodeState__prepare_and_stage_large_commit_values(jazz_node_NodeState *self, jazz_node_SchemaCommitVec *commits);
+jz_err jazz_node__node__NodeState__prepare_and_stage_large_scalar(jazz_node_NodeState *self, groove_Value *value, u32 semantic_kind,
+    bool *some, groove_StagedLargeValue *out);
+jz_err jazz_node__node__NodeState__commit_mergeable_unit(jazz_node_NodeState *self, jazz_node_MergeableCommit commit,
+    jazz_node_PublishedTransaction *published, jazz_protocol_SyncMessage **unit);
+jz_err jazz_node__node__NodeState__resident_commit_unit(jazz_node_NodeState *self, jazz_model_TxId tx_id, jazz_protocol_SyncMessage **out);
+jz_err jazz_node__node__NodeState__settle_published_transaction(jazz_node_NodeState *self, jazz_model_TxId tx_id, groove_PersistedBatch *persistence);
+jz_err jazz_node__node__NodeState__persist_and_settle_transaction(jazz_node_NodeState *self, jazz_node_PublishedTransaction published, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__persist_and_settle_outcome(jazz_node_NodeState *self, jazz_node_PublicationOutcome outcome, void **out);
+jz_err jazz_node__node__NodeState__commit_unit_for(jazz_node_NodeState *self, jazz_model_TxId tx_id, jazz_protocol_SyncMessage **out);
+jz_err jazz_node__node__NodeState__visible_current_cells(jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jz_btree *out);
+jz_err jazz_node__node__NodeState__visible_current_cells_in_branch(jazz_node_NodeState *self, const jz_str *table, const jazz_model_BranchSelector *branch,
+    jazz_types_RowUuid row_uuid, bool *has, jz_btree *out);
+jz_err jazz_node__node__NodeState__visible_current_physical_cells_in_branch_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, const jazz_model_BranchSelector *branch, jazz_types_RowUuid row_uuid, bool *has, jz_btree *out);
+jz_err jazz_node__node__NodeState__visible_current_physical_cells_and_winner_in_branch_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, const jazz_model_BranchSelector *branch, jazz_types_RowUuid row_uuid, bool *has, jz_btree *cells_out, jazz_model_TxId *tx_out);
+jz_err jazz_node__node__NodeState__local_content_winner_tx_id_in_branch(jazz_node_NodeState *self, const jz_str *table, const jazz_model_BranchSelector *branch,
+    jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__local_deletion_winner_tx_id_in_branch(jazz_node_NodeState *self, const jz_str *table, const jazz_model_BranchSelector *branch,
+    jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__local_winner_in_branch_selector(jazz_node_NodeState *self, const jz_str *table, const jazz_model_BranchSelector *branch,
+    jazz_types_RowUuid row_uuid, jazz_node_VersionRow **out);
+jz_err jazz_node__node__NodeState__local_content_winner_tx_id(jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__local_content_winner_tx_id_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__local_deletion_winner_tx_id(jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__local_deletion_winner_tx_id_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jazz_model_TxId *out);
+jz_err jazz_node__node__NodeState__rebuild_ahead_current_keys(jazz_node_NodeState *self);
+void jazz_node__node__NodeState__mark_tx_touched_row(jazz_node_NodeState *self, jazz_types_PhysicalTableId table_id, const jazz_node_VersionRow *version);
+jz_err jazz_node__node__NodeState__load_tx_touched_rows(const jazz_node_NodeState *self, const groove_DatabaseBatch *batch /* NULL = None */,
+    jazz_types_TxTime tx_time, jazz_types_NodeAlias node_alias, jazz_node_TouchedRows *out);
+bool jazz_node__node__NodeState__cached_tx_versions(const jazz_node_NodeState *self, jazz_model_TxId tx_id, jazz_node_VersionRowVec *out);
+void jazz_node__node__NodeState__cache_tx_versions(jazz_node_NodeState *self, jazz_model_TxId tx_id, jazz_node_VersionRowVec versions);
+void jazz_node__node__NodeState__invalidate_tx_version_tables_cache(jazz_node_NodeState *self, jazz_model_TxId tx_id);
+jz_err jazz_node__node__NodeState__current_row_from_materialized_version(jazz_node_NodeState *self, const jazz_model_TableSchema *table,
+    const jazz_node_VersionRow *version, jazz_node_CurrentRow *out);
+jz_err jazz_node__node__NodeState__materialized_cells_for_version(const jazz_node_NodeState *self, const jazz_model_TableSchema *table,
+    const jazz_node_VersionRow *version, jz_btree *out);
+jz_err jazz_node__node__NodeState__local_current_row(jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jazz_node_CurrentRow *out);
+jz_err jazz_node__node__NodeState__current_physical_cell_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, jazz_types_RowUuid row_uuid, const jz_str *column, bool *has, groove_Value *out);
+jz_err jazz_node__node__NodeState__current_physical_cells_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jz_btree *out);
+jz_err jazz_node__node__NodeState__current_physical_cells_and_winner_in_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, jazz_types_RowUuid row_uuid, bool *has, jz_btree *cells, jazz_model_TxId *winner);
+jz_err jazz_node__node__NodeState__current_physical_cells_in_branch_schema(jazz_node_NodeState *self, jazz_types_SchemaVersionId schema_version,
+    const jz_str *table, const jazz_model_BranchSelector *branch, jazz_types_RowUuid row_uuid, bool *has, jz_btree *out);
+jz_err jazz_node__node__NodeState__seal_large_value_updates(jazz_node_NodeState *self, jazz_node_MergeableCommit commit,
+    const jazz_node_NamedStagedLargeValue *staged, u32 n_staged, jazz_types_SchemaVersionId schema_version, jazz_node_MergeableCommit *out);
+jz_err jazz_node__node__NodeState__seal_inherited_large_values(jazz_node_NodeState *self, jazz_node_MergeableCommit commit,
+    jazz_types_SchemaVersionId schema_version, bool allow_inherited_descriptors, jazz_node_MergeableCommit *out);
+jz_err jazz_node__node__NodeState__local_current_row_in_schema(jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid,
+    jazz_types_SchemaVersionId schema_version, bool *has, jazz_node_CurrentRow *out);
+jz_err jazz_node__node__NodeState__local_current_content_row_candidate(jazz_node_NodeState *self, const jazz_model_TableSchema *table, jazz_types_RowUuid row_uuid,
+    jazz_types_SchemaVersionId schema_version, bool *found, jazz_node_CurrentRow *row_out, jazz_types_TxTime *tx_time, jazz_types_NodeUuid *tx_node, bool *deleted_out);
+jz_err jazz_node__node__NodeState__current_record_sort_key(const jazz_node_NodeState *self, const jz_str *table, jazz_types_RowUuid row_uuid,
+    const groove_BorrowedRecord *record, jazz_types_TxTime *tx_time, jazz_types_NodeUuid *tx_node);
+jz_err jazz_node__node__NodeState__malformed_current_query_error(const jz_str *table, jazz_types_RowUuid row_uuid, jz_err error);
+
+/* ---- state/lifecycle.rs ---- */
+void jazz_node__node__ActiveSessionClaimsScope__drop(jazz_node_ActiveSessionClaimsScope *scope);
+jz_err jazz_node__node__NodeState__new(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema schema, jazz_node_BoxedStorage *storage, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__new_client(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema requested_schema,
+    jazz_node_BoxedStorage *storage, bool history_complete, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__new_catalogue_uninitialized(jazz_types_NodeUuid node_uuid, jazz_node_BoxedStorage *storage, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__discover_durable_catalogue_genesis(jazz_node_BoxedStorage *storage,
+    jazz_node_BoxedStorage **storage_out, bool *has_schema, jazz_model_JazzSchema *schema_out);
+jz_err jazz_node__node__NodeState__select_durable_reopen_schema(jazz_node_BoxedStorage *storage, jazz_model_JazzSchema requested,
+    jazz_node_BoxedStorage **storage_out, jazz_model_JazzSchema *schema_out);
+jz_err jazz_node__node__NodeState__new_history_complete(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema schema, jazz_node_BoxedStorage *storage, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__reopen_in_place(jazz_node_NodeState *self, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__new_with_history_complete(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema schema,
+    jazz_node_BoxedStorage *storage, bool history_complete, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__new_with_options(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema schema,
+    jazz_node_BoxedStorage *storage, bool history_complete, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__new_with_options_inner(jazz_types_NodeUuid node_uuid, jazz_model_JazzSchema schema,
+    jazz_node_BoxedStorage *storage, bool history_complete, u32 catalogue_bootstrap_state, jazz_node_NodeState **out);
+jz_err jazz_node__node__NodeState__open_full_database(const jazz_model_JazzSchema *schema, const jz_btree *catalogue_schemas,
+    const jz_btree *schema_version_aliases, const jz_btree *physical_mappings, jazz_node_BoxedStorage *storage, groove_Database **out);
+jazz_types_GlobalTime jazz_node__node__NodeState__committed_global_time(const jazz_node_NodeState *self);
+jazz_types_NodeUuid jazz_node__node__NodeState__node_uuid(const jazz_node_NodeState *self);
+jazz_types_TxTime jazz_node__node__NodeState__tx_time_high_water(const jazz_node_NodeState *self);
+jazz_types_TxTime *jazz_node__node__NodeState__tx_time_reservation_clock(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__seed_tx_time_high_water(jazz_node_NodeState *self, jazz_types_TxTime high_water);
+jazz_model_DurabilityTier jazz_node__node__NodeState__authored_commit_durability(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__set_non_durable_client(jazz_node_NodeState *self);
+void jazz_node__node__NodeState__enable_authoritative_scalar_exit_refresh(jazz_node_NodeState *self);
+jz_err jazz_node__node__NodeState__configure_scope_isolated_client_relay(jazz_node_NodeState *self, jazz_node_ClientRelayScope *scope);
+const jazz_node_ClientRelayScope *jazz_node__node__NodeState__client_relay_scope(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__set_session_claims(jazz_node_NodeState *self, jazz_types_AuthorSubject identity, jz_btree claims);
+jazz_node_ActiveSessionClaimsScope jazz_node__node__NodeState__scoped_active_session_claims(jazz_node_NodeState *self, jazz_types_AuthorSubject identity, jz_btree claims);
+jazz_node_ActiveSessionClaimsScope jazz_node__node__NodeState__scoped_optional_session_claims(jazz_node_NodeState *self, jazz_types_AuthorSubject identity,
+    bool has_claims, jz_btree claims);
+u64 jazz_node__node__NodeState__session_claim_revision(const jazz_node_NodeState *self, jazz_types_AuthorSubject identity);
+jazz_node_SessionClaimsRevisionVec jazz_node__node__NodeState__session_claims_with_revisions(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__session_claims_for(const jazz_node_NodeState *self, jazz_types_AuthorSubject identity, jz_btree *out);
+void jazz_node__node__NodeState__set_permissions_ready(jazz_node_NodeState *self, bool ready);
+bool jazz_node__node__NodeState__permissions_ready(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__set_chunk_storage(jazz_node_NodeState *self, void *storage /* Rc<dyn ChunkStorage> */);
+bool *jazz_node__node__NodeState__detach_covered_chunk_waits_handle(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__set_missing_chunk_resolver(jazz_node_NodeState *self, void *resolver);
+jz_err jazz_node__node__NodeState__local_chunk(const jazz_node_NodeState *self, groove_Locator locator, groove_ContentHash expected_hash, jz_bytes *out);
+void *jazz_node__node__NodeState__local_chunk_reader_handle(const jazz_node_NodeState *self);
+void jazz_node__node__NodeState__set_large_value_staging_policy(jazz_node_NodeState *self, jazz_node_LargeValueStagingPolicy policy);
+bool jazz_node__node__NodeState__admit_large_value_ingress(jazz_node_NodeState *self, u64 encoded_bytes);
+jz_err jazz_node__node__NodeState__current_staged_ids_for_descriptors(jazz_node_NodeState *self, const groove_LargeValueRefVec *descriptors,
+    bool require_every_descriptor, groove_StagedLargeValueIdVec *out);
+jz_err jazz_node__node__NodeState__require_staged_large_values_for_versions(jazz_node_NodeState *self, const jazz_protocol_VersionRecordVec *versions);
+jz_err jazz_node__node__NodeState__evict_expired_staged_large_values(jazz_node_NodeState *self, usize *out);
+jz_err jazz_node__node__NodeState__staged_large_value_ids(jazz_node_NodeState *self, groove_StagedLargeValueIdVec *out);
+jz_err jazz_node__node__NodeState__evict_staged_large_value(jazz_node_NodeState *self, groove_StagedLargeValueId id, bool *out);
+jz_err jazz_node__node__NodeState__stage_large_value_chunk_batch(jazz_node_NodeState *self, groove_StagedLargeValueId upload_id, u32 kind, groove_StagedChunkVec chunks);
+jz_err jazz_node__node__NodeState__begin_streaming_large_value_upload(jazz_node_NodeState *self, groove_StagedLargeValueId upload_id, u32 kind);
+jz_err jazz_node__node__NodeState__evict_pending_large_value_upload(jazz_node_NodeState *self, groove_StagedLargeValueId upload_id);
+jz_err jazz_node__node__NodeState__finalize_large_value_upload(jazz_node_NodeState *self, groove_StagedLargeValueId upload_id, groove_LargeValueRef *value_ref,
+    groove_StagedLargeValue *out);
+jz_err jazz_node__node__NodeState__consolidate_and_stage_large_value(jazz_node_NodeState *self, groove_LargeValueRef *value, groove_StagedLargeValue *out);
+jz_err jazz_node__node__NodeState__append_and_stage_large_value(jazz_node_NodeState *self, groove_LargeValueRef *value, jz_bytes bytes, groove_StagedLargeValue *out);
+jz_err jazz_node__node__NodeState__edit_and_stage_large_value(jazz_node_NodeState *self, groove_LargeValueRef *value, u64 offset, u64 delete_length,
+    jz_bytes insert_bytes, groove_StagedLargeValue *out);
+jz_err jazz_node__node__NodeState__read_large_value_range(const jazz_node_NodeState *self, const groove_LargeValueRef *value, u64 start, u64 end, jz_bytes *out);
+jz_err jazz_node__node__NodeState__read_large_text_utf16_range(const jazz_node_NodeState *self, const groove_LargeValueRef *value, u64 start, u64 end, jz_str *out);
+jz_err jazz_node__node__NodeState__large_text_utf16_offset_to_byte(const jazz_node_NodeState *self, const groove_LargeValueRef *value, u64 offset, u64 *out);
+jz_err jazz_node__node__NodeState__read_large_json_pointer(const jazz_node_NodeState *self, const groove_LargeValueRef *value, const jz_str *pointer,
+    bool *some, jz_json *out);
+jz_err jazz_node__node__NodeState__hydrate_large_value_cells(const jazz_node_NodeState *self, jz_btree *cells);
+jz_err jazz_node__node__NodeState__hydrate_current_rows(const jazz_node_NodeState *self, jazz_node_CurrentRow *rows, u32 n);
+jz_err jazz_node__node__NodeState__hydrate_encoded_record(const jazz_node_NodeState *self, const groove_RecordDescriptor *descriptor, jz_bytes *raw);
+jz_err jazz_node__node__NodeState__rebuild_database_slot(jazz_node_NodeState *self);
+void jazz_node__node__NodeState__invalidate_runtime_handles_after_database_rebuild(jazz_node_NodeState *self);
+jz_err jazz_node__node__NodeState__open_catalogue_stage(jazz_model_JazzSchema schema, jazz_node_BoxedStorage *storage,
+    u32 catalogue_bootstrap_state, jazz_node_CatalogueOpenState *out);
+jz_err jazz_node__node__NodeState__validate_durable_staged_lineage(const jazz_node_StagedSchemaLineage *staged, const jz_btree *catalogue_schemas);
+jz_err jazz_node__node__NodeState__validate_durable_physical_identity_bindings(const jz_btree *schemas, const jz_btree *mappings,
+    const jz_btree *staged, const jz_btree *active, const jz_btree *pending, bool has_genesis, jazz_types_SchemaVersionId genesis, u32 bootstrap_state);
+
 #endif

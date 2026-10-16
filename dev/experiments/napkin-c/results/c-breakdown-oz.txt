@@ -1,0 +1,20 @@
+total code bytes 2518121
+    770271  30.6% jazz_node
+    679527  27.0% groove
+    328070  13.0% jazz_db
+    230395   9.1% jazz_model
+    211809   8.4% jazz_engine
+     74166   2.9% jazz_protocol
+     49458   2.0% jazz_wasm
+     37557   1.5% libc (wasi-libc: printf, dlmalloc, strtod, ...)
+     36752   1.5% runtime (std/serde/collections equivalent)
+     25937   1.0% idb_tree
+     19890   0.8% jazz_types
+     17757   0.7% third_party/zstd
+     13098   0.5% third_party/blake3
+     10049   0.4% third_party/monocypher
+      6080   0.2% wasm_tracing
+      3547   0.1% unresolved-name stubs/other own
+      3043   0.1% jazz_compression
+       628   0.0% third_party/crypto-algorithms
+        87   0.0% link stubs

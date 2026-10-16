@@ -1636,6 +1636,8 @@ bool jazz_node__node__codec__VersionRow__is_deleted(const jazz_node_VersionRow *
 }
 
 static const jz_btree_desc jzn_desc_str_value = { sizeof(jz_str), sizeof(groove_Value), jz_cmp_str, jzn_str_drop_v, jzn_value_drop_v };
+/* exported for maintained_subscription_view.c (VersionRowParts.cells) */
+const jz_btree_desc jzn_desc_str_value_pub = { sizeof(jz_str), sizeof(groove_Value), jz_cmp_str, jzn_str_drop_v, jzn_value_drop_v };
 
 jz_err jazz_node__node__codec__VersionRow__cells(const jazz_node_VersionRow *v, const jazz_model_TableSchema *table, jz_btree *out) {
     jz_btree cells;

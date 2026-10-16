@@ -1,0 +1,32 @@
+functions matched by exact path: 1229; Rust bytes 2589139 (incl. their closures/async bodies, not callees) vs C 501812: 5.2x
+median ratio 3.3555194805194803
+   85871    2387   36.0x jazz_engine__query_engine__lowering__lower_resolved_query_program_with_source_parameters
+   76817    4464   17.2x jazz_node__node__maintained_subscription_view__MaintainedSubscriptionView__apply_multisink_deltas
+   75017   10468    7.2x jazz_node__node__physical__physical_version_storage_tables
+   70814    9571    7.4x groove__ivm__runtime__runtime_tick__IncrementalEvaluation__poll
+   46570    4271   10.9x groove__ivm__runtime__evaluator__TickEvaluator__compute_node
+   39722    9927    4.0x jazz_db__db__node_runtime__refresh_subscriptions_in_with_tables
+   31481     211  149.2x groove__ivm__graph__NodeDescriptor__node_id_of
+   31233    1767   17.7x jazz_protocol__wire__stream_backend__OrderedChannelBackend__receive
+   30463   11969    2.5x jazz_node__node__query_eval__normalization__normalize_policy_atom_chain
+   26282    3939    6.7x jazz_node__node__NodeState__new_with_options_inner
+   23669     170  139.2x jazz_wasm__verify_self_signed_runtime_author
+   22896    2217   10.3x groove__ivm__runtime__runtime_tick__EvaluationSession__hydration
+   21425     245   87.4x groove__ivm__runtime__runtime_tick__EvaluationWorkQueue__poll_node
+   20719     827   25.1x jazz_engine__query_engine__lowering__source_requests_for_plan
+   20471     410   49.9x jazz_db__db__channel_endpoint__ChannelEndpoint__enqueue
+   17852   12961    1.4x jazz_engine__query_engine__lowering__terminals__lowered_terminals
+   17064     166  102.8x jazz_protocol__wire__WireInboundContext__decode_semantic_payload
+   16740    4738    3.5x jazz_model__query__relation_query_to_query
+   15575    2062    7.6x jazz_node__node__codec__decode_physical_mapping
+   15314    1367   11.2x jazz_node__node__query_eval__bindings__bind_query_predicate
+   14445    1728    8.4x jazz_node__node__migration_validation__validate_migration_lens_between
+   14309    6747    2.1x jazz_model__model__public_schema_convert__convert_public_schema
+   14083    7064    2.0x jazz_db__db__apply_maintained_update_to_snapshot
+   13427    3962    3.4x groove__ivm__runtime__subscriptions__graph_builder_fingerprint
+   13367     403   33.2x groove__ivm__runtime__evaluator__SparseGroups__commit_overlay
+   13317    2911    4.6x jazz_model__schema__RuntimeSchema__storage_tables
+   13175    1275   10.3x jazz_node__node__codec__decode_physical_identity_manifest
+   12731    1317    9.7x groove__ivm__runtime__runtime_tick__EvaluationSession__install
+   12494    3280    3.8x jazz_db__db__restore_local_subscriber_replay
+   11774    2415    4.9x groove__ivm__runtime__evaluator__TickEvaluator__update_aggregate

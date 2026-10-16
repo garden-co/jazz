@@ -165,6 +165,7 @@ typedef struct jazz_node_VersionRowParts {
     jazz_protocol_RowBase base;
     jz_bytes counter_signs;
 } jazz_node_VersionRowParts;
+extern const jz_btree_desc jzn_desc_str_value_pub; /* String -> Value (VersionRowParts.cells) */
 enum { JZN_PARKED_RELAY = 0, JZN_PARKED_AUTHORITY = 1 };
 /* ParkedCommitUnit (codec.rs) */
 typedef struct jazz_node_ParkedCommitUnit {

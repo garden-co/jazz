@@ -1198,6 +1198,7 @@ void jazz_protocol__protocol__SupportingRowsUpdate__drop(jazz_protocol_Supportin
 bool jazz_protocol__protocol__SupportingRow__is_wire_valid(const jazz_protocol_SupportingRow *r);
 bool jazz_protocol__protocol__SupportingRow__eq(const jazz_protocol_SupportingRow *a, const jazz_protocol_SupportingRow *b);
 enum { JAZZ_KSD_FAST = 0, JAZZ_KSD_FAST_WITH_AUTH = 1, JAZZ_KSD_RESERVED2 = 2, JAZZ_KSD_WATERMARK = 3 };
+enum { JAZZ_KSC_FAST_CURRENT_MEMBERSHIP = 0 }; /* KnownStateCompleteness */
 struct jazz_protocol_KnownStateDeclaration {
     u32 tag; u32 completeness; jazz_types_GlobalTime position;
     bool has_authorization_progress; u64 authorization_progress;
@@ -1251,6 +1252,7 @@ const jz_str *jazz_model__tx__Transaction__user_metadata_json(const jazz_model_T
 void *jazz_model__tx__Transaction__contribution_merge_clone(const jazz_model_Transaction *t);  /* NULL = None */
 bool jazz_model__tx__Fate__eq(const jazz_model_Fate *a, const jazz_model_Fate *b);
 void jazz_model__tx__Fate__clone(jazz_model_Fate *dst, const jazz_model_Fate *src);
+void jazz_model__tx__Fate__drop(jazz_model_Fate *f);
 jz_err jazz_model__model__branch__BranchKey__from_canonical_bytes(jz_slice bytes, jazz_model_BranchKey **out);
 jazz_types_SchemaVersionId jazz_model__query__ValidatedQuery__schema_version(const jazz_model_ValidatedQuery *v);
 /* groove */
@@ -1323,5 +1325,158 @@ jz_err jazz_node__node__physical__NodeState__authored_columns_for_version(struct
 bool jazz_node__debug_env__covered_input_trace(void);
 void jazz_protocol__protocol__ResultMemberEntry__drop(void *p);
 void jazz_node__debug_env__eprintln(const jz_str *line);
+
+/* ======================= peer external mirrors ======================= */
+/* protocol */
+typedef struct jazz_protocol_ReadViewSpec jazz_protocol_ReadViewSpec;
+bool jazz_protocol__protocol__ReadViewSpec__is_default(const jazz_protocol_ReadViewSpec *r);
+jazz_protocol_ReadViewSpec *jazz_protocol__protocol__ReadViewSpec__clone(const jazz_protocol_ReadViewSpec *r);
+void jazz_protocol__protocol__ReadViewSpec__drop(void *r);
+struct jazz_protocol_RegisterShapeOptions {
+    jazz_model_DurabilityTier tier;
+    jazz_protocol_ReadViewSpec *read_view;
+    u32 binding_source; /* BindingSource::Ordinary = 0 */
+};
+void jazz_protocol__protocol__RegisterShapeOptions__default(jazz_protocol_RegisterShapeOptions *out);
+void jazz_protocol__protocol__RegisterShapeOptions__clone(jazz_protocol_RegisterShapeOptions *dst, const jazz_protocol_RegisterShapeOptions *src);
+void jazz_protocol__protocol__RegisterShapeOptions__drop(jazz_protocol_RegisterShapeOptions *o);
+jazz_protocol_ReadViewKey jazz_protocol__protocol__RegisterShapeOptions__read_view_key(const jazz_protocol_RegisterShapeOptions *o);
+typedef struct jazz_protocol_DelegatedSessionBinding { jazz_types_AuthorSubject identity; jz_btree claims; /* String -> Value */ } jazz_protocol_DelegatedSessionBinding;
+struct jazz_protocol_Subscribe {
+    jazz_model_ShapeId shape_id;
+    jazz_protocol_SubscriptionKey subscription;
+    groove_ValueVec values;
+    jazz_protocol_KnownStateDeclaration *known_state;            /* NULL = None */
+    jazz_protocol_DelegatedSessionBinding *delegated_session;    /* NULL = None */
+};
+jazz_protocol_ShapeAst *jazz_protocol__protocol__ShapeAst__from_validated(const jazz_model_ValidatedQuery *shape);
+jazz_protocol_PolicyBindingKey *jazz_protocol__protocol__PolicyBindingKey__from_canonical_parts(jazz_types_AuthorSubject identity, jz_btree claims);
+void jazz_protocol__protocol__AuthorityResultKey__unscoped(jazz_protocol_BindingViewKey binding_view, jazz_protocol_AuthorityResultKey *out);
+jazz_protocol_BindingViewKey jazz_protocol__protocol__BindingViewKey__from_canonical_subscription_key(jazz_protocol_SubscriptionKey k);
+bool jazz_protocol_AuthorityResultKey_eq(const jazz_protocol_AuthorityResultKey *a, const jazz_protocol_AuthorityResultKey *b);
+/* SyncMessage::ViewUpdate access (NULL when the message is another variant) */
+jazz_protocol_ViewUpdatePayload *jazz_protocol__protocol__SyncMessage__as_view_update(jazz_protocol_SyncMessage *m);
+void jazz_protocol__protocol__SyncMessage__drop(jazz_protocol_SyncMessage *m);
+bool jazz_protocol__protocol__SupportingRowsUpdate__is_snapshot(const jazz_protocol_SupportingRowsUpdate *u);
+void jazz_protocol__protocol__SupportingRowsUpdate__revision(const jazz_protocol_SupportingRowsUpdate *u, u8 out[16]);
+void jazz_protocol__protocol__SupportingRowsUpdate__clone(jazz_protocol_SupportingRowsUpdate *dst, const jazz_protocol_SupportingRowsUpdate *src);
+jz_err jazz_protocol__protocol__expand_version_carriers(jazz_protocol_VersionCarrier *const *carriers, u32 n, jazz_protocol_VersionBundleVec *out);
+void jazz_protocol__protocol__VersionBundle__drop(void *b);
+enum { JAZZ_BUNDLE_SCOPE_COMPLETE_TX = 0 };
+/* ResultMemberEntry (Ord, Clone) */
+int jazz_protocol__protocol__ResultMemberEntry__cmp(const void *a, const void *b, void *ctx);
+void jazz_protocol__protocol__ResultMemberEntry__clone(void *dst, const void *src);
+const jz_str *jazz_protocol__protocol__ResultMemberEntry__table_name(const jazz_protocol_ResultMemberEntry *m); /* NULL = None */
+const jz_str *jazz_protocol__protocol__ResultMemberEntry__synthetic_table(const jazz_protocol_ResultMemberEntry *m); /* Synthetic only */
+enum { JAZZ_RRS_CURRENT = 0 };
+jazz_protocol_ResultRowLayer jazz_protocol__protocol__RealRowMemberEntry__layer(const jazz_protocol_RealRowMemberEntry *r);
+bool jazz_protocol__protocol__RealRowMemberEntry__has_deletion_tx(const jazz_protocol_RealRowMemberEntry *r);
+u32 jazz_protocol__protocol__RealRowMemberEntry__source(const jazz_protocol_RealRowMemberEntry *r);
+bool jazz_protocol__protocol__RealRowMemberEntry__has_branch_or_prefix(const jazz_protocol_RealRowMemberEntry *r);
+bool jazz_protocol__protocol__RealRowMemberEntry__has_batch(const jazz_protocol_RealRowMemberEntry *r);
+groove_InternStr jazz_protocol__protocol__RealRowMemberEntry__table_intern(const jazz_protocol_RealRowMemberEntry *r);
+int jazz_types__object__OutputOccurrenceId__cmp(const jazz_types_OutputOccurrenceId *a, const jazz_types_OutputOccurrenceId *b);
+jazz_types_OutputOccurrenceId *jazz_types__object__OutputOccurrenceId__clone(const jazz_types_OutputOccurrenceId *o);
+/* ProgramFactEntry */
+typedef struct jazz_protocol_ProgramFactEntry jazz_protocol_ProgramFactEntry;
+JZ_NVEC(jazz_protocol_ProgramFactEntryPtrVec, jazz_protocol_ProgramFactEntry *);
+bool jazz_protocol__protocol__ProgramFactEntry__is_peer_source_closure_fact(const jazz_protocol_ProgramFactEntry *f);
+void jazz_protocol__protocol__ProgramFactEntry__drop(void *f);
+/* groove */
+typedef struct groove_MultisinkSubscription groove_MultisinkSubscription;
+typedef struct groove_MultisinkBatch groove_MultisinkBatch;
+typedef u64 groove_SubscriptionId;
+enum { GROOVE_TRY_RECV_OK = 0, GROOVE_TRY_RECV_EMPTY = 1, GROOVE_TRY_RECV_DISCONNECTED = 2 };
+u32 groove__ivm__MultisinkSubscription__try_recv(groove_MultisinkSubscription *s, groove_MultisinkBatch **out);
+groove_SubscriptionId groove__ivm__MultisinkSubscription__id(const groove_MultisinkSubscription *s);
+void groove__ivm__MultisinkSubscription__drop(groove_MultisinkSubscription *s);
+typedef struct groove_StorageReadBucket { u64 reads, ranges; } groove_StorageReadBucket;
+struct groove_StorageReadMetrics {
+    groove_StorageReadBucket total, history_rows, history_indexes, ahead_current_rows, global_current_rows, global_current_indexes,
+        register_global_current_rows, global_changes_rows, global_changes_indexes, transactions_rows, transactions_indexes, other;
+};
+/* node::maintained_subscription_view (node-core-a) */
+typedef struct jazz_node_MaintainedTerminalSchemas jazz_node_MaintainedTerminalSchemas;
+typedef struct jazz_node_MaintainedSubscriptionViewFootprint jazz_node_MaintainedSubscriptionViewFootprint;
+JZ_NVEC(jzn_SupportingRowRefVec, const jazz_protocol_SupportingRow *);
+JZ_NVEC(jazz_protocol_ResultMemberEntryVec, jazz_protocol_ResultMemberEntry);
+typedef struct jazz_node_ResultTransitions {
+    bool authoritative_membership_changed;
+    jz_btree authoritative_member_adds;     /* BTreeSet<ResultMemberEntry> */
+    jazz_protocol_ResultMemberEntryVec adds, removes;
+    jzn_ptrvec result_payload_adds;
+    jazz_protocol_ResultMemberEntryVec result_payload_removes;
+    jazz_protocol_ProgramFactEntryPtrVec program_fact_adds, program_fact_removes;
+    bool supporting_changed;
+    jzn_ptrvec terminal_operations;
+    usize observed_result_delta_batches;
+    bool requires_authoritative_membership_reconcile;
+} jazz_node_ResultTransitions;
+void jazz_node_ResultTransitions_default(jazz_node_ResultTransitions *t);
+void jazz_node_ResultTransitions_drop(void *t);
+#define JZN_MSV(x) jazz_node__node__maintained_subscription_view__##x
+void JZN_MSV(MaintainedSubscriptionView__drop)(jazz_node_MaintainedSubscriptionView *m);
+void jazz_node_MaintainedTerminalSchemas_drop(jazz_node_MaintainedTerminalSchemas *s);
+bool jazz_node__node__MaintainedTerminalSchemas__has_root_collector(const jazz_node_MaintainedTerminalSchemas *s);
+jz_err JZN_MSV(MaintainedSubscriptionView__apply_multisink_deltas)(jazz_node_MaintainedSubscriptionView *m, groove_MultisinkBatch *deltas,
+    const jazz_node_MaintainedTerminalSchemas *schemas, const jz_btree *tables, const struct jazz_node_NodeAliases *node_aliases,
+    jazz_node_ResultTransitions *out);
+void JZN_MSV(MaintainedSubscriptionView__acknowledged_supporting_rows)(const jazz_node_MaintainedSubscriptionView *m, jzn_SupportingRowRefVec *out);
+bool JZN_MSV(MaintainedSubscriptionView__single_physical_table)(const jazz_node_MaintainedSubscriptionView *m, const jz_str **table, jazz_types_GlobalPhysicalTableId *id);
+void JZN_MSV(MaintainedSubscriptionView__supporting_rows)(const jazz_node_MaintainedSubscriptionView *m, jzn_SupportingRowRefVec *out);
+bool JZN_MSV(MaintainedSubscriptionView__unpublished_supporting_delta)(const jazz_node_MaintainedSubscriptionView *m, jazz_protocol_SupportingRowVec *adds,
+    jazz_protocol_SupportingRowVec *removes);
+void JZN_MSV(MaintainedSubscriptionView__forget_peer_source_closure_baseline)(jazz_node_MaintainedSubscriptionView *m);
+void JZN_MSV(MaintainedSubscriptionView__acknowledge_peer_source_closure)(jazz_node_MaintainedSubscriptionView *m);
+bool JZN_MSV(MaintainedSubscriptionView__replace_selected_deletion_witnesses)(jazz_node_MaintainedSubscriptionView *m, jz_btree witnesses);
+void JZN_MSV(MaintainedSubscriptionView__footprint)(const jazz_node_MaintainedSubscriptionView *m, jazz_node_MaintainedSubscriptionViewFootprint *out);
+void JZN_MSV(MaintainedSubscriptionView__active_result_members)(const jazz_node_MaintainedSubscriptionView *m, jz_btree *out /* set<ResultMemberEntry> */);
+const jz_btree *JZN_MSV(MaintainedSubscriptionView__published_result_members)(const jazz_node_MaintainedSubscriptionView *m);
+void JZN_MSV(MaintainedSubscriptionView__discard_structured_app_rows)(jazz_node_MaintainedSubscriptionView *m);
+/* node::query_eval (node-qe units) */
+typedef struct jazz_node_LocalAuthorityReconciliation jazz_node_LocalAuthorityReconciliation;
+jazz_node_LocalAuthorityReconciliation *jazz_node__node__query_eval__local_authority_reconciliation__LocalAuthorityReconciliation__default(void);
+jazz_node_LocalAuthorityReconciliation *jazz_node__node__query_eval__local_authority_reconciliation__LocalAuthorityReconciliation__clone(const jazz_node_LocalAuthorityReconciliation *l);
+void jazz_node__node__query_eval__local_authority_reconciliation__LocalAuthorityReconciliation__drop(jazz_node_LocalAuthorityReconciliation *l);
+void jazz_node__node__query_eval__local_authority_reconciliation__LocalAuthorityReconciliation__replace_source(jazz_node_LocalAuthorityReconciliation *self, jazz_protocol_AuthorityResultKey source, u64 generation);
+typedef struct jazz_node_CoveredInputReceiver jazz_node_CoveredInputReceiver;
+void jazz_node__node__query_eval__maintained_views__CoveredInputReceiver__drop(jazz_node_CoveredInputReceiver *r);
+typedef struct jazz_node_PreparedQueryPlan jazz_node_PreparedQueryPlan; /* PreparedQueryPlanHandle = Arc<PreparedQueryPlan> (jz_rc) */
+typedef struct jazz_node_SeededMaintainedView {
+    groove_MultisinkSubscription *subscription; jazz_node_MaintainedSubscriptionView *maintained; jazz_node_MaintainedTerminalSchemas *terminal_schemas;
+    jazz_node_ResultTransitions transitions; jz_btree tables; bool initial_received;
+    jz_btree covered_input_sources;
+    jazz_node_CoveredInputReceiver *covered_input_receiver; /* relay variant only */
+} jazz_node_SeededMaintainedView;
+typedef struct jz_waker jz_waker;
+jazz_node_PreparedQueryPlan *jazz_node__node__query_eval__NodeState__mark_peer_maintained_query_shape_cache(struct jazz_node_NodeState *self, const jazz_model_ValidatedQuery *shape, const jazz_model_Binding *binding, jazz_model_DurabilityTier tier);
+jz_err jazz_node__node__query_eval__NodeState__open_seeded_maintained_subscription_view_with_waker(struct jazz_node_NodeState *self, const jazz_model_ValidatedQuery *shape, const jazz_model_Binding *binding, jazz_types_AuthorSubject identity, jazz_model_DurabilityTier tier, const jazz_protocol_ReadViewSpec *read_view, jazz_protocol_ReadViewKey read_view_key, const jz_waker *progress_waker, jazz_node_SeededMaintainedView *out);
+jz_err jazz_node__node__query_eval__NodeState__open_seeded_relay_subscription_view_with_waker(struct jazz_node_NodeState *self, const jazz_model_ValidatedQuery *shape, const jazz_model_Binding *binding, jazz_types_AuthorSubject identity, const jazz_protocol_ReadViewSpec *read_view, jazz_protocol_ReadViewKey read_view_key, jazz_protocol_AuthorityResultKey authority_result_key, const jz_waker *progress_waker, jazz_node_SeededMaintainedView *out);
+jz_err jazz_node__node__query_eval__NodeState__open_seeded_authorization_support_subscription_view_with_waker(struct jazz_node_NodeState *self, const jazz_model_ValidatedQuery *shape, const jazz_model_Binding *binding, jazz_types_AuthorSubject identity, jazz_model_DurabilityTier tier, const jazz_protocol_ReadViewSpec *read_view, jazz_protocol_ReadViewKey read_view_key, const jz_waker *progress_waker, jazz_node_SeededMaintainedView *out);
+jz_err jazz_node__node__query_eval__subscriptions__NodeState__register_query_subscription_for_peer(struct jazz_node_NodeState *self, u64 publication_owner, jazz_model_ShapeId shape_id, jazz_protocol_ShapeAst *ast, jazz_protocol_RegisterShapeOptions opts, jazz_protocol_Subscribe subscribe, jazz_protocol_PolicyBindingKey *policy_binding);
+void jazz_node__node__query_eval__subscriptions__NodeState__release_query_subscription_for_peer(struct jazz_node_NodeState *self, u64 publication_owner, jazz_protocol_SubscriptionKey subscription);
+void jazz_node__node__query_eval__subscriptions__NodeState__release_query_subscription_for_peer_with_admitted_policy_binding(struct jazz_node_NodeState *self, u64 publication_owner, jazz_protocol_SubscriptionKey subscription, jazz_protocol_PolicyBindingKey *policy_binding);
+bool jazz_node__node__query_eval__subscriptions__NodeState__has_settled_authority_result(const struct jazz_node_NodeState *self, const jazz_protocol_AuthorityResultKey *key);
+jz_err jazz_node__node__query_eval__subscriptions__NodeState__selected_deletion_witnesses(struct jazz_node_NodeState *self, const jazz_protocol_AuthorityResultKey *key, jazz_types_SchemaVersionId schema, jz_btree *out);
+bool jazz_node__node__query_eval__subscriptions__NodeState__settled_through_for_authority_result(const struct jazz_node_NodeState *self, const jazz_protocol_AuthorityResultKey *key, jazz_types_GlobalTime *out);
+bool jazz_node__node__query_eval__maintained_views__NodeState__covered_input_receiver_reconciliation_due(const struct jazz_node_NodeState *self, const jazz_node_CoveredInputReceiver *receiver, const jazz_protocol_AuthorityResultKey *key);
+jz_err jazz_node__node__query_eval__maintained_views__NodeState__replace_covered_input_receiver(struct jazz_node_NodeState *self, jazz_node_CoveredInputReceiver *receiver, jazz_types_SchemaVersionId schema, const jazz_protocol_AuthorityResultKey *key, bool *out);
+/* node::state (node-qe-b / core-a) */
+bool jazz_node__node__NodeState__unsubscribe_groove_subscription(struct jazz_node_NodeState *self, groove_SubscriptionId subscription_id);
+jz_err jazz_node__node__NodeState__drive_query_runtime(struct jazz_node_NodeState *self);
+jz_err jazz_node__node__NodeState__drive_ready_query_runtime_with_waker(struct jazz_node_NodeState *self, const jz_waker *progress_waker);
+u64 jazz_node__node__NodeState__groove_runtime_token(const struct jazz_node_NodeState *self);
+u64 jazz_node__node__NodeState__physical_identity_generation(const struct jazz_node_NodeState *self);
+void jazz_node__node__NodeState__reset_storage_read_metrics(const struct jazz_node_NodeState *self);
+groove_StorageReadMetrics jazz_node__node__NodeState__take_storage_read_metrics(const struct jazz_node_NodeState *self);
+void jazz_node__node__NodeState__session_claims_for(struct jazz_node_NodeState *n, jazz_types_AuthorSubject a, jz_btree *out);
+/* scoped_active_session_claims: installs the admitted snapshot and returns the
+ * node; the guard's Drop is end_scoped_active_session_claims. */
+struct jazz_node_NodeState *jazz_node__node__NodeState__scoped_active_session_claims(struct jazz_node_NodeState *n, jazz_types_AuthorSubject a, jz_btree claims);
+void jazz_node__node__NodeState__end_scoped_active_session_claims(struct jazz_node_NodeState *n);
+jz_err jazz_node__node__ingest__NodeState__commit_unit_satisfies_write_policy(struct jazz_node_NodeState *s, const jazz_protocol_VersionRecordVec *versions,
+    jazz_types_AuthorSubject author, jazz_model_TxId candidate, bool *out);
+bool jazz_node__debug_env__rehydrate_trace(void);
+const jz_btree *jazz_model__query__ValidatedQuery__params(const jazz_model_ValidatedQuery *v); /* String -> ColumnType */
 
 #endif

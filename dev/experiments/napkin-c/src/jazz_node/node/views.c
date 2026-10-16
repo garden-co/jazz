@@ -1612,3 +1612,1446 @@ out:
     jz_vec_drop(&inputs.result_member_removes, sizeof(jazz_protocol_ResultMemberEntry), jazz_protocol__protocol__ResultMemberEntry__drop);
     return e;
 }
+
+/* ---------------- receiver: apply view updates ---------------- */
+static jz_err validate_received_view_update_global_time_durability(NS *self, const jazz_node_ViewUpdateParts *update) {
+    (void)self;
+    jazz_protocol_VersionBundleRefVec refs;
+    JZ_TRY(version_bundle_refs_for_carriers(update->version_carriers.ptr, update->version_carriers.len, &refs));
+    jz_err e = JZ_OK;
+    for (u32 i = 0; i < refs.len && !e.code; i++)
+        e = jazz_node__node__ingest__validate_received_view_bundle_global_time_durability(refs.ptr[i].has_global_time, refs.ptr[i].global_time, refs.ptr[i].durability);
+    jz_free(refs.ptr);
+    return e;
+}
+
+static int srow_cmp(const void *a, const void *b, void *ctx) { return jazz_protocol__protocol__SupportingRow__cmp(a, b, ctx); }
+static const jz_btree_desc desc_srow_ref_set = { sizeof(const SRow *), 0, NULL, NULL, NULL };
+static int srow_ptr_cmp(const void *a, const void *b, void *ctx) { return srow_cmp(*(const SRow *const *)a, *(const SRow *const *)b, ctx); }
+
+/* Validate all row bundles carried by a receiver frame without changing
+ * storage or in-memory receiver state. */
+static jz_err validate_view_update_payloads(NS *self, const jazz_node_ViewUpdateParts *updates, u32 n) {
+    jz_btree descriptors;
+    jz_btree_init(&descriptors, &jazz_node__node__ingest__PREPARED_DESCRIPTORS_DESC);
+    jz_btree_desc set_desc = desc_srow_ref_set;
+    set_desc.cmp = srow_ptr_cmp;
+    jz_err e = JZ_OK;
+    for (u32 u = 0; u < n && !e.code; u++) {
+        const jazz_node_ViewUpdateParts *update = &updates[u];
+        u32 n_adds = 0, n_removes = 0;
+        const SRow *adds = jazz_node__node__ViewUpdateParts__supporting_adds(update, &n_adds);
+        const SRow *removes = jazz_node__node__ViewUpdateParts__supporting_removes(update, &n_removes);
+        /* An opening-pending marker makes no source or body claim. It
+         * must not mutate a prior closure while withholding settlement. */
+        if (update->opening_pending && (n_adds != 0 || n_removes != 0 || update->version_carriers.len != 0
+                                        || update->peer_complete_tx_payload_refs.len != 0)) {
+            e = invalid_closure_c(update->subscription, "opening-pending marker carries source data");
+            break;
+        }
+        /* INV-SYNC-36 has one peer result model: the authority sends an
+         * exact covered source closure and the receiver derives its own
+         * terminal. Result-member deltas and payload rows are authority
+         * output, not receiver input; accepting either would revive the
+         * retired snapshot/materialization bypass. */
+        if (update->result_member_adds.len != 0 || update->result_member_removes.len != 0) {
+            e = invalid_closure_c(update->subscription, "authority view update carries retired result members");
+            break;
+        }
+        jz_btree added, removed;
+        jz_btree_init(&added, &set_desc); jz_btree_init(&removed, &set_desc);
+        for (u32 i = 0; i < n_adds; i++) { const SRow *r = &adds[i]; jz_btree_insert(&added, &r, NULL, NULL); }
+        for (u32 i = 0; i < n_removes; i++) { const SRow *r = &removes[i]; jz_btree_insert(&removed, &r, NULL, NULL); }
+        bool disjoint = true;
+        const SRow **k; void *unit;
+        JZ_BTREE_FOR(&added, k, unit) { (void)unit; if (jz_btree_contains(&removed, k)) { disjoint = false; break; } }
+        bool wire_valid = true;
+        for (u32 i = 0; i < n_adds && wire_valid; i++) wire_valid = jazz_protocol__protocol__SupportingRow__is_wire_valid(&adds[i]);
+        for (u32 i = 0; i < n_removes && wire_valid; i++) wire_valid = jazz_protocol__protocol__SupportingRow__is_wire_valid(&removes[i]);
+        bool bad = added.len != n_adds || removed.len != n_removes || !disjoint || !wire_valid;
+        jz_btree_drop(&added); jz_btree_drop(&removed);
+        if (bad) { e = invalid_closure_c(update->subscription, "invalid or duplicate supporting physical row version"); break; }
+        jazz_protocol_VersionBundleRefVec refs;
+        e = version_bundle_refs_for_carriers(update->version_carriers.ptr, update->version_carriers.len, &refs);
+        if (e.code) break;
+        for (u32 i = 0; i < refs.len && !e.code; i++) {
+            /* This preflight runs before bulk-reset selection, alias
+             * allocation, clock advancement, or receiver staging. The
+             * shared transaction boundary keeps view payloads from being
+             * a durable-ingress bypass for operation provenance. */
+            groove_Value merge;
+            e = jazz_node__node__NodeState__admit_contribution_merge_for_storage(self, refs.ptr[i].tx, &merge);
+            if (e.code) break;
+            groove__records__values__Value__drop(&merge);
+            e = jazz_node__node__ingest__NodeState__validate_view_payload_versions_prepared(self, refs.ptr[i].versions, refs.ptr[i].n_versions, &descriptors);
+        }
+        jz_free(refs.ptr);
+    }
+    jz_btree_drop(&descriptors);
+    return e;
+}
+
+/* Only an explicit physical snapshot replaces a scope. Metadata-only
+ * opening/deferred-completion stamps never clear retained membership. */
+static bool reset_replaces_authority_source_closure(bool reset, bool has_scope, bool opening_pending) {
+    return reset && has_scope && !opening_pending;
+}
+
+static void compiled_tables_drop_v(void *p) { jz_btree_drop(p); }
+static const jz_btree_desc desc_compiled_caches = {
+    sizeof(jazz_protocol_AuthorityResultKey), sizeof(jz_btree), jazz_protocol__protocol__AuthorityResultKey__cmp,
+    jazz_protocol__protocol__AuthorityResultKey__drop, compiled_tables_drop_v
+};
+/* (cleared, BTreeMap<CoveredInputCoordinate, Option<SupportingRow>>) */
+typedef struct { bool cleared; jz_btree changes; } Overlay;
+typedef struct { bool some; SRow row; } OptSRow;
+static void opt_srow_drop_v(void *p) { OptSRow *o = p; if (o->some) jazz_protocol__protocol__SupportingRow__drop(&o->row); }
+static const jz_btree_desc desc_overlay_changes = {
+    sizeof(jazz_node_CoveredInputCoordinate), sizeof(OptSRow), jazz_node__node__CoveredInputCoordinate__cmp,
+    jazz_node__node__CoveredInputCoordinate__drop, opt_srow_drop_v
+};
+static void overlay_drop_v(void *p) { jz_btree_drop(&((Overlay *)p)->changes); }
+static const jz_btree_desc desc_overlays = {
+    sizeof(jazz_protocol_AuthorityResultKey), sizeof(Overlay), jazz_protocol__protocol__AuthorityResultKey__cmp,
+    jazz_protocol__protocol__AuthorityResultKey__drop, overlay_drop_v
+};
+
+/* Stage only changed coordinates; no full predecessor copy for deltas. */
+static jz_err validate_covered_input_closure_admission(NS *self, const jazz_node_ViewUpdateParts *updates, u32 n,
+                                                      jz_btree *caches /* AuthorityResultKey -> CompiledScopeTables */) {
+    const char *receiver_role = jazz_node__node__NodeState__client_relay_scope(self) ? "client relay" : "client";
+    jz_btree_init(caches, &desc_compiled_caches);
+    jz_btree overlays; jz_btree_init(&overlays, &desc_overlays);
+    jz_err e = JZ_OK;
+    for (u32 u = 0; u < n && !e.code; u++) {
+        const jazz_node_ViewUpdateParts *update = &updates[u];
+        jazz_protocol_AuthorityResultKey key;
+        jz_err ke = jazz_node__node__query_eval__subscriptions__NodeState__authority_result_key_for_subscription(self, update->subscription, &key);
+        if (ke.code) { jz_err_drop(&ke); continue; }
+        const jazz_node_AuthorityResultState *state = jz_btree_get(&self->query.authority_results, &key);
+        const jz_btree *tables = NULL;
+        if (state && state->has_compiled_covered_input_sources) tables = &state->compiled_covered_input_sources;
+        else {
+            if (!jz_btree_contains(caches, &key)) {
+                jz_btree compiled;
+                e = jazz_node__node__query_eval__NodeState__compiled_covered_input_sources_for_subscription(self, update->subscription, &compiled);
+                if (e.code) { jazz_protocol__protocol__AuthorityResultKey__drop(&key); break; }
+                jazz_protocol_AuthorityResultKey k; jazz_protocol__protocol__AuthorityResultKey__clone(&k, &key);
+                jz_btree_insert(caches, &k, &compiled, NULL);
+            }
+            tables = jz_btree_get(caches, &key);
+        }
+        bool inserted = false;
+        Overlay *overlay = jz_btree_get(&overlays, &key);
+        if (!overlay) {
+            Overlay fresh = { false };
+            jz_btree_init(&fresh.changes, &desc_overlay_changes);
+            jazz_protocol_AuthorityResultKey k; jazz_protocol__protocol__AuthorityResultKey__clone(&k, &key);
+            jz_btree_insert(&overlays, &k, &fresh, NULL);
+            overlay = jz_btree_get(&overlays, &key);
+        }
+        (void)inserted;
+        jazz_protocol__protocol__AuthorityResultKey__drop(&key);
+        if (reset_replaces_authority_source_closure(update->reset_input_set, update->wire_rows != NULL, update->opening_pending)) {
+            overlay->cleared = true;
+            jz_btree_clear(&overlay->changes);
+        }
+        for (u32 pass = 0; pass < 2 && !e.code; pass++) {
+            bool adding = pass == 1;
+            u32 n_rows = 0;
+            const SRow *rows = adding ? jazz_node__node__ViewUpdateParts__supporting_adds(update, &n_rows)
+                                      : jazz_node__node__ViewUpdateParts__supporting_removes(update, &n_rows);
+            for (u32 i = 0; i < n_rows; i++) {
+                const SRow *row = &rows[i];
+                if (!jz_btree_contains(tables, &row->physical_table)) {
+                    e = invalid_closure_c(update->subscription, "supporting physical table is outside compiled scope");
+                    break;
+                }
+                jazz_node_CoveredInputCoordinate coordinate;
+                jazz_node__node__CoveredInputCoordinate__From__from(&coordinate, row);
+                const SRow *current = NULL;
+                const OptSRow *changed = jz_btree_get(&overlay->changes, &coordinate);
+                if (changed) current = changed->some ? &changed->row : NULL;
+                else if (!overlay->cleared && state) current = jz_btree_get(&state->covered_input_versions, &coordinate);
+                if (adding) {
+                    if (current) {
+                        jz_str retained = supporting_row_diagnostic(current), added = supporting_row_diagnostic(row);
+                        jz_str msg = jz_format("scope addition duplicates a retained physical coordinate (receiver %s: retained %.*s, added %.*s)",
+                                               receiver_role, (int)retained.len, retained.ptr, (int)added.len, added.ptr);
+                        e = invalid_closure(update->subscription, msg.ptr, msg.len);
+                        jz_str_drop(&retained); jz_str_drop(&added); jz_str_drop(&msg);
+                        jazz_node__node__CoveredInputCoordinate__drop(&coordinate);
+                        break;
+                    }
+                    OptSRow v = { true }; jazz_protocol__protocol__SupportingRow__clone(&v.row, row);
+                    OptSRow old;
+                    if (jz_btree_insert(&overlay->changes, &coordinate, &v, &old)) { jazz_node__node__CoveredInputCoordinate__drop(&coordinate); opt_srow_drop_v(&old); }
+                } else {
+                    if (!current || !jazz_protocol__protocol__SupportingRow__eq(current, row)) {
+                        jz_str retained = current ? supporting_row_diagnostic(current) : jz_str_from("none"), removed = supporting_row_diagnostic(row);
+                        jz_str msg = jz_format("scope removal is absent from exact predecessor (receiver %s: retained %.*s, removed %.*s)",
+                                               receiver_role, (int)retained.len, retained.ptr, (int)removed.len, removed.ptr);
+                        e = invalid_closure(update->subscription, msg.ptr, msg.len);
+                        jz_str_drop(&retained); jz_str_drop(&removed); jz_str_drop(&msg);
+                        jazz_node__node__CoveredInputCoordinate__drop(&coordinate);
+                        break;
+                    }
+                    OptSRow v = { false }, old;
+                    if (jz_btree_insert(&overlay->changes, &coordinate, &v, &old)) { jazz_node__node__CoveredInputCoordinate__drop(&coordinate); opt_srow_drop_v(&old); }
+                }
+            }
+        }
+    }
+    jz_btree_drop(&overlays);
+    if (e.code) jz_btree_drop(caches);
+    return e;
+}
+
+static void install_compiled_covered_input_source_caches(NS *self, jz_btree *caches) {
+    jazz_protocol_AuthorityResultKey key; jz_btree compiled;
+    while (jz_btree_pop_first(caches, &key, &compiled)) {
+        jazz_node_AuthorityResultState *state = authority_state_entry(self, &key);
+        jz_btree_drop(&state->compiled_covered_input_sources);
+        state->compiled_covered_input_sources = compiled;
+        state->has_compiled_covered_input_sources = true;
+        jazz_protocol__protocol__AuthorityResultKey__drop(&key);
+    }
+    jz_btree_drop(caches);
+}
+
+/* (TxId, String, RowUuid, Vec<u8>) */
+typedef struct { TxId tx; jz_str table; jazz_types_RowUuid row; jz_bytes branch; } AdmittedVersion;
+static int admitted_cmp(const void *a, const void *b, void *ctx) {
+    (void)ctx;
+    const AdmittedVersion *x = a, *y = b;
+    int c = jazz_model_TxId_cmp(&x->tx, &y->tx); if (c) return c;
+    c = jz_str_cmp(&x->table, &y->table); if (c) return c;
+    c = jz_uuid_cmp(&x->row, &y->row); if (c) return c;
+    return jz_bytes_cmp(&x->branch, &y->branch);
+}
+static void admitted_drop(void *p) { AdmittedVersion *v = p; jz_str_drop(&v->table); jz_bytes_drop(&v->branch); }
+static const jz_btree_desc desc_admitted = { sizeof(AdmittedVersion), 0, admitted_cmp, admitted_drop, NULL };
+static void admitted_insert(jz_btree *set, TxId tx, const jz_str *table, jazz_types_RowUuid row, jz_bytes branch) {
+    AdmittedVersion v = { tx, jz_str_clone(table), row, branch };
+    if (jz_btree_insert(set, &v, NULL, NULL)) admitted_drop(&v);
+}
+
+static jz_err covered_input_has_resident_body(NS *self, const SRow *input, jazz_types_SchemaVersionId read_schema, bool *out) {
+    *out = false;
+    bool found = false;
+    jazz_node_StoredTransaction stored;
+    JZ_TRY(jazz_node__node__currency__NodeState__query_transaction(self, input->version.tx, &found, &stored));
+    if (!found) return JZ_OK;
+    jazz_node__node__codec__StoredTransaction__drop(&stored);
+    VRow *version = NULL;
+    JZ_TRY(jazz_node__node__views__NodeState__covered_input_version(self, input, read_schema, &version));
+    *out = version != NULL;
+    if (version) jazz_node__node__codec__VersionRow__drop(version);
+    return JZ_OK;
+}
+
+static jz_err validate_covered_input_body_witnesses(NS *self, const jazz_node_ViewUpdateParts *updates, u32 n, const jz_btree *staged_bundles) {
+    jz_btree referenced_complete_payloads; jz_btree_init(&referenced_complete_payloads, &desc_txid_set);
+    for (u32 u = 0; u < n; u++)
+        for (u32 i = 0; i < updates[u].peer_complete_tx_payload_refs.len; i++)
+            jz_btree_insert(&referenced_complete_payloads, &updates[u].peer_complete_tx_payload_refs.ptr[i], NULL, NULL);
+    jz_btree admitted_versions; jz_btree_init(&admitted_versions, &desc_admitted);
+    const TxId *txp; const Bundle *bundle;
+    JZ_BTREE_FOR(staged_bundles, txp, bundle) {
+        for (u32 i = 0; i < bundle->versions.len; i++) {
+            const VR *version = bundle->versions.ptr[i];
+            jz_bytes branch;
+            jazz_model__model__branch__BranchKey__canonical_bytes(jazz_protocol__protocol__VersionRecord__branch_key(version), &branch);
+            admitted_insert(&admitted_versions, TXID(bundle->tx), jazz_protocol__protocol__VersionRecord__table(version),
+                            jazz_protocol__protocol__VersionRecord__row_uuid(version), branch);
+        }
+    }
+    jz_err e = JZ_OK;
+    /* Complete-payload inventory references are the only valid exception
+     * to a same-frame body: the receiver already admitted that complete
+     * immutable transaction on this link. Re-read its stored bodies before
+     * accepting a source coordinate, rather than trusting the sender's
+     * declaration alone. */
+    void *unit;
+    JZ_BTREE_FOR(&referenced_complete_payloads, txp, unit) {
+        (void)unit;
+        jazz_node_VersionRowVec versions = { 0 };
+        e = jazz_node__node__currency__NodeState__query_versions_for_tx(self, *txp, &versions);
+        if (e.code) break;
+        for (u32 i = 0; i < versions.len; i++) {
+            jz_bytes branch;
+            jazz_model__model__branch__BranchKey__canonical_bytes(jazz_node__node__codec__VersionRow__branch_key(versions.ptr[i]), &branch);
+            admitted_insert(&admitted_versions, *txp, VROW_TABLE(versions.ptr[i]), VROW_ROW(versions.ptr[i]), branch);
+        }
+        vrow_vec_drop(&versions);
+    }
+    for (u32 u = 0; u < n && !e.code; u++) {
+        const jazz_node_ViewUpdateParts *update = &updates[u];
+        u32 n_adds = 0;
+        const SRow *adds = jazz_node__node__ViewUpdateParts__supporting_adds(update, &n_adds);
+        for (u32 i = 0; i < n_adds; i++) {
+            const SRow *input = &adds[i];
+            AdmittedVersion coordinate = { input->version.tx, *input->version_table, input->row,
+                                           input->version.has_branch_or_prefix ? input->version.branch_or_prefix : (jz_bytes){ 0 } };
+            bool staged_body_witness = jz_btree_contains(&admitted_versions, &coordinate);
+            /* A known-state repair may have admitted this exact immutable
+             * body in its own request/response frame before the later view
+             * frame that consumes it. Use the same physical lookup, concrete
+             * layer, and canonical-branch check as receiver materialization;
+             * a merely matching tx/row name is not evidence. */
+            bool resident_body_witness = false;
+            if (!staged_body_witness) {
+                jazz_model_ValidatedQuery *const *shape = jz_btree_get(&self->query.registered_shapes, &update->subscription.shape_id);
+                if (!shape) { e = JZN_INVALID_STORED("covered input shape is not registered"); break; }
+                jazz_types_SchemaVersionId read_schema = jazz_model__query__ValidatedQuery__schema_version(*shape);
+                e = covered_input_has_resident_body(self, input, read_schema, &resident_body_witness);
+                if (e.code) break;
+            }
+            bool batch_is_tx = input->version.has_batch && jazz_model_TxId_eq(&input->version.batch, &input->version.tx);
+            if (!batch_is_tx || (!staged_body_witness && !resident_body_witness)) {
+                e = invalid_closure_c(update->subscription, "covered input is not witnessed by admitted payload");
+                break;
+            }
+        }
+    }
+    jz_btree_drop(&admitted_versions);
+    jz_btree_drop(&referenced_complete_payloads);
+    return e;
+}
+
+/* Resolve an exact immutable witness using the receiver source's physical
+ * table, then verify its authored name. A rename changes the name, not
+ * the physical table, row, layer, branch, or transaction being requested. */
+jz_err jazz_node__node__views__NodeState__covered_input_version(NS *self, const SRow *input, jazz_types_SchemaVersionId read_schema, VRow **out) {
+    *out = NULL;
+    const jazz_types_NodeAlias *alias = jazz_node__node__node_aliases__NodeAliases__get(&self->node_aliases, &input->version.tx.node);
+    if (!alias) return JZ_OK;
+    jazz_types_NodeAlias tx_node_alias = *alias;
+    /* Content and deletion witnesses name the same stored row image. */
+    switch (input->version.layer) {
+    case JAZZ_LAYER_CONTENT: case JAZZ_LAYER_DELETION: break;
+    case JAZZ_LAYER_CONTENT_OR_DELETION: return JZN_INVALID_STORED("covered input must name one concrete version layer");
+    }
+    jazz_model_BranchKey *branch_key = NULL;
+    if (input->version.has_branch_or_prefix) {
+        jz_err be = jazz_model__model__branch__BranchKey__from_canonical_bytes(jz_bytes_slice(&input->version.branch_or_prefix), &branch_key);
+        if (be.code) { jz_err_drop(&be); return JZN_INVALID_STORED("covered input branch witness is malformed"); }
+    } else {
+        branch_key = jazz_model__model__branch__BranchKey__default();
+    }
+    groove_InternStr logical;
+    jz_err e = jazz_node__node__views__NodeState__scope_logical_table(self, read_schema, input->physical_table, &logical);
+    VRow *version = NULL;
+    if (!e.code) e = jazz_node__node__currency__NodeState__query_version_by_alias_in_branch(self, read_schema, logical, branch_key, input->row,
+                                                                                          input->version.tx.time, tx_node_alias, &version);
+    jazz_model__model__branch__BranchKey__drop(branch_key);
+    if (e.code || !version) return e;
+    if (!jz_str_eq(VROW_TABLE(version), input->version_table)) {
+        jazz_node__node__codec__VersionRow__drop(version);
+        return JZN_INVALID_STORED("authority covered input authored table disagrees with stored version");
+    }
+    jz_bytes stored_branch;
+    jazz_model__model__branch__BranchKey__canonical_bytes(jazz_node__node__codec__VersionRow__branch_key(version), &stored_branch);
+    jz_bytes witness = input->version.has_branch_or_prefix ? input->version.branch_or_prefix : (jz_bytes){ 0 };
+    bool same = jz_bytes_eq(&stored_branch, &witness);
+    jz_bytes_drop(&stored_branch);
+    if (!same) {
+        jazz_node__node__codec__VersionRow__drop(version);
+        return JZN_INVALID_STORED("authority covered input branch witness disagrees with stored version");
+    }
+    *out = version;
+    return JZ_OK;
+}
+
+/* Clone a bundle's records into an owned VersionRecordVec. */
+static jazz_protocol_VersionRecordVec clone_versions(const Bundle *bundle) {
+    jazz_protocol_VersionRecordVec v = { 0 };
+    for (u32 i = 0; i < bundle->versions.len; i++) JZ_VEC_PUSH(v, jazz_protocol__protocol__VersionRecord__clone(bundle->versions.ptr[i]));
+    return v;
+}
+static jazz_protocol_VersionRecordVec take_versions(Bundle *bundle) {
+    jazz_protocol_VersionRecordVec v = { bundle->versions.ptr, bundle->versions.len, bundle->versions.cap };
+    bundle->versions.ptr = NULL; bundle->versions.len = bundle->versions.cap = 0;
+    return v;
+}
+
+static jz_err ingest_view_bundle(NS *self, Bundle bundle) {
+    jz_err e = jazz_node__node__ingest__validate_received_view_bundle_global_time_durability(bundle.has_global_time, bundle.global_time, bundle.durability);
+    if (e.code) goto out;
+    /* View carriers may replay a transaction learned under a local
+     * permission capability. They never transport that capability into a
+     * receiving store or onward view publication. */
+    {
+        jazz_model_Transaction *redacted = jazz_node__node__codec__transaction_without_permission_subject(bundle.tx);
+        jazz_model__tx__Transaction__drop(bundle.tx);
+        bundle.tx = redacted;
+    }
+    if (jazz_model__tx__Transaction__n_total_writes(bundle.tx) != bundle.versions.len) {
+        e = JZN_MALFORMED_VIEW("version bundle count does not match its declared scope payload");
+        goto out;
+    }
+    TxId tx_id = TXID(bundle.tx);
+    bool found = false;
+    jazz_node_StoredTransaction stored;
+    e = jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &found, &stored);
+    if (e.code) goto out;
+    if (found) {
+        jazz_model__tx__Transaction__set_n_total_writes(stored.tx, 0);
+        jazz_model_Transaction *stored_identity = jazz_node__node__codec__transaction_without_permission_subject(stored.tx);
+        jazz_model_Transaction *incoming_identity = jazz_model__tx__Transaction__clone(bundle.tx);
+        jazz_model__tx__Transaction__set_n_total_writes(incoming_identity, 0);
+        /* The author or relay of a pending exclusive transaction stores
+         * its read evidence; view carriers never ship it. Compare the
+         * payload, not the local-only evidence. */
+        bool matches = jazz_node__node__codec__known_transaction_payload_matches(stored_identity, incoming_identity);
+        jazz_model__tx__Transaction__drop(stored_identity);
+        jazz_model__tx__Transaction__drop(incoming_identity);
+        jazz_node__node__codec__StoredTransaction__drop(&stored);
+        if (!matches) { e = jazz_node__node__Error__conflicting_commit_unit(&tx_id); goto out; }
+    }
+    if (jazz_model__tx__Transaction__kind(bundle.tx) != JAZZ_TXKIND_EXCLUSIVE) {
+        jazz_model_Transaction *tx = bundle.tx; bundle.tx = NULL;
+        jazz_protocol_VersionRecordVec versions = take_versions(&bundle);
+        if (bundle.scope == JAZZ_BUNDLE_SCOPE_VIEW_SCOPED)
+            return jazz_node__node__ingest__NodeState__ingest_view_scoped_transaction_with_current_indexes(self, tx, versions, bundle.fate,
+                       bundle.has_global_time, bundle.global_time, bundle.durability);
+        return jazz_node__node__ingest__NodeState__ingest_known_transaction(self, tx, versions, bundle.fate, bundle.has_global_time,
+                                                                           bundle.global_time, bundle.durability);
+    }
+    if (bundle.scope == JAZZ_BUNDLE_SCOPE_VIEW_SCOPED) {
+        bool has_stored = false;
+        e = jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &has_stored, &stored);
+        if (e.code) goto out;
+        /* A bulk reset installs its authorized fragment as locally current
+         * so a relay can serve it onward. Further authorized siblings from
+         * that same view-scoped transaction must extend that projection;
+         * fragments first learned outside such a reset remain history-only. */
+        bool extend_current_view = has_stored && stored.is_partial;
+        if (has_stored) jazz_node__node__codec__StoredTransaction__drop(&stored);
+        jz_btree known_keys; jz_btree_init(&known_keys, &desc_view_version_key_set);
+        if (has_stored) {
+            jz_btree stored_by_key;
+            e = stored_versions_by_key(self, tx_id, &stored_by_key);
+            RecordKey *k; VR **v;
+            JZ_BTREE_FOR(&stored_by_key, k, v) view_version_key_insert(&known_keys, *v);
+            jz_btree_drop(&stored_by_key);
+            if (e.code) { jz_btree_drop(&known_keys); goto out; }
+        }
+        for (u32 i = 0; i < bundle.versions.len; i++) view_version_key_insert(&known_keys, bundle.versions.ptr[i]);
+        jazz_model_Transaction *redacted_tx = bundle.tx; bundle.tx = NULL;
+        jazz_model__tx__Transaction__set_n_total_writes(redacted_tx, known_keys.len);
+        jz_btree_drop(&known_keys);
+        jazz_protocol_VersionRecordVec versions = take_versions(&bundle);
+        if (extend_current_view)
+            return jazz_node__node__ingest__NodeState__ingest_view_scoped_transaction_with_current_indexes(self, redacted_tx, versions, bundle.fate,
+                       bundle.has_global_time, bundle.global_time, bundle.durability);
+        return jazz_node__node__ingest__NodeState__ingest_transaction_fragment_without_current_indexes(self, redacted_tx, versions, bundle.fate,
+                   bundle.has_global_time, bundle.global_time, bundle.durability);
+    }
+    u32 complete_len = jazz_model__tx__Transaction__n_total_writes(bundle.tx);
+    jazz_protocol_VersionRecordVec stored_versions = { 0 };
+    {
+        bool has_stored = false;
+        e = jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &has_stored, &stored);
+        if (e.code) goto out;
+        if (has_stored) {
+            jazz_node__node__codec__StoredTransaction__drop(&stored);
+            jazz_node_VersionRowVec rows = { 0 };
+            e = jazz_node__node__currency__NodeState__query_versions_for_tx(self, tx_id, &rows);
+            for (u32 i = 0; i < rows.len && !e.code; i++) {
+                VR *v = NULL;
+                e = jazz_node__node__NodeState__version_record_from_row(self, rows.ptr[i], &v);
+                if (!e.code) JZ_VEC_PUSH(stored_versions, v);
+            }
+            vrow_vec_drop(&rows);
+            if (e.code) { vr_vec_drop(&stored_versions); goto out; }
+        }
+    }
+    jz_btree known_keys; jz_btree_init(&known_keys, &desc_view_version_key_set);
+    for (u32 i = 0; i < stored_versions.len; i++) view_version_key_insert(&known_keys, stored_versions.ptr[i]);
+    for (u32 i = 0; i < bundle.versions.len; i++) view_version_key_insert(&known_keys, bundle.versions.ptr[i]);
+    u32 known = known_keys.len;
+    jz_btree_drop(&known_keys);
+    if (known > complete_len) { vr_vec_drop(&stored_versions); e = jazz_node__node__Error__conflicting_commit_unit(&tx_id); goto out; }
+    if (known == complete_len) {
+        jazz_protocol_VersionRecordVec complete_versions = { 0 };
+        jz_btree complete_keys; jz_btree_init(&complete_keys, &desc_view_version_key_set);
+        /* The delivered versions come first: for an accepted transaction
+         * they are the authority's post-images, which replace this node's
+         * own copy (for the originator, its patch or its local merge). */
+        for (u32 pass = 0; pass < 2; pass++) {
+            const jazz_protocol_VersionRecordVec *src = pass ? &stored_versions : (const jazz_protocol_VersionRecordVec *)&bundle.versions;
+            for (u32 i = 0; i < src->len; i++) {
+                u32 before = complete_keys.len;
+                view_version_key_insert(&complete_keys, src->ptr[i]);
+                if (complete_keys.len != before) JZ_VEC_PUSH(complete_versions, jazz_protocol__protocol__VersionRecord__clone(src->ptr[i]));
+            }
+        }
+        jz_btree_drop(&complete_keys);
+        vr_vec_drop(&stored_versions);
+        jazz_model_Fate fate; jazz_model__tx__Fate__clone(&fate, &bundle.fate);
+        jazz_model_Transaction *tx = bundle.tx; bundle.tx = NULL;
+        e = jazz_node__node__ingest__NodeState__ingest_known_transaction(self, tx, complete_versions, fate, bundle.has_global_time, bundle.global_time, bundle.durability);
+        goto out;
+    }
+    vr_vec_drop(&stored_versions);
+    {
+        jazz_model_Transaction *tx = bundle.tx; bundle.tx = NULL;
+        jazz_protocol_VersionRecordVec versions = take_versions(&bundle);
+        return jazz_node__node__ingest__NodeState__ingest_transaction_fragment_without_current_indexes(self, tx, versions, bundle.fate,
+                   bundle.has_global_time, bundle.global_time, bundle.durability);
+    }
+out:
+    if (bundle.tx) jazz_protocol__protocol__VersionBundle__drop(&bundle);
+    else { jz_vec_drop(&bundle.versions, sizeof(VR *), vr_drop_v); jazz_model__tx__Fate__drop(&bundle.fate); }
+    return e;
+}
+
+static jz_err stage_view_bundle(NS *self, groove_DatabaseBatch *batch, const Bundle *bundle, jz_btree *staged_tx_ids,
+                                jazz_node_GlobalTimeTxVec *staged_global_times, jazz_node_VersionRowVec *staged_content_versions,
+                                jazz_node_RejectedTransactionVec *staged_rejections, bool *staged) {
+    *staged = true;
+    JZ_TRY(jazz_node__node__ingest__validate_received_view_bundle_global_time_durability(bundle->has_global_time, bundle->global_time, bundle->durability));
+    if (jazz_model__tx__Transaction__n_total_writes(bundle->tx) != bundle->versions.len)
+        return JZN_MALFORMED_VIEW("version bundle count does not match its declared scope payload");
+    TxId tx_id = TXID(bundle->tx);
+    jazz_model_Fate fate;
+    if (bundle->scope == JAZZ_BUNDLE_SCOPE_VIEW_SCOPED) {
+        /* A view-scoped exclusive fragment may extend a projection already
+         * installed by an earlier reset. Its redacted cardinality is
+         * deliberately not a whole-transaction completeness claim, so do
+         * not take the complete-exclusive fast path below merely because
+         * the transaction itself is already known. */
+        if (jz_btree_insert(staged_tx_ids, &tx_id, NULL, NULL)) return JZ_OK;
+        jazz_model__tx__Fate__clone(&fate, &bundle->fate);
+        return jazz_node__node__ingest__NodeState__stage_view_scoped_transaction_with_current_indexes(self, batch, jazz_model__tx__Transaction__clone(bundle->tx),
+                   clone_versions(bundle), fate, bundle->has_global_time, bundle->global_time, bundle->durability,
+                   staged_global_times, staged_content_versions, staged_rejections);
+    }
+    /* Known complete transactions take the fate/update path below, after
+     * this batch commits. That path may publish independently and must not
+     * invalidate exact-match preparation for preceding new transactions. */
+    bool found = false;
+    jazz_node_StoredTransaction stored;
+    JZ_TRY(jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &found, &stored));
+    if (found) { jazz_node__node__codec__StoredTransaction__drop(&stored); *staged = false; return JZ_OK; }
+    if (jazz_model__tx__Transaction__kind(bundle->tx) == JAZZ_TXKIND_EXCLUSIVE
+        && bundle->versions.len != jazz_model__tx__Transaction__n_total_writes(bundle->tx)) {
+        *staged = false;
+        return JZ_OK;
+    }
+    if (jz_btree_insert(staged_tx_ids, &tx_id, NULL, NULL)) return JZ_OK;
+    jazz_model__tx__Fate__clone(&fate, &bundle->fate);
+    return jazz_node__node__ingest__NodeState__stage_known_transaction(self, batch, jazz_model__tx__Transaction__clone(bundle->tx), clone_versions(bundle),
+               fate, bundle->has_global_time, bundle->global_time, bundle->durability, staged_global_times, staged_content_versions, staged_rejections);
+}
+
+static jz_err apply_view_update_inner(NS *self, jazz_node_ViewUpdateParts update, const jz_btree *preloaded_tx_ids /* NULL = None */,
+                                      bool has_normalized_snapshot, const u8 normalized_snapshot[16]) {
+    jazz_protocol_SubscriptionKey subscription = update.subscription;
+    bool defer_settlement = update.defer_settlement, reset_input_set = update.reset_input_set, opening_pending = update.opening_pending;
+    bool has_scope = update.wire_rows != NULL;
+    jz_err e = JZ_OK;
+    jazz_protocol_SupportingRowVec program_fact_adds = { 0 }, program_fact_removes = { 0 };
+    jazz_protocol_VersionBundleRefVec version_bundle_refs = { 0 };
+    ViewBundlePreflight preflight; bool has_preflight = false;
+    jz_btree bulk_loaded_tx_ids; jz_btree_init(&bulk_loaded_tx_ids, &desc_txid_set);
+    jazz_protocol_AuthorityResultKey authority_result_key; bool has_key = false;
+    if (update.wire_rows) {
+        jazz_protocol_SupportingRowsUpdate *wire = update.wire_rows;
+        switch (wire->tag) {
+        case JAZZ_SRU_SNAPSHOT: program_fact_adds = wire->added; wire->added = (jazz_protocol_SupportingRowVec){ 0 }; break;
+        case JAZZ_SRU_DELTA:
+            program_fact_adds = wire->added; program_fact_removes = wire->removed;
+            wire->added = wire->removed = (jazz_protocol_SupportingRowVec){ 0 };
+            break;
+        /* Normalization turns a catch-up into an exact delta first. */
+        case JAZZ_SRU_CATCH_UP:
+            e = invalid_closure_c(subscription, "catch-up without an installed predecessor");
+            goto out;
+        }
+    }
+    e = version_bundle_refs_for_carriers(update.version_carriers.ptr, update.version_carriers.len, &version_bundle_refs);
+    if (e.code) goto out;
+    {
+        jazz_protocol_BindingViewKey bvk;
+        jz_err be = jazz_node__node__query_eval__subscriptions__NodeState__binding_view_key_for_subscription(self, subscription, &bvk);
+        if (be.code) {
+            if (err_is_unregistered_subscription(&be)) {
+                /* Subscription teardown races in-flight traffic by design:
+                 * unsubscribe is asynchronous, so per-subscription messages
+                 * arriving after detach are normal protocol life, not
+                 * corruption. The receiver cannot distinguish late-detached
+                 * from never-registered keys, so both are benign drops. */
+                jz_err_drop(&be);
+                self->sync_metrics.dropped_detached_subscription_messages += 1;
+                goto out;
+            }
+            e = be;
+            goto out;
+        }
+    }
+    /* Wire updates name a usage subscription only.  Resolve the complete
+     * policy-scoped authority identity captured when that subscription was
+     * admitted; never reconstruct or share it through BindingViewKey. */
+    e = jazz_node__node__query_eval__subscriptions__NodeState__authority_result_key_for_subscription(self, subscription, &authority_result_key);
+    if (e.code) goto out;
+    has_key = true;
+    /* Invalidate before any mutation or suspension. A failed frame can
+     * alter provisional facts before advancing its generation, so a
+     * generation comparison alone would not be a sufficient cache proof. */
+    {
+        jazz_node_AuthorityResultState *state = jz_btree_get(&self->query.authority_results, &authority_result_key);
+        if (state) state->has_supporting_revision = false;
+    }
+    bool reset_cleared_shared_state = reset_replaces_authority_source_closure(reset_input_set, has_scope, opening_pending);
+    bool has_reset_generation = false; u64 pending_authoritative_reset_generation = 0;
+    if (reset_cleared_shared_state) {
+        e = jazz_node__node__query_eval__subscriptions__NodeState__allocate_authoritative_reset_generation(self, &pending_authoritative_reset_generation);
+        if (e.code) goto out;
+        has_reset_generation = true;
+    }
+    if (!preloaded_tx_ids) {
+        e = preflight_view_bundle_conflicts(self, version_bundle_refs.ptr, version_bundle_refs.len, &preflight);
+        if (e.code) goto out;
+        has_preflight = true;
+    }
+    if (preloaded_tx_ids) {
+        jz_btree_drop(&bulk_loaded_tx_ids);
+        jz_btree_clone(&bulk_loaded_tx_ids, preloaded_tx_ids, NULL, NULL);
+    } else if (reset_input_set && update.peer_complete_tx_payload_refs.len == 0) {
+        /* A reset with bundles is a snapshot for this subscription even
+         * when other subscriptions already advanced the node watermark.
+         * Empty reset stamps stay orthogonal below: with no bundles there
+         * is no payload to bulk ingest and the stamp must not clear shared
+         * state that is already more settled. */
+        jazz_protocol_VersionBundleRefVec complete_refs = { 0 };
+        const TxId *tx; const Bundle *bundle;
+        JZ_BTREE_FOR(&preflight.bundles, tx, bundle)
+            if (bundle->scope == JAZZ_BUNDLE_SCOPE_COMPLETE) JZ_VEC_PUSH(complete_refs, jazz_protocol__protocol__VersionBundle__as_ref(bundle));
+        jz_btree_drop(&bulk_loaded_tx_ids);
+        e = jazz_node__node__ingest__NodeState__ingest_reset_view_bundle_refs_in_bulk(self, complete_refs.ptr, complete_refs.len,
+                                                                                     &preflight.persisted_tx_ids, &bulk_loaded_tx_ids);
+        jz_free(complete_refs.ptr);
+        if (e.code) { jz_btree_init(&bulk_loaded_tx_ids, &desc_txid_set); goto out; }
+    }
+    if (reset_input_set) authority_state_entry(self, &authority_result_key)->initial_hydration = true;
+    authority_state_entry(self, &authority_result_key)->deferred_publication = defer_settlement;
+    if (defer_settlement) {
+        /* A newer deferred update supersedes any earlier complete
+         * handoff for this *exact* authority receipt. Its membership may
+         * be useful while the authority finishes the update, but neither
+         * it nor a sibling policy scope may justify a known-state claim
+         * until a non-deferred completion arrives. */
+        authority_state_entry(self, &authority_result_key)->live_settled = false;
+    }
+    bool version_bundles_is_empty = version_bundle_refs.len == 0;
+    if (has_preflight) {
+        TxId tx; Bundle bundle;
+        while (jz_btree_pop_first(&preflight.bundles, &tx, &bundle)) {
+            if (jz_btree_contains(&bulk_loaded_tx_ids, &tx)) { jazz_protocol__protocol__VersionBundle__drop(&bundle); continue; }
+            self->sync_metrics.receiver_per_bundle_ingests += 1;
+            e = ingest_view_bundle(self, bundle);
+            if (e.code) goto out;
+        }
+    }
+    /* Retain the active peer payload inventory diagnostic independently
+     * from the retired result-member witness validation. */
+    for (u32 i = 0; i < update.peer_complete_tx_payload_refs.len; i++) {
+        TxId tx_id = update.peer_complete_tx_payload_refs.ptr[i];
+        if (jz_btree_contains(&bulk_loaded_tx_ids, &tx_id)) continue;
+        bool found = false; jazz_node_StoredTransaction stored;
+        e = jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &found, &stored);
+        if (e.code) goto out;
+        if (found) jazz_node__node__codec__StoredTransaction__drop(&stored);
+        else jazz_node__node__NodeState__record_peer_payload_inventory_missing_fallback(self);
+    }
+    if (reset_cleared_shared_state) {
+        jazz_protocol_AuthorityResultKey k; jazz_protocol__protocol__AuthorityResultKey__clone(&k, &authority_result_key);
+        jazz_node__node__NodeState__clear_settled_result_view(self, k);
+    }
+    if (reset_input_set) authority_state_entry(self, &authority_result_key);
+    apply_covered_input_closure_admission_delta(authority_state_entry(self, &authority_result_key), reset_cleared_shared_state,
+                                                program_fact_adds.ptr, program_fact_adds.len, program_fact_removes.ptr, program_fact_removes.len);
+    if (!defer_settlement && !opening_pending) {
+        jazz_node_AuthorityResultState *state = authority_state_entry(self, &authority_result_key);
+        /* A complete inbound receipt makes this exact result live for
+         * the current process even when it has no usable fast cursor.
+         * `GlobalTime::default()` is the protocol's cursorless settlement
+         * marker: it permits an exact known-state declaration but must
+         * not claim a fast current-membership position. */
+        state->live_settled = true;
+        state->has_settled_through = update.settled_through != 0;
+        state->settled_through = update.settled_through;
+        /* A reset is an authoritative membership rebuild, including when
+         * it carries retractions. The public subscription materializes its
+         * replacement snapshot below, rather than attempting to apply a
+         * removal after the reset has cleared the cached result set. */
+        if (has_reset_generation) {
+            state->has_pending_authoritative_reset = true;
+            state->pending_authoritative_reset = pending_authoritative_reset_generation;
+        }
+    }
+    /* An empty-bundle reset may finish initial hydration even when it names
+     * peer payload refs: every covered input's body was already proven staged
+     * or physically resident by `validate_covered_input_body_witnesses`, which
+     * rejects the whole frame otherwise. This flag only ends the initial-sync
+     * flush cadence; it does not gate visibility, known state or authorization.
+     * Loosening witness validation would widen this shortcut. */
+    {
+        jazz_node_AuthorityResultState *state = jz_btree_get(&self->query.authority_results, &authority_result_key);
+        if (state && state->initial_hydration && version_bundles_is_empty && !defer_settlement && !opening_pending)
+            state->initial_hydration = false;
+    }
+    if (update.has_authorization_progress) {
+        jazz_node_AuthorityResultState *state = authority_state_entry(self, &authority_result_key);
+        state->has_authorization_progress = true;
+        state->authorization_progress = update.authorization_progress;
+    }
+    authority_state_entry(self, &authority_result_key)->pending_opening = opening_pending;
+    jazz_node_AuthorityResultState *state = authority_state_entry(self, &authority_result_key);
+    state->applied_view_update_generation += 1; /* wrapping_add */
+    /* In the current wire contract, a non-deferred reset is the single
+     * frame that claims a complete replacement frontier.  Do not infer an
+     * empty closure from an opened result container or an incremental
+     * frame: receiver-local maintained graphs must wait for this marker.
+     * The receiver validates the exact compiler-owned coverage set before
+     * it installs the replacement, so this marker never makes a partial
+     * closure publishable. */
+    if (reset_input_set && !defer_settlement && !opening_pending) {
+        state->source_closure_tag = JZN_SOURCE_CLOSURE_CLAIMED;
+        state->source_closure_generation = state->applied_view_update_generation;
+        for (u32 i = 0; i < state->source_incrementals.len; i++) {
+            jz_btree_drop(&state->source_incrementals.ptr[i].adds);
+            jz_btree_drop(&state->source_incrementals.ptr[i].removes);
+        }
+        state->source_incrementals.len = 0;
+    } else if (!defer_settlement && !opening_pending) {
+        /* Normal source updates retain their predecessor closure and are
+         * applied as descriptor-bound runtime input deltas. They must not
+         * be re-labelled as a complete reset merely because an authority
+         * state map happens to contain the current closure. */
+        static const jz_btree_desc desc_srow_set = { sizeof(SRow), 0, srow_cmp, jazz_protocol__protocol__SupportingRow__drop, NULL };
+        jz_btree adds, removes;
+        jz_btree_init(&adds, &desc_srow_set); jz_btree_init(&removes, &desc_srow_set);
+        for (u32 i = 0; i < program_fact_adds.len; i++) {
+            SRow c; jazz_protocol__protocol__SupportingRow__clone(&c, &program_fact_adds.ptr[i]);
+            if (jz_btree_insert(&adds, &c, NULL, NULL)) jazz_protocol__protocol__SupportingRow__drop(&c);
+        }
+        for (u32 i = 0; i < program_fact_removes.len; i++) {
+            SRow c; jazz_protocol__protocol__SupportingRow__clone(&c, &program_fact_removes.ptr[i]);
+            if (jz_btree_insert(&removes, &c, NULL, NULL)) jazz_protocol__protocol__SupportingRow__drop(&c);
+        }
+        if (adds.len != 0 || removes.len != 0) {
+            if (state->source_closure_tag != JZN_SOURCE_CLOSURE_CLAIMED) {
+                jz_btree_drop(&adds); jz_btree_drop(&removes);
+                e = JZN_INVALID_STORED("incremental source closure arrived before a reset closure");
+                goto out;
+            }
+            u64 predecessor_generation = state->source_closure_generation;
+            u64 generation = state->applied_view_update_generation;
+            jazz_node_AuthoritySourceIncremental inc = { predecessor_generation, generation, adds, removes };
+            JZ_VEC_PUSH(state->source_incrementals, inc);
+            state->source_closure_tag = JZN_SOURCE_CLOSURE_CLAIMED;
+            state->source_closure_generation = generation;
+        } else {
+            jz_btree_drop(&adds); jz_btree_drop(&removes);
+        }
+    }
+    if (jazz_node__debug_env__covered_input_trace()) {
+        char node[37];
+        jz_uuid_to_string(&self->node_uuid, node);
+        jz_str line = jz_format("JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node=%s reset=%s deferred=%s generation=%llu facts=%u closure=%s",
+                                node, reset_input_set ? "true" : "false", defer_settlement ? "true" : "false",
+                                (unsigned long long)state->applied_view_update_generation, state->covered_input_versions.len,
+                                state->source_closure_tag == JZN_SOURCE_CLOSURE_CLAIMED ? "Claimed" : "Pending");
+        jazz_node__debug_env__eprintln(&line);
+        jz_str_drop(&line);
+    }
+    /* Only this fully admitted in-process update establishes a predecessor.
+     * Neither membership nor transport revisions survive process restart. */
+    if (!defer_settlement && !opening_pending) {
+        const jazz_node_AuthorityResultState *s = jz_btree_get(&self->query.authority_results, &authority_result_key);
+        if (s && s->source_closure_tag == JZN_SOURCE_CLOSURE_CLAIMED) {
+            bool has_settled = s->has_settled_through;
+            jazz_types_GlobalTime settled_through = s->settled_through;
+            /* Record the watermark before installing it in memory: a
+             * cancelled write then leaves no in-process revision behind. */
+            if (has_settled && has_normalized_snapshot) {
+                const jazz_model_ValidatedQuery *shape = jazz_node__node__query_eval__NodeState__registered_shape(self, subscription.shape_id);
+                if (shape && jazz_node__node__query_eval__subscription_watermarks__NodeState__watermark_catch_up_view(self, shape)) {
+                    e = jazz_node__node__query_eval__subscription_watermarks__NodeState__persist_subscription_watermark(self, &authority_result_key,
+                                                                                                                       settled_through, normalized_snapshot);
+                    if (e.code) goto out;
+                }
+            }
+            /* Only this exact successfully applied frame can install its
+             * normalized predecessor. Legacy/deferred/opening frames do
+             * not preserve an earlier frame's cache accidentally. */
+            jazz_node_AuthorityResultState *m = jz_btree_get(&self->query.authority_results, &authority_result_key);
+            if (m) {
+                m->has_supporting_revision = has_normalized_snapshot;
+                if (has_normalized_snapshot) memcpy(m->supporting_revision, normalized_snapshot, 16);
+            }
+        }
+    }
+out:
+    jz_vec_drop(&program_fact_adds, sizeof(SRow), jazz_protocol__protocol__SupportingRow__drop);
+    jz_vec_drop(&program_fact_removes, sizeof(SRow), jazz_protocol__protocol__SupportingRow__drop);
+    jz_free(version_bundle_refs.ptr);
+    if (has_preflight) preflight_drop(&preflight);
+    jz_btree_drop(&bulk_loaded_tx_ids);
+    if (has_key) jazz_protocol__protocol__AuthorityResultKey__drop(&authority_result_key);
+    jazz_node__node__ViewUpdateParts__drop(&update);
+    return e;
+}
+
+/* Apply a downstream current-row view update. */
+jz_err jazz_node__node__views__NodeState__apply_view_update(NS *self, jazz_node_ViewUpdateParts update) {
+    jz_btree revisions; jz_btree_init(&revisions, &desc_revisions);
+    bool has_snapshot = false; u8 snapshot[16];
+    jz_err e = normalize_supporting_update(self, &update, &revisions, &has_snapshot, snapshot);
+    jz_btree_drop(&revisions);
+    jazz_protocol_SubscriptionKey sub = update.subscription;
+    jz_btree compiled_source_caches; jz_btree_init(&compiled_source_caches, &desc_compiled_caches);
+    jazz_protocol_VersionBundleRefVec bundle_refs = { 0 };
+    ViewBundlePreflight preflight; bool has_preflight = false;
+    if (e.code) goto fail;
+    e = validate_received_view_update_global_time_durability(self, &update);
+    if (e.code) { e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    e = validate_view_update_payloads(self, &update, 1);
+    if (e.code) { e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    jz_btree_drop(&compiled_source_caches);
+    e = validate_covered_input_closure_admission(self, &update, 1, &compiled_source_caches);
+    if (e.code) { jz_btree_init(&compiled_source_caches, &desc_compiled_caches); e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    e = version_bundle_refs_for_carriers(update.version_carriers.ptr, update.version_carriers.len, &bundle_refs);
+    if (e.code) { e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    e = preflight_view_bundle_conflicts(self, bundle_refs.ptr, bundle_refs.len, &preflight);
+    if (e.code) { e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    has_preflight = true;
+    e = validate_covered_input_body_witnesses(self, &update, 1, &preflight.bundles);
+    if (e.code) { e = invalid_authority_source_closure_error(sub, e); goto fail; }
+    preflight_drop(&preflight);
+    jz_free(bundle_refs.ptr);
+    JZ_TRY(apply_view_update_inner(self, update, NULL, has_snapshot, snapshot));
+    install_compiled_covered_input_source_caches(self, &compiled_source_caches);
+    return JZ_OK;
+fail:
+    if (has_preflight) preflight_drop(&preflight);
+    jz_free(bundle_refs.ptr);
+    jz_btree_drop(&compiled_source_caches);
+    jazz_node__node__ViewUpdateParts__drop(&update);
+    return e;
+}
+
+typedef struct { bool some; u8 revision[16]; } OptRevision;
+
+jz_err jazz_node__node__views__NodeState__apply_view_updates_in_batch(NS *self, jazz_node_ViewUpdatePartsVec updates) {
+    jz_err e = JZ_OK;
+    JZ_VEC(OptRevision) snapshots = { 0 };
+    jz_btree compiled_source_caches; jz_btree_init(&compiled_source_caches, &desc_compiled_caches);
+    jazz_protocol_VersionBundleRefVec all_bundle_refs = { 0 }, bulk_candidates = { 0 };
+    jz_btree initial_hydration_authority_results; jz_btree_init(&initial_hydration_authority_results, &desc_revisions);
+    ViewBundlePreflight preflight; bool has_preflight = false;
+    jz_btree bulk_loaded_tx_ids; jz_btree_init(&bulk_loaded_tx_ids, &desc_txid_set);
+    jz_btree receiver_batch_tx_ids; jz_btree_init(&receiver_batch_tx_ids, &desc_txid_set);
+    jazz_node_GlobalTimeTxVec receiver_batch_global_times = { 0 };
+    jazz_node_VersionRowVec receiver_batch_content_versions = { 0 };
+    jazz_node_RejectedTransactionVec receiver_batch_rejections = { 0 };
+    jazz_protocol_VersionBundleVec deferred_bundles = { 0 };
+    groove_DatabaseBatch *receiver_batch = NULL;
+    u32 consumed = 0; /* updates moved into apply_view_update_inner */
+    {
+        jz_btree prior_snapshots; jz_btree_init(&prior_snapshots, &desc_revisions);
+        jz_vec_reserve(&snapshots, updates.len, sizeof(OptRevision));
+        for (u32 i = 0; i < updates.len && !e.code; i++) {
+            OptRevision r = { false };
+            e = normalize_supporting_update(self, &updates.ptr[i], &prior_snapshots, &r.some, r.revision);
+            JZ_VEC_PUSH(snapshots, r);
+        }
+        jz_btree_drop(&prior_snapshots);
+        if (e.code) goto out;
+    }
+    if (updates.len == 0) goto out;
+    for (u32 i = 0; i < updates.len; i++) {
+        e = validate_received_view_update_global_time_durability(self, &updates.ptr[i]);
+        if (e.code) { e = invalid_authority_source_closure_error(updates.ptr[i].subscription, e); goto out; }
+    }
+    /* A receiver tick is one atomic protocol frame. Validate every row
+     * descriptor before the first reset can change flush cadence, or a
+     * preceding valid bundle can advance clocks, allocate aliases, or
+     * stage history before a later malformed bundle rejects the frame. */
+    for (u32 i = 0; i < updates.len; i++) {
+        e = validate_view_update_payloads(self, &updates.ptr[i], 1);
+        if (e.code) { e = invalid_authority_source_closure_error(updates.ptr[i].subscription, e); goto out; }
+    }
+    jz_btree_drop(&compiled_source_caches);
+    e = validate_covered_input_closure_admission(self, updates.ptr, updates.len, &compiled_source_caches);
+    if (e.code) { jz_btree_init(&compiled_source_caches, &desc_compiled_caches); goto out; }
+    {
+        const jazz_protocol_AuthorityResultKey *key; const jazz_node_AuthorityResultState *state;
+        JZ_BTREE_FOR(&self->query.authority_results, key, state) {
+            if (!state->initial_hydration) continue;
+            jazz_protocol_AuthorityResultKey k; jazz_protocol__protocol__AuthorityResultKey__clone(&k, key);
+            u8 none[16] = { 0 };
+            jz_btree_insert(&initial_hydration_authority_results, &k, none, NULL);
+        }
+    }
+    for (u32 i = 0; i < updates.len; i++) {
+        const jazz_node_ViewUpdateParts *update = &updates.ptr[i];
+        jazz_protocol_VersionBundleRefVec version_bundle_refs;
+        e = version_bundle_refs_for_carriers(update->version_carriers.ptr, update->version_carriers.len, &version_bundle_refs);
+        if (e.code) goto out;
+        jz_vec_extend(&all_bundle_refs, version_bundle_refs.ptr, version_bundle_refs.len, sizeof(BundleRef));
+        jazz_protocol_AuthorityResultKey authority_result_key;
+        jz_err ke = jazz_node__node__query_eval__subscriptions__NodeState__authority_result_key_for_subscription(self, update->subscription, &authority_result_key);
+        if (ke.code) { jz_err_drop(&ke); jz_free(version_bundle_refs.ptr); continue; }
+        if (update->reset_input_set && !jz_btree_contains(&initial_hydration_authority_results, &authority_result_key)) {
+            jazz_protocol_AuthorityResultKey k; jazz_protocol__protocol__AuthorityResultKey__clone(&k, &authority_result_key);
+            u8 none[16] = { 0 };
+            jz_btree_insert(&initial_hydration_authority_results, &k, none, NULL);
+        }
+        bool in_initial_hydration = jz_btree_contains(&initial_hydration_authority_results, &authority_result_key);
+        if (update->reset_input_set && update->peer_complete_tx_payload_refs.len == 0 && update->result_member_removes.len == 0)
+            jz_vec_extend(&bulk_candidates, version_bundle_refs.ptr, version_bundle_refs.len, sizeof(BundleRef));
+        if (in_initial_hydration && version_bundle_refs.len == 0 && (!update->reset_input_set || update->peer_complete_tx_payload_refs.len == 0)) {
+            jazz_protocol_AuthorityResultKey ok;
+            if (jz_btree_remove(&initial_hydration_authority_results, &authority_result_key, &ok, NULL)) jazz_protocol__protocol__AuthorityResultKey__drop(&ok);
+        }
+        jazz_protocol__protocol__AuthorityResultKey__drop(&authority_result_key);
+        jz_free(version_bundle_refs.ptr);
+    }
+    e = preflight_view_bundle_conflicts(self, all_bundle_refs.ptr, all_bundle_refs.len, &preflight);
+    if (e.code) goto out;
+    has_preflight = true;
+    /* A CoveredInput is not merely a selection hint: it names immutable
+     * bytes the receiver will later install into a local runtime source.
+     * Validate that each added coordinate is backed by either a body in
+     * this atomic receiver frame or a previously admitted complete
+     * payload explicitly referenced by its sender inventory. This closes
+     * the old ResultMember witness boundary without accepting a new
+     * source-input bypass. */
+    e = validate_covered_input_body_witnesses(self, updates.ptr, updates.len, &preflight.bundles);
+    if (e.code) goto out;
+    {
+        jz_btree bulk_candidate_tx_ids; jz_btree_init(&bulk_candidate_tx_ids, &desc_txid_set);
+        for (u32 i = 0; i < bulk_candidates.len; i++) { TxId t = TXID(bulk_candidates.ptr[i].tx); jz_btree_insert(&bulk_candidate_tx_ids, &t, NULL, NULL); }
+        jazz_protocol_VersionBundleRefVec bulk_candidate_refs = { 0 };
+        const TxId *tx; const Bundle *bundle;
+        JZ_BTREE_FOR(&preflight.bundles, tx, bundle)
+            if (jz_btree_contains(&bulk_candidate_tx_ids, tx) && bundle->scope == JAZZ_BUNDLE_SCOPE_COMPLETE)
+                JZ_VEC_PUSH(bulk_candidate_refs, jazz_protocol__protocol__VersionBundle__as_ref(bundle));
+        jz_btree_drop(&bulk_loaded_tx_ids);
+        e = jazz_node__node__ingest__NodeState__ingest_reset_view_bundle_refs_in_bulk(self, bulk_candidate_refs.ptr, bulk_candidate_refs.len,
+                                                                                     &preflight.persisted_tx_ids, &bulk_loaded_tx_ids);
+        jz_free(bulk_candidate_refs.ptr);
+        jz_btree_drop(&bulk_candidate_tx_ids);
+        if (e.code) { jz_btree_init(&bulk_loaded_tx_ids, &desc_txid_set); goto out; }
+    }
+    jz_btree *receiver_candidates = &preflight.bundles;
+    {
+        bool any_reset = false;
+        for (u32 i = 0; i < updates.len; i++) any_reset |= updates.ptr[i].reset_input_set;
+        if (any_reset) { e = jazz_node__node__NodeState__begin_initial_sync_flush_cadence(self); if (e.code) goto out; }
+    }
+    {
+        const TxId *tx; void *unit;
+        JZ_BTREE_FOR(&bulk_loaded_tx_ids, tx, unit) {
+            (void)unit;
+            Bundle removed;
+            if (jz_btree_remove(receiver_candidates, tx, NULL, &removed)) jazz_protocol__protocol__VersionBundle__drop(&removed);
+        }
+    }
+    /* Alias registration publishes metadata. Resolve every author, parent
+     * and schema before preparing any immutable row in this shared batch. */
+    {
+        const TxId *tx; const Bundle *bundle;
+        JZ_BTREE_FOR(receiver_candidates, tx, bundle) {
+            jazz_types_NodeAlias alias;
+            e = jazz_node__node__state__catalogue__NodeState__ensure_node_alias(self, tx->node, &alias);
+            if (e.code) goto out;
+            for (u32 i = 0; i < bundle->versions.len; i++) {
+                jazz_types_SchemaVersionAlias sva;
+                e = jazz_node__node__state__catalogue__NodeState__ensure_schema_version_alias(self, jazz_protocol__protocol__VersionRecord__schema_version(bundle->versions.ptr[i]), &sva);
+                if (e.code) goto out;
+            }
+        }
+    }
+    receiver_batch = groove__db__facade__Database__open_batch(self->database.database);
+    u64 receiver_batch_bundle_count = 0;
+    {
+        TxId tx; Bundle bundle;
+        while (jz_btree_pop_first(receiver_candidates, &tx, &bundle)) {
+            bool staged = false;
+            e = stage_view_bundle(self, receiver_batch, &bundle, &receiver_batch_tx_ids, &receiver_batch_global_times,
+                                  &receiver_batch_content_versions, &receiver_batch_rejections, &staged);
+            if (e.code) { jazz_protocol__protocol__VersionBundle__drop(&bundle); goto out; }
+            if (staged) { receiver_batch_bundle_count += 1; jazz_protocol__protocol__VersionBundle__drop(&bundle); }
+            else JZ_VEC_PUSH(deferred_bundles, bundle);
+        }
+    }
+    if (!groove__db__facade__DatabaseBatch__is_empty(receiver_batch)) {
+        self->sync_metrics.receiver_bulk_ingest_commits += 1;
+        self->sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
+        groove_AppliedBatch *applied = NULL;
+        groove_DatabaseBatch *batch = receiver_batch; receiver_batch = NULL;
+        e = jazz_node__node__state__commit__NodeState__apply_node_batch(self, batch, &applied);
+        if (e.code) goto out;
+        groove_PersistOutcome *persisted = groove__db__commit__Database__persist_with_progress(self->database.database, applied);
+        e = groove__db__commit__Database__finish_persistence(self->database.database, persisted);
+        if (e.code) goto out;
+        for (u32 i = 0; i < receiver_batch_rejections.len; i++) {
+            TxId rtx = jazz_model__tx__RejectedTransaction__tx_id(receiver_batch_rejections.ptr[i]);
+            jz_btree_insert(&self->rejections.rejected_transactions, &rtx, &receiver_batch_rejections.ptr[i], NULL);
+        }
+        receiver_batch_rejections.len = 0;
+        const TxId *tx; void *unit;
+        JZ_BTREE_FOR(&receiver_batch_tx_ids, tx, unit) { (void)unit; jazz_node__node__NodeState__invalidate_tx_version_tables_cache(self, *tx); }
+        for (u32 i = 0; i < receiver_batch_global_times.len; i++) {
+            jazz_types_GlobalTime newly; bool has_newly;
+            e = jazz_node__node__open_tx__NodeState__record_applied_global_time(self, receiver_batch_global_times.ptr[i].gt, receiver_batch_global_times.ptr[i].tx,
+                                                                              &newly, &has_newly);
+            if (e.code) goto out;
+        }
+    }
+    jz_btree preloaded_tx_ids;
+    jz_btree_clone(&preloaded_tx_ids, &bulk_loaded_tx_ids, NULL, NULL);
+    {
+        const TxId *tx; void *unit;
+        JZ_BTREE_FOR(&receiver_batch_tx_ids, tx, unit) { (void)unit; jz_btree_insert(&preloaded_tx_ids, tx, NULL, NULL); }
+    }
+    /* Supplying preloaded IDs bypasses per-update bundle ingestion below,
+     * so deferred known transactions must explicitly apply their new fate. */
+    for (u32 i = 0; i < deferred_bundles.len; i++) {
+        TxId tx_id = TXID(deferred_bundles.ptr[i].tx);
+        self->sync_metrics.receiver_per_bundle_ingests += 1;
+        Bundle b = deferred_bundles.ptr[i];
+        deferred_bundles.ptr[i] = (Bundle){ 0 };
+        e = ingest_view_bundle(self, b);
+        if (e.code) { jz_btree_drop(&preloaded_tx_ids); goto out; }
+        jz_btree_insert(&preloaded_tx_ids, &tx_id, NULL, NULL);
+    }
+    /* Cross-subscription ordering within one receiver tick carries no
+     * protocol semantics beyond per-link FIFO. Table writes are coalesced
+     * above; per-subscription settled-state mutations still apply in
+     * arrival order below. */
+    for (u32 i = 0; i < updates.len; i++) {
+        consumed = i + 1;
+        e = apply_view_update_inner(self, updates.ptr[i], &preloaded_tx_ids, snapshots.ptr[i].some, snapshots.ptr[i].revision);
+        if (e.code) break;
+    }
+    jz_btree_drop(&preloaded_tx_ids);
+    if (e.code) goto out;
+    install_compiled_covered_input_source_caches(self, &compiled_source_caches);
+    jz_btree_init(&compiled_source_caches, &desc_compiled_caches);
+    if (self->initial_sync_flush_active) {
+        bool all_hydrated = true;
+        const jazz_protocol_AuthorityResultKey *key; const jazz_node_AuthorityResultState *state;
+        JZ_BTREE_FOR(&self->query.authority_results, key, state) if (state->initial_hydration) { all_hydrated = false; break; }
+        if (all_hydrated) e = jazz_node__node__NodeState__finish_initial_sync_flush_cadence(self);
+    }
+out:
+    for (u32 i = consumed; i < updates.len; i++) jazz_node__node__ViewUpdateParts__drop(&updates.ptr[i]);
+    jz_free(updates.ptr);
+    jz_free(snapshots.ptr);
+    jz_btree_drop(&compiled_source_caches);
+    jz_free(all_bundle_refs.ptr); jz_free(bulk_candidates.ptr);
+    jz_btree_drop(&initial_hydration_authority_results);
+    if (has_preflight) preflight_drop(&preflight);
+    jz_btree_drop(&bulk_loaded_tx_ids);
+    jz_btree_drop(&receiver_batch_tx_ids);
+    jz_free(receiver_batch_global_times.ptr);
+    vrow_vec_drop(&receiver_batch_content_versions);
+    for (u32 i = 0; i < receiver_batch_rejections.len; i++) jz_free(receiver_batch_rejections.ptr[i]);
+    jz_free(receiver_batch_rejections.ptr);
+    for (u32 i = 0; i < deferred_bundles.len; i++) if (deferred_bundles.ptr[i].tx) jazz_protocol__protocol__VersionBundle__drop(&deferred_bundles.ptr[i]);
+    jz_free(deferred_bundles.ptr);
+    (void)receiver_batch;
+    return e;
+}
+
+static const jz_btree_desc desc_tx_headers = { sizeof(TxId), sizeof(jazz_model_Transaction *), jzn_cmp_txid, NULL, NULL };
+
+/* Preserve a discarded Pending carrier's transaction identity for its
+ * already-registered fate observer, without publishing any row version or
+ * accepting the discarded view's supporting set. A later ordinary carrier
+ * extends this existing zero-body, view-scoped fragment. */
+jz_err jazz_node__node__views__NodeState__remember_discarded_pending_view_transactions(NS *self, jazz_protocol_VersionCarrier *const *carriers, u32 n) {
+    jz_btree headers; jz_btree_init(&headers, &desc_tx_headers);
+    jz_err e = JZ_OK;
+    for (u32 c = 0; c < n && !e.code; c++) {
+        jazz_protocol_VersionBundleRefVec refs = { 0 };
+        jz_err be = jazz_protocol__protocol__VersionCarrier__bundle_refs(carriers[c], &refs);
+        if (be.code) { jz_err_drop(&be); e = JZN_MALFORMED_VIEW("malformed version-bundle run"); break; }
+        for (u32 i = 0; i < refs.len; i++) {
+            if (refs.ptr[i].fate->tag != JAZZ_FATE_PENDING) continue;
+            jazz_model_Transaction *tx = jazz_node__node__codec__transaction_without_permission_subject(refs.ptr[i].tx);
+            jazz_model__tx__Transaction__set_n_total_writes(tx, 0);
+            groove_Value merge;
+            e = jazz_node__node__NodeState__admit_contribution_merge_for_storage(self, tx, &merge);
+            if (e.code) { jazz_model__tx__Transaction__drop(tx); break; }
+            groove__records__values__Value__drop(&merge);
+            TxId tx_id = TXID(tx);
+            jazz_model_Transaction **previous = jz_btree_get(&headers, &tx_id);
+            if (previous && !jazz_node__node__codec__known_transaction_payload_matches(*previous, tx)) {
+                jazz_model__tx__Transaction__drop(tx);
+                e = jazz_node__node__Error__conflicting_commit_unit(&tx_id);
+                break;
+            }
+            jazz_model_Transaction *old;
+            if (jz_btree_insert(&headers, &tx_id, &tx, &old)) jazz_model__tx__Transaction__drop(old);
+        }
+        jz_free(refs.ptr);
+    }
+    JZ_VEC(jazz_model_Transaction *) missing = { 0 };
+    TxId tx_id; jazz_model_Transaction *tx;
+    while (jz_btree_pop_first(&headers, &tx_id, &tx)) {
+        if (e.code) { jazz_model__tx__Transaction__drop(tx); continue; }
+        bool found = false; jazz_node_StoredTransaction stored;
+        e = jazz_node__node__currency__NodeState__query_transaction(self, tx_id, &found, &stored);
+        if (e.code) { jazz_model__tx__Transaction__drop(tx); continue; }
+        if (found) {
+            jazz_model_Transaction *identity = jazz_node__node__codec__transaction_without_permission_subject(stored.tx);
+            jazz_model__tx__Transaction__set_n_total_writes(identity, 0);
+            bool matches = jazz_node__node__codec__known_transaction_payload_matches(identity, tx);
+            jazz_model__tx__Transaction__drop(identity);
+            jazz_node__node__codec__StoredTransaction__drop(&stored);
+            jazz_model__tx__Transaction__drop(tx);
+            if (!matches) e = jazz_node__node__Error__conflicting_commit_unit(&tx_id);
+        } else {
+            JZ_VEC_PUSH(missing, tx);
+        }
+    }
+    jz_btree_drop(&headers);
+    for (u32 i = 0; i < missing.len; i++) {
+        if (e.code) { jazz_model__tx__Transaction__drop(missing.ptr[i]); continue; }
+        jazz_model_Fate pending = { JAZZ_FATE_PENDING, NULL };
+        e = jazz_node__node__ingest__NodeState__ingest_transaction_fragment_without_current_indexes(self, missing.ptr[i], (jazz_protocol_VersionRecordVec){ 0 },
+                                                                                                   pending, false, 0, JAZZ_DUR_LOCAL);
+    }
+    jz_free(missing.ptr);
+    return e;
+}
+
+/* Persist immutable bodies carried by a stale authority link without
+ * accepting that link's source closure as an authority receipt.
+ *
+ * A replacement upstream can have a later receipt selected while an old
+ * transport still has a frame in flight. Its bodies are ordinary
+ * immutable replication data and may be needed for the selected link's
+ * later exact closure, but its covered-input facts must not mutate the
+ * selected receiver frontier or derived terminal. */
+jz_err jazz_node__node__views__NodeState__ingest_unselected_authority_view_bundles(NS *self, jazz_protocol_VersionCarrier *const *carriers, u32 n) {
+    jazz_protocol_VersionBundleRefVec bundle_refs;
+    JZ_TRY(version_bundle_refs_for_carriers(carriers, n, &bundle_refs));
+    ViewBundlePreflight preflight;
+    jz_err e = preflight_view_bundle_conflicts(self, bundle_refs.ptr, bundle_refs.len, &preflight);
+    jz_free(bundle_refs.ptr);
+    if (e.code) return e;
+    TxId tx; Bundle bundle;
+    while (jz_btree_pop_first(&preflight.bundles, &tx, &bundle)) {
+        if (e.code) { jazz_protocol__protocol__VersionBundle__drop(&bundle); continue; }
+        e = ingest_view_bundle(self, bundle);
+    }
+    preflight_drop(&preflight);
+    return e;
+}
+
+/* ---------------- whole-table shape, bundle assembly ---------------- */
+jz_err jazz_node__node__views__NodeState__whole_table_subscription_key(NS *self, const jz_str *table, jazz_protocol_SubscriptionKey *out) {
+    jazz_model_ValidatedQuery *shape = NULL; jazz_model_Binding *binding = NULL;
+    JZ_TRY(jazz_node__node__views__NodeState__whole_table_shape_binding(self, table, &shape, &binding));
+    out->shape_id = jazz_model__query__ValidatedQuery__shape_id(shape);
+    out->binding_id = jazz_model__query__Binding__binding_id(binding);
+    out->read_view = (jazz_protocol_ReadViewKey){ 0 }; /* Default::default() */
+    jazz_model__query__ValidatedQuery__drop(shape);
+    jazz_model__query__Binding__drop(binding);
+    return JZ_OK;
+}
+
+jz_err jazz_node__node__views__NodeState__whole_table_shape_binding(NS *self, const jz_str *table, jazz_model_ValidatedQuery **shape_out,
+                                                                   jazz_model_Binding **binding_out) {
+    const jazz_model_JazzSchema *schema;
+    jazz_types_SchemaVersionId schema_version;
+    const jazz_model_TableSchema *t;
+    jz_err te = jazz_node__node__NodeState__table(self, table, &t);
+    if (!te.code) {
+        schema = self->catalogue.schema;
+        schema_version = self->catalogue.local_schema_version_id;
+    } else {
+        jz_err_drop(&te);
+        schema_version = self->catalogue.active_schema.schema;
+        jazz_protocol_SchemaVersion *const *payload = jz_btree_get(&self->catalogue.catalogue_schemas, &schema_version);
+        if (!payload) return JZN_INVALID_STORED("current write schema payload missing");
+        schema = (*payload)->schema;
+    }
+    jazz_model_Query query = jazz_model__query__Query__from(jz_str_clone(table), (jazz_model_OptStr){ false });
+    jazz_model_ValidatedQuery *shape = NULL;
+    jz_err e = jazz_model__query__Query__validate_with_schema_version(&query, schema, schema_version, &shape);
+    jazz_model__query__Query__drop_v(&query);
+    if (e.code) return e;
+    jz_btree params; jz_btree_init(&params, &jzn_desc_str_value);
+    jazz_model_Binding *binding = NULL;
+    e = jazz_model__query__ValidatedQuery__bind(shape, params, &binding);
+    if (e.code) { jazz_model__query__ValidatedQuery__drop(shape); return e; }
+    *shape_out = shape;
+    *binding_out = binding;
+    return JZ_OK;
+}
+
+jz_err jazz_node__node__views__NodeState__version_bundle_for_maintained_view_versions_with_tx(NS *self, const jazz_node_StoredTransaction *stored_tx,
+                                                                                             jazz_node_VersionRow *const *tx_versions, u32 n, Bundle *out) {
+    return version_bundle_for_maintained_view_versions_with_tx_and_source(self, stored_tx, tx_versions, n, MBVS_IVM_WITNESS, out);
+}
+
+/* (version_bundle_for_exact_storage_maintained_view_versions_with_tx is the
+ * MBVS_EXACT_STORAGE call above, inlined at its single call site.)
+ *
+ * Whether these direct immutable-store reads can be serialized without
+ * the normal maintained-witness canonicalization. Logical names can be
+ * reused by different physical tables across schema history, so an exact
+ * `(table, row, tx)` lookup alone is not enough: every row must resolve
+ * to the sole physical table ever named by that logical label. Otherwise
+ * use the ordinary fail-closed canonicalization path. */
+static jz_err exact_storage_maintained_versions_are_unambiguous(NS *self, VRow *const *versions, u32 n, bool *out) {
+    bool all_unambiguous = true;
+    for (u32 i = 0; i < n; i++) {
+        jazz_types_PhysicalTableId version_table_id;
+        JZ_TRY(jazz_node__node__physical__NodeState__physical_table_id_for_version(self, versions[i], &version_table_id));
+        u32 distinct = 0; bool contains = false;
+        jazz_types_PhysicalTableId seen[64]; /* BTreeSet<PhysicalTableId>; schema history is small */
+        const jazz_types_SchemaVersionId *sv; const jazz_node_SchemaPhysicalMapping *mapping;
+        JZ_BTREE_FOR(&self->catalogue.physical_mappings, sv, mapping) {
+            const jazz_node_TablePhysicalMapping *tm = jz_btree_get(&mapping->tables, VROW_TABLE(versions[i]));
+            if (!tm) continue;
+            bool dup = false;
+            for (u32 j = 0; j < distinct && !dup; j++) dup = seen[j] == tm->table_id;
+            if (!dup && distinct < 64) seen[distinct++] = tm->table_id;
+            if (tm->table_id == version_table_id) contains = true;
+        }
+        all_unambiguous = all_unambiguous && distinct == 1 && contains;
+    }
+    *out = all_unambiguous;
+    return JZ_OK;
+}
+
+static jz_err version_bundle_for_maintained_view_versions_with_tx_and_source(NS *self, const jazz_node_StoredTransaction *stored_tx,
+    VRow *const *tx_versions, u32 n, MaintainedBundleVersionSource source, Bundle *out) {
+    const jazz_model_Transaction *tx = stored_tx->tx;
+    TxId tx_id = TXID(tx);
+    u32 n_total_writes = jazz_model__tx__Transaction__n_total_writes(tx);
+    /* A structured result can reach the same immutable version through
+     * more than one retained fact (for example, a root's nested relation
+     * and the relation's sender witness). A wire bundle describes a set of
+     * row versions, not those traversal paths: canonicalize it before
+     * deriving its declared view-scoped cardinality. */
+    jz_btree versions; jz_btree_init(&versions, &desc_record_map);
+    jz_err e = JZ_OK;
+    for (u32 i = 0; i < n && !e.code; i++) {
+        /* A maintained terminal may use a current-row source projected for
+         * query evaluation, but a VersionRecord is replicated history, not
+         * query output. Resolve its identity back to the stored authored
+         * row before crossing the wire boundary (INV-DATA-16/18,
+         * INV-SYNC-16, and C.3's byte-fidelity rule). */
+        VRow *canonical = NULL;
+        if (source == MBVS_EXACT_STORAGE) canonical = jazz_node__node__codec__VersionRow__clone(tx_versions[i]);
+        else { e = jazz_node__node__views__NodeState__canonical_history_version_for_maintained_witness(self, tx_versions[i], &canonical); if (e.code) break; }
+        VR *record = NULL;
+        e = jazz_node__node__NodeState__version_record_from_row(self, canonical, &record);
+        jazz_node__node__codec__VersionRow__drop(canonical);
+        if (e.code) break;
+        RecordKey key = version_bundle_record_key(record);
+        VR **existing = jz_btree_get(&versions, &key);
+        if (existing) {
+            bool same = jazz_protocol__protocol__VersionRecord__eq(*existing, record);
+            record_key_drop(&key);
+            jazz_protocol__protocol__VersionRecord__drop(record);
+            if (!same) e = jazz_node__node__Error__conflicting_commit_unit(&tx_id);
+        } else {
+            jz_btree_insert(&versions, &key, &record, NULL);
+        }
+    }
+    if (e.code) { jz_btree_drop(&versions); return e; }
+    memset(out, 0, sizeof *out);
+    RecordKey k; VR *v;
+    while (jz_btree_pop_first(&versions, &k, &v)) { record_key_drop(&k); JZ_VEC_PUSH(out->versions, v); }
+    jz_btree_drop(&versions);
+    /* A relay may only retain the selected fragment of an upstream
+     * view-scoped bundle. Its stored cardinality then describes that
+     * fragment, so matching it to the selected versions does not prove
+     * that the complete transaction is known. */
+    u32 scope = (!stored_tx->is_partial && n_total_writes == out->versions.len) ? JAZZ_BUNDLE_SCOPE_COMPLETE : JAZZ_BUNDLE_SCOPE_VIEW_SCOPED;
+    const jz_str *meta = jazz_model__tx__Transaction__user_metadata_json(tx);
+    jz_slice meta_slice = meta ? jz_str_slice(meta) : (jz_slice){ 0 };
+    out->tx = jazz_model__tx__Transaction__new(
+        tx_id, jazz_model__tx__Transaction__kind(tx),
+        scope == JAZZ_BUNDLE_SCOPE_COMPLETE ? n_total_writes : out->versions.len,
+        *jazz_model__tx__Transaction__made_by(tx),
+        /* Policy capabilities are local authority state and never part of
+         * a view or repair carrier. Durable made_by remains explicit. */
+        false, jazz_types__ids__AuthorSubject__SYSTEM,
+        /* Exclusive read evidence is kept only for retransmitting the
+         * author's own pending unit; view carriers never expose it. */
+        false, (jazz_model_Snapshot){ 0 }, NULL, NULL, NULL,
+        meta ? &meta_slice : NULL, jazz_model__tx__Transaction__contribution_merge_clone(tx));
+    out->scope = scope;
+    jazz_model__tx__Fate__clone(&out->fate, &stored_tx->fate);
+    out->has_global_time = stored_tx->has_global_time;
+    out->global_time = stored_tx->global_time;
+    out->durability = stored_tx->durability;
+    return JZ_OK;
+}
+
+/* Return the stored, authored history row for a maintained witness.
+ *
+ * The maintained graph may evaluate a schema-compatible current source,
+ * whereas a wire `VersionRecord` is always the complete immutable row
+ * version under its authored schema. This producer-side normalization is
+ * deliberately before serialization; receivers reject non-identical
+ * duplicate row versions rather than repairing them. */
+jz_err jazz_node__node__views__NodeState__canonical_history_version_for_maintained_witness(NS *self, const VRow *version, VRow **out) {
+    *out = NULL;
+    const jz_str *vtable = VROW_TABLE(version);
+    jazz_types_RowUuid vrow = VROW_ROW(version);
+    /* The maintained graph can call its projected result table by a name
+     * that also existed in the authored schema.  Resolve that name once
+     * through the active catalogue and require the same physical table
+     * for every candidate below; a reused name is ambiguous and must fail
+     * closed rather than selecting the first matching row key. */
+    jz_btree logical_candidates; jz_btree_init(&logical_candidates, &jzn_desc_u64_set);
+    {
+        const jazz_types_SchemaVersionId *sv; const jazz_node_SchemaPhysicalMapping *mapping;
+        JZ_BTREE_FOR(&self->catalogue.physical_mappings, sv, mapping) {
+            const jazz_node_TablePhysicalMapping *tm = jz_btree_get(&mapping->tables, vtable);
+            if (tm) jz_btree_insert(&logical_candidates, &tm->table_id, NULL, NULL);
+        }
+    }
+    TxId witness_tx_id;
+    jz_err e = jazz_node__node__NodeState__version_tx_id(self, version, &witness_tx_id);
+    if (e.code) { jz_btree_drop(&logical_candidates); return e; }
+    jz_btree physical_candidates;
+    if (logical_candidates.len == 1) physical_candidates = logical_candidates;
+    else {
+        jz_btree_init(&physical_candidates, &jzn_desc_u64_set);
+        jazz_node_VersionRowVec stored = { 0 };
+        e = jazz_node__node__currency__NodeState__query_versions_for_tx(self, witness_tx_id, &stored);
+        for (u32 i = 0; i < stored.len && !e.code; i++) {
+            jazz_types_RowUuid r = VROW_ROW(stored.ptr[i]);
+            if (!jz_uuid_eq(&r, &vrow) || !jazz_model__model__branch__BranchKey__eq(jazz_node__node__codec__VersionRow__branch_key(stored.ptr[i]),
+                                                                                    jazz_node__node__codec__VersionRow__branch_key(version))) continue;
+            jazz_types_PhysicalTableId table_id;
+            jz_err pe = jazz_node__node__physical__NodeState__physical_table_id_for_version(self, stored.ptr[i], &table_id);
+            if (pe.code) { jz_err_drop(&pe); continue; }
+            if (jz_btree_contains(&logical_candidates, &table_id)) jz_btree_insert(&physical_candidates, &table_id, NULL, NULL);
+        }
+        vrow_vec_drop(&stored);
+        jz_btree_drop(&logical_candidates);
+        if (e.code) { jz_btree_drop(&physical_candidates); return e; }
+    }
+    if (physical_candidates.len != 1) {
+        jz_btree_drop(&physical_candidates);
+        return JZN_INVALID_STORED("maintained witness maps to zero or multiple physical tables");
+    }
+    jazz_types_PhysicalTableId projected_table_id;
+    {
+        void *k, *v;
+        jz_btree_first(&physical_candidates, &k, &v);
+        projected_table_id = *(jazz_types_PhysicalTableId *)k;
+    }
+    jz_btree_drop(&physical_candidates);
+    jazz_types_SchemaVersionId authored_schema;
+    if (!jazz_node__node__NodeState__schema_version_for_alias(self, jazz_node__node__codec__VersionRow__schema_version_alias(version), &authored_schema))
+        return JZN_INVALID_STORED("maintained witness schema version alias must exist");
+    const jazz_model_TableSchema *authored_table = NULL;
+    e = jazz_node__node__NodeState__table_in_schema_ref(self, vtable, authored_schema, &authored_table);
+    if (e.code) {
+        if (e.code != JZN_E_TABLE_NOT_FOUND) return e;
+        jz_err_drop(&e);
+        /* A current-query source may have been projected through a
+         * later schema, so its logical name need not exist under the
+         * authored alias carried by its immutable history identity.
+         * Resolve it through the catalogue's unambiguous physical
+         * table id, then reload the actual stored row for the same
+         * physical table, branch, row, transaction, and layer. This is the
+         * same identity boundary used for repair payloads; reused or
+         * unknown logical names fail closed before history is read. */
+        jazz_node_VersionRowVec stored = { 0 };
+        JZ_TRY(jazz_node__node__currency__NodeState__query_versions_for_tx(self, witness_tx_id, &stored));
+        for (u32 i = 0; i < stored.len; i++) {
+            jazz_types_RowUuid r = VROW_ROW(stored.ptr[i]);
+            if (!jz_uuid_eq(&r, &vrow) || !jazz_model__model__branch__BranchKey__eq(jazz_node__node__codec__VersionRow__branch_key(stored.ptr[i]),
+                                                                                    jazz_node__node__codec__VersionRow__branch_key(version))) continue;
+            jazz_types_PhysicalTableId table_id;
+            jz_err pe = jazz_node__node__physical__NodeState__physical_table_id_for_version(self, stored.ptr[i], &table_id);
+            if (pe.code) { jz_err_drop(&pe); continue; }
+            if (table_id == projected_table_id) {
+                *out = stored.ptr[i];
+                for (u32 j = 0; j < stored.len; j++) if (j != i) jazz_node__node__codec__VersionRow__drop(stored.ptr[j]);
+                jz_free(stored.ptr);
+                return JZ_OK;
+            }
+        }
+        vrow_vec_drop(&stored);
+        return JZN_ERR(JZN_E_MAINTAINED_VIEW_MISSING_BUNDLE_WITNESS, "maintained witness projection is missing its canonical history row");
+    }
+    /* A maintained witness is decoded from the current-query graph. Its
+     * descriptor can be identical to history storage while selected-out
+     * cells are still typed nulls, so first prefer its immutable stored
+     * history identity even when the descriptors match. */
+    jzn_strvec storage_tables = { 0 };
+    JZ_TRY(jazz_node__node__currency__NodeState__version_storage_sources(self, vtable, &storage_tables));
+    for (u32 i = 0; i < storage_tables.len && !e.code; i++) {
+        VRow *canonical = NULL;
+        e = jazz_node__node__currency__NodeState__query_version_by_alias_with_storage_in_schema(self, authored_schema, vtable, &storage_tables.ptr[i],
+                jazz_node__node__codec__VersionRow__branch_key(version), vrow, jazz_node__node__codec__VersionRow__tx_time(version),
+                jazz_node__node__codec__VersionRow__tx_node_alias(version), &canonical);
+        if (e.code || !canonical) continue;
+        /* The read projection may change the schema alias even when the
+         * table layout is unchanged. This exact history key identifies the
+         * authored version; never replace its identity with the projection. */
+        jazz_types_PhysicalTableId table_id;
+        e = jazz_node__node__physical__NodeState__physical_table_id_for_version(self, canonical, &table_id);
+        if (!e.code && table_id == projected_table_id) { *out = canonical; break; }
+        jazz_node__node__codec__VersionRow__drop(canonical);
+    }
+    jz_vec_drop(&storage_tables, sizeof(jz_str), jzn_str_drop_v);
+    if (e.code || *out) return e;
+    /* Some maintained rows are legitimate materialized/synthetic versions
+     * (for example, synthesized merge output) and therefore have no persisted
+     * history identity to reload. They may cross the boundary only when
+     * their authored descriptor is complete. `authored_columns` lets us
+     * distinguish such a row from a query projection whose selected-out
+     * authored cells were replaced by typed nulls.
+     * Only synthetic rows need a reconstructed descriptor. Ordinary rows
+     * returned above already carry the immutable store's authored layout. */
+    JZ_TRY(jazz_node__node__NodeState__table_in_schema_ref(self, vtable, authored_schema, &authored_table));
+    const groove_RecordDescriptor *authored_descriptor = jazz_model__schema__TableSchema__history_storage_record_schema(authored_table);
+    bool has_authored_layout = groove__records__RecordDescriptor__eq(
+        groove__records__OwnedRecord__descriptor(jazz_node__node__codec__VersionRow__record(version)), authored_descriptor);
+    bool has_complete_authored_payload = false;
+    if (has_authored_layout) {
+        jazz_model_DeletionEvent ev;
+        if (jazz_node__node__codec__VersionRow__deletion(version, &ev)) has_complete_authored_payload = true;
+        else {
+            bool some = false; jz_btree authored;
+            JZ_TRY(jazz_node__node__physical__NodeState__authored_columns_for_version(self, version, &some, &authored));
+            if (!some) has_complete_authored_payload = true; /* Legacy complete rows predate authored-column metadata. */
+            else {
+                has_complete_authored_payload = true;
+                const jz_str *column; void *unit;
+                JZ_BTREE_FOR(&authored, column, unit) {
+                    (void)unit;
+                    if (jz_str_eq_cstr(column, JAZZ_DELETION_COLUMN_NAME)) continue;
+                    bool cell_some = false; groove_Value value;
+                    jz_err ce = jazz_node__node__codec__VersionRow__cell(version, authored_table, column, &cell_some, &value);
+                    if (ce.code) { jz_err_drop(&ce); has_complete_authored_payload = false; break; }
+                    if (cell_some) groove__records__values__Value__drop(&value);
+                    else { has_complete_authored_payload = false; break; }
+                }
+                jz_btree_drop(&authored);
+            }
+        }
+    }
+    if (has_complete_authored_payload) { *out = jazz_node__node__codec__VersionRow__clone(version); return JZ_OK; }
+    return JZN_ERR(JZN_E_MAINTAINED_VIEW_MISSING_BUNDLE_WITNESS, "maintained witness is missing its canonical history row");
+}
