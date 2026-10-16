@@ -1,42 +1,29 @@
 //! Conversion between the stored (physical) and logical forms of records
-//! whose descriptor has interned or U64-stored-as-U48 fields.
+//! whose descriptor has interned fields.
 //!
 //! An interned field stores a 4-byte dictionary code (`u32` LE) where the
-//! logical record holds the full value. A U64-stored-as-U48 field
-//! (`INV-STORAGE-39`) stores 6 bytes little-endian where the logical record
-//! holds an 8-byte `U64`. Every other field has the same encoding in both
-//! forms, but the record layout differs: a code is fixed-width while the
-//! logical value usually is not, so fields move between the fixed region and
-//! the variable region. [`RecordTranscoder`] rebuilds a record field by field
-//! in the other form; it never decodes a field whose form does not change.
+//! logical record holds the full value. Every other field has the same
+//! encoding in both forms, but the record layout differs: a code is
+//! fixed-width while the logical value usually is not, so fields move between
+//! the fixed region and the variable region. [`RecordTranscoder`] rebuilds a
+//! record field by field in the other form; it never decodes a field that is
+//! not interned.
 
 use super::values::{
-    U48_MAX, decode_value, encode_value, ensure_value_type, validate_canonical_value,
+    decode_value, encode_value, ensure_value_type, validate_canonical_value,
     visit_encoded_indirect_values,
 };
 use super::{Error, RecordDescriptor, ValueType};
 
-/// How one stored field whose form differs from its logical form is laid out.
+/// How one interned field of a stored record is laid out.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct TranscodedField {
-    /// The field is `Nullable(..)`: a presence flag precedes the payload.
+struct InternedField {
+    dictionary: String,
+    /// The field is `Nullable(Interned)`: a presence flag precedes the code.
     nullable: bool,
-    kind: TranscodedKind,
+    /// The logical type stored in the dictionary.
+    logical: ValueType,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TranscodedKind {
-    Interned {
-        dictionary: String,
-        /// The logical type stored in the dictionary.
-        logical: ValueType,
-    },
-    /// A logical `U64` kept in a 6-byte little-endian slot.
-    StoredU48,
-}
-
-/// Width of a stored U64-stored-as-U48 payload.
-const STORED_U48_WIDTH: usize = 6;
 
 /// Rebuilds records of one stored descriptor between its physical form (codes)
 /// and its logical form (values).
@@ -44,15 +31,18 @@ const STORED_U48_WIDTH: usize = 6;
 pub struct RecordTranscoder {
     physical: RecordDescriptor,
     logical: RecordDescriptor,
-    fields: Vec<Option<TranscodedField>>,
+    fields: Vec<Option<InternedField>>,
 }
 
 /// The logical descriptor of a stored descriptor: every interned field
-/// replaced by its logical type and every U64-stored-as-U48 field by `U64`.
-/// Names and identities are kept, so a field index means the same field in
-/// both descriptors.
+/// replaced by its logical type. Names and identities are kept, so a field
+/// index means the same field in both descriptors.
 pub(crate) fn logical_record_descriptor(descriptor: &RecordDescriptor) -> RecordDescriptor {
-    if !descriptor.contains_storage_transcoding() {
+    if !descriptor
+        .fields()
+        .iter()
+        .any(|field| field.value_type.contains_interned())
+    {
         return *descriptor;
     }
     RecordDescriptor::new_with_fields(descriptor.fields().iter().map(|field| {
@@ -70,16 +60,7 @@ impl RecordDescriptor {
             .any(|field| field.value_type.contains_interned())
     }
 
-    /// Whether any field's stored form differs from its logical form: it is
-    /// interned or a U64-stored-as-U48 field, at any depth.
-    pub fn contains_storage_transcoding(&self) -> bool {
-        self.fields()
-            .iter()
-            .any(|field| field.value_type.contains_storage_transcoding())
-    }
-
-    /// This descriptor with interned fields replaced by their logical types
-    /// and U64-stored-as-U48 fields by `U64`.
+    /// This descriptor with interned fields replaced by their logical types.
     pub fn logical(&self) -> RecordDescriptor {
         logical_record_descriptor(self)
     }
@@ -87,41 +68,26 @@ impl RecordDescriptor {
 
 impl RecordTranscoder {
     /// A transcoder for records stored under `physical`, or `None` when no
-    /// field is interned or U64-stored-as-U48 and the stored bytes already
-    /// are the logical record.
+    /// field is interned and the stored bytes already are the logical record.
     ///
-    /// Such a field must sit at top level, optionally under one `Nullable`;
-    /// any other placement is refused.
+    /// An interned field must sit at top level, optionally under one
+    /// `Nullable`; any other placement is refused.
     pub fn new(physical: RecordDescriptor) -> Result<Option<Self>, Error> {
-        if !physical.contains_storage_transcoding() {
+        if !physical.contains_interned() {
             return Ok(None);
         }
         let mut fields = Vec::with_capacity(physical.fields().len());
         for field in physical.fields() {
-            let (candidate, nullable) = match &field.value_type {
-                ValueType::Nullable(inner) => (inner.as_ref(), true),
-                other => (other, false),
+            let interned = match &field.value_type {
+                ValueType::Nullable(inner) => inner.as_interned().map(|parts| (parts, true)),
+                other => other.as_interned().map(|parts| (parts, false)),
             };
-            if candidate.is_u64_stored_as_u48() {
-                fields.push(Some(TranscodedField {
-                    nullable,
-                    kind: TranscodedKind::StoredU48,
-                }));
-                continue;
-            }
-            if field.value_type.contains_stored_u48() {
-                return Err(Error::UnsupportedStoredU48Placement {
-                    field: field.name.clone().unwrap_or_default(),
-                });
-            }
-            match candidate.as_interned() {
-                Some((dictionary, logical)) if !logical.contains_storage_transcoding() => {
-                    fields.push(Some(TranscodedField {
+            match interned {
+                Some(((dictionary, logical), nullable)) if !logical.contains_interned() => {
+                    fields.push(Some(InternedField {
+                        dictionary: dictionary.to_owned(),
                         nullable,
-                        kind: TranscodedKind::Interned {
-                            dictionary: dictionary.to_owned(),
-                            logical: logical.clone(),
-                        },
+                        logical: logical.clone(),
                     }));
                 }
                 None if !field.value_type.contains_interned() => fields.push(None),
@@ -153,13 +119,7 @@ impl RecordTranscoder {
         self.fields
             .iter()
             .flatten()
-            .filter_map(|field| match &field.kind {
-                TranscodedKind::Interned {
-                    dictionary,
-                    logical,
-                } => Some((dictionary.as_str(), logical)),
-                TranscodedKind::StoredU48 => None,
-            })
+            .map(|field| (field.dictionary.as_str(), &field.logical))
     }
 
     /// Rebuild a stored record in its logical form. `decode` resolves a code
@@ -180,18 +140,18 @@ impl RecordTranscoder {
                     output.extend_from_slice(stored);
                     return Ok(());
                 };
-                let payload = if field.nullable {
+                let code = if field.nullable {
                     match stored.split_first() {
                         Some((0, padding)) if padding.iter().all(|byte| *byte == 0) => {
                             output.push(0);
-                            if let Some(width) = field.logical_fixed_size() {
+                            if let Some(width) = field.logical.fixed_size() {
                                 output.resize(output.len() + width, 0);
                             }
                             return Ok(());
                         }
-                        Some((1, payload)) => {
+                        Some((1, code)) => {
                             output.push(1);
-                            payload
+                            code
                         }
                         Some((0, _)) => return Err(Error::InvalidOffset.into()),
                         Some((flag, _)) => return Err(Error::InvalidNullFlag(*flag).into()),
@@ -200,19 +160,8 @@ impl RecordTranscoder {
                 } else {
                     stored
                 };
-                match &field.kind {
-                    TranscodedKind::Interned { dictionary, .. } => {
-                        let code: [u8; 4] = payload.try_into().map_err(|_| Error::InvalidOffset)?;
-                        output.extend_from_slice(decode(dictionary, u32::from_le_bytes(code))?);
-                    }
-                    TranscodedKind::StoredU48 => {
-                        let narrow: [u8; STORED_U48_WIDTH] =
-                            payload.try_into().map_err(|_| Error::InvalidOffset)?;
-                        let mut wide = [0u8; 8];
-                        wide[..STORED_U48_WIDTH].copy_from_slice(&narrow);
-                        output.extend_from_slice(&wide);
-                    }
-                }
+                let code: [u8; 4] = code.try_into().map_err(|_| Error::InvalidOffset)?;
+                output.extend_from_slice(decode(&field.dictionary, u32::from_le_bytes(code))?);
                 Ok(())
             })
     }
@@ -238,8 +187,7 @@ impl RecordTranscoder {
                 let value = if field.nullable {
                     match value.split_first() {
                         Some((0, _)) => {
-                            output.push(0);
-                            output.resize(output.len() + field.stored_width(), 0);
+                            output.extend_from_slice(&[0; 5]);
                             return Ok(());
                         }
                         Some((1, value)) => {
@@ -252,44 +200,10 @@ impl RecordTranscoder {
                 } else {
                     value
                 };
-                match &field.kind {
-                    TranscodedKind::Interned {
-                        dictionary,
-                        logical,
-                    } => {
-                        let code = encode(dictionary, logical, value)?;
-                        output.extend_from_slice(&code.to_le_bytes());
-                    }
-                    TranscodedKind::StoredU48 => {
-                        let wide: [u8; 8] = value.try_into().map_err(|_| Error::InvalidOffset)?;
-                        let value = u64::from_le_bytes(wide);
-                        if value > U48_MAX {
-                            return Err(Error::U48OutOfRange(value).into());
-                        }
-                        output.extend_from_slice(&wide[..STORED_U48_WIDTH]);
-                    }
-                }
+                let code = encode(&field.dictionary, &field.logical, value)?;
+                output.extend_from_slice(&code.to_le_bytes());
                 Ok(())
             })
-    }
-}
-
-impl TranscodedField {
-    /// Width of the stored payload, without a nullable presence flag.
-    fn stored_width(&self) -> usize {
-        match self.kind {
-            TranscodedKind::Interned { .. } => 4,
-            TranscodedKind::StoredU48 => STORED_U48_WIDTH,
-        }
-    }
-
-    /// Width of the logical payload when it is fixed, without a nullable
-    /// presence flag.
-    fn logical_fixed_size(&self) -> Option<usize> {
-        match &self.kind {
-            TranscodedKind::Interned { logical, .. } => logical.fixed_size(),
-            TranscodedKind::StoredU48 => Some(8),
-        }
     }
 }
 

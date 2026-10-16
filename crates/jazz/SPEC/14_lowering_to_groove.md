@@ -386,11 +386,12 @@ than rebinding provenance from the authenticated identity. This evidence
 remains hidden source metadata and does not change application row fields or
 read visibility.
 
-Lowering sees provenance timestamps as `U64` milliseconds. History,
-global-current and ahead-current rows store `created_at` and `updated_at` in
-6-byte U64-stored-as-U48 columns (ch. 2 §2.7.1, `INV-DATA-27`), and Groove
-widens them to `U64` before any source, predicate, projection or binding reads
-them. So query shapes, predicates and the wire never see a `U48` value. Node
+History, global-current and ahead-current rows store `created_at` and
+`updated_at` as native 6-byte `U48` milliseconds (ch. 2 §2.7.1,
+`INV-DATA-27`), and lowering sees them as `U48` in every source, predicate and
+projection. Integer literals compare against them by value. Jazz widens them to
+`U64` only at its own egress, so the wire and the JS bindings never see a `U48`
+value. Node
 aliases (`tx_node_id`) lower as `U32` key and payload columns (`INV-DATA-2`).
 They are node-local and resolved back to a `NodeUuid` before any egress.
 

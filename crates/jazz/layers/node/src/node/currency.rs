@@ -452,10 +452,10 @@ where
                 }
                 let value = match index {
                     HistoryRowRecord::FIELD_CREATED_AT_IDX => {
-                        Some(current.get_u64(GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX)?)
+                        Some(current.get_u48(GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX)?)
                     }
                     HistoryRowRecord::FIELD_UPDATED_AT_IDX => {
-                        Some(current.get_u64(GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX)?)
+                        Some(current.get_u48(GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX)?)
                     }
                     _ => None,
                 };
@@ -465,7 +465,7 @@ where
                     TxTime::from_physical_ms(ms).map_err(|_| {
                         Error::InvalidStoredValue("current provenance ms exceeds HLC range")
                     })?;
-                    history_descriptor.encode_field_into(index, &Value::U64(ms), output)?;
+                    history_descriptor.encode_field_into(index, &Value::U48(ms), output)?;
                     return Ok(());
                 }
                 let source = source_of(index);

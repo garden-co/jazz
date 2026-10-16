@@ -1804,6 +1804,7 @@ where
                 ValueType::U16 if matches!(value, Value::U16(_)) => Ok(()),
                 ValueType::U32 if matches!(value, Value::U32(_)) => Ok(()),
                 ValueType::U64 if matches!(value, Value::U64(_)) => Ok(()),
+                ValueType::U48 if matches!(value, Value::U48(_)) => Ok(()),
                 ValueType::I32 if matches!(value, Value::I32(_)) => Ok(()),
                 ValueType::I64 if matches!(value, Value::I64(_)) => Ok(()),
                 ValueType::Bool if matches!(value, Value::Bool(_)) => Ok(()),

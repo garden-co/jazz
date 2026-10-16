@@ -126,8 +126,9 @@ fn stored_rows_keep_node_aliases_in_four_bytes_and_provenance_in_six() {
     assert_eq!(versions[0].updated_at().physical_ms(), now_ms);
 }
 
-/// Contract: a history or global-current row whose provenance timestamp does
-/// not fit the 6-byte slot is refused with a typed error, never truncated.
+/// Contract: history and global-current rows store provenance timestamps as
+/// a native `U48`; a value that does not fit the 6-byte slot is refused with a
+/// typed error, never truncated, and the stored row stays untouched.
 #[test]
 fn provenance_timestamps_above_the_six_byte_slot_are_refused() {
     let (_temp_dir, mut state) = open_node();
@@ -144,32 +145,18 @@ fn provenance_timestamps_above_the_six_byte_slot_are_refused() {
         let record = stored[0].record();
         let created_at = record.descriptor().field_index("created_at").unwrap();
         let mut values = record.to_values().unwrap();
-        assert_eq!(values[created_at], Value::U64(1_000));
-        values[created_at] = Value::U64(groove::records::U48_MAX + 1);
-        let descriptor = record.descriptor();
-        let raw = descriptor.create(&values).unwrap();
-        let mut batch = state.database.open_batch();
-        batch.insert(
-            &name,
-            groove::records::VariantRecord::new(
-                stored[0].variant_tag(),
-                groove::records::OwnedRecord::new(raw, descriptor),
-            ),
-        );
-        let refused = crate::local_executor::block_on(state.database.apply_batch(batch));
+        assert_eq!(values[created_at], Value::U48(1_000));
+        values[created_at] = Value::U48(groove::records::U48_MAX + 1);
         assert!(
             matches!(
-                refused,
-                Err(groove::db::Error::RecordEncoding(
-                    groove::records::Error::U48OutOfRange(_)
-                ))
+                record.descriptor().create(&values),
+                Err(groove::records::Error::U48OutOfRange(_))
             ),
-            "{name}: {:?}",
-            refused.err()
+            "{name}"
         );
         let after = state.database.primary_key_scan_raw(&name, &[]).unwrap();
         assert_eq!(
-            after[0].record().get_u64(created_at).unwrap(),
+            after[0].record().get_u48(created_at).unwrap(),
             1_000,
             "{name}: the refused write left the stored row untouched"
         );
