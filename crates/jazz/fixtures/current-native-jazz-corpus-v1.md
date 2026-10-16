@@ -21,7 +21,7 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 33 entries in the current storage format. The active
+The logical pack has 32 entries in the current storage format. The active
 schema selection lives in `jazz_catalogue`; the redundant write-pointer table
 and retired scope-relay repair ledger are no longer registered.
 
@@ -51,7 +51,7 @@ unified catalogue encoding and kind-specific record descriptors.
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
 | `jazz_tx_provenance`                |       2 |
-| `jazz_tx_touched_rows`              |       4 |
+| `jazz_tx_touched_rows`              |       3 |
 
 The one `jazz_subscription_watermarks_v1` record names a catch-up revision that
 is a fresh random id per catch-up. The receipt pins its key, record version and
@@ -73,7 +73,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `99cfe4277e42a57246215d008a76a3725d9cebd81eace8f02ac218799a3d469d` |
-| SQLite payload      | `5be21874e59bc740894cb4372ae07846b2ee63b0d756d8178ea7546240d2b2b4` |
-| gzip SQLite archive | `e748016a7a6daaa295299cdb668f95381ce412c1e6b109b7fe6be18cab9185e3` |
-| RocksDB archive     | `66d48677a5abd1b65b0f214d2eb58f027a73d73313c32d33d736787be5299188` |
+| logical pack        | `cb082dbbf76311d0969abea96aafbe6cefee4c10d5be5e2caa2c7a7f992c9d6a` |
+| SQLite payload      | `0999d5c98dc4ec68b688fcc916ea7099105d396700ef775e87d9332beeb66dc2` |
+| gzip SQLite archive | `5b073f7c5eb84506a7c75d103c3f2114ba795184a785b1938bb71d30800aade1` |
+| RocksDB archive     | `e180db59aa0936af75505f68e9a3e8cc0bb66aebe279b7c90c14f61d3d95cb4d` |
