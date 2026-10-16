@@ -3066,7 +3066,7 @@ async fn jazz_shaped_index_entries_have_compact_sizes() {
         ]))
         .with_index(IndexSchema::new("by_global_time", ["global_time"])),
     ]);
-    let layout = StorageLayout::jazz_class_v2();
+    let layout = StorageLayout::jazz_class_v3();
     let families = layout.physical_column_families(schema.column_families());
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let physical = MemoryStorage::new(&refs).unwrap();
