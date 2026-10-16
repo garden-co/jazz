@@ -914,9 +914,9 @@ pub(super) fn public_recursive_access_policy(
     let edge_alias = "recursive_edge";
     let target_alias = "recursive_target";
     let access_alias = "access";
-    let seed = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: seed_table.into(),
                 alias: Some(seed_alias.to_owned()),
             }),
@@ -945,19 +945,19 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             edge_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
-    let step = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Join {
-            left: Box::new(PublicRelExpr::Filter {
-                input: Box::new(PublicRelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: edge_table.into(),
                     alias: Some(edge_alias.to_owned()),
                 }),
                 predicate: PublicRelPredicateExpr::And(edge_predicates),
             }),
-            right: Box::new(PublicRelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(target_alias.to_owned()),
             }),
@@ -972,7 +972,7 @@ pub(super) fn public_recursive_access_policy(
             expr: PublicRelProjectExpr::Column(public_rel_column(target_alias, "id")),
         }],
     };
-    let reachable = PublicRelExpr::Gather {
+    let reachable = RelationExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
         frontier_key: PublicRelKeyRef::RowId(PublicRelRowIdRef::Current),
@@ -988,7 +988,7 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             access_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
     access_predicates.extend(access_in_filters.iter().map(|(column, values)| {
@@ -997,15 +997,15 @@ pub(super) fn public_recursive_access_policy(
             values: values
                 .iter()
                 .cloned()
-                .map(PublicRelValueRef::Literal)
+                .map(PublicRelValueRef::literal)
                 .collect(),
         }
     }));
     PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
                 left: Box::new(reachable),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: access_table.into(),
                     alias: Some(access_alias.to_owned()),
                 }),
