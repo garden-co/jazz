@@ -273,6 +273,23 @@ impl Database {
         Ok(codec)
     }
 
+    /// The logical descriptor of one table variant, or `None` when the table
+    /// has no such variant. Same result as
+    /// [`TableSchema::record_schema_for_variant`], but served from the
+    /// per-generation codec cache instead of being rebuilt on every call, so
+    /// per-row callers pay a lookup, not a descriptor build.
+    pub fn table_record_descriptor(
+        &self,
+        table: &str,
+        variant_tag: u32,
+    ) -> Result<Option<RecordDescriptor>, Error> {
+        match self.stored_record_codec(self.table_schema(table)?, variant_tag) {
+            Ok(codec) => Ok(Some(codec.logical)),
+            Err(Error::UnknownTableVariant { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Bind one stored row as its logical record. Every point, scan and index
     /// read of table rows comes through here, so interned columns are
     /// resolved to their values before any caller sees the record.

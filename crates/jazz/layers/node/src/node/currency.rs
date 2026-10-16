@@ -385,10 +385,11 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let history_table =
             physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
+        // Every winner read comes through here, so the descriptor comes from
+        // Groove's per-generation cache rather than being rebuilt per row.
         let Some(history_descriptor) = self
             .database
-            .table_schema(&history_table)?
-            .record_schema_for_variant(variant_tag)
+            .table_record_descriptor(&history_table, variant_tag)?
         else {
             return Ok(None);
         };
