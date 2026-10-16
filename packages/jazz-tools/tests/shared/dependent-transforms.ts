@@ -64,6 +64,25 @@ export function testDependentTransforms(create: () => Promise<Db>) {
       await expect(db.one(table.where({ id: row.id }))).resolves.toMatchObject({ price: 200 });
     });
 
+    it("orders plain-table writes and transaction snapshots after dependency preparation", async () => {
+      const db = await open();
+      const { value: product } = db.insert(app.products, { price: 1 });
+      const pending = db.update(app.products, product.id, { price: 2 });
+      const basket = db.insert(app.baskets, { product: product.id });
+      expect(basket.value.product).toBe(product.id);
+      const tx = db.beginExclusiveTransaction();
+      tx.update(app.baskets, basket.value.id, { product: product.id });
+      await expect(tx.one(app.products.where({ id: product.id }))).resolves.toMatchObject({
+        price: 2,
+      });
+      await tx.commit().wait({ tier: "local" });
+      await pending.wait({ tier: "local" });
+      await expect(db.one(app.baskets.where({ id: basket.value.id }))).resolves.toEqual({
+        id: basket.value.id,
+        product: product.id,
+      });
+    });
+
     it("rejects unknown, self and cyclic dependencies when defining a table", () => {
       const transform = (dependsOn: string[]) =>
         s.float().transform({
