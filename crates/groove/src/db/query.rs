@@ -1,6 +1,59 @@
 use super::*;
 
+/// Descriptor inference shared within one immutable graph/database borrow.
+///
+/// The graph lifetime prevents a memoised pointer being reused for a different
+/// graph. The database borrow prevents schema changes while results are reused.
+/// Successful descriptors alone are memoised; errors keep their normal meaning.
+///
+/// ```compile_fail
+/// use groove::db::{Database, GraphBuilder};
+/// fn replace_graph(db: &Database, mut graph: GraphBuilder) {
+///     let mut inference = db.graph_output_descriptors();
+///     inference.describe(&graph).unwrap();
+///     graph = graph.clone();
+///     inference.describe(&graph).unwrap();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use groove::db::{Database, GraphBuilder};
+/// use groove::records::RecordDescriptor;
+/// fn change_database(db: &mut Database, graph: &GraphBuilder, output: RecordDescriptor) {
+///     let mut inference = db.graph_output_descriptors();
+///     inference.describe(graph).unwrap();
+///     db.allocate_input_source(output);
+///     inference.describe(graph).unwrap();
+/// }
+/// ```
+pub struct GraphOutputDescriptors<'db, 'graph> {
+    database: &'db Database,
+    outputs: rustc_hash::FxHashMap<usize, RecordDescriptor>,
+    graphs: std::marker::PhantomData<&'graph GraphBuilder>,
+}
+
+impl<'graph> GraphOutputDescriptors<'_, 'graph> {
+    /// Infer a graph with the same validation as [`Database::graph_output_descriptor`].
+    pub fn describe(&mut self, graph: &'graph GraphBuilder) -> Result<RecordDescriptor, Error> {
+        self.database.ensure_not_poisoned()?;
+        self.database
+            .ivm_runtime
+            .infer_builder_output_cached(graph, &mut self.outputs)
+            .map_err(Into::into)
+    }
+}
+
 impl Database {
+    /// Reuse descriptor inference while the database and every graph stay immutable.
+    /// The memo is discarded with the returned analysis; it retains no row data.
+    pub fn graph_output_descriptors(&self) -> GraphOutputDescriptors<'_, '_> {
+        GraphOutputDescriptors {
+            database: self,
+            outputs: Default::default(),
+            graphs: std::marker::PhantomData,
+        }
+    }
+
     /// An owned, metered read view of durable storage with the resident
     /// staged writes layered over it, for IVM work that outlives `&self`.
     fn owned_read_storage(

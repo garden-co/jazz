@@ -1,36 +1,17 @@
-use core::{
-    default::Default,
-    fmt::{self, Write},
-};
+use core::fmt::{self, Write};
 use std::collections::HashMap;
 
 use tracing::field::{Field, Visit};
 
+#[derive(Default)]
 pub struct StringRecorder {
     pub display: String,
     pub is_following_args: bool,
-    pub show_fields: bool,
     pub fields: HashMap<String, String>,
     pub message: Option<String>,
 }
 impl StringRecorder {
-    pub fn new(show_fields: bool) -> Self {
-        StringRecorder {
-            show_fields,
-            ..Default::default()
-        }
-    }
-}
-
-impl Visit for StringRecorder {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.record_debug(field, &value);
-            return;
-        }
-        if !self.show_fields {
-            return;
-        }
+    fn record_field(&mut self, field: &Field, value: &dyn fmt::Debug, raw: String) {
         if self.is_following_args {
             writeln!(self.display).unwrap();
         } else {
@@ -38,8 +19,17 @@ impl Visit for StringRecorder {
             self.is_following_args = true;
         }
         write!(self.display, "{} = {:?};", field.name(), value).unwrap();
-        self.fields
-            .insert(field.name().to_owned(), value.to_owned());
+        self.fields.insert(field.name().to_owned(), raw);
+    }
+}
+
+impl Visit for StringRecorder {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.record_debug(field, &value);
+        } else {
+            self.record_field(field, &value, value.to_owned());
+        }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
@@ -51,18 +41,8 @@ impl Visit for StringRecorder {
             } else {
                 self.display = format!("{value:?}")
             }
-        } else if self.show_fields {
-            if self.is_following_args {
-                // following args
-                writeln!(self.display).unwrap();
-            } else {
-                // first arg
-                write!(self.display, " ").unwrap();
-                self.is_following_args = true;
-            }
-            write!(self.display, "{} = {:?};", field.name(), value).unwrap();
-            self.fields
-                .insert(field.name().to_owned(), format!("{value:?}"));
+        } else {
+            self.record_field(field, value, format!("{value:?}"));
         }
     }
 }
@@ -73,18 +53,6 @@ impl core::fmt::Display for StringRecorder {
             write!(&mut f, " {}", self.display)
         } else {
             Ok(())
-        }
-    }
-}
-
-impl core::default::Default for StringRecorder {
-    fn default() -> Self {
-        Self {
-            display: String::new(),
-            is_following_args: false,
-            show_fields: true,
-            fields: HashMap::new(),
-            message: None,
         }
     }
 }

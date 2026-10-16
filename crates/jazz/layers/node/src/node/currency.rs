@@ -420,7 +420,9 @@ where
         }
         let source_of = |index: usize| {
             if index > seq_idx {
-                // The base fields follow `authored_columns` in current.
+                // The base fields follow `authored_columns` in current, and a
+                // union row's extra cells follow the base fields in both
+                // layouts (SPEC 10 §10.3, "Union row cases").
                 index - 1
             } else if index >= global_time_idx {
                 index + 1
@@ -1390,7 +1392,7 @@ where
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            view_scoped_cardinality: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
+            is_partial: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 

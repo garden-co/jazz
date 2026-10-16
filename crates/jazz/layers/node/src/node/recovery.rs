@@ -33,7 +33,7 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
-                let schema_alias = SchemaVersionAlias(u64::from(raw.variant_tag()));
+                let schema_alias = schema_alias_for_variant_tag(raw.variant_tag());
                 let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
                     Error::InvalidStoredValue("rejected row schema version alias missing"),
                 )?;
@@ -299,7 +299,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 stored.global_time,
                 stored.durability,
             )
-            .view_scoped(stored.view_scoped_cardinality),
+            .view_scoped(stored.is_partial),
         )
         .unwrap();
         let applied = self.database.apply_batch(batch).await.unwrap();

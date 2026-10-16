@@ -101,22 +101,6 @@ retained transaction time nor a discarded subscription cursor is promoted to
 a complete-history frontier. Only history-complete nodes have that guarantee;
 remote query settlement remains an exact live subscription claim.
 
-The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
-are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
-keys and cursors are not interpreted as authority evidence, including malformed
-retired payloads. No new scope writer, encoder or decoder exists. The closed
-storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
-legacy family ID so old roots open; this does not introduce a new encoding or
-reuse that ID for new values. Native storage encodings and manifests remain
-unchanged. Shared policy/availability metadata has independent consumers and
-is not discarded with the scope cache.
-
-`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
-pins both retired byte generations and native/pending retention;
-`retired_scope_payloads_never_restore_authority` covers malformed retired
-payloads. Cleanup must finish successfully before open returns; partial cleanup
-is safe to retry because no durable cursor or scope is ever recovered.
-
 Active subscriptions still maintain exact physical membership and predecessor
 revisions in memory. A retained process may use its own valid unevicted cursor
 for native-body dedup on reconnect, but a new process starts without one.
@@ -155,16 +139,47 @@ that role rather than being replaced by local numeric catalogue aliases.
 
 The concrete v1 byte contracts are:
 
-- Immutable-version row blob: ASCII `JVRR`, byte `2` (wire protocol v6; the
-  version-1 blob carried `parents` and is rejected), descriptor byte length as
-  little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
-  canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length (canonical Postcard unsigned varint followed by exactly that
+- Immutable-version row blob: ASCII `JVRR`, byte `3` (alpha.60; version 2
+  repeated the descriptor in every row and version 1 carried `parents`; both
+  are rejected). One grammar covers every row, including a Core union image
+  and its union cells (`UnionExtraCells`, SPEC 10 §10.3):
+
+  ```text
+  blob  = "JVRR" 0x03  use(row)  [union]  row-bytes
+  use   = head  [descriptor-length:u32le  descriptor]
+  union = count  entry{count}
+  entry = schema-version:16  table-length:u32le  table:utf8
+          use(cells)  cell-bytes-length:u32le  cell-bytes
+  ```
+
+  `head` and `count` are canonical (shortest) unsigned LEB128. `head` is
+  `reference << 1 | union`, with `reference` no larger than 2^32. Reference
+  `0` defines the next entry of the enclosing sync message's descriptor
+  table inline: the descriptor byte length, then exactly that many Groove
+  persisted-descriptor bytes. Reference `k > 0` reuses entry `k - 1`, which
+  an earlier `use` of the same message defined. The `union` bit is set only
+  in the row's own `use` and only when union cells follow; then `count` is at
+  least 1, and the entries are in strictly ascending
+  `(schema version, table)` order, each a non-empty record of that schema's
+  nullable `_app_<column>` cells, in that schema's column order with each
+  column once (a receiver rejects any other order). An entry's own `use` has
+  the bit clear. Every other
+  row is `JVRR 0x03 use(row) row-bytes` with the bit clear, so it pays nothing
+  for the union grammar. The row's canonical bytes consume the remainder.
+  Each sync message starts with an empty table; the encoder defines a
+  descriptor at its first use in serialization order (the row's descriptor
+  before its entries') and references it afterwards, so a receiver rejects a
+  reference to an undefined entry and a second definition of the same
+  descriptor bytes. A blob encoded outside a sync message defines every
+  descriptor inline. Union cells are admitted only on Core images; a commit
+  unit carrying them is rejected. The enclosing sync message owns the blob
+  length (canonical Postcard unsigned varint followed by exactly that
   many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
   in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of
   `RecordDescriptor` and bytes. Both unknown versions and the former incidental
   `OwnedRecord` representation are rejected.
+
 - Result descriptor blob: ASCII `JRPD`, byte `1`, role byte (`0` current,
   `1` aggregate), then one exact Groove persisted-descriptor tree. This is a
   runtime publication format, not a persisted-output family. Current descriptors start with

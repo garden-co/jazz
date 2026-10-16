@@ -917,9 +917,9 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     assert_eq!(
         entries,
         vec![
-            // code 0 → "red": inline string scalar (tag 02, then UTF-8).
-            (vec![0, 0, 0, 0], vec![0x02, b'r', b'e', b'd']),
-            (vec![0, 0, 0, 1], vec![0x02, b'b', b'l', b'u', b'e']),
+            // code 0 → "red": inline string scalar (tag 00, then UTF-8).
+            (vec![0, 0, 0, 0], vec![0x00, b'r', b'e', b'd']),
+            (vec![0, 0, 0, 1], vec![0x00, b'b', b'l', b'u', b'e']),
         ]
     );
     let row = |id| {

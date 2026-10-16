@@ -230,8 +230,7 @@ fn canonical_large_value_children(
 // `staged/`, and `upload/` cannot be confused. Values therefore use a plain
 // canonical Groove record, rather than a second private magic/version/tag
 // envelope. These identifiers are durable *one-based record slots*, not
-// declaration order. A retired slot stays in the physical layout as an empty
-// nullable placeholder; it is never compacted away.
+// declaration order. Field IDs must be contiguous, starting at one.
 const ROOT_REF_DURABLE_FIELD: u16 = 1;
 const ROOT_REF_STAGED_FIELD: u16 = 2;
 const ROOT_REF_NODE_ACTIVE_FIELD: u16 = 3;
@@ -256,60 +255,39 @@ const PENDING_UPLOAD_CHUNKS_FIELD: u16 = 7;
 
 #[derive(Clone)]
 struct DurableMetadataRecordSchema {
-    slots: Vec<DurableMetadataRecordSlot>,
+    field_ids: Vec<u16>,
     descriptor: records::RecordDescriptor,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DurableMetadataRecordSlot {
-    Known(u16),
-    Reserved(u16),
 }
 
 /// Construct a fixed engine-owned record layout from permanent, one-based
 /// positional field IDs. Sorting source declarations is a no-op, but an ID is
-/// also its actual ordinal: gaps become reserved nullable slots so renumbering
-/// a field changes the physical record schema rather than being normalized by
-/// a name sort.
+/// also its actual ordinal. Gaps and duplicate IDs are rejected.
 fn durable_metadata_record_schema(
     fields: impl IntoIterator<Item = (u16, &'static str, records::ValueType)>,
 ) -> DurableMetadataRecordSchema {
     let mut fields = fields.into_iter().collect::<Vec<_>>();
     fields.sort_by_key(|(id, _, _)| *id);
     assert!(
-        fields.iter().all(|(id, _, _)| *id != 0),
-        "durable metadata record field IDs start at one"
+        !fields.is_empty(),
+        "durable metadata record must have at least one field"
     );
     assert!(
-        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
-        "durable metadata record has duplicate field IDs"
+        fields
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _, _))| usize::from(*id) == index + 1),
+        "durable metadata record field IDs must be contiguous starting at one"
     );
-    let max_field_id = fields
-        .last()
-        .expect("durable metadata record must have at least one field")
-        .0;
-    let mut fields = fields.into_iter().peekable();
-    let mut slots = Vec::with_capacity(usize::from(max_field_id));
-    let mut descriptor_fields = Vec::with_capacity(usize::from(max_field_id));
-    for slot_id in 1..=max_field_id {
-        match fields.peek() {
-            Some((id, _, _)) if *id == slot_id => {
-                let (_, name, value_type) = fields.next().expect("peeked field must exist");
-                slots.push(DurableMetadataRecordSlot::Known(slot_id));
-                descriptor_fields.push((format!("f{slot_id:04}_{name}"), value_type));
-            }
-            _ => {
-                slots.push(DurableMetadataRecordSlot::Reserved(slot_id));
-                descriptor_fields.push((
-                    format!("f{slot_id:04}_reserved"),
-                    records::ValueType::Nullable(Box::new(records::ValueType::raw_bytes())),
-                ));
-            }
-        }
+    let field_ids = fields.iter().map(|(id, _, _)| *id).collect();
+    let descriptor = records::RecordDescriptor::new(
+        fields
+            .into_iter()
+            .map(|(id, name, value_type)| (format!("f{id:04}_{name}"), value_type)),
+    );
+    DurableMetadataRecordSchema {
+        field_ids,
+        descriptor,
     }
-    debug_assert!(fields.next().is_none());
-    let descriptor = records::RecordDescriptor::new(descriptor_fields);
-    DurableMetadataRecordSchema { slots, descriptor }
 }
 
 fn large_value_root_references_schema() -> &'static DurableMetadataRecordSchema {
@@ -429,6 +407,149 @@ fn pending_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
     })
 }
 
+/// Durable completion evidence retained until its staged receipt is closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletedLargeValueUpload {
+    id: crate::large_values::StagedLargeValueId,
+    receipt_id: crate::large_values::StagedLargeValueId,
+    descriptor: crate::large_values::LargeValueRef,
+    accounting: crate::large_values::StagedLargeValueAccounting,
+}
+
+const COMPLETED_UPLOAD_ID_FIELD: u16 = 1;
+const COMPLETED_UPLOAD_RECEIPT_ID_FIELD: u16 = 2;
+const COMPLETED_UPLOAD_DESCRIPTOR_FIELD: u16 = 3;
+const COMPLETED_UPLOAD_ENCODED_BYTES_FIELD: u16 = 4;
+const COMPLETED_UPLOAD_NODE_COUNT_FIELD: u16 = 5;
+
+fn completed_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
+            (
+                COMPLETED_UPLOAD_ID_FIELD,
+                "id",
+                records::ValueType::raw_bytes(),
+            ),
+            (
+                COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+                "receipt_id",
+                records::ValueType::raw_bytes(),
+            ),
+            // Preserve descriptor-led format dispatch at the metadata boundary.
+            (
+                COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+                "descriptor",
+                records::ValueType::raw_bytes(),
+            ),
+            (
+                COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+                "encoded_bytes",
+                records::ValueType::U64,
+            ),
+            (
+                COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+                "node_count",
+                records::ValueType::U64,
+            ),
+        ])
+    })
+}
+
+fn encode_completed_large_value_upload(
+    upload: &CompletedLargeValueUpload,
+) -> Result<Vec<u8>, Error> {
+    let descriptor =
+        crate::large_values::encode_large_value_ref(&upload.descriptor).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot encode completed upload descriptor: {error}"
+            ))
+        })?;
+    encode_large_value_metadata_record(
+        completed_large_value_upload_schema(),
+        [
+            (
+                COMPLETED_UPLOAD_ID_FIELD,
+                staged_large_value_id_value(upload.id),
+            ),
+            (
+                COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+                staged_large_value_id_value(upload.receipt_id),
+            ),
+            (
+                COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+                records::Value::Bytes(descriptor),
+            ),
+            (
+                COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+                records::Value::U64(upload.accounting.encoded_bytes),
+            ),
+            (
+                COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+                records::Value::U64(upload.accounting.node_count),
+            ),
+        ],
+        "completed upload",
+    )
+}
+
+fn decode_completed_large_value_upload(encoded: &[u8]) -> Result<CompletedLargeValueUpload, Error> {
+    let mut fields = decode_large_value_metadata_record(
+        encoded,
+        completed_large_value_upload_schema(),
+        "completed upload",
+    )?;
+    let id = take_metadata_field(&mut fields, COMPLETED_UPLOAD_ID_FIELD, "completed upload")?;
+    let receipt_id = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_RECEIPT_ID_FIELD,
+        "completed upload",
+    )?;
+    let records::Value::Bytes(descriptor) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_DESCRIPTOR_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload descriptor".to_owned(),
+        ));
+    };
+    let records::Value::U64(encoded_bytes) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_ENCODED_BYTES_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload accounting".to_owned(),
+        ));
+    };
+    let records::Value::U64(node_count) = take_metadata_field(
+        &mut fields,
+        COMPLETED_UPLOAD_NODE_COUNT_FIELD,
+        "completed upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "invalid completed upload accounting".to_owned(),
+        ));
+    };
+    Ok(CompletedLargeValueUpload {
+        id: staged_large_value_id_from_value(&id)?,
+        receipt_id: staged_large_value_id_from_value(&receipt_id)?,
+        descriptor: crate::large_values::decode_large_value_ref(&descriptor).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode completed upload descriptor: {error}"
+            ))
+        })?,
+        accounting: crate::large_values::StagedLargeValueAccounting {
+            encoded_bytes,
+            node_count,
+        },
+    })
+}
+
 fn encode_large_value_metadata_record(
     schema: &DurableMetadataRecordSchema,
     input_values: impl IntoIterator<Item = (u16, records::Value)>,
@@ -442,18 +563,11 @@ fn encode_large_value_metadata_record(
             )));
         }
     }
-    let mut ordered = Vec::with_capacity(schema.slots.len());
-    for slot in &schema.slots {
-        match slot {
-            DurableMetadataRecordSlot::Known(id) => {
-                ordered.push(values.remove(id).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode {name}: missing field id {id}"
-                    ))
-                })?)
-            }
-            DurableMetadataRecordSlot::Reserved(_) => ordered.push(records::Value::Nullable(None)),
-        }
+    let mut ordered = Vec::with_capacity(schema.field_ids.len());
+    for id in &schema.field_ids {
+        ordered.push(values.remove(id).ok_or_else(|| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode {name}: missing field id {id}"))
+        })?);
     }
     if let Some((id, _)) = values.into_iter().next() {
         return Err(Error::InvalidLargeValueMetadata(format!(
@@ -486,21 +600,7 @@ fn decode_large_value_metadata_record(
             "cannot decode {name}: non-canonical record"
         )));
     }
-    let mut decoded = BTreeMap::new();
-    for (slot, value) in schema.slots.iter().zip(values) {
-        match slot {
-            DurableMetadataRecordSlot::Known(id) => {
-                decoded.insert(*id, value);
-            }
-            DurableMetadataRecordSlot::Reserved(id) => {
-                if !matches!(value, records::Value::Nullable(None)) {
-                    return Err(Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode {name}: reserved field id {id} is nonempty"
-                    )));
-                }
-            }
-        }
-    }
+    let decoded = schema.field_ids.iter().copied().zip(values).collect();
     Ok(decoded)
 }
 
@@ -974,10 +1074,10 @@ fn decode_pending_large_value_upload_at_key(
 fn decode_completed_large_value_upload_at_key(
     key: &[u8],
     encoded: &[u8],
-) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+) -> Result<CompletedLargeValueUpload, Error> {
     let key_id =
         staged_large_value_id_from_metadata_key(key, b"completed-upload/", "completed upload")?;
-    let completed = decode_pending_large_value_upload(encoded)?;
+    let completed = decode_completed_large_value_upload(encoded)?;
     if completed.id != key_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload key and journal id differ".to_owned(),
@@ -986,21 +1086,20 @@ fn decode_completed_large_value_upload_at_key(
     Ok(completed)
 }
 
-/// Decode the reverse completed-receipt journal only when its embedded receipt
-/// identity is the canonical fixed-width suffix of its metadata key.
+/// Decode the reverse binding's fixed-width upload ID after validating the
+/// receipt key. The caller must verify the forward record names this receipt
+/// before retrying or mutating lifecycle state.
 fn decode_completed_large_value_receipt_at_key(
     key: &[u8],
     encoded: &[u8],
-) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
-    let key_id =
-        staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
-    let completed = decode_pending_large_value_upload(encoded)?;
-    if completed.receipt_id != Some(key_id) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed receipt key and receipt id differ".to_owned(),
-        ));
-    }
-    Ok(completed)
+) -> Result<crate::large_values::StagedLargeValueId, Error> {
+    staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
+    let upload_id = encoded.try_into().map_err(|_| {
+        Error::InvalidLargeValueMetadata(
+            "completed receipt binding must contain exactly 16 upload-id bytes".to_owned(),
+        )
+    })?;
+    Ok(crate::large_values::StagedLargeValueId(upload_id))
 }
 
 /// Apply physical-node ownership transitions against one read-your-own-write
@@ -1730,6 +1829,7 @@ use encoding::*;
 pub(crate) use encoding::{
     index_record_descriptor, persisted_index_column_value, persisted_index_primary_key,
 };
+pub use query::GraphOutputDescriptors;
 use schema_admission::*;
 pub(crate) use storage_helpers::MeteredStorage;
 use storage_helpers::*;

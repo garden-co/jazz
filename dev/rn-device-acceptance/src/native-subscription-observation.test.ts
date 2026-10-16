@@ -38,7 +38,7 @@ test("subscription observation inspects structured added and updated row identit
     nativeSubscriptionDeltaHasFieldBytes(
       encoded,
       "title",
-      Uint8Array.from([2, ...new TextEncoder().encode("first")]),
+      Uint8Array.from([0, ...new TextEncoder().encode("first")]),
     ),
     true,
   );
@@ -46,7 +46,7 @@ test("subscription observation inspects structured added and updated row identit
     nativeSubscriptionDeltaHasFieldBytes(
       encoded,
       "title",
-      Uint8Array.from([2, ...new TextEncoder().encode("absent")]),
+      Uint8Array.from([0, ...new TextEncoder().encode("absent")]),
     ),
     false,
   );

@@ -382,11 +382,41 @@ fn large_value_metadata_records_are_canonical_groove_records() {
     let encoded_node = encode_large_value_node_references(&node).unwrap();
     let encoded_staged = encode_staged_large_value(&staged).unwrap();
     let encoded_pending = encode_pending_large_value_upload(&pending).unwrap();
+    let completed = CompletedLargeValueUpload {
+        id: pending.id,
+        receipt_id: pending.receipt_id.unwrap(),
+        descriptor: value_ref.clone(),
+        accounting: pending.accounting,
+    };
+    let encoded_completed = encode_completed_large_value_upload(&completed).unwrap();
+    // Internal byte receipt: Alice's completion keeps only required evidence.
+    // Fixed accounting, two offsets, two 16-byte IDs, then the independently
+    // pinned canonical descriptor; no timestamp, chunk list or nullable flags.
+    let mut expected_completed = vec![
+        19, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 0, 56, 0, 0, 0,
+    ];
+    expected_completed.extend_from_slice(&[0x55; 16]);
+    expected_completed.extend_from_slice(&[0x66; 16]);
+    expected_completed.extend_from_slice(&encoded_value_ref);
+    assert_eq!(encoded_completed, expected_completed);
+    assert_eq!(
+        decode_completed_large_value_upload(&expected_completed).unwrap(),
+        completed
+    );
+    assert!(decode_completed_large_value_upload(&encoded_pending).is_err());
+    for end in 0..encoded_completed.len() {
+        assert!(decode_completed_large_value_upload(&encoded_completed[..end]).is_err());
+    }
+    let mut trailing_completed = encoded_completed.clone();
+    trailing_completed.push(0);
+    assert!(decode_completed_large_value_upload(&trailing_completed).is_err());
+
     for (schema, encoded) in [
         (large_value_root_references_schema(), &encoded_root),
         (large_value_node_references_schema(), &encoded_node),
         (staged_large_value_schema(), &encoded_staged),
         (pending_large_value_upload_schema(), &encoded_pending),
+        (completed_large_value_upload_schema(), &encoded_completed),
     ] {
         assert!(
             !encoded.starts_with(b"GLVM"),
@@ -396,14 +426,7 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         assert_eq!(schema.descriptor.create(&values).unwrap(), *encoded);
     }
     assert_eq!(
-        large_value_root_references_schema()
-            .slots
-            .iter()
-            .filter_map(|slot| match slot {
-                DurableMetadataRecordSlot::Known(id) => Some(*id),
-                DurableMetadataRecordSlot::Reserved(_) => None,
-            })
-            .collect::<Vec<_>>(),
+        large_value_root_references_schema().field_ids,
         [
             ROOT_REF_DURABLE_FIELD,
             ROOT_REF_STAGED_FIELD,
@@ -411,14 +434,7 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         ]
     );
     assert_eq!(
-        large_value_node_references_schema()
-            .slots
-            .iter()
-            .filter_map(|slot| match slot {
-                DurableMetadataRecordSlot::Known(id) => Some(*id),
-                DurableMetadataRecordSlot::Reserved(_) => None,
-            })
-            .collect::<Vec<_>>(),
+        large_value_node_references_schema().field_ids,
         [
             NODE_REF_REFERENCES_FIELD,
             NODE_REF_UPLOAD_REFERENCES_FIELD,
@@ -517,11 +533,6 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         (1, "references", records::ValueType::U64),
         (2, "upload_references", records::ValueType::U64),
     ]);
-    let children_at_four = durable_metadata_record_schema([
-        (1, "references", records::ValueType::U64),
-        (2, "upload_references", records::ValueType::U64),
-        (4, "children", records::ValueType::U64),
-    ]);
     let at_three = encode_large_value_metadata_record(
         &children_at_three,
         [
@@ -542,16 +553,6 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         "children-at-three",
     )
     .unwrap();
-    let at_four = encode_large_value_metadata_record(
-        &children_at_four,
-        [
-            (1, records::Value::U64(7)),
-            (2, records::Value::U64(11)),
-            (4, records::Value::U64(13)),
-        ],
-        "children-at-four",
-    )
-    .unwrap();
     assert_eq!(
         at_three, reordered,
         "source declaration order is not physical"
@@ -560,33 +561,17 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         to_hex(&at_three),
         "07000000000000000b000000000000000d00000000000000"
     );
-    assert_eq!(
-        to_hex(&at_four),
-        "07000000000000000b000000000000000d0000000000000000"
-    );
-    assert!(
-        decode_large_value_metadata_record(&at_three, &children_at_four, "children-at-four")
+    for ids in [vec![], vec![0], vec![2], vec![1, 1], vec![1, 3]] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                durable_metadata_record_schema(
+                    ids.iter().map(|id| (*id, "field", records::ValueType::U64)),
+                );
+            })
             .is_err(),
-        "renumbering CHILDREN from slot 3 to 4 must reject old physical bytes"
-    );
-    let nonempty_reserved = children_at_four
-        .descriptor
-        .create(&[
-            records::Value::U64(7),
-            records::Value::U64(11),
-            records::Value::Nullable(Some(Box::new(records::Value::Bytes(vec![1])))),
-            records::Value::U64(13),
-        ])
-        .unwrap();
-    assert!(
-        decode_large_value_metadata_record(
-            &nonempty_reserved,
-            &children_at_four,
-            "children-at-four"
-        )
-        .is_err(),
-        "reserved slots remain permanently empty"
-    );
+            "invalid field IDs must be rejected: {ids:?}"
+        );
+    }
 
     assert_eq!(
         [
@@ -598,17 +583,17 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         ]
         .map(to_hex),
         [
-            "000107000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
+            "0001070000000000000031000000750000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
             "0300000000000000050000000000000001",
             "07000000000000000b00000000000000020000004c000000240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff2400000022222222222222222222222222222222222222222222222222222222222222226c51cfbc9a018998ba52dec05284df710cb836a95d75d802ac9471e096c59292",
-            "0d00000000000000020000000000000011000000000000002c00000044444444444444444444444444444444000107000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
-            "13000000000000000200000000000000170000000000000034000000b8000000c90000005555555555555555555555555555555501000107000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff000000000166666666666666666666666666666666020000004c000000240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff2400000022222222222222222222222222222222222222222222222222222222222222226c51cfbc9a018998ba52dec05284df710cb836a95d75d802ac9471e096c59292",
+            "0d00000000000000020000000000000011000000000000002c000000444444444444444444444444444444440001070000000000000031000000750000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
+            "13000000000000000200000000000000170000000000000034000000af000000c000000055555555555555555555555555555555010001070000000000000031000000750000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff000000000166666666666666666666666666666666020000004c000000240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff2400000022222222222222222222222222222222222222222222222222222222222222226c51cfbc9a018998ba52dec05284df710cb836a95d75d802ac9471e096c59292",
         ]
         .map(str::to_owned)
     );
     assert_eq!(
         to_hex(Database::descriptor_upload_id(&value_ref).unwrap().0),
-        "aec69de205adc49847c9d755eee7c9c3"
+        "d9ee5555ee6302f572245fda9b408a18"
     );
 }
 
@@ -977,21 +962,23 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
     let copied_upload_key_id = crate::large_values::StagedLargeValueId([0x86; 16]);
     let source_receipt = crate::large_values::StagedLargeValueId([0x87; 16]);
     let copied_receipt_key_id = crate::large_values::StagedLargeValueId([0x88; 16]);
-    let completed =
-        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
-            id: source_upload,
-            descriptor: Some(descriptor),
-            receipt_id: Some(source_receipt),
-            accounting: crate::large_values::StagedLargeValueAccounting::default(),
-            created_at_ms: 0,
-            chunks: Vec::new(),
-        })
-        .unwrap();
+    let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+        id: source_upload,
+        descriptor,
+        receipt_id: source_receipt,
+        accounting: crate::large_values::StagedLargeValueAccounting::default(),
+    })
+    .unwrap();
     let copied_upload_key = completed_large_value_upload_key(copied_upload_key_id);
     let copied_receipt_key = completed_large_value_receipt_key(copied_receipt_key_id);
     database
         .storage
         .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_upload_key(source_upload),
+                value: completed.clone(),
+            },
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: copied_upload_key.clone(),
@@ -1000,7 +987,7 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: copied_receipt_key.clone(),
-                value: completed.clone(),
+                value: source_upload.0.to_vec(),
             },
         ])
         .await
@@ -1021,7 +1008,7 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
         super::facade::completed_large_value_cleanup_operations(&storage, copied_receipt_key_id)
             .await,
         Err(Error::InvalidLargeValueMetadata(message))
-            if message.contains("completed receipt key and receipt id differ")
+            if message.contains("completed upload bindings disagree")
     ));
     assert_eq!(
         storage
@@ -1036,9 +1023,36 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_receipt_key)
             .await
             .unwrap(),
-        Some(completed),
+        Some(source_upload.0.to_vec()),
         "rejected reverse copy must remain untouched"
     );
+    // Bob cannot use a malformed binding or the former duplicated journal.
+    for malformed in [vec![], vec![0x85; 15], vec![0x85; 17], completed] {
+        storage
+            .write_many(vec![crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_receipt_key(source_receipt),
+                value: malformed.clone(),
+            }])
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::facade::completed_large_value_cleanup_operations(&storage, source_receipt).await,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("exactly 16 upload-id bytes")
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    completed_large_value_receipt_key(source_receipt)
+                )
+                .await
+                .unwrap(),
+            Some(malformed),
+            "rejected reverse bindings remain untouched"
+        );
+    }
 }
 
 // A bidirectional completion journal is not itself a completed upload: its
@@ -1060,16 +1074,13 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
         .value_ref;
     let upload_id = crate::large_values::StagedLargeValueId([0x89; 16]);
     let receipt_id = crate::large_values::StagedLargeValueId([0x8a; 16]);
-    let completed =
-        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
-            id: upload_id,
-            descriptor: Some(descriptor),
-            receipt_id: Some(receipt_id),
-            accounting: crate::large_values::StagedLargeValueAccounting::default(),
-            created_at_ms: 0,
-            chunks: Vec::new(),
-        })
-        .unwrap();
+    let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+        id: upload_id,
+        descriptor,
+        receipt_id,
+        accounting: crate::large_values::StagedLargeValueAccounting::default(),
+    })
+    .unwrap();
     let upload_key = completed_large_value_upload_key(upload_id);
     let receipt_key = completed_large_value_receipt_key(receipt_id);
     database
@@ -1083,7 +1094,7 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
             crate::storage::OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: receipt_key.clone(),
-                value: completed.clone(),
+                value: upload_id.0.to_vec(),
             },
         ])
         .await
@@ -1113,7 +1124,7 @@ async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutat
             .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key)
             .await
             .unwrap(),
-        Some(completed),
+        Some(upload_id.0.to_vec()),
         "failed staging must not alter the reverse completion journal"
     );
 }

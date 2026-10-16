@@ -56,7 +56,13 @@ mod persist;
 pub(crate) mod pipeline;
 mod rank_index;
 mod recursion;
+mod residency;
 mod state;
+mod stored_arrangement;
+pub use residency::{
+    process_cache_budget, process_cache_evicted_buckets, process_cache_resident_bytes,
+    process_stored_arrangements, set_process_cache_budget, set_process_stored_arrangements,
+};
 mod terminal;
 mod typed_template;
 
@@ -256,6 +262,18 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether new arrangements over stored tables, keyed on their primary
+    /// key, are read from storage instead of held (`stored_arrangement`).
+    stored_arrangements_enabled: bool,
+    /// Bytes the resident buckets of this runtime's stored arrangements may
+    /// hold after an install; `None` follows the process budget
+    /// (`residency`).
+    cache_budget: Option<usize>,
+    /// Shared with every stored arrangement plan: whether reads record the
+    /// buckets they use, which only a finite budget needs.
+    arrangement_use_tracking: Arc<std::sync::atomic::AtomicBool>,
+    /// This runtime's part of the process's resident bytes.
+    resident_share: residency::ResidentShare,
     /// Whether plain ordered outputs receive generic root positions (insert
     /// indices and moves). A consumer that never reads them turns this off,
     /// so an unbounded TopBy keeps its delta-only path.
@@ -387,6 +405,12 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            stored_arrangements_enabled: residency::process_stored_arrangements(),
+            cache_budget: None,
+            arrangement_use_tracking: Arc::new(std::sync::atomic::AtomicBool::new(
+                residency::process_cache_budget().is_some(),
+            )),
+            resident_share: residency::ResidentShare::default(),
             plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
@@ -475,6 +499,17 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Read arrangements compiled from now on from storage when they arrange
+    /// a stored table by its primary key. Existing arrangements keep their
+    /// representation.
+    pub fn stored_arrangements_enabled(&self) -> bool {
+        self.stored_arrangements_enabled
+    }
+
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.stored_arrangements_enabled = enabled;
     }
 
     /// Enable or disable generic root positions for plain ordered outputs.
@@ -679,6 +714,8 @@ pub enum IvmRuntimeError {
     StorageUnavailable,
     #[error("evaluation blocked on a non-resident storage input")]
     EvaluationBlocked,
+    #[error("a stored arrangement was read for a key nobody probed")]
+    StoredArrangementUnprobed,
     #[error("streaming checksum window and work budgets must be non-zero")]
     InvalidStreamingChecksumBudget,
     #[error("streaming checksum requires a String or Bytes field")]

@@ -2063,7 +2063,7 @@ where
             let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
             let mut cells = self.materialized_cells_for_version(source_table, version)?;
             let projected_table =
-                self.translate_cells(source_schema, schema_version, version.table(), &mut cells)?;
+                self.translate_version_cells(source_schema, schema_version, version, &mut cells)?;
             if projected_table.as_deref() == Some(table) {
                 Some(
                     self.table_in_schema_ref(table, schema_version)?

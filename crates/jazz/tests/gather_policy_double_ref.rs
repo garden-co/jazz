@@ -25,8 +25,9 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef, RowIdRef,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchemaBuilder,
@@ -50,38 +51,38 @@ fn row(seed: u8) -> RowUuid {
     RowUuid::from_bytes([seed; 16])
 }
 
-fn col(scope: &str, column: &str) -> RelColumnRef {
-    RelColumnRef {
+fn col(scope: &str, column: &str) -> RelationColumnRef {
+    RelationColumnRef {
         scope: Some(scope.to_owned()),
         column: column.to_owned(),
     }
 }
 
-fn scan(table: &str, alias: Option<&str>) -> RelExpr {
-    RelExpr::TableScan {
-        table: TableName::new(table),
+fn scan(table: &str, alias: Option<&str>) -> RelationExpr {
+    RelationExpr::TableScan {
+        table: String::from(table),
         alias: alias.map(str::to_owned),
     }
 }
 
-fn eq(left: RelColumnRef, right: RelValueRef) -> RelPredicateExpr {
-    RelPredicateExpr::Cmp {
+fn eq(left: RelationColumnRef, right: RelationValueRef) -> RelationPredicate {
+    RelationPredicate::Cmp {
         left,
-        op: RelPredicateCmpOp::Eq,
+        op: RelationCmpOp::Eq,
         right,
     }
 }
 
-fn literal(value: impl Into<jazz::tools::Value>) -> RelValueRef {
-    RelValueRef::Literal(value.into())
+fn literal(value: impl Into<jazz::tools::Value>) -> RelationValueRef {
+    RelationValueRef::literal(value.into())
 }
 
-fn project_id(input: RelExpr, column: RelColumnRef) -> RelExpr {
-    RelExpr::Project {
+fn project_id(input: RelationExpr, column: RelationColumnRef) -> RelationExpr {
+    RelationExpr::Project {
         input: Box::new(input),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column),
+            expr: RelationProjectExpr::Column(column),
         }],
     }
 }
@@ -107,61 +108,61 @@ fn project_id(input: RelExpr, column: RelColumnRef) -> RelExpr {
 /// scan `team_entry`, the table that holds two refs to `teams`. This is built
 /// with the typed public relation IR because the fluent Rust relation builder
 /// cannot express a filter above a hop join or an `IN` list.
-fn dropdown_read_policy() -> PolicyExpr {
+fn dropdown_read_policy(bound: RecursionBound) -> PolicyExpr {
     let seed = project_id(
-        RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
+        RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
                 left: Box::new(scan("team_entry", None)),
                 right: Box::new(scan("teams", Some("__hop_0"))),
-                on: vec![RelJoinCondition {
+                on: vec![RelationJoinCondition {
                     left: col("team_entry", "target_id"),
                     right: col("__hop_0", "id"),
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
             predicate: eq(
                 col("team_entry", "user_id"),
-                RelValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
+                RelationValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
             ),
         },
         col("__hop_0", "id"),
     );
     let step = project_id(
-        RelExpr::Filter {
+        RelationExpr::Filter {
             input: Box::new(scan("team_entry", None)),
-            predicate: RelPredicateExpr::And(vec![
+            predicate: RelationPredicate::And(vec![
                 eq(col("team_entry", "administrator"), literal(false)),
                 eq(
                     col("team_entry", "team_id"),
-                    RelValueRef::RowId(RowIdRef::Frontier),
+                    RelationValueRef::RowId(RelationRowIdRef::Frontier),
                 ),
             ]),
         },
         col("team_entry", "target_id"),
     );
-    let reachable = RelExpr::Gather {
+    let reachable = RelationExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
-        frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-        bound: RelRecursionBound::MaxDepth(8),
-        dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+        frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+        bound,
+        dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
     };
-    let grants = RelExpr::Filter {
-        input: Box::new(RelExpr::Join {
+    let grants = RelationExpr::Filter {
+        input: Box::new(RelationExpr::Join {
             left: Box::new(reachable),
             right: Box::new(scan("dropdowns_access_edges", Some("__recursive_join_0"))),
-            on: vec![RelJoinCondition {
+            on: vec![RelationJoinCondition {
                 left: col("teams", "id"),
                 right: col("__recursive_join_0", "team_id"),
             }],
-            join_kind: RelJoinKind::Inner,
+            join_kind: RelationJoinKind::Inner,
         }),
-        predicate: RelPredicateExpr::And(vec![
+        predicate: RelationPredicate::And(vec![
             eq(
                 col("__recursive_join_0", "resource_id"),
-                RelValueRef::OuterColumn(RelColumnRef::unscoped("id")),
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped("id")),
             ),
-            RelPredicateExpr::In {
+            RelationPredicate::In {
                 left: col("__recursive_join_0", "grant_role"),
                 values: vec![literal("viewer")],
             },
@@ -173,7 +174,7 @@ fn dropdown_read_policy() -> PolicyExpr {
     }
 }
 
-fn schema() -> JazzSchema {
+fn schema(bound: RecursionBound) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -192,7 +193,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("dropdowns")
                     .column("name", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(dropdown_read_policy())),
+                    .policies(TablePolicies::new().with_select(dropdown_read_policy(bound))),
             )
             .table(
                 TableSchemaBuilder::new("dropdowns_access_edges")
@@ -206,8 +207,8 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_global_node() -> Db {
-    let schema = schema();
+fn open_global_node(bound: RecursionBound) -> Db {
+    let schema = schema(bound);
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
@@ -264,7 +265,17 @@ fn local_opts() -> ReadOpts {
 /// ```
 #[test]
 fn gather_seed_hops_the_target_ref_of_a_same_table_double_ref_edge() {
-    let db = open_global_node();
+    assert_session_reads_only_the_reachable_grant(RecursionBound::MaxDepth(8));
+}
+
+/// The same policy walked to a fixpoint instead of a depth bound.
+#[test]
+fn fixpoint_gather_policy_reads_only_the_reachable_grant() {
+    assert_session_reads_only_the_reachable_grant(RecursionBound::Fixpoint);
+}
+
+fn assert_session_reads_only_the_reachable_grant(bound: RecursionBound) {
+    let db = open_global_node(bound);
     let (user_team, direct, nested) = (row(0x01), row(0x02), row(0x03));
     let (visible, source_only) = (row(0x11), row(0x12));
     for (id, name) in [(user_team, "User"), (direct, "Direct"), (nested, "Nested")] {

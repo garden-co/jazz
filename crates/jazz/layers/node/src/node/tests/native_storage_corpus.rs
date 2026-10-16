@@ -6,7 +6,7 @@
 // producer here makes the semantic shape, backend profile, and reopen contract
 // executable beside the NodeState paths that actually write it.
 
-use crate::storage_codec_profile::{epoch_1_storage_codec_profile, node_storage_codec_profile};
+use crate::storage_codec_profile::node_storage_codec_profile;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
 use jazz_storage_sqlite::{
@@ -23,14 +23,11 @@ use sha2::{Digest, Sha256};
 /// of a settled historical fixture merely to inflate this corpus.
 const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_catalogue",
-    "jazz_catalogue_pointer",
     "jazz_nodes",
     "jazz_schema_versions",
     "jazz_transactions",
     "jazz_tx_touched_rows",
     "jazz_authority_policy_bindings",
-    "jazz_known_state_facts",
-    "jazz_settled_program_facts",
     groove::db::LARGE_VALUE_METADATA_CF,
 ];
 const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
@@ -45,25 +42,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367";
+    "95ed6800cc4438263c79a3489a3eebd8c5e9ffd22bbf48bb16d5488b125b9370";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "54b59d30c4cf7461979322c050554b835b03de1ad56bb448646febe4ee90bbca";
+    "954ecdfb37444ccc9d186412d8fd589ca84441f13580e8712124030f70f79c62";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367";
+    "95ed6800cc4438263c79a3489a3eebd8c5e9ffd22bbf48bb16d5488b125b9370";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70";
+    "a8b9e0fcd123a1935f0c349f8466010cb0f0497722aace2312f769ae4c810613";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379";
+    "4fc5cf8119b2c17f3c35b84eb0ccd2e59639b93f0e3fdb127784bf0eb6af486a";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491";
+    "ec741e7d2b4b9f862ef077c6f6c2ccb4b1470057e4d1886c0dc8061e0913ad35";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -119,18 +116,6 @@ fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
         }
     }
     pack
-}
-
-fn native_pack_without_derived_scope_entries(pack: &str) -> String {
-    // Subscription caches are explicitly invalidated on this format upgrade;
-    // every native family, its registry entry and every primary byte still match.
-    pack.lines()
-        .filter(|line| {
-            !line.starts_with("entry\tjazz_known_state_facts\t")
-                && !line.starts_with("entry\tjazz_settled_program_facts\t")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn epoch_1_native_corpus_pack() -> String {
@@ -983,13 +968,11 @@ where
                 (key, value)
             })
             .collect::<Vec<_>>();
-        // The baseline corpus intentionally has no scope-isolated relay
-        // attachment. Keep its historical receipt focused on settled state;
-        // populated relay, local-availability and superseded-writes stores
-        // have separate receipts (the last in
+        // Keep the baseline receipt focused on settled state; populated
+        // local-availability and superseded-writes stores have separate
+        // receipts (the latter in
         // `superseded_writes_store_native_bytes_are_pinned`).
-        if (store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE
-            || store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE
+        if (store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE
             || store_name == crate::schema::SUPERSEDED_WRITES_STORE)
             && rows.is_empty()
         {
@@ -1417,7 +1400,7 @@ where
         }) => {
             assert!(missing.is_empty(), "{missing:?}");
             assert!(
-                unknown.iter().any(|codec| codec == "jazz.history-version-current.v4")
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v2")
                     && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
                 "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
             );
@@ -1488,41 +1471,11 @@ fn verify_historical_native_corpus<S>(
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
-        // Only selection metadata changes during the startup upgrade. Validate
-        // those records explicitly, then compare every other historical byte.
-        let active = reader.database.primary_key_get_raw("jazz_catalogue", &[
-            Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
-            Value::Uuid(uuid::Uuid::nil()),
-        ]).unwrap().expect("opening persists the active selection");
-        assert_eq!(codec::decode_active_schema(active.record().get_bytes(
-            CatalogueRowRecord::FIELD_PAYLOAD_IDX,
-        ).unwrap()).unwrap(), reader.catalogue.active_schema);
-        let mut upgraded_keys = vec![("jazz_catalogue", active.into_parts().0)];
-        for ready in reader.database.primary_key_scan_raw("jazz_catalogue", &[
-            Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
-        ]).unwrap() {
-            let marker = codec::decode_catalogue_bootstrap_ready(ready.record().get_bytes(
-                CatalogueRowRecord::FIELD_PAYLOAD_IDX,
-            ).unwrap()).unwrap();
-            assert_eq!(marker.current_write_schema, reader.current_write_schema().unwrap());
-            assert_eq!(marker.active_catalogue_seq, reader.active_catalogue_seq());
-            upgraded_keys.push(("jazz_catalogue", ready.into_parts().0));
-        }
-        if reader.catalogue.active_schema.revision == 0 {
-            let pointer = reader.database.primary_key_get_raw("jazz_catalogue_pointer", &[Value::U64(0)])
-                .unwrap().expect("upgraded revision-zero pointer");
-            assert_eq!(pointer.record().get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX).unwrap(),
-                reader.catalogue.active_schema.schema.0);
-            upgraded_keys.push(("jazz_catalogue_pointer", pointer.into_parts().0));
-        }
-        let prefixes = upgraded_keys.into_iter().map(|(store, key)|
-            format!("entry\t{store}\t{}\t", hex::encode(key))
-        ).collect::<Vec<_>>();
-        let historical = |pack: &str| native_pack_without_derived_scope_entries(pack)
-            .lines().filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
-            .collect::<Vec<_>>().join("\n");
-        assert_eq!(historical(&native_corpus_pack(&before_write)), historical(&expected_pack()),
-            "current Jazz preserves every historical byte outside upgraded selection metadata");
+        assert_eq!(
+            native_corpus_pack(&before_write),
+            expected_pack(),
+            "opening the corpus preserves every stored byte"
+        );
     }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
     reader
@@ -1950,7 +1903,7 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     let historical = epoch_1_native_corpus_pack();
     assert!(historical.contains("store\tjazz_settled_result_members\n"));
     let schema = native_corpus_schema();
-    let profile = epoch_1_storage_codec_profile().unwrap();
+    let profile = node_storage_codec_profile().unwrap();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let sqlite_dir = tempfile::tempdir().unwrap();
@@ -1966,7 +1919,9 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     .err()
     .expect("retired SQLite profile must reject");
     assert!(
-        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref unknown, .. } if unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
+        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref missing, ref unknown, .. }
+            if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                && unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
@@ -2395,16 +2350,14 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// Before linear history this receipt reopened and extended the alpha.54 root.
 /// The history codec is now `jazz.history-version-current.v4` and old roots
 /// are refused rather than migrated, so the receipt pins the refusal instead:
-/// the root lacks exactly the dictionary, durable-index, row-history and
-/// durability families and
-/// declares nothing this build does not read.
+/// the root lacks the dictionary, durable-index and node-storage markers and
+/// declares retired per-family Jazz markers.
 ///
 /// ```text
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                       missing [groove.dictionary.v1,
 ///                                                groove.durable-index.v2,
-///                                                jazz.history-version-current.v4,
-///                                                jazz.transaction-durability.v2]
+///                                                jazz.node-storage.v2]
 /// ```
 #[test]
 fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
@@ -2460,9 +2413,9 @@ fn rocksdb_family_entries(
 }
 
 /// A pre-linear (DAG layout, alpha.54 to alpha.59) node root is refused at
-/// manifest admission with the typed error naming exactly the three families
-/// it lacks (durable index, linear row history and the compact durability
-/// encoding). It declares no family this build does not read.
+/// manifest admission with the typed error naming the current root profile markers
+/// it lacks (durable index and node storage), and its retired per-family
+/// Jazz markers.
 fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
     match result {
         Err(groove::storage::Error::UnsupportedStorageCodecs {
@@ -2476,12 +2429,13 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 vec![
                     "groove.dictionary.v1".to_owned(),
                     "groove.durable-index.v2".to_owned(),
-                    "jazz.history-version-current.v4".to_owned(),
-                    "jazz.transaction-durability.v2".to_owned(),
+                    "groove.large-value.v2".to_owned(),
+                    "groove.ordered-chunk-storage.v2".to_owned(),
+                    "jazz.node-storage.v2".to_owned(),
                 ],
                 "{store}"
             );
-            assert!(unknown.is_empty(), "{store}: {unknown:?}");
+            assert_eq!(unknown, ["groove.large-value.v1","groove.ordered-chunk-storage.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
         }
         Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
         Ok(()) => panic!("{store}: a pre-linear root must not open"),

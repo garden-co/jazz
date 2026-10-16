@@ -1550,6 +1550,26 @@ where
         self.node.node.borrow().runtime_stats_for_test()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only switch: read arrangements of stored tables from
+    /// storage by key for queries compiled from now on.
+    pub fn set_stored_arrangements_enabled_for_test(&self, enabled: bool) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_stored_arrangements_enabled_for_test(enabled);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only switch: bound the query cache of this database's
+    /// runtime; `None` follows the process-wide budget.
+    pub fn set_query_cache_budget_for_test(&self, budget: Option<usize>) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_query_cache_budget_for_test(budget);
+    }
+
     #[cfg(feature = "testing")]
     /// Test-only count of relay-owned upstream usage sites. This deliberately
     /// counts wire owners rather than coverage evaluators, so reconnect tests

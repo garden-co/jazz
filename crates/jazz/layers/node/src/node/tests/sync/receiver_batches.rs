@@ -878,7 +878,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
             .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
     );
     let stored_tx = reader.query_transaction(tx_id).unwrap().unwrap();
-    assert!(stored_tx.view_scoped_cardinality);
+    assert!(stored_tx.is_partial);
     assert_eq!(stored_tx.tx.n_total_writes, 2);
     for (title, expected_row) in [("one", row(1)), ("two", row(2))] {
         let shape = Query::from("todos")
@@ -1415,7 +1415,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
             ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
         }
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-        assert!(!stored.view_scoped_cardinality);
+        assert!(!stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 2);
         assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
     }
@@ -1448,7 +1448,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
             ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
         }
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-        assert!(stored.view_scoped_cardinality);
+        assert!(stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 2);
         assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
     }
@@ -1612,7 +1612,7 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
             Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
         ));
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-        assert_eq!(stored.view_scoped_cardinality, !stored_complete);
+        assert_eq!(stored.is_partial, !stored_complete);
         let versions = reader.query_versions_for_tx(tx_id).unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(reader.version_record_from_row(&versions[0]).unwrap(), first);
@@ -2184,10 +2184,10 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     );
 }
 
-// This is internal because the durable redacted-cardinality marker is protocol
-// receiver state; public clients can observe only the resulting rows.
+/// Alice receives a fragment, reopens, then receives the complete transaction.
+/// Internal receipt: public row results cannot expose the persisted partial flag.
 #[test]
-fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
+fn is_partial_survives_reopen_and_upgrades_to_complete_payload() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
@@ -2241,7 +2241,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             .query_transaction(tx_id)
             .unwrap()
             .unwrap()
-            .view_scoped_cardinality
+            .is_partial
     );
 
     drop(reader);
@@ -2251,7 +2251,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             .query_transaction(tx_id)
             .unwrap()
             .unwrap()
-            .view_scoped_cardinality
+            .is_partial
     );
     register_whole_table_receiver(&mut reader, "todos");
     reader
@@ -2278,7 +2278,12 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
         .unwrap();
     let stored = reader.query_transaction(tx_id).unwrap().unwrap();
     assert_eq!(stored.tx.n_total_writes, 2);
-    assert!(!stored.view_scoped_cardinality);
+    assert!(!stored.is_partial);
+    drop(reader);
+    let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+    let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+    assert!(!stored.is_partial);
+    assert_eq!(stored.tx.n_total_writes, 2);
 }
 
 #[test]
@@ -2478,7 +2483,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         ));
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.tx.n_total_writes, 0);
-        assert!(stored.view_scoped_cardinality);
+        assert!(stored.is_partial);
         assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
         assert!(reader.query_local_winner("todos", row(1)).unwrap().is_none());
         reader.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
@@ -2491,7 +2496,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         drop(reader);
         let mut reader = reopen_node_at(&reader_dir, node(3), schema());
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-        assert!(stored.view_scoped_cardinality);
+        assert!(stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 0);
         assert_eq!(stored.fate, Fate::Accepted);
         assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
@@ -2508,12 +2513,12 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
             let partial = reader.query_transaction(tx_id).unwrap().unwrap();
             assert_eq!(partial.fate, Fate::Accepted, "first fragment preserves terminal fate");
             assert_eq!(partial.tx.n_total_writes, 1);
-            assert!(partial.view_scoped_cardinality);
+            assert!(partial.is_partial);
         }
         reader.apply_view_updates_in_batch(vec![reset_scope_update(subscription, vec![bundle])]).unwrap();
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.tx.n_total_writes, 2);
-        assert_eq!(stored.view_scoped_cardinality, scope == ViewScoped);
+        assert_eq!(stored.is_partial, scope == ViewScoped);
         assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
         assert_eq!(stored.fate, Fate::Accepted, "later pending carrier must preserve terminal identity ({scope:?})");
         assert_eq!(stored.global_time, Some(GlobalTime(1)));

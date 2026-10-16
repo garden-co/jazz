@@ -33,10 +33,6 @@ pub use crate::model::public_schema_convert::SchemaConversionError;
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
 
-/// Retired cursor store, reserved only to discard legacy entries on open.
-pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
-/// Retired scope store, reserved only to discard legacy entries on open.
-pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
@@ -47,18 +43,6 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row
-/// (keyed by physical table id, which a table rename keeps) and writer node,
-/// the newest transaction time of that node's writes to the row that Core
-/// passed over when it decided a later write of the node chained on a
-/// predecessor it holds no decision for (unknown, or stored Pending). A write
-/// of that node at or before the time arriving afterwards is late
-/// (`INV-HIST-23`).
-pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
-/// Retired: the scope relay's row-version repair ledger. Nothing writes or
-/// reads it since the repair lane was removed; it stays registered so stores
-/// that already hold it still open.
-pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
 /// The Groove dictionary that every stored author column is interned into
 /// (`groove.dictionary.v1`): transaction records' `made_by` and the row
 /// images' `created_by`/`updated_by` store a node-local 4-byte code, while
@@ -75,6 +59,14 @@ pub fn interned_author_type() -> ValueType {
     ValueType::interned(AUTHORS_DICTIONARY, crate::ids::RowAuthor::value_type())
 }
 
+/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row
+/// (keyed by physical table id, which a table rename keeps) and writer node,
+/// the newest transaction time of that node's writes to the row that Core
+/// passed over when it decided a later write of the node chained on a
+/// predecessor it holds no decision for (unknown, or stored Pending). A write
+/// of that node at or before the time arriving afterwards is late
+/// (`INV-HIST-23`).
+pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue
@@ -521,7 +513,6 @@ impl RuntimeSchema {
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
-            catalogue_pointer_table(),
             transactions_table(),
             pending_transactions_table(),
             tx_provenance_table(),
@@ -533,12 +524,7 @@ impl RuntimeSchema {
 
     /// Return the version-independent metadata tables used by staged catalogue open.
     pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
-        vec![
-            nodes_table(),
-            schema_versions_table(),
-            catalogue_table(),
-            catalogue_pointer_table(),
-        ]
+        vec![nodes_table(), schema_versions_table(), catalogue_table()]
     }
 
     /// Return the canonical byte encoding used to address this schema version.
@@ -578,39 +564,6 @@ impl RuntimeSchema {
                 ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
-                KNOWN_STATE_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([
-                    ("settled_through", ValueType::U64),
-                    ("authorization_progress", ValueType::U64),
-                    // A nonzero generation proves the persisted program
-                    // facts are an exact CoveredInput closure. It is
-                    // deliberately distinct from the live authority receipt.
-                    ("source_closure_generation", ValueType::U64),
-                ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SETTLED_PROGRAM_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                    // Canonical source closure facts are addressed by digest.
-                    // Their exact source roles and version references remain
-                    // in the validated record body.
-                    ("fact_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([("fact", ValueType::Bytes)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
                 SUBSCRIPTION_WATERMARKS_STORE,
                 subscription_watermark_key_descriptor(),
                 subscription_watermark_value_descriptor(),
@@ -633,26 +586,6 @@ impl RuntimeSchema {
                     ("node", ValueType::Uuid),
                 ]),
                 RecordDescriptor::new([("superseded_through", ValueType::U64)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SCOPE_RELAY_REPAIR_LEDGER_STORE,
-                RecordDescriptor::new([
-                    ("scope_digest", ValueType::Bytes),
-                    ("physical_table_id", ValueType::U64),
-                    ("row_id", ValueType::Uuid),
-                    ("tx_time", ValueType::U64),
-                    ("tx_node", ValueType::Uuid),
-                ]),
-                // Full scope components are values so host supplied strings
-                // never enter a backend's bounded ordered-key space.
-                RecordDescriptor::new([
-                    ("format_version", ValueType::U64),
-                    ("storage_owner", ValueType::String),
-                    (
-                        "admitted_subject",
-                        ValueType::Nullable(Box::new(ValueType::String)),
-                    ),
-                ]),
             ))
     }
 }
@@ -1373,17 +1306,6 @@ fn catalogue_table() -> GrooveTableSchema {
     ]))
 }
 
-fn catalogue_pointer_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_catalogue_pointer",
-        [
-            column("revision", GrooveColumnType::U64),
-            column("schema", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
-}
-
 /// Policy-shape constructors.
 #[cfg(test)]
 pub struct Policy;
@@ -1419,25 +1341,11 @@ fn deletion_column() -> GrooveColumnType {
 }
 
 fn rejection_reason_column() -> GrooveColumnType {
-    storage_enum(
-        "jazz_rejection_reason",
-        &[
-            "client_clock_too_far_ahead",
-            "authorization_denied",
-            "exclusive_conflict",
-            "causality_violation",
-            "cascade",
-            "malformed_commit",
-        ],
-    )
+    crate::tx::RejectionReason::storage_value_type()
 }
 
 fn durability_column() -> GrooveColumnType {
     storage_enum("jazz_durability", &["none", "local", "global"])
-}
-
-fn tx_id_column() -> GrooveColumnType {
-    GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
 }
 
 /// History field holding a write's accepted seq (0 while unfated).
@@ -1577,7 +1485,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("durability", durability_column()),
             column("user_metadata", GrooveColumnType::String.nullable()),
             // upstream-decided: set exactly when `fate` is rejected.
-            column("rejection", rejection_column().nullable()),
+            column("rejection", rejection_reason_column().nullable()),
             // The identity the writes were authorized as when it is not the
             // author (flag bit 2 covers that case). Replayed units carry it,
             // so it is kept for the transaction's whole life.
@@ -1596,14 +1504,6 @@ fn transactions_table() -> GrooveTableSchema {
 
 /// The rejection reason of a rejected transaction: its reason tag, the
 /// transaction whose rejection cascaded to it, and a diagnostic detail.
-fn rejection_column() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
-        ("reason", rejection_reason_column()),
-        ("cascade_root", tx_id_column().nullable()),
-        ("detail", ValueType::String.nullable()),
-    ])))
-}
-
 /// `jazz_pending_transactions`: what a transaction needs only until it has a
 /// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
 /// record. A record exists only for an unsettled transaction that has
@@ -2064,8 +1964,6 @@ fn rejected_transactions_table() -> GrooveTableSchema {
             column("kind", tx_kind_column()),
             column("made_by", interned_author_type()),
             column("rejection_reason", rejection_reason_column()),
-            column("cascade_root", tx_id_column().nullable()),
-            column("reason_detail", GrooveColumnType::String.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
         ],
     )

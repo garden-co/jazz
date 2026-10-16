@@ -56,8 +56,8 @@ use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
 };
 use crate::schema::{
-    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE,
-    SETTLED_PROGRAM_FACTS_STORE, SUPERSEDED_WRITES_STORE, TableSchema, registered_column_transform,
+    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, SUPERSEDED_WRITES_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{
@@ -596,6 +596,9 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
+    /// Only schemas ranked no later than this may lie on the path
+    /// (`compiled_lens_path_within`).
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -603,6 +606,7 @@ struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
     table: String,
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -828,7 +832,10 @@ struct SchemaCatalogue {
         SchemaVersionId,
         BTreeMap<
             String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+            BTreeMap<
+                (physical::PhysicalWriteTarget, bool),
+                Arc<physical::PreparedPhysicalWritePlan>,
+            >,
         >,
     >,
     /// Schema version currently used for newly authored writes.
@@ -2887,6 +2894,14 @@ fn version_indirect_descriptors(
                 collect_indirect_descriptors(&value, &mut descriptors);
             }
         }
+        for extra in version.extra_cells() {
+            let record = extra.record().borrowed();
+            for index in 0..extra.record().descriptor().fields().len() {
+                if let Ok(Value::Nullable(Some(value))) = record.get_idx(index) {
+                    collect_indirect_descriptors(&value, &mut descriptors);
+                }
+            }
+        }
     }
     descriptors
 }
@@ -3033,9 +3048,8 @@ struct CatalogueOpenState {
     active_catalogue_seq: u64,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
-    current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
-    recovered_active_schema: Option<ActiveSchema>,
+    active_schema: ActiveSchema,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

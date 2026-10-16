@@ -1660,6 +1660,70 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     );
 }
 
+/// With the query cache at budget 0, every read of the parent resources
+/// goes to storage; rows must still move in and out of visibility exactly as
+/// the policy says.
+#[test]
+fn inherited_child_policy_holds_with_no_query_cache() {
+    let schema = customer_inherited_child_policy_schema();
+    let server = open_core(0x67, AuthorSubject::SYSTEM, &schema);
+    {
+        let node = server.node();
+        let mut node = node.borrow_mut();
+        node.set_stored_arrangements_enabled_for_test(true);
+        node.set_query_cache_budget_for_test(Some(0));
+    }
+    let member = AuthorSubject::for_test_bytes([0x1b; 16]);
+    let other = AuthorSubject::for_test_bytes([0x1c; 16]);
+    let (child, _grandchild, other_child, _other_grandchild) =
+        seed_inherited_child_fixture(&server, member, other);
+    let visible =
+        |author| served_subscription_rows_for_author(&schema, &server, author, "res_i_child");
+    assert_eq!(visible(member), vec![child]);
+    assert_eq!(visible(other), vec![other_child]);
+    let stats = server.node().borrow().runtime_stats_for_test();
+    assert!(stats.stored_arrangement_count > 0, "{stats:?}");
+    assert_eq!(stats.stored_arrangement_resident_bytes, 0, "{stats:?}");
+
+    let set_admin = |administrator: bool| {
+        server
+            .update(
+                "res_i_access_edges",
+                row(0xbb),
+                BTreeMap::from([("administrator".to_owned(), Value::Bool(administrator))]),
+            )
+            .unwrap();
+    };
+    set_admin(true);
+    assert!(visible(member).is_empty());
+    assert_eq!(visible(other), vec![other_child]);
+    set_admin(false);
+    assert_eq!(visible(member), vec![child]);
+
+    let second = row(0xef);
+    server
+        .insert_with_id(
+            "res_i_child",
+            second,
+            child_cells(row(0xdd), "open", "second"),
+        )
+        .unwrap();
+    let mut rows = visible(member);
+    rows.sort();
+    let mut expected = vec![child, second];
+    expected.sort();
+    assert_eq!(rows, expected);
+    server
+        .update(
+            "res_i_child",
+            child,
+            BTreeMap::from([("status".to_owned(), Value::String("closed".to_owned()))]),
+        )
+        .unwrap();
+    assert_eq!(visible(member), vec![second]);
+    assert_eq!(visible(other), vec![other_child]);
+}
+
 #[test]
 fn inherited_child_policy_composes_with_local_predicates() {
     let schema = customer_inherited_child_policy_schema();

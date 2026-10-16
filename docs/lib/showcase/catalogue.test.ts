@@ -91,6 +91,8 @@ test("every example benchmark with metadata has exactly one place on the page", 
     placeBenchmark(sourceOf("first_sync_local_relay_27518_rocksdb")),
     "adopter-workloads",
   );
+  assert.equal(placeBenchmark(sourceOf("band_book_reload_browser")), "band-book");
+  assert.equal(placeBenchmark(sourceOf("jamazon_cart_reload_browser")), "jamazon");
 });
 
 test("engine rows are the per-merge Groove cases, one per id and scenario", () => {

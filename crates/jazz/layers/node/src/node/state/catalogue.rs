@@ -1090,10 +1090,6 @@ where
         batch: &mut DatabaseBatch,
         active: &ActiveSchema,
     ) -> Result<(), Error> {
-        batch.update(
-            "jazz_catalogue_pointer",
-            vec![Value::U64(active.revision), Value::Uuid(active.schema.0)],
-        );
         put_catalogue(
             batch,
             codec::CatalogueRecordKind::ActiveSchema,
@@ -1217,7 +1213,7 @@ where
             ));
         }
         if self
-            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema)
+            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema, None)
             .is_none()
         {
             return Err(Error::InvalidCatalogueUpdate(
