@@ -287,6 +287,13 @@ pub(super) fn lowered_terminals(
         let fields = graph_declared_output_fields(&closure.visible_root);
         (closure, fields)
     };
+    // Non-root covered members depend on the root's routes and on their own
+    // policy routes, which the root need not carry (a public root can
+    // reference private rows). Deliver each by every route it carries.
+    let member_route_scope = routing_param_fields
+        .union(&root_route_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let claim_route_fields = request
         .parameter_domain()
         .map_err(single_gap_report)?
@@ -361,7 +368,7 @@ pub(super) fn lowered_terminals(
                             source_id,
                             resolved_source,
                             plan.root_source(),
-                            &root_route_fields,
+                            &member_route_scope,
                             &root_source_route_fields,
                         ),
                     )),
@@ -391,7 +398,7 @@ pub(super) fn lowered_terminals(
             })
         })?;
         let contribution_route_fields =
-            source_terminal_route_fields(resolved_source, &root_route_fields);
+            source_terminal_route_fields(resolved_source, &member_route_scope);
         let graph = if contribution.id.starts_with("flat_join:") {
             flat_join_contribution_membership_graph(
                 closure.visible_root.clone(),
@@ -447,7 +454,7 @@ pub(super) fn lowered_terminals(
                 contribution.source
             )))
         })?;
-        let parent_route_fields = source_terminal_route_fields(parent_source, &root_route_fields);
+        let parent_route_fields = source_terminal_route_fields(parent_source, &member_route_scope);
         let graph = closure::inherited_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -480,7 +487,7 @@ pub(super) fn lowered_terminals(
                     contribution.access_source
                 )))
             })?;
-        let access_route_fields = source_terminal_route_fields(access_source, &root_route_fields);
+        let access_route_fields = source_terminal_route_fields(access_source, &member_route_scope);
         let graph = closure::reachable_contribution_membership_graph(
             visible_root_with_routes.clone(),
             contribution,
@@ -1035,7 +1042,7 @@ pub(super) fn lowered_terminals(
                     source_id,
                     resolved_source,
                     plan.root_source(),
-                    &root_route_fields,
+                    &member_route_scope,
                     &root_source_route_fields,
                 );
                 let content_output = fact_output_with_terminal(
@@ -1099,7 +1106,7 @@ pub(super) fn lowered_terminals(
                     source_id,
                     resolved_source,
                     plan.root_source(),
-                    &root_route_fields,
+                    &member_route_scope,
                     &root_source_route_fields,
                 );
                 let content_output = fact_output_with_terminal(
@@ -1169,7 +1176,7 @@ pub(super) fn lowered_terminals(
                     source_id,
                     resolved_source,
                     plan.root_source(),
-                    &root_route_fields,
+                    &member_route_scope,
                     &root_source_route_fields,
                 );
                 let output = fact_output_with_terminal(
@@ -4103,20 +4110,6 @@ fn aggregate_result_membership_fields(
             Value::String("global".to_owned()),
         ));
     }
-    // This runtime-only token pairs the aggregate operator's before/after
-    // records. It is wrapped as an opaque protocol type before it crosses the
-    // runtime boundary, so it cannot be mistaken for row version metadata.
-    if let Some(first_output) = outputs.first() {
-        fields.push(ProjectField::renamed(
-            aggregate_output_field(&first_output.output.name),
-            "synthetic_replacement",
-        ));
-    } else {
-        fields.push(ProjectField::literal(
-            "synthetic_replacement",
-            Value::String("empty".to_owned()),
-        ));
-    }
     for group in group_by {
         let field = aggregate_source_field_name(group, source)?;
         let identity = source
@@ -4138,7 +4131,7 @@ fn aggregate_result_membership_fields(
             &output.output.name,
         ))),
         output_name: aggregate_output_field(&output.output.name),
-        output_identity: FieldIdentity::Name(output.output.name.clone()),
+        output_identity: FieldIdentity::Name(aggregate_output_field(&output.output.name)),
     }));
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
@@ -4291,7 +4284,6 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(format!("{prefix}tx_time"), "tx_time"),
         ProjectField::renamed(format!("{prefix}tx_node_id"), "tx_node_id"),
         ProjectField::renamed(format!("{prefix}schema_version"), "schema_version"),
-        ProjectField::renamed(format!("{prefix}parents"), "parents"),
         ProjectField::renamed(format!("{prefix}authored_columns"), "authored_columns"),
         ProjectField::renamed(format!("{prefix}created_by"), "created_by"),
         ProjectField::renamed(format!("{prefix}created_at"), "created_at"),
@@ -4339,7 +4331,6 @@ fn inline_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(version.tx_time_field, "tx_time"),
         ProjectField::renamed(version.tx_node_field, "tx_node_id"),
         ProjectField::renamed(version.schema_version_field, "schema_version"),
-        ProjectField::named("parents"),
         ProjectField::named("authored_columns"),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),
@@ -4378,7 +4369,6 @@ fn deletion_witness_fields_for_tagged_rows(
         ProjectField::named("tx_time"),
         ProjectField::named("tx_node_id"),
         ProjectField::named("schema_version"),
-        ProjectField::named("parents"),
         ProjectField::null_typed(
             "authored_columns",
             ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
@@ -4600,7 +4590,6 @@ fn version_witness_schema(
         created_at_field: "created_at".to_owned(),
         updated_by_field: "updated_by".to_owned(),
         updated_at_field: "updated_at".to_owned(),
-        parents_field: "parents".to_owned(),
         authored_columns_field: "authored_columns".to_owned(),
         deletion_field: "_deletion".to_owned(),
         user_fields: source

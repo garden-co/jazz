@@ -15,7 +15,7 @@ use crate::db::{
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
-use crate::protocol::{MigrationLens, SyncMessage};
+use crate::protocol::MigrationLens;
 use crate::schema::JazzSchema;
 use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
@@ -1682,13 +1682,17 @@ impl ServerRuntimeHandle {
                 if reply.is_closed() {
                     return;
                 }
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error.to_string()),
                 };
-                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                // See `tick_take`: re-arm on frames taken here or produced for
+                // any session by this tick, never on output merely queued.
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty())
+                    || shell.session_frames_queued() != queued_before;
                 let _ = reply.send(result);
                 if made_progress {
                     notify_shell_activity(&activity_tx);
@@ -1702,6 +1706,7 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         self.run_async(move |shell| {
             Box::pin(async move {
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
@@ -1714,9 +1719,16 @@ impl ServerRuntimeHandle {
                 // consolidation-spin feeder. One notification must never buy an
                 // unbounded loop, and delivery must never stall mid-reset; frames
                 // produced is exactly the signal that separates the two.
-                if let Ok(frames) = &result
-                    && !frames.is_empty()
-                {
+                //
+                // "Produced" covers every session, not only this one: the tick
+                // serves all connections, so it can queue another session's
+                // update while this session receives nothing. Only that
+                // session's own activity wake drains it, so announce it here.
+                // The counter advances only when a tick queues new output, so a
+                // session that never drains its backlog cannot re-arm an empty
+                // tick.
+                let produced = shell.session_frames_queued() != queued_before;
+                if produced || result.as_ref().is_ok_and(|frames| !frames.is_empty()) {
                     notify_shell_activity(&activity_tx);
                 }
                 result
@@ -1972,64 +1984,13 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
     let Ok(frame) = postcard::from_bytes::<WireFrame>(frame) else {
         return "malformed wire frame".to_owned();
     };
-    let WireFrame::Message(envelope) = frame else {
-        return match frame {
-            WireFrame::Hello(_) => "wire hello".to_owned(),
-            WireFrame::Error(_) => "wire error".to_owned(),
-            WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
-            WireFrame::Channel(_) => "wire channel extent".to_owned(),
-            WireFrame::ChannelCredit(_) => "wire channel credit".to_owned(),
-            WireFrame::Message(_) => unreachable!("message handled above"),
-        };
-    };
-    match postcard::from_bytes::<SyncMessage>(&envelope.payload) {
-        Ok(message) => sync_message_name(&message).to_owned(),
-        Err(_) => "malformed SyncMessage".to_owned(),
+    match frame {
+        WireFrame::Hello(_) => "wire hello",
+        WireFrame::Error(_) => "wire error",
+        WireFrame::Channel(_) => "wire channel extent",
+        WireFrame::ChannelCredit(_) => "wire channel credit",
     }
-}
-
-fn sync_message_name(message: &SyncMessage) -> &'static str {
-    // This deliberately names only the protocol variant. Never format the
-    // message itself here: claims and row payloads must not escape through a
-    // transport diagnostic.
-    match message {
-        SyncMessage::Reserved12(retired) => match *retired {},
-        SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
-        SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
-        SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
-        SyncMessage::ChunkUploadNodes(_) => "ChunkUploadNodes",
-        SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
-        SyncMessage::SessionClaims { .. } => "SessionClaims",
-        SyncMessage::CommitUnit { .. } => "CommitUnit",
-        SyncMessage::Reserved30(retired) => match *retired {},
-        SyncMessage::FateUpdate { .. } => "FateUpdate",
-        SyncMessage::RegisterShape { .. } => "RegisterShape",
-        SyncMessage::Subscribe(_) => "Subscribe",
-        SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",
-        SyncMessage::Unsubscribe { .. } => "Unsubscribe",
-        SyncMessage::PublishSchema { .. } => "PublishSchema",
-        SyncMessage::PublishSchemaWithLens { .. } => "PublishSchemaWithLens",
-        SyncMessage::PublishLens { .. } => "PublishLens",
-        SyncMessage::CatalogueAck(_) => "CatalogueAck",
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
-        SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
-        SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
-        SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
-        SyncMessage::CurrentRowsRequest(_) => "CurrentRowsRequest",
-        SyncMessage::CurrentRowsReceipt(_) => "CurrentRowsReceipt",
-        SyncMessage::CurrentRowsCancel { .. } => "CurrentRowsCancel",
-        SyncMessage::PermissionAdviceRequest { .. } => "PermissionAdviceRequest",
-        SyncMessage::PermissionAdviceResponse { .. } => "PermissionAdviceResponse",
-        SyncMessage::AuthorizationScopeSubscribe { .. } => "AuthorizationScopeSubscribe",
-        SyncMessage::AuthorizationScopeReceipt { .. } => "AuthorizationScopeReceipt",
-        SyncMessage::AuthorizationScopeIntent { .. } => "AuthorizationScopeIntent",
-        SyncMessage::AuthorizationScopeView { .. } => "AuthorizationScopeView",
-        SyncMessage::AuthorizationScopeAggregateReceipt { .. } => {
-            "AuthorizationScopeAggregateReceipt"
-        }
-        SyncMessage::AuthorizationScopeUnavailable { .. } => "AuthorizationScopeUnavailable",
-        SyncMessage::AuthorizationScopeDecision { .. } => "AuthorizationScopeDecision",
-    }
+    .to_owned()
 }
 
 fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
@@ -2042,10 +2003,10 @@ fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
 mod tests {
     use super::*;
     use crate::db::WireTransportAdapter;
-    use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
+    use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey, SyncMessage};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-    use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+    use crate::wire::{encode_frame, encode_sync_message};
     use futures::FutureExt;
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -2103,12 +2064,16 @@ mod tests {
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
-        encode_frame(&WireFrame::Message(WireEnvelope::new(
+        let context = crate::wire::WireInboundContext::new(
             crate::wire::WIRE_PROTOCOL_VERSION,
             crate::wire::FEATURE_NONE,
-            payload,
-        )))
-        .unwrap()
+            None,
+        );
+        let mut sender = crate::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+        sender
+            .enqueue(0, 0, crate::wire::channels::ChannelClass::Control, payload)
+            .unwrap();
+        sender.peek_outbound().unwrap().unwrap()
     }
 
     // This internal test is necessary because the terminal reason crosses the
@@ -2242,13 +2207,13 @@ mod tests {
     }
 
     #[test]
-    fn inbound_frame_phase_labels_semantic_transport_work() {
+    fn inbound_frame_phase_labels_channel_transport_work() {
         let encoded = encode_message(SyncMessage::SessionClaims {
             identity: AuthorSubject::for_test_bytes([7; 16]),
             claims: BTreeMap::new(),
         });
 
-        assert_eq!(inbound_frame_phase(&encoded), "SessionClaims");
+        assert_eq!(inbound_frame_phase(&encoded), "wire channel extent");
         let shape_id = ShapeId(uuid::Uuid::from_bytes([3; 16]));
         let subscribe = encode_message(SyncMessage::Subscribe(Subscribe {
             shape_id,
@@ -2261,7 +2226,7 @@ mod tests {
             known_state: None,
             delegated_session: None,
         }));
-        assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
+        assert_eq!(inbound_frame_phase(&subscribe), "wire channel extent");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
     }
 

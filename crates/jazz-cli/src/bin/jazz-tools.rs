@@ -186,6 +186,21 @@ enum Commands {
         )]
         shutdown_timeout_secs: u64,
 
+        /// Maximum live WebSocket connections. Upgrades beyond it get
+        /// `503 Service Unavailable` with `Retry-After`.
+        #[arg(
+            long,
+            env = "JAZZ_MAX_CONNECTIONS",
+            default_value_t = jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        )]
+        max_connections: usize,
+
+        /// Memory the server sizes its caches against, in bytes. Defaults to
+        /// the container's cgroup memory limit.
+        #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        memory_limit_bytes: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -260,6 +275,8 @@ async fn run() {
             backend_secret,
             admin_secret,
             shutdown_timeout_secs,
+            max_connections,
+            memory_limit_bytes,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -316,6 +333,11 @@ async fn run() {
                     heap_profiler: None,
                     listen: diagnostics_listen,
                     token: diagnostics_token,
+                },
+                jazz_server::resources::ServerResourceLimits {
+                    max_websocket_connections: max_connections,
+                    memory_limit_bytes: memory_limit_bytes
+                        .or_else(jazz_server::resources::detect_memory_limit_bytes),
                 },
             )
             .await
@@ -620,6 +642,44 @@ mod tests {
         let error = validate_server_cli_options(&cli.command)
             .expect_err("external JWT verifier without audience must fail");
         assert!(error.contains("--jwt-audience"), "{error}");
+    }
+
+    #[test]
+    fn server_command_defaults_and_validates_max_connections() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env_guard = EnvVarGuard::remove("JAZZ_MAX_CONNECTIONS");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                max_connections,
+                memory_limit_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    max_connections,
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
+                );
+                assert_eq!(memory_limit_bytes, None);
+            }
+            _ => panic!("expected server command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--max-connections",
+                "0",
+            ])
+            .is_err(),
+            "a zero connection cap would refuse every client"
+        );
     }
 
     #[test]
