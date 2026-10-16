@@ -2,9 +2,8 @@
 
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    CmpOp, PolicyExpr, PolicyValue, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind,
-    RelKeyRef, RelPredicateCmpOp, RelPredicateExpr, RelProjectColumn, RelProjectExpr,
-    RelRecursionBound, RelValueRef, RowIdRef,
+    PolicyExpr, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
+    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef, RowIdRef,
 };
 use jazz::tools::{SchemaBuilder, TablePolicies};
 
