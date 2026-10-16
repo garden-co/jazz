@@ -1,0 +1,136 @@
+---
+title: Upgrading to alpha.60
+description: alpha.60 changes the wire protocol and the storage format together. What happens to old stores and old clients, how to recover, and which behaviours change.
+---
+
+alpha.60 is a breaking release for data as well as code. It changes the wire protocol and the storage
+format in one step:
+
+- **alpha.60 can't open anything written by alpha.59 or earlier.** Browser, Node, React Native and
+  native client stores, relays, Core, and the server's catalogue and account registry are all
+  refused when they are opened. There is no migration: everything starts from empty storage.
+- **alpha.59 and alpha.60 can't sync with each other.** An old peer is refused at the first
+  handshake, so clients, native builds, relays and servers must be upgraded together.
+
+This page covers those two breaks and the behaviour changes that come with them. API changes, such as
+the removed read tiers and options, are listed under
+[In alpha.60](/docs/reference/upgrading-from-alpha-55#in-alpha60) on the alpha.55 upgrade page.
+Upgrade all Jazz packages together.
+
+## Before you upgrade
+
+Data stored by alpha.59 doesn't carry over: not on clients, and not on the server. Once a Core
+server runs alpha.60 it starts from an empty data directory, so clients that wipe their local store
+and resync get only what is written after the upgrade.
+
+- **Fresh start.** Create a new Jazz Cloud app, or start a self-hosted Core with an empty data
+  directory, and deploy your schema and permissions to it as usual.
+- **Data you need to keep.** If you have production data, contact us for migration help before
+  upgrading. Keep the alpha.59 server and its data directory until you have what you need from it.
+
+{/* TODO(alpha.60 bump pass): confirm with the cloud team how hosted Jazz Cloud apps move to alpha.60. */}
+
+## Old stores are refused
+
+alpha.60 checks a store's format marker when it opens it, before it reads or changes any record. A
+store written by alpha.59 or earlier is refused with a typed `UnsupportedStorageCodecs` error:
+
+- In JavaScript the error has `code` set to `"unsupported_storage_codecs"`. Where it carries them,
+  its `missing` and `unknown` fields list the storage formats the store lacks and the ones this build
+  doesn't read.
+- In the browser it is an `UnsupportedStorageCodecsError`. The class doesn't survive the browser
+  storage worker, but the `code` does, so check the code rather than the class.
+- In Rust it is `groove::storage::Error::UnsupportedStorageCodecs { epoch, missing, unknown }`.
+
+The message reads like this:
+
+```text
+unsupported storage format: this epoch-1 root lacks codec families [...] required by this build
+and declares [...] that this build does not read
+```
+
+A store whose format marker is missing or damaged still fails with the generic storage error, so
+an app can tell an old store from a broken one.
+
+{/* TODO(alpha.60 bump pass): once #4023 lands, document isUnsupportedStorageCodecsError (jazz-tools and jazz-tools/react-native), the NAPI/WASM error fields, the React Native status code and JazzError::UnsupportedStorageCodecs, and point the "Old local stores are refused" section of the alpha.55 page here. */}
+
+### Recover by wiping and resyncing
+
+There is no converter. Delete the old store, then let the client resync from Core:
+
+- **Browser.** If you still hold a `Db`, call `await db.deleteClientStorage()` (see
+  [Storage reset](/docs/auth/lifecycle#storage-reset)). Otherwise clear the site's storage for your
+  app's origin.
+- **Node and native clients.** Close the client and delete its data directory.
+- **React Native.** Delete the app's Jazz data directory, or reinstall the app.
+- **Relays and Core.** Stop the process and start it on an empty data directory.
+
+Writes that were still pending in the old store, and had never reached Core, are lost. Keep the old
+release running until its pending writes have synced if you need them.
+
+## alpha.59 peers are refused
+
+alpha.60 speaks wire protocol v7 only. Every other version is refused at the `Hello` handshake with
+`UnsupportedProtocolVersion` and retry `Never`, before any message is decoded. Nothing from the
+other side is ever reinterpreted.
+
+| Pair                                    | What happens                                                                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| alpha.59 client → alpha.60 server       | The server refuses the handshake: `unsupported wire protocol advertisement: remote 3..=3, expected 7..=7`.                           |
+| alpha.60 client → alpha.59 server       | The old server refuses it the same way (`remote 7..=7, expected 3..=3`). A TypeScript client reports `unsupported_protocol_version`. |
+| alpha.60 TypeScript client, old server  | `server must advertise exactly wire protocol 7, got 3..=3`.                                                                          |
+| React Native JS bundle and native build | Mismatched builds fail at startup with "new native development/release build required" (native relay ABI 3).                         |
+
+An end user who still runs an alpha.59 build of your app after the server upgrade keeps working
+locally, but nothing syncs, and reads that need the server fail. Writes made in that window stay in
+the alpha.59 store, which alpha.60 refuses, so they are lost when that user loads the new build. To
+keep the window short, ship the upgraded app together with the server upgrade, and make sure your
+HTML isn't cached: a cached `index.html` keeps loading the old client.
+
+React Native apps need a new native build. A JavaScript-only (OTA) update to alpha.60 can't run on an
+alpha.59 native build.
+
+## Behaviour changes
+
+### Subscriptions without a server open at once
+
+With no server configured, or when the server link has failed, a `"local-first"` subscription now
+delivers its first result immediately, even when nothing is stored locally. That first result is
+empty and still pending. Before, the first result arrived only once local data changed. If your UI
+treats the first callback as "loaded", check for the pending state too.
+
+### Exclusive aggregates
+
+An exclusive transaction now records the result of a count or other aggregate it read, not every
+row it counted. The commit is rejected with `exclusive_conflict` only when that result changed, not
+when another writer changed a counted row without changing the count, sum, minimum or maximum.
+
+Reading an aggregate after the transaction's first write now fails with an "is not supported in
+exclusive transactions yet" error. Read aggregates before the first write.
+
+### Reads see your earlier writes after a reconnect
+
+A server now answers a read only after it has answered every write the same connection sent before
+it, including writes resent after a reconnect. A one-shot `"remote"` read therefore sees your
+earlier writes even across a reconnect.
+
+### Writes apply in the order they were written
+
+Core applies each writer's writes in the order they were written. A write is no longer held back
+when it reaches Core before the write it builds on, and it no longer fails as "predecessor lost":
+it applies over the row's current state.
+
+### Tuple values
+
+A present nullable integer inside a tuple now reads back as it was written instead of byte-swapped,
+and `F64` tuple members encode, decode and sort numerically. Stored tuple bytes are unchanged.
+
+{/* TODO(alpha.60 bump pass): add #4023's per-column merge across schema versions (#3899) here once it lands: an older-schema client's edit keeps columns it doesn't know, merge-column writes across schema versions are accepted, and a CopyColumn target keeps its own value. */}
+
+## Smaller storage
+
+The new format stores much less per row. A row inserted and then updated takes 1,259 bytes on Core
+instead of 1,546, and 771 bytes on a reader instead of 985. A 1,000-row view update on the wire
+shrinks from about 2.4 MB to 458 KB.
+
+{/* TODO(alpha.60 bump pass): update the per-row sizes after #4088, #4103, #4109 and the storage-tightening PRs. */}

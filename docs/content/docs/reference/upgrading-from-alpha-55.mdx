@@ -178,6 +178,9 @@ upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
 
 ## In alpha.60
 
+alpha.60 also changes the wire protocol and the storage format: stores written by alpha.59 or
+earlier don't open, and alpha.59 peers can't sync. See [Upgrading to alpha.60](/docs/reference/upgrading-to-alpha-60).
+
 ### `"edge"` write waits rejected
 
 `wait({ tier: "edge" })` used to warn and wait for `"global"`. It now rejects with a `TypeError`, and

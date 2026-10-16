@@ -151,7 +151,7 @@ evidence, not a migration input.
 **Linear-history boundary, 2026-10-08 — the sole wire protocol is v6.** Wire v6
 replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
 v5's compact durability tags, Edge-free peer roles and flagless shape
-registration, and v4's schema-predecessor vector (below), unchanged. It changes
+registration, and v4's schema-predecessor vector (SPEC 10), unchanged. It changes
 payload shapes in place, so every endpoint advertises exactly
 `min_protocol_version=6, max_protocol_version=6` and a v5 (or older) peer fails
 the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
@@ -181,9 +181,13 @@ baseline, frozen fresh rather than appended to v5, is:
   unchanged;
 - `SyncMessage` tags 14 (`FetchRowVersions`) and 15 (`RowVersionPayloads`) in
   the compact v5 numbering are retired and reserved: rows are resent whole, never fetched per version;
-- `SyncMessage` tag 29 (`RetryLater`, the authority's answer to a unit whose
-  pending predecessor it had not decided) is retired and reserved: the
-  authority never waits for a predecessor, so the tag is never reused;
+- `SyncMessage` tag 29 is `Reserved29`, permanently: it was `RetryLater`, the
+  authority's answer to a unit whose pending predecessor it had not decided.
+  The authority never waits for a predecessor (#4072), so the tag is
+  uninhabited, rejected like tags 14 and 15, and never reused;
+- `SyncMessage` tag 30 is `ReadBarrier { writes_through }` on the requests
+  channel (§8.2.1, #3863). It is a mandatory variant with no feature bit; a
+  peer that predates it is refused at `Hello`, never at this tag;
 - `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
   `Watermark` is tag 3, so an old exact declaration fails decoding instead of
   being read as a watermark prefix;
@@ -206,31 +210,11 @@ are `crates/jazz/fixtures/wire_message_frames_v5.json` and
 `crates/jazz/fixtures/wire_hello_frames_v5.json`; v6 replays its Hello frames
 only to prove they are refused.
 
-**Schema-predecessor boundary — wire protocol v4 (superseded by v5).** Wire v4
-replaces the single incoming migration in each schema publication with an
-explicit predecessor vector. V3 and older peers fail the Hello handshake before
-decoding these snapshots. Clients and Core servers must upgrade together. It
-retains v3's deployment-aware catalogue policy semantics: policy changes must
-advance the write revision. Existing message discriminants remain fixed,
-including retired tags 12 and 30. Persisted single-predecessor records remain
-readable; storage versions are independent of this wire boundary.
-
-**Deployment boundary, 2026-09-18 — wire protocol v3 (superseded by v4).** `ViewUpdate` carries
-settled version payloads only through `version_carriers`; the transitional
-duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v3 and requires every peer Hello to advertise exactly
-`min_protocol_version=3, max_protocol_version=3`; v1, v2, and ranges such as `0..=3`,
-`2..=3`, and `3..=15` reject before payload decoding. There are no compatibility
-aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
-carrier is expanded and remains the direct payload of `RowVersionPayloads`
-repair responses.
-
-Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
-Core can emit a policy-only snapshot at the same write revision that v3 receivers
-reject. Therefore v2 peers fail the Hello handshake rather than reaching that
-semantic mismatch. Clients and Core servers must upgrade together. Existing
-message discriminants remain fixed, including retired tag 12; this wire boundary
-does not change storage formats or remove legacy storage upgrade paths.
+Wire v3 (alpha.56 to alpha.59) and the unreleased v4 used an older,
+uncompacted `SyncMessage` numbering, so tag numbers quoted for those versions
+do not name the variants in the table below. Their boundaries are refused at
+`Hello` like every other version, and their frozen Hello frames are kept only
+as refusal receipts.
 
 Transaction and row-version authors use the native record
 `{account: UUID, identity: {issuer: String, subject: String}}`. System authors
@@ -303,19 +287,20 @@ sequence and the remaining Hello fields are otherwise well formed.
 Postcard enum ordinals are wire data. The wire-protocol v6 baseline freezes these permanent
 discriminants (decimal):
 
-| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`             | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `reserved=14`, `reserved=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27`, `ViewUpdatePart=28`, `reserved=29`, `ReadBarrier=30` |
-| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `reserved=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`             | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `Reserved14=14`, `Reserved15=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27`, `ViewUpdatePart=28`, `Reserved29=29`, `ReadBarrier=30` |
+| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `Reserved2=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 `SyncMessage` tags 0 through 27 keep the compact v5 numbering; v6 retires tags
 14 (`FetchRowVersions`) and 15 (`RowVersionPayloads`) in place and appends
-`ViewUpdatePart` (28), the since retired tag 29 and `ReadBarrier` (30). Tags
+`ViewUpdatePart` (28), `Reserved29` (29, the retired `RetryLater`, reserved
+forever) and `ReadBarrier` (30). Tags
 14, 15 and 29 of
 `SyncMessage` and tag 2 of `KnownStateDeclaration` are retired and MUST reject
 decoding; they have no
