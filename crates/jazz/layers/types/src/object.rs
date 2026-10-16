@@ -79,21 +79,16 @@ mod occurrence {
     /// The root source row is always first. `joined` contains contributing source
     /// rows in the query's declared join order. This is deliberately distinct from
     /// a source [`ObjectId`]: one source row can contribute to more than one output
-    /// occurrence.
+    /// occurrence. Serialization delegates to ResultKey so every identity field
+    /// survives a round trip through the single result-key encoding.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    #[serde(from = "ResultKey", into = "ResultKey")]
     pub struct OutputOccurrenceId {
         pub(super) root: ObjectId,
         pub(super) joined: SmallVec<[ObjectId; 2]>,
         /// Stable typed derivation discriminators keyed by joined-source position.
-        /// Empty for the ordinary row-only identity and omitted from its wire form.
-        // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
-        // ResultKey owns the complete versioned sidecar envelope and must never add
-        // a positional postcard field here.
-        #[serde(skip)]
         union_arms: SmallVec<[(usize, String); 1]>,
-        /// Portable content transaction for a history root. Like union arms,
-        /// this is carried by ResultKey, never the legacy postcard carrier.
-        #[serde(skip)]
+        /// Portable content transaction for a history root.
         root_version: Option<(TxTime, NodeUuid)>,
     }
 
@@ -377,6 +372,18 @@ impl ResultKey {
     }
 }
 
+impl From<OutputOccurrenceId> for ResultKey {
+    fn from(value: OutputOccurrenceId) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ResultKey> for OutputOccurrenceId {
+    fn from(value: ResultKey) -> Self {
+        value.0
+    }
+}
+
 impl From<ObjectId> for ResultKey {
     fn from(value: ObjectId) -> Self {
         Self(OutputOccurrenceId::single_source(value))
@@ -543,45 +550,34 @@ mod tests {
         assert_ne!(typed, plain);
     }
 
+    /// Alice's current, joined, union, and history identities must survive
+    /// direct serialization. This lower-layer test checks that all callers use
+    /// the same complete ResultKey codec, rather than a lossy field subset.
     #[test]
-    fn output_occurrence_postcard_remains_exact_legacy_two_field_wire() {
-        #[derive(Serialize)]
-        struct LegacyOccurrence {
-            root: ObjectId,
-            joined: SmallVec<[ObjectId; 2]>,
-        }
-
+    fn output_occurrence_serializes_through_result_key() {
         let root = ObjectId::from_uuid(Uuid::from_u128(1));
         let joined = ObjectId::from_uuid(Uuid::from_u128(2));
-        let legacy = postcard::to_allocvec(&LegacyOccurrence {
-            root,
-            joined: SmallVec::from_slice(&[joined]),
-        })
-        .expect("encode legacy fixture");
-        let mut golden = vec![16];
-        golden.extend_from_slice(&[0_u8; 15]);
-        golden.push(1);
-        golden.push(1);
-        golden.push(16);
-        golden.extend_from_slice(&[0_u8; 15]);
-        golden.push(2);
-        assert_eq!(legacy, golden, "pin the historical postcard fixture");
-        let current = postcard::to_allocvec(&OutputOccurrenceId::new(root, [joined]))
-            .expect("encode current occurrence");
-        assert_eq!(current, legacy, "row-only postcard bytes are unchanged");
-        assert_eq!(
-            postcard::from_bytes::<OutputOccurrenceId>(&legacy)
-                .expect("decode exact legacy two-field bytes"),
-            OutputOccurrenceId::new(root, [joined])
-        );
-
-        let typed = OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
-            .expect("typed occurrence");
-        assert_eq!(
-            postcard::to_allocvec(&typed).expect("encode legacy occurrence carrier"),
-            legacy,
-            "typed derivation is deliberately not smuggled into the legacy wire struct"
-        );
+        for occurrence in [
+            OutputOccurrenceId::single_source(root),
+            OutputOccurrenceId::new(root, [joined]),
+            OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+                .unwrap(),
+            OutputOccurrenceId::history(root, TxTime(u64::MAX), NodeUuid(Uuid::from_u128(3))),
+        ] {
+            let key = ResultKey::from_occurrence(occurrence.clone());
+            let bytes = postcard::to_allocvec(&occurrence).unwrap();
+            assert_eq!(bytes, postcard::to_allocvec(&key).unwrap());
+            assert_eq!(
+                postcard::from_bytes::<OutputOccurrenceId>(&bytes).unwrap(),
+                occurrence
+            );
+            let json = serde_json::to_value(&occurrence).unwrap();
+            assert_eq!(json, serde_json::to_value(&key).unwrap());
+            assert_eq!(
+                serde_json::from_value::<OutputOccurrenceId>(json).unwrap(),
+                occurrence
+            );
+        }
     }
 
     #[test]

@@ -648,9 +648,11 @@ decoder or storage migration is required.
 
 Public subscription transports MUST carry the opaque versioned `ResultKey`
 sidecar aligned with added, updated, and removed rows. They MUST validate the
-alignment and key encoding before applying a delta. Serializing the legacy
-two-field `OutputOccurrenceId` alone is insufficient because its byte-compatible
-form intentionally does not carry typed union-arm or history-version discriminators.
+alignment and key encoding before applying a delta. Direct serialization of
+`OutputOccurrenceId` MUST delegate to `ResultKey` and preserve union-arm and
+history-version discriminators. There is no separate field-based occurrence
+encoding or typed-row member variant. The retired two-field representation is
+not supported.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`

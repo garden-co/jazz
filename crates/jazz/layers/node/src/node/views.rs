@@ -227,7 +227,7 @@ fn content_row_members_for_bundle(
         .filter(|member| member.as_row().is_some())
         .map(|member| {
             member.as_row().ok_or(Error::InvalidStoredValue(match member {
-                ResultMemberEntry::Row(_) | ResultMemberEntry::TypedRow { .. } => context,
+                ResultMemberEntry::Row(_) => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
                 }

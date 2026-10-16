@@ -300,8 +300,11 @@ The shared `result-key.json` fixture pins a history key including the full
 Result keys are ephemeral binding values, not persisted data or active peer
 messages. Rust and TypeScript migrate together to this one format, rejecting
 previous encodings. No compatibility decoder or database migration is needed.
-Stored row/history bytes, the active peer source-closure protocol, and the
-legacy serialized `OutputOccurrenceId` carrier are unchanged. Binding-codec
+Stored row/history bytes and the active peer source-closure protocol are
+unchanged. Direct `OutputOccurrenceId` serialization delegates to `ResultKey`,
+including inside removed rows and internal result members. The old lossy
+`(root, joined)` encoding and redundant `TypedRow` member variant are removed;
+there is no compatibility reader for those retired representations. Binding-codec
 support alone does not enable history queries in the TypeScript API or history
 subscriptions.
 
