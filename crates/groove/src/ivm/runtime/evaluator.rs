@@ -1944,9 +1944,9 @@ impl TickEvaluator<'_> {
                 scope: self.context.scope,
                 input: node,
             };
-            // A stored arrangement holds no buckets between evaluations, so a
-            // rebuild that scans all of them must rebuild it too. One probed
-            // by another input's keys is read from storage instead.
+            // A stored arrangement may not hold every bucket, so a rebuild
+            // that scans all of them must rebuild it too. One probed by
+            // another input's keys is read from storage instead.
             self.arrangement_states.get(&key).is_none_or(|state| {
                 self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
                     && state.value().probe_plan().is_some()
@@ -3183,6 +3183,9 @@ impl TickEvaluator<'_> {
         }
         // The copy, not the shared state, saw this kernel's reads.
         arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -3319,6 +3322,9 @@ impl TickEvaluator<'_> {
         }
         // The copy, not the shared state, saw this kernel's reads.
         arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,

@@ -10,6 +10,9 @@
 //!   --bench stored_arrangement_memory --quiet
 //! ```
 //!
+//! `JAZZ_BUDGET` bounds the bytes stored arrangements keep resident (the
+//! process-wide arrangement budget); unset is unbounded.
+//!
 //! `JAZZ_KJ_PROJECTS` sets the included table's size, `JAZZ_KJ_ROUTES` the
 //! subscriber count (one team each) and `JAZZ_KJ_DOCS_PER_ROUTE` each
 //! team's documents, which reference distinct projects. With
@@ -41,6 +44,10 @@ fn main() {
     let routes = env_usize("JAZZ_KJ_ROUTES", 100);
     let docs_per_route = env_usize("JAZZ_KJ_DOCS_PER_ROUTE", 10);
     let shared = env_usize("JAZZ_KJ_SHARED", 0) != 0;
+    let budget = std::env::var("JAZZ_BUDGET")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("JAZZ_BUDGET is a byte count"));
+    jazz::groove::ivm::set_process_cache_budget(budget);
     assert!(routes * docs_per_route <= projects || shared);
 
     let db = open_db();
@@ -120,6 +127,9 @@ fn main() {
             "included_write_us": included_write_us,
             "unrelated_write_us": unrelated_write_us,
             "new_doc_write_us": new_doc_write_us,
+            "budget": budget,
+            "resident_bytes": stats.stored_arrangement_resident_bytes,
+            "resident_bytes_after_writes": stats_after_writes.stored_arrangement_resident_bytes,
             "stored_arrangement_count": stats.stored_arrangement_count,
             "arrangement_count": stats.arrangement_count,
             "arrangement_rows": stats.arrangement_rows,

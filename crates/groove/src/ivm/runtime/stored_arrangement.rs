@@ -10,19 +10,26 @@
 //! in memory, the arrangement node stays shared by every consumer, and
 //! nothing is copied or written back.
 //!
-//! A stored arrangement keeps only its transition (`changes`) and the
-//! buckets its consumers probed for one evaluation. Consumers ask for the
-//! buckets they will read before reading them (`prefetch_stored_buckets`):
-//! a join reads the other side's changed keys, a threshold join and a
-//! grouped consumer every changed key. Storage holds the evaluation's state,
-//! so a probed bucket is the arrangement's current bucket. A Replace
-//! evaluation rebuilds the arrangement in full for that evaluation, as it
-//! does any other.
+//! A stored arrangement's buckets are a cache over storage. Consumers ask
+//! for the buckets they will read before reading them
+//! (`prefetch_stored_buckets`): a join reads the other side's changed keys,
+//! a threshold join and a grouped consumer every changed key. Buckets that
+//! are not resident are read from storage, which holds the evaluation's
+//! state, and stay resident afterwards; resident buckets follow each
+//! transition like a held arrangement's. A Replace evaluation rebuilds the
+//! arrangement in full, leaving every bucket resident.
+//!
+//! The runtime's arrangement budget bounds the resident bytes of all stored
+//! arrangements together, evicting the least recently read buckets after
+//! each install. No budget keeps every bucket read, which costs what a held
+//! arrangement does; a budget of zero keeps none, reading every bucket from
+//! storage; budgets between trade memory for storage reads smoothly.
 
 use super::evaluation_session::StorageRequestKey;
 use super::join::{ArrangementTransition, JoinKey, probed_buckets};
 use super::*;
 use crate::storage::KeyValue;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How to read the buckets of one stored arrangement.
 #[derive(Debug)]
@@ -34,9 +41,16 @@ pub(super) struct StoredArrangementPlan {
     /// version): the read covers the row, and the full key picks the bucket.
     probe_parts: usize,
     root: ProbeNode,
+    /// Set while the runtime has a finite arrangement budget: reads then
+    /// record which resident buckets they used, for eviction.
+    tracks_use: Arc<AtomicBool>,
 }
 
 impl StoredArrangementPlan {
+    pub(super) fn tracks_use(&self) -> bool {
+        self.tracks_use.load(Ordering::Relaxed)
+    }
+
     /// A plan that reads nothing, for tests of the probed state alone.
     #[cfg(test)]
     pub(super) fn reading_nothing() -> Arc<Self> {
@@ -49,6 +63,7 @@ impl StoredArrangementPlan {
                 output: descriptor,
                 inputs: Vec::new(),
             },
+            tracks_use: Arc::default(),
         })
     }
 
@@ -178,6 +193,7 @@ pub(super) fn plan_stored_arrangement(
     graph: &IvmGraph,
     schema: &DatabaseSchema,
     arrange: NodeId,
+    tracks_use: Arc<AtomicBool>,
 ) -> Option<StoredArrangementPlan> {
     let descriptor = &graph.node(arrange)?.descriptor;
     let OpType::Arrange(op) = &descriptor.operator else {
@@ -215,6 +231,7 @@ pub(super) fn plan_stored_arrangement(
         fields: op.fields.clone(),
         probe_parts,
         root,
+        tracks_use,
     })
 }
 
@@ -534,7 +551,7 @@ impl TickEvaluator<'_> {
         let plan = Arc::clone(state.probe_plan()?);
         let mut missing = keys
             .into_iter()
-            .filter(|key| !state.is_probed(key))
+            .filter(|key| !state.is_known(key))
             .collect::<Vec<_>>();
         missing.sort_unstable();
         missing.dedup();
