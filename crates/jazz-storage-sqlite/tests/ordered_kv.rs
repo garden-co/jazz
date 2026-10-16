@@ -107,7 +107,7 @@ fn class_layout_v3_writes_exact_sqlite_marker_and_mapped_key_receipt() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout.sqlite");
-        let logical_cf = "jazz_albums_history";
+        let logical_cf = "jazz_physical_258_history";
         let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(
@@ -135,19 +135,7 @@ fn class_layout_v3_writes_exact_sqlite_marker_and_mapped_key_receipt() {
             .unwrap();
         assert_eq!(marker, b"class-cf-v3");
 
-        let mut registry_key = 0u32.to_be_bytes().to_vec();
-        registry_key.extend_from_slice(logical_cf.as_bytes());
-        let table_id: Vec<u8> = connection
-            .query_row(
-                "SELECT kv.v FROM kv JOIN column_families ON kv.cf = column_families.id \
-                 WHERE column_families.name = ?1 AND kv.k = ?2",
-                rusqlite::params!["__groove_class_meta", registry_key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table_id, 1u32.to_be_bytes());
-
-        let mut expected_key = 1u32.to_be_bytes().to_vec();
+        let mut expected_key = 258u32.to_be_bytes().to_vec();
         expected_key.extend_from_slice(b"row\0key");
         let value: Vec<u8> = connection
             .query_row(
@@ -181,7 +169,7 @@ fn class_layout_v3_reopen_rejects_a_future_marker_without_normalizing_it() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout-future.sqlite");
-        let logical_cf = "jazz_albums_history";
+        let logical_cf = "jazz_physical_258_history";
         let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(

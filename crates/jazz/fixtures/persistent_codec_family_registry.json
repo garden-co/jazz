@@ -149,11 +149,11 @@
         },
         {
           "path": "crates/groove/src/storage/mod.rs",
-          "anchor": "class_table_ids_persist_with_their_first_write_and_survive_reopen"
+          "anchor": "class_table_ids_come_from_catalogue_ids_and_fixed_system_ids"
         },
         {
           "path": "crates/groove/src/storage/mod.rs",
-          "anchor": "class_table_id_registry_rejects_malformed_and_duplicate_entries"
+          "anchor": "class_layout_refuses_families_without_a_table_id_before_storage"
         }
       ]
     },

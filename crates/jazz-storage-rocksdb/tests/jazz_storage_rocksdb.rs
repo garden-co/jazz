@@ -6,7 +6,7 @@ use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 #[futures_test::test]
 async fn class_layout_v3_writes_exact_rocks_marker_and_mapped_key_receipt() {
     let directory = tempfile::tempdir().unwrap();
-    let logical_cf = "jazz_albums_history";
+    let logical_cf = "jazz_physical_258_history";
     let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
     let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let layout = LayoutStorage::new(
@@ -32,15 +32,7 @@ async fn class_layout_v3_writes_exact_rocks_marker_and_mapped_key_receipt() {
         .unwrap(),
         Some(b"class-cf-v3".to_vec())
     );
-    let mut registry_key = 0u32.to_be_bytes().to_vec();
-    registry_key.extend_from_slice(logical_cf.as_bytes());
-    assert_eq!(
-        raw.get("__groove_class_meta".into(), registry_key)
-            .await
-            .unwrap(),
-        Some(1u32.to_be_bytes().to_vec())
-    );
-    let mut expected_key = 1u32.to_be_bytes().to_vec();
+    let mut expected_key = 258u32.to_be_bytes().to_vec();
     expected_key.extend_from_slice(b"row\0key");
     assert_eq!(
         raw.get("__groove_class_history".into(), expected_key)

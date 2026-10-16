@@ -14,8 +14,8 @@
 //! both tables at `Global`; the reader connects after every write settled and
 //! subscribes to both tables. Every store is RocksDB. After close, every
 //! column family is read raw and each entry is attributed to its logical
-//! table (class-CF framing `u32be table id | key`, named through the class
-//! table-id registry) or, in `indices`, to its
+//! table (class-CF framing `u32be table id | key`, where the id is the
+//! catalogue physical table id or a fixed system id) or, in `indices`, to its
 //! `table\0index\0` prefix. Bytes are key plus value.
 
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
@@ -125,17 +125,26 @@ struct Group {
     value_bytes: usize,
 }
 
-/// Split a class-layout key into its logical table, named through the
-/// class table-id registry, and its logical key. Registry entries themselves
-/// (table id 0) are grouped together.
-fn split_logical(cf: &str, key: &[u8], tables: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
-    if cf.starts_with("__groove_class_") && key.len() >= 4 {
+/// Split a class-layout key into its logical table and its logical key. A
+/// fixed system id names its system family; any other id is a catalogue
+/// physical table id, whose family the class names.
+fn split_logical(cf: &str, key: &[u8], fixed: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
+    if key.len() >= 4 {
         let id = u32::from_be_bytes(key[..4].try_into().unwrap());
-        if id == 0 {
-            return ("class table-id registry".to_owned(), key[4..].to_vec());
-        }
-        if let Some(name) = tables.get(&id) {
+        if let Some(name) = fixed.get(&id) {
             return (name.clone(), key[4..].to_vec());
+        }
+        let suffix = match cf {
+            "__groove_class_history" => Some("history"),
+            "__groove_class_global_current" => Some("global_current"),
+            "__groove_class_ahead_current" => Some("ahead_current"),
+            "__groove_class_meta" => Some("rejected_versions"),
+            _ => None,
+        };
+        if let Some(suffix) = suffix
+            && u64::from(id) <= jazz::groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID
+        {
+            return (format!("jazz_physical_{id}_{suffix}"), key[4..].to_vec());
         }
     }
     (cf.to_owned(), key.to_vec())
@@ -183,15 +192,14 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
     let families = rocksdb::DB::list_cf(&options, path).expect("list column families");
     let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
         .expect("open RocksDB read-only");
-    let meta = db
-        .cf_handle("__groove_class_meta")
-        .expect("class meta family");
-    let tables = db
-        .iterator_cf(&meta, rocksdb::IteratorMode::Start)
-        .filter_map(|entry| {
-            let (key, value) = entry.expect("raw entry");
-            jazz::groove::storage::decode_class_table_id_entry(&key, &value)
-                .map(|(name, id)| (id, name.to_owned()))
+    let tables = schema()
+        .lower_to_groove()
+        .column_families()
+        .into_iter()
+        .filter_map(|name| {
+            jazz::groove::storage::class_table_id(&name)
+                .ok()
+                .map(|id| (id, name))
         })
         .collect::<BTreeMap<_, _>>();
     let mut names = BTreeMap::new();

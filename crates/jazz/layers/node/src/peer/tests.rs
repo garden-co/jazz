@@ -57,22 +57,6 @@ fn cancelled_cold_authorization_support_restores_peer_identity() {
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&refs);
     let eviction = storage.clone();
-    // A table that was never written has no class table id, so its reads are
-    // answered without storage. One settled row, written by an earlier open of
-    // the same store, makes the hydration read cold.
-    let mut writer = crate::local_executor::block_on(NodeState::new_with_shared_test_catalogue(
-        node(0xe3),
-        schema.clone(),
-        storage.clone(),
-    ))
-    .unwrap();
-    let cold_tx = writer
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0xe5), 1_000).cells(title_cells("cold")),
-        )
-        .unwrap();
-    accept_global(&mut writer, cold_tx, 1);
-    drop(writer);
     let mut state = crate::local_executor::block_on(NodeState::new_with_shared_test_catalogue(
         node(0xe3),
         schema.clone(),

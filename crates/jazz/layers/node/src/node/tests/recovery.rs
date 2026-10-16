@@ -2468,15 +2468,6 @@ fn author_columns_store_dictionary_codes() {
     let families = rocksdb::DB::list_cf(&options, temp_dir.path()).unwrap();
     let db = rocksdb::DB::open_cf_for_read_only(&options, temp_dir.path(), &families, false)
         .unwrap();
-    let meta = db.cf_handle("__groove_class_meta").unwrap();
-    let table_ids = db
-        .iterator_cf(&meta, rocksdb::IteratorMode::Start)
-        .filter_map(|entry| {
-            let (key, value) = entry.unwrap();
-            groove::storage::decode_class_table_id_entry(&key, &value)
-                .map(|(name, id)| (name.to_owned(), id))
-        })
-        .collect::<BTreeMap<_, _>>();
     let mut dictionary = Vec::new();
     // Per table: the stored author codes of each record, in key order.
     let mut codes = BTreeMap::<&str, Vec<Vec<u32>>>::new();
@@ -2488,11 +2479,19 @@ fn author_columns_store_dictionary_codes() {
                 dictionary.push((key.to_vec(), value.to_vec()));
                 continue;
             }
-            let Some((name, table)) = tables.iter().find(|(name, _)| {
-                key.len() > 4
-                    && table_ids
-                        .get(name)
-                        .is_some_and(|id| key[..4] == id.to_be_bytes())
+            // Class table ids are unique per class, so match the class too.
+            let classes = [
+                "__groove_class_meta",
+                "__groove_class_history",
+                "__groove_class_global_current",
+                "__groove_class_ahead_current",
+            ];
+            let Some((name, table)) = tables.iter().zip(classes).find_map(|((name, table), class)| {
+                (family == class
+                    && key.len() > 4
+                    && groove::storage::class_table_id(name)
+                        .is_ok_and(|id| key[..4] == id.to_be_bytes()))
+                .then_some((name, table))
             }) else {
                 continue;
             };

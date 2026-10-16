@@ -40,25 +40,24 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         key: Vec<u8>,
     ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
     {
-        Box::pin(async move {
-            // The class layout frames `jazz_transactions` keys by its class
-            // table id in the shared meta class.
-            let is_transaction_read = cf == "__groove_class_meta"
-                && groove::storage::class_table_id(&self.inner, "jazz_transactions")
-                    .await?
-                    .is_some_and(|id| key.starts_with(&id.to_be_bytes()));
-            if is_transaction_read && let Some(remaining) = self.fail_after_transaction_reads.get()
-            {
-                if remaining == 0 {
-                    self.fail_after_transaction_reads.set(None);
-                    return Err(groove::storage::Error::InvalidStorageLayout(
+        // The class layout frames `jazz_transactions` keys by its fixed class
+        // table id in the shared meta class.
+        let transactions_id = groove::storage::class_table_id("jazz_transactions").unwrap();
+        if cf == "__groove_class_meta"
+            && key.starts_with(&transactions_id.to_be_bytes())
+            && let Some(remaining) = self.fail_after_transaction_reads.get()
+        {
+            if remaining == 0 {
+                self.fail_after_transaction_reads.set(None);
+                return Box::pin(async {
+                    Err(groove::storage::Error::InvalidStorageLayout(
                         "injected transaction read failure".to_owned(),
-                    ));
-                }
-                self.fail_after_transaction_reads.set(Some(remaining - 1));
+                    ))
+                });
             }
-            self.inner.get(cf, key).await
-        })
+            self.fail_after_transaction_reads.set(Some(remaining - 1));
+        }
+        self.inner.get(cf, key)
     }
 
     fn put_if_absent(

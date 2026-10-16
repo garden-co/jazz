@@ -10,7 +10,6 @@ struct TargetedWriteManyFailure {
 }
 
 fn jazz_class_v3_history_physical_target(
-    raw: &impl OrderedKvStorage,
     logical_cf: &str,
     logical_key: &[u8],
 ) -> (String, Vec<u8>) {
@@ -19,9 +18,7 @@ fn jazz_class_v3_history_physical_target(
         "physical history target requires a Jazz history column family"
     );
     let table_id =
-        crate::local_executor::block_on(groove::storage::class_table_id(raw, logical_cf))
-            .expect("class table-id registry is readable")
-            .expect("a written history family has a class table id");
+        groove::storage::class_table_id(logical_cf).expect("history families have a table id");
     let mut physical_key = Vec::with_capacity(4 + logical_key.len());
     physical_key.extend_from_slice(&table_id.to_be_bytes());
     physical_key.extend_from_slice(logical_key);

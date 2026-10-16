@@ -2547,12 +2547,8 @@ fn superseded_writes_store_native_bytes_are_pinned() {
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
     // The class-CF layout stores the family in the shared meta class, each
     // key framed by the family's u32 big-endian class table id.
-    let table_id = crate::local_executor::block_on(groove::storage::class_table_id(
-        &storage,
-        crate::schema::SUPERSEDED_WRITES_STORE,
-    ))
-    .unwrap()
-    .expect("the superseded-writes store has a class table id");
+    let table_id =
+        groove::storage::class_table_id(crate::schema::SUPERSEDED_WRITES_STORE).unwrap();
     let framed = table_id.to_be_bytes().to_vec();
     let entries = crate::local_executor::block_on(async {
         groove::storage::collect_scan(

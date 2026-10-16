@@ -18,7 +18,7 @@ Invariant digest:
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
-- `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v3`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the logical family's durable class table id (u32 big-endian, 1 through 2^24-1) followed by the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. A family's id is recorded in `__groove_class_meta` under `u32be(0) | utf8(family)` in the same atomic batch as the first committed entry framed with it; ids are never reassigned, and a registry entry that is malformed, names an unframed family, or repeats an id fails closed before logical access. Missing, malformed, old (`class-cf-v1`, `class-cf-v2`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
+- `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v3`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the logical family's class table id (u32 big-endian, at most 2^24-1) followed by the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. The id is derived from the family name alone: a per-table family `jazz_physical_{id}_{history|global_current|ahead_current|rejected_versions}` carries its catalogue physical table id (at most 2^24-257), each fixed Jazz system family has a static id above that range, and an operation on any other mapped family fails closed before storage access. Missing, malformed, old (`class-cf-v1`, `class-cf-v2`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -388,10 +388,9 @@ empty class store is not a legacy logical-family store.
 For a mapped logical family `L` and its logical key `K`, the physical key is
 exactly `u32be(id(L)) | K`, except in `__groove_class_indices`: its classifier
 admits only the one logical family `indices`, so its physical key is exactly
-`K`. `id(L)` is the class table id assigned to `L`, unique across every class
-family of the store. Ids are assigned upward from 1, at most `2^24 - 1`, so the
-first byte of every framed key is `0x00` and no framed key in
-`__groove_class_meta` can equal or prefix the marker key. There is no tag,
+`K`. `id(L)` is the class table id of `L`, at most `2^24 - 1`, so the first
+byte of every framed key is `0x00` and no framed key in `__groove_class_meta`
+can equal or prefix the marker key. There is no tag,
 separator, escaping, checksum, or second table prefix. Prefix/range scans
 frame their logical boundary the same way and strip exactly 4 bytes (zero for
 `indices`) after the physical adapter returns a key, so two logical families
@@ -399,24 +398,40 @@ cannot alias even when one name is a prefix of the other. The layout validates
 a logical family against the portable no-NUL/`u16::MAX` UTF-8 bound on every
 mapped operation.
 
-The table-id registry is part of the same layout. `__groove_class_meta` holds
-one entry per assigned id: key `u32be(0) | utf8(L)`, value `u32be(id(L))`. Id 0
-frames no family, so the registry is exactly the `00 00 00 00` prefix of that
-family. An id is assigned when `L` first receives a set and becomes durable in
-the same atomic batch as that set: until a batch carrying the registry entry is
-known to have committed, every batch that writes under the id carries the
-entry again (an idempotent set). A conditional `put_if_absent`, which has no
-batch form, writes the registry entry in its own batch first. Reads, scans,
-deletes, and compare operations of a family with no id answer "absent" and
-assign none. Open loads the whole registry before any logical access and fails
-closed on a key that is not UTF-8, a family that fails name validation or maps
-to no framed class, a value that is not exactly four bytes in `1..=2^24-1`, or
-an id assigned twice. An assignment whose batch never committed leaves no
-durable entry framed with its id, so a later process may assign that number
-again. The registry assumes the store's single-writer ownership that every
-epoch-1 adapter already requires. The exact marker, classifier, order, key
-grammar, and registry are part of epoch 1 (`INV-STORAGE-35`); changing any
-requires a new storage epoch rather than a fallback decoder.
+Class table ids are derived from the family name, so the layout stores no id
+registry and every family's keys are framed the same way before and after its
+first write. A per-table family is spelled exactly
+`jazz_physical_{id}_{suffix}` with `id` in unsigned decimal (no sign, no
+leading zero except `0` itself) and `suffix` one of `history`,
+`global_current`, `ahead_current`, or `rejected_versions`; its class table id
+is the catalogue physical table id `id`, which Jazz allocates at schema ingest
+and refuses above `2^24 - 257`. The four suffixes land in four different
+classes, so one catalogue id never frames two families of one class. The
+fixed Jazz system families have static ids above every catalogue id:
+
+| family                            | id           |
+| --------------------------------- | ------------ |
+| `jazz_nodes`                      | `0x00FFFF01` |
+| `jazz_schema_versions`            | `0x00FFFF02` |
+| `jazz_catalogue`                  | `0x00FFFF03` |
+| `jazz_transactions`               | `0x00FFFF04` |
+| `jazz_pending_transactions`       | `0x00FFFF05` |
+| `jazz_tx_provenance`              | `0x00FFFF06` |
+| `jazz_tx_touched_rows`            | `0x00FFFF07` |
+| `jazz_rejected_transactions`      | `0x00FFFF08` |
+| `jazz_history_horizon`            | `0x00FFFF09` |
+| `jazz_authority_policy_bindings`  | `0x00FFFF0A` |
+| `jazz_subscription_watermarks_v1` | `0x00FFFF0B` |
+| `jazz_local_row_availability_v1`  | `0x00FFFF0C` |
+| `jazz_superseded_writes_v1`       | `0x00FFFF0D` |
+| `jazz_global_changes`             | `0x00FFFF0E` |
+
+Any other classified family (for example a name with a different suffix, a
+padded id, or an id above the catalogue range) has no class table id: every
+read, scan, write, or compare on it fails closed with `InvalidStorageLayout`
+before storage access. The exact marker, classifier, order, key grammar, and id
+assignment are part of epoch 1 (`INV-STORAGE-35`); changing any requires a new
+storage epoch rather than a fallback decoder.
 
 SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
 `user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
