@@ -672,6 +672,29 @@ async fn variant_payload_fields_keep_their_interning() {
     let physical = table.storage_record_schema_for_variant(2).unwrap();
     assert_eq!(physical.bind(payload).get("by").unwrap(), Value::U32(0));
     assert_eq!(dictionary_entries(&storage).await.len(), 1);
+
+    // The database serves the same logical descriptors from its codec cache:
+    // repeated lookups build nothing, and an unknown variant is `None`.
+    assert_eq!(
+        database.table_record_descriptor("events", 1).unwrap(),
+        Some(first)
+    );
+    assert_eq!(
+        database.table_record_descriptor("events", 2).unwrap(),
+        Some(second)
+    );
+    crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+    for _ in 0..3 {
+        assert_eq!(
+            database.table_record_descriptor("events", 2).unwrap(),
+            Some(second)
+        );
+    }
+    assert_eq!(
+        crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
+        0
+    );
+    assert_eq!(database.table_record_descriptor("events", 9).unwrap(), None);
 }
 
 /// Contract: schemas that place an interned column where Groove cannot
