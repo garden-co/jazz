@@ -1586,7 +1586,7 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
 };
 
 /** Read-only query over locally retained accepted content versions.
- * Start with one exact row ID;
+ * Bound the query with an exact row ID or an explicit `id.in` list;
  * joins, transaction-ID predicates, remote coverage and branched tables are not supported yet.
  */
 export interface HistoryQuery<

@@ -68,6 +68,92 @@ describe("TS Query API history (connected client)", () => {
     };
   }
 
+  it("reads each selected row's versions once even when IDs repeat", async () => {
+    const a = await insertNote("a1");
+    const b = await insertNote("b1");
+    await insertNote("unrelated");
+    await db.update(app.notes, a.id, { title: "a2" }).wait({ tier: "global" });
+    const rows = await db.all(
+      app.notes.history
+        .where({ id: { in: [a.id, b.id, a.id] } })
+        .orderBy("title")
+        .select("title"),
+    );
+    expect(rows).toEqual([
+      { id: a.id, title: "a1" },
+      { id: a.id, title: "a2" },
+      { id: b.id, title: "b1" },
+    ]);
+  });
+
+  it("returns an empty query and subscription for an empty ID list", async () => {
+    await insertNote();
+    const query = app.notes.history.where({ id: { in: [] } });
+    expect(await db.all(query)).toEqual([]);
+    const latest = watch(query);
+    await expect.poll(latest).toEqual([]);
+  });
+
+  it("orders and paginates across the combined histories", async () => {
+    const a = await insertNote("a");
+    const b = await insertNote("b");
+    await db.update(app.notes, a.id, { title: "d" }).wait({ tier: "global" });
+    await db.update(app.notes, b.id, { title: "c" }).wait({ tier: "global" });
+    expect(
+      await db.all(
+        app.notes.history
+          .where({ id: { in: [a.id, b.id] } })
+          .orderBy("title")
+          .offset(1)
+          .limit(2)
+          .select("title"),
+      ),
+    ).toEqual([
+      { id: b.id, title: "b" },
+      { id: b.id, title: "c" },
+    ]);
+  });
+
+  it("subscribes to new versions of every selected row", async () => {
+    const a = await insertNote("a1");
+    const b = await insertNote("b1");
+    const latest = watch(
+      app.notes.history
+        .where({ id: { in: [a.id, b.id] } })
+        .orderBy("title")
+        .select("title"),
+    );
+    await expect.poll(latest).toEqual([
+      { id: a.id, title: "a1" },
+      { id: b.id, title: "b1" },
+    ]);
+    await db.update(app.notes, a.id, { title: "a2" }).wait({ tier: "global" });
+    await db.update(app.notes, b.id, { title: "b2" }).wait({ tier: "global" });
+    await expect.poll(latest).toEqual([
+      { id: a.id, title: "a1" },
+      { id: a.id, title: "a2" },
+      { id: b.id, title: "b1" },
+      { id: b.id, title: "b2" },
+    ]);
+  });
+
+  it("observes a selected row that did not exist when subscribed", async () => {
+    const a = await insertNote("a");
+    const futureId = "00000000-0000-4000-8000-000000000001";
+    const latest = watch(
+      app.notes.history
+        .where({ id: { in: [a.id, futureId] } })
+        .orderBy("title")
+        .select("title"),
+    );
+    await expect.poll(latest).toEqual([{ id: a.id, title: "a" }]);
+    await db.upsert(app.notes, futureId, { title: "b", done: false }).wait({ tier: "global" });
+    await expect.poll(latest).toEqual([
+      { id: a.id, title: "a" },
+      { id: futureId, title: "b" },
+    ]);
+  });
+
   it("returns typed content and transaction metadata for an accepted version", async () => {
     const startedAt = Date.now();
     const note = await insertNote();
@@ -175,10 +261,10 @@ describe("TS Query API history (connected client)", () => {
     ).rejects.toThrow(new Error("Remote history queries are not supported yet"));
   });
 
-  it("rejects history reads without an exact row id", async () => {
+  it("rejects history reads without a bounded row id constraint", async () => {
     await expect(db.all(app.notes.history)).rejects.toMatchObject({
       message:
-        "Query: unsupported relation query: Reading history without an exact id equality constraint is not supported in history queries yet",
+        "Query: unsupported relation query: Reading history without an id equality or IN constraint is not supported in history queries yet",
       code: "query",
     });
   });
@@ -300,10 +386,10 @@ describe("TS Query API history (connected client)", () => {
     expect(await db.all(query.where({ $acceptedAt: { gte: new Date(8e15) } }))).toEqual([]);
   });
 
-  it("rejects application filters without an exact id constraint", async () => {
+  it("rejects application filters without a bounded id constraint", async () => {
     await expect(db.all(app.notes.history.where({ title: "first" }))).rejects.toMatchObject({
       message:
-        "Query: unsupported relation query: Reading history without an exact id equality constraint is not supported in history queries yet",
+        "Query: unsupported relation query: Reading history without an id equality or IN constraint is not supported in history queries yet",
       code: "query",
     });
   });

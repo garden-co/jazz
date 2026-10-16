@@ -401,23 +401,27 @@ fn validate_query_with_schema_version_as(
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
 impl Query {
-    /// A conjunctive exact row constraint bounds the history source.
+    /// A conjunctive finite row constraint bounds a primary-key source.
     #[doc(hidden)]
-    pub fn history_row_operand(&self) -> Option<&Operand> {
-        fn exact_id(predicate: &Predicate) -> Option<&Operand> {
+    pub fn primary_key_operands(&self) -> Option<Vec<&Operand>> {
+        fn bounded_id(predicate: &Predicate) -> Option<Vec<&Operand>> {
+            let supplied =
+                |value: &Operand| matches!(value, Operand::Literal(_) | Operand::Param(_));
             match predicate {
-                Predicate::All(predicates) => predicates.iter().find_map(exact_id),
+                Predicate::All(predicates) => predicates.iter().find_map(bounded_id),
+                // Validation canonicalizes an empty IN list to false.
+                Predicate::Any(predicates) if predicates.is_empty() => Some(Vec::new()),
                 Predicate::Eq(Operand::Column(column), value)
-                | Predicate::Eq(value, Operand::Column(column))
-                    if column == "id"
-                        && matches!(value, Operand::Literal(_) | Operand::Param(_)) =>
-                {
-                    Some(value)
+                | Predicate::Eq(value, Operand::Column(column)) => {
+                    (column == "id" && supplied(value)).then(|| vec![value])
+                }
+                Predicate::In(Operand::Column(column), values) => {
+                    (column == "id" && values.iter().all(supplied)).then(|| values.iter().collect())
                 }
                 _ => None,
             }
         }
-        self.filters.iter().find_map(exact_id)
+        self.filters.iter().find_map(bounded_id)
     }
 }
 
@@ -446,16 +450,29 @@ fn validate_history_query(
         || !query.inherits.is_empty()
         || !query.policy_branches.is_empty()
         || query.relation.is_some()
-        || query.aggregate.is_some()
     {
-        return Err(unsupported("joins, relationships, or aggregates"));
+        return Err(unsupported("joins or relationships"));
+    }
+    if let Some(aggregate) = &query.aggregate
+        && aggregate
+            .group_by
+            .iter()
+            .chain(
+                aggregate
+                    .aggregates
+                    .iter()
+                    .filter_map(|output| output.column.as_ref()),
+            )
+            .any(|column| column.starts_with('$'))
+    {
+        return Err(unsupported("aggregates over history metadata"));
     }
     if !history.source_table().branch_by.is_empty() {
         return Err(unsupported("branched tables"));
     }
-    if query.history_row_operand().is_none() {
+    if query.primary_key_operands().is_none() {
         return Err(unsupported(
-            "history without an exact id equality constraint",
+            "history without an id equality or IN constraint",
         ));
     }
     fn supplied_transaction_id(predicate: &Predicate) -> bool {

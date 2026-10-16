@@ -11,8 +11,8 @@ It is addressable by the ordinary query API wherever a supported table source
 is accepted. `tasks` continues to mean current rows. No public current/history
 source-selector enum or separate history query API is required.
 
-The initial implementation supports filtering, projection, ordering, and live
-subscriptions for one row's history. User queries joining history to current
+The initial implementation supports filtering, projection, ordering, aggregates,
+and live subscriptions for a bounded set of rows' histories. User queries joining history to current
 tables or other history relations are deferred and receive explicit
 unsupported-pattern errors. History relations expose retained content versions,
 not deletion/restore events or a transaction audit log. They enumerate versions
@@ -35,7 +35,7 @@ adds a result; losing current read permission retracts the row's history.
   Trusted local subscriptions use `Db::subscribe_for_identity` with
   `ReadTier::LocalOnly`. Client-local reads expose locally retained accepted history without evaluating
   policies. Peer history delivery remains deferred.
-- An exact `id` equality constraint, additional application-field predicates, and
+- An exact `id` equality or explicit `id IN (...)` constraint, additional application-field predicates, and
   ordering by application fields or `$acceptedAt`. Branched tables remain rejected.
 - Accepted, settled content images. Pending authored patches are not exposed as
   complete historical images, and rejected transactions are excluded. Requests
@@ -43,6 +43,12 @@ adds a result; losing current read permission retracts the row's history.
 - No user-authored joins involving history, including relationship traversals
   or includes that would introduce another source. Internal policy joins remain
   necessary and use the ordinary authorization machinery.
+- Rust queries support count, sum, average, minimum, maximum, and grouping over
+  application columns across the selected rows' histories. Filters apply before aggregation;
+  identical versions contribute separately. Aggregate results use ordinary
+  synthetic group identities in both queries and subscriptions. Aggregates over
+  metadata columns remain explicitly unsupported. The typed TypeScript DSL does
+  not yet expose aggregate builders for either current or history tables.
 - Existing history access paths only; no new persistent history indexes.
 - History is read-only: insert, update, delete, schema declaration, and policy
   declaration against a history relation are rejected.
@@ -50,6 +56,10 @@ adds a result; losing current read permission retracts the row's history.
 History contains only settled versions: an offline edit does not
 appear in this relation until accepted and settled, even if it is already
 visible in the ordinary current-row view.
+
+An empty ID list produces an empty history source without storage reads. Duplicate
+IDs do not duplicate versions. Each selected row retains its own current-row
+visibility and authorization checks.
 
 History completeness is not required. Queries return the locally retained,
 accepted content versions. Trusted serving reads apply current-row authorization. A partial node
@@ -211,13 +221,13 @@ hydrating history. Apply remaining predicates to that bounded row history.
 Sequence bounds should narrow the scan when their key position permits it.
 The initial admission rules are:
 
-| Shape                                                          | Initial admission rule                                                         |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| One row's history, optionally filtered and ordered             | Admit using an exact branch/row prefix, with sequence bounds where applicable. |
-| Any user join involving history, even through indexed keys     | Explicitly unsupported in the first slice.                                     |
-| Current-table selection expanded into multiple rows' histories | Explicitly unsupported in the first slice.                                     |
-| History filtered only by an unindexed application field        | Reject if it requires scanning unrelated history.                              |
-| Small limit over otherwise unbounded history                   | Reject; a limit alone does not establish a bounded access path.                |
+| Shape                                                          | Initial admission rule                                                                                                             |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Explicit row IDs, optionally filtered and ordered              | Admit using one exact branch/row prefix per distinct ID. Combine versions before filtering, aggregation, ordering, and pagination. |
+| Any user join involving history, even through indexed keys     | Explicitly unsupported in the first slice.                                                                                         |
+| Current-table selection expanded into multiple rows' histories | Explicitly unsupported in the first slice.                                                                                         |
+| History filtered only by an unindexed application field        | Reject if it requires scanning unrelated history.                                                                                  |
+| Small limit over otherwise unbounded history                   | Reject; a limit alone does not establish a bounded access path.                                                                    |
 
 These rules apply to both reads and live subscriptions. `$transactionId` remains
 selectable, but predicates with user-provided transaction IDs are rejected.
@@ -314,7 +324,7 @@ support does not claim to implement this coverage protocol.
    against `history.tasks`, retaining the original application schema for
    admission. Query-only descriptor resolution adds the two metadata columns;
    no virtual table is deployed or persisted. The read-only handle supports one
-   exact `id` constraint, application-field and `$acceptedAt` predicates, projection,
+   exact `id` or explicit `id IN (...)` constraint, application-field and `$acceptedAt` predicates, projection,
    application-field or `$acceptedAt` ordering, offset and limit. Application
    columns retain their types/transforms; `$transactionId` is
    `TxId` and `$acceptedAt` is `Date`.

@@ -29,14 +29,18 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .strip_prefix(crate::schema::history::HISTORY_PREFIX)
             .ok_or_else(|| unsupported("unknown history source"))?;
         let base_table = self.node.table_in_schema(base_name, schema_version)?;
-        let Some(CurrentAccessPath::PrimaryKey(prefix)) = self.access_paths.get(&request.source)
-        else {
-            return Err(unsupported("history without an exact row access path"));
+        let values = match self.access_paths.get(&request.source) {
+            Some(CurrentAccessPath::PrimaryKey(prefix)) if prefix.len() == 1 => prefix,
+            Some(CurrentAccessPath::PrimaryKeySet(values)) => values,
+            _ => return Err(unsupported("history without a bounded row access path")),
         };
-        let [Value::Uuid(id)] = prefix.as_slice() else {
-            return Err(unsupported("a history row id that is not a bound UUID"));
-        };
-        let row = RowUuid(*id);
+        let rows = values
+            .iter()
+            .map(|value| match value {
+                Value::Uuid(id) => Ok(RowUuid(*id)),
+                _ => Err(unsupported("a history row id that is not a bound UUID")),
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
         // ClientLocal lowering supplies System, just as for ordinary local
         // sources: retained data is not filtered by client-side policy checks.
         // Trusted serving sources retain their PolicyFiltered identity.
@@ -51,64 +55,84 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .read_view
             .source_current_tier(&request.source)
             .ok_or_else(|| unsupported("history at a snapshot cut"))?;
-        let schema = &self
-            .node
-            .catalogue
-            .catalogue_schemas
-            .get(&schema_version)
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-            .schema;
-        let visibility = crate::query::Query::from(base_name)
-            .filter(crate::query::eq(
-                crate::query::col("id"),
-                crate::query::lit(Value::Uuid(row.0)),
-            ))
-            .select(["id"])
-            .validate_with_schema_version(schema, schema_version)?;
-        let binding = visibility.bind(BTreeMap::new())?;
-        // Compile the ordinary authorized point read into the source graph. No
-        // query is executed while preparing history, and permission changes
-        // remain dependencies of the resulting graph.
-        let visibility_request = self
-            .node
-            .current_query_program_request_with_inline_binding_source(
-                &visibility,
-                &binding,
-                tier,
-                identity,
-                CurrentQueryProgramOutput::AuthorizedRows,
-                &ReadViewSpec::default(),
-                QueryAuthorizationMode::TrustedServing,
+        let mut graphs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let schema = &self
+                .node
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema;
+            let visibility = crate::query::Query::from(base_name)
+                .filter(crate::query::eq(
+                    crate::query::col("id"),
+                    crate::query::lit(Value::Uuid(row.0)),
+                ))
+                .select(["id"])
+                .validate_with_schema_version(schema, schema_version)?;
+            let binding = visibility.bind(BTreeMap::new())?;
+            // Compile the ordinary authorized point read into the source graph. No
+            // query is executed while preparing history, and permission changes
+            // remain dependencies of the resulting graph.
+            let visibility_request = self
+                .node
+                .current_query_program_request_with_inline_binding_source(
+                    &visibility,
+                    &binding,
+                    tier,
+                    identity,
+                    CurrentQueryProgramOutput::AuthorizedRows,
+                    &ReadViewSpec::default(),
+                    QueryAuthorizationMode::TrustedServing,
+                )?;
+            let visibility_program =
+                Box::pin(self.node.compile_query_program_request_with_access_paths(
+                    visibility_request,
+                    BTreeMap::from([(
+                        root_source_id(base_name),
+                        CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+                    )]),
+                ))
+                .await?;
+            self.nested_program_dependencies.tables.extend(
+                visibility_program
+                    .lowered
+                    .targeted_refresh_tables
+                    .iter()
+                    .cloned(),
+            );
+            self.nested_program_dependencies.uncertain |=
+                visibility_program.lowered.targeted_refresh_uncertain;
+            let authorized =
+                lowering::lowered_terminal_graph(&visibility_program, "policy.authorized_rows")?
+                    .project(["row_uuid"]);
+            let history = self.node.physical_history_row_source_graph(
+                schema_version,
+                base_name,
+                &BranchKey::default(),
+                row,
             )?;
-        let visibility_program =
-            Box::pin(self.node.compile_query_program_request_with_access_paths(
-                visibility_request,
-                BTreeMap::from([(
-                    root_source_id(base_name),
-                    CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
-                )]),
-            ))
-            .await?;
-        self.nested_program_dependencies.tables.extend(
-            visibility_program
-                .lowered
-                .targeted_refresh_tables
-                .iter()
-                .cloned(),
-        );
-        self.nested_program_dependencies.uncertain |=
-            visibility_program.lowered.targeted_refresh_uncertain;
-        let authorized =
-            lowering::lowered_terminal_graph(&visibility_program, "policy.authorized_rows")?
-                .project(["row_uuid"]);
-        let history = self.node.physical_history_row_source_graph(
-            schema_version,
-            base_name,
-            &BranchKey::default(),
-            row,
-        )?;
-        let history = GraphBuilder::semi_join(history, authorized, ["row_uuid"], ["row_uuid"])
-            .filter(PredicateExpr::gt("seq", Value::U64(0)));
+            graphs.push(GraphBuilder::semi_join(
+                history,
+                authorized,
+                ["row_uuid"],
+                ["row_uuid"],
+            ));
+        }
+        let history = if graphs.is_empty() {
+            // Obtain only the descriptor; no physical source enters this graph.
+            let source = self
+                .node
+                .physical_history_source_graph(schema_version, base_name)?;
+            GraphBuilder::inline_records(
+                self.node.database.graph_output_descriptor(&source)?,
+                Vec::new(),
+            )
+        } else {
+            GraphBuilder::union(graphs)
+        }
+        .filter(PredicateExpr::gt("seq", Value::U64(0)));
         let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
         let history_fields = descriptor_field_names(&history_descriptor)?;
         // Complete received images may omit authored-column metadata. Preserve
@@ -287,7 +311,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             &request.requirements,
         )?;
         Ok(ResolvedSource {
-            stored_column_ids: BTreeMap::new(),
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &base_table)?,
             table_schema: table.into(),
             graph,
             row_shape: SourceRowShape {

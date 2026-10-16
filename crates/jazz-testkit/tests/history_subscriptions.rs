@@ -483,3 +483,352 @@ async fn restore_preserves_session_write_permissions() {
         })
         .await;
 }
+
+/// Alice counts Bob's accepted content versions, including identical values.
+#[tokio::test(flavor = "current_thread")]
+async fn history_count_counts_versions_not_distinct_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let mut query = history(row).count();
+            query.order_by.clear();
+            let rows = alice.query(query, ReadTier::LocalOnly).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(2)));
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice groups Bob's historical titles after filtering, rather than grouping
+/// the current title or collapsing versions with equal values.
+#[tokio::test(flavor = "current_thread")]
+async fn history_grouped_count_filters_version_values() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "first")).unwrap();
+            settled(&bob, tx).await;
+            for title in ["first", "second"] {
+                settled(
+                    &bob,
+                    bob.update(
+                        "tasks",
+                        row,
+                        vec![("title".into(), Value::Text(title.into()))],
+                    )
+                    .unwrap(),
+                )
+                .await;
+            }
+            let mut query = history(row).count().group_by("title");
+            query.order_by.clear();
+            let rows = alice
+                .query(
+                    query.clone().order_by("title", OrderDirection::Asc),
+                    ReadTier::LocalOnly,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].get("title"), Some(&Value::Text("first".into())));
+            assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(2)));
+            assert_eq!(rows[1].get("title"), Some(&Value::Text("second".into())));
+            assert_eq!(rows[1].get("count"), Some(&Value::Timestamp(1)));
+            let filtered = alice
+                .query(
+                    query.filter(eq(
+                        col("title"),
+                        lit(jazz::groove::records::Value::String("first".into())),
+                    )),
+                    ReadTier::LocalOnly,
+                )
+                .await
+                .unwrap();
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].get("count"), Some(&Value::Timestamp(2)));
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's count subscription changes when Bob adds an accepted version.
+/// bob -> server acceptance -> alice's aggregate replacement
+#[tokio::test(flavor = "current_thread")]
+async fn history_count_subscription_tracks_new_versions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            let mut query = history(row).count();
+            query.order_by.clear();
+            let mut stream = alice
+                .subscribe_with_read_tier(query, ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 1);
+            let key = initial.added[0].id.clone();
+            assert_eq!(
+                initial.added[0].row.get("count"),
+                Some(&Value::Timestamp(1))
+            );
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let delta = next(&mut stream).await;
+            assert!(delta.added.is_empty() && delta.removed.is_empty());
+            assert_eq!(delta.updated.len(), 1);
+            assert_eq!(delta.updated[0].id, key);
+            assert_eq!(
+                delta.updated[0].row.as_ref().unwrap().get("count"),
+                Some(&Value::Timestamp(2))
+            );
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's numeric summaries include every accepted value Bob wrote, not just
+/// the current value. All functions consume the same history source.
+#[tokio::test(flavor = "current_thread")]
+async fn history_numeric_aggregates_summarize_version_values() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::query::Aggregate;
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("score", ColumnType::Integer))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob.insert("tasks", row_input!("score" => 3)).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update("tasks", row, vec![("score".into(), Value::Integer(5))])
+                    .unwrap(),
+            )
+            .await;
+            let mut query = history(row).aggregate([
+                Aggregate::sum("score"),
+                Aggregate::avg("score"),
+                Aggregate::min("score"),
+                Aggregate::max("score"),
+            ]);
+            query.order_by.clear();
+            let rows = alice.query(query, ReadTier::LocalOnly).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("sum_score"), Some(&Value::Integer(8)));
+            assert_eq!(rows[0].get("avg_score"), Some(&Value::Double(4.0)));
+            assert_eq!(rows[0].get("min_score"), Some(&Value::Integer(3)));
+            assert_eq!(rows[0].get("max_score"), Some(&Value::Integer(5)));
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's count becomes zero when Bob deletes the current row and returns
+/// when he restores it; neither mutation contributes a content version.
+/// bob -> delete/restore acceptance -> alice's count replacement
+#[tokio::test(flavor = "current_thread")]
+async fn history_count_subscription_tracks_current_visibility() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            let mut query = history(row).count();
+            query.order_by.clear();
+            let mut stream = alice
+                .subscribe_with_read_tier(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut stream).await.added[0].row.get("count"),
+                Some(&Value::Timestamp(1))
+            );
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let deleted = next(&mut stream).await;
+            assert_eq!(
+                deleted.updated[0].row.as_ref().unwrap().get("count"),
+                Some(&Value::Timestamp(0))
+            );
+            settled(&bob, bob.restore("tasks", row, None).unwrap()).await;
+            let restored = next(&mut stream).await;
+            assert_eq!(
+                restored.updated[0].row.as_ref().unwrap().get("count"),
+                Some(&Value::Timestamp(1))
+            );
+            assert_eq!(
+                alice.query(query, ReadTier::LocalOnly).await.unwrap()[0].get("count"),
+                Some(&Value::Timestamp(1))
+            );
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice receives an explicit unsupported error for metadata aggregates instead
+/// of a malformed aggregate result or an internal decoding failure.
+#[tokio::test(flavor = "current_thread")]
+async fn history_metadata_aggregates_are_explicitly_unsupported() {
+    tokio::task::LocalSet::new().run_until(async {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+            .allow_all().build();
+        let (_server, alice) = backend(schema).await;
+        let row = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
+        for mut query in [history(row).min("$acceptedAt"), history(row).count().group_by("$acceptedAt")] {
+            query.order_by.clear();
+            let error = alice.query(query, ReadTier::LocalOnly).await.unwrap_err();
+            assert_eq!(error.to_string(), "Query error: Query: unsupported relation query: Reading aggregates over history metadata is not supported in history queries yet");
+        }
+        alice.shutdown().await.unwrap();
+    }).await;
+}
+
+/// Alice counts Bob's versions across a finite list of rows. Repeated IDs
+/// must not multiply contributions, and unrelated rows must not contribute.
+#[tokio::test(flavor = "current_thread")]
+async fn history_count_combines_selected_rows_without_duplicate_contributions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (a, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            let (b, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            let (_, _, tx) = bob
+                .insert("tasks", row_input!("title" => "unrelated"))
+                .unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    a,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let query = Query::from("history.tasks")
+                .filter(jazz::query::in_list(
+                    col("id"),
+                    [a, b, a].map(|id| lit(jazz::groove::records::Value::Uuid(*id.uuid()))),
+                ))
+                .count();
+            let rows = alice
+                .query(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(3)));
+            let mut stream = alice
+                .subscribe_with_read_tier(query, ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut stream).await.added[0].row.get("count"),
+                Some(&Value::Timestamp(3))
+            );
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    b,
+                    vec![("title".into(), Value::Text("new".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                next(&mut stream).await.updated[0]
+                    .row
+                    .as_ref()
+                    .unwrap()
+                    .get("count"),
+                Some(&Value::Timestamp(4))
+            );
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice receives the ordinary zero count for an empty set of historical rows.
+#[tokio::test(flavor = "current_thread")]
+async fn history_empty_id_list_has_zero_count() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, alice) = backend(schema).await;
+            let query = Query::from("history.tasks")
+                .filter(jazz::query::in_list(col("id"), []))
+                .count();
+            let rows = alice
+                .query(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(0)));
+            let mut stream = alice
+                .subscribe_with_read_tier(query, ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut stream).await.added[0].row.get("count"),
+                Some(&Value::Timestamp(0))
+            );
+            alice.shutdown().await.unwrap();
+        })
+        .await;
+}

@@ -4198,6 +4198,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::Strict,
+            CurrentQueryProgramOutput::MaintainedView,
             false,
             progress_waker,
         )
@@ -4309,6 +4310,7 @@ where
                 settled_binding_view,
                 Some(authority_result_key.clone()),
                 PreparedClaimBindingMode::Strict,
+                CurrentQueryProgramOutput::MaintainedView,
                 false,
                 progress_waker,
             )
@@ -4476,6 +4478,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
+            CurrentQueryProgramOutput::MaintainedView,
             false,
             progress_waker,
         )
@@ -4510,6 +4513,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         settled_authority_result_key: Option<AuthorityResultKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        output: CurrentQueryProgramOutput,
         pending_overlay: bool,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
@@ -4567,7 +4571,7 @@ where
             &binding,
             tier,
             identity,
-            CurrentQueryProgramOutput::MaintainedView,
+            output,
             read_view,
             settled_binding_view,
             authorization_mode,

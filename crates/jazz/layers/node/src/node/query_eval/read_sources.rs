@@ -295,6 +295,7 @@ pub(super) struct CurrentIndexCandidateFilter {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
+    PrimaryKeySet(Vec<Value>),
     /// First-result Global listing in physical row-UUID order. The caller
     /// re-proves the page after policy and deletion filtering before returning.
     PrimaryKeyPage {
@@ -392,7 +393,7 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::LocalAvailabilityInput))
     }
 
-    fn stored_column_ids_for_read_table(
+    pub(super) fn stored_column_ids_for_read_table(
         &self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -2804,13 +2805,13 @@ where
         access_path: CurrentAccessPath,
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
-            CurrentAccessPath::PrimaryKey(prefix) => {
+            path @ (CurrentAccessPath::PrimaryKey(_) | CurrentAccessPath::PrimaryKeySet(_)) => {
                 if self.count_access_path_metrics {
                     self.node.query_engine_read_metrics.source_primary_key_scans += 1;
                 }
-                Ok(Some(selected_visible_current_primary_key_graph(
-                    table, tier, prefix,
-                )))
+                selected_visible_current_primary_key_graph(table, tier, &path)
+                    .map(Some)
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
             }
             CurrentAccessPath::PrimaryKeyPage { cap } => {
                 if tier != DurabilityTier::Global {
@@ -3059,6 +3060,9 @@ where
     /// access path, when one bounds a branch layer (SPEC 11 §11.2).
     fn branch_layer_access(&self, request: &SourceRequest) -> BranchLayerAccess {
         match self.access_paths.get(&request.source) {
+            Some(CurrentAccessPath::PrimaryKeySet(values)) => {
+                BranchLayerAccess::PrimaryKeySet(values.clone())
+            }
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                 BranchLayerAccess::PrimaryKey(prefix.clone())
             }
@@ -3415,6 +3419,9 @@ where
         self.record_branch_layer_read(|metrics| match access {
             BranchLayerAccess::Full => metrics.source_full_scans += 1,
             BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
+            BranchLayerAccess::PrimaryKeySet(values) => {
+                metrics.source_primary_key_scans += refs * keys * values.len() as u64
+            }
             BranchLayerAccess::Index { intersections, .. } => {
                 // Each ref under the prefix; the local delta's mask over
                 // origin is its presence (read whole or looked up by
@@ -3437,6 +3444,17 @@ where
                             branch_key,
                             None,
                         ),
+                    BranchLayerAccess::PrimaryKeySet(values) => this
+                        .node
+                        .physical_current_branch_source_graph_with_projection_target(
+                            this.read_view.read_schema,
+                            &request.source.table,
+                            class,
+                            projection_target.clone(),
+                            branch_key,
+                            None,
+                        )
+                        .and_then(|rows| lookup_by_row_id(rows, primary_key_rows(values)?)),
                     BranchLayerAccess::PrimaryKey(prefix) => this
                         .node
                         .physical_current_branch_source_graph_with_projection_target(
@@ -3543,7 +3561,16 @@ where
         let fields = std::iter::once("branch_key".to_owned())
             .chain(register_storage_field_names())
             .collect::<Vec<_>>();
+        let selected_ids = match access {
+            BranchLayerAccess::PrimaryKeySet(values) => Some(
+                primary_key_rows(values)
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
+            ),
+            _ => None,
+        };
+        let row_ids = row_ids.or(selected_ids.as_ref());
         let scan = match access {
+            BranchLayerAccess::PrimaryKeySet(_) => None,
             BranchLayerAccess::PrimaryKey(prefix) => Some(row_prefix_scan(prefix)),
             BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => {
                 if row_ids.is_none() {
@@ -3611,6 +3638,23 @@ where
             if tier == DurabilityTier::Global {
                 let projection_target = self.current_projection_target(request, read_table)?;
                 let content = match self.access_paths.get(&request.source).cloned() {
+                    Some(CurrentAccessPath::PrimaryKeySet(values)) => {
+                        if self.count_access_path_metrics {
+                            self.node.query_engine_read_metrics.source_primary_key_scans +=
+                                values.len() as u64;
+                        }
+                        self.node
+                            .physical_current_source_graph_with_projection_target(
+                                self.read_view.read_schema,
+                                &request.source.table,
+                                PhysicalCurrentClass::Global,
+                                projection_target,
+                            )
+                            .and_then(|rows| lookup_by_row_id(rows, primary_key_rows(&values)?))
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::SchemaProjection)
+                            })?
+                    }
                     Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                         if self.count_access_path_metrics {
                             self.node.query_engine_read_metrics.source_primary_key_scans += 1;
@@ -3722,6 +3766,23 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
             let access_path = self.access_paths.get(&request.source).cloned();
             let global = match &access_path {
+                Some(CurrentAccessPath::PrimaryKeySet(values)) => {
+                    if self.count_access_path_metrics {
+                        self.node.query_engine_read_metrics.source_primary_key_scans +=
+                            values.len() as u64;
+                    }
+                    self.node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target.clone(),
+                        )
+                        .and_then(|rows| lookup_by_row_id(rows, primary_key_rows(values)?))
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?
+                }
                 Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                     if self.count_access_path_metrics {
                         self.node.query_engine_read_metrics.source_primary_key_scans += 1;
@@ -3875,6 +3936,15 @@ where
                     return Ok(content.filter(not_deleted_predicate()));
                 }
                 let ahead = match &access_path {
+                    Some(CurrentAccessPath::PrimaryKeySet(values)) => self
+                        .node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target.clone(),
+                        )
+                        .and_then(|rows| lookup_by_row_id(rows, primary_key_rows(values)?)),
                     Some(CurrentAccessPath::PrimaryKey(prefix)) => self
                         .node
                         .physical_current_source_scan_graph_with_projection_target(
@@ -4063,8 +4133,8 @@ fn content_version_current_source_graph(
 fn selected_visible_current_primary_key_graph(
     table: &TableSchema,
     tier: DurabilityTier,
-    prefix: Vec<Value>,
-) -> GraphBuilder {
+    path: &CurrentAccessPath,
+) -> Result<GraphBuilder, Error> {
     let user_fields = table
         .columns
         .iter()
@@ -4084,31 +4154,34 @@ fn selected_visible_current_primary_key_graph(
         "tx_time".to_owned(),
         "tx_node_id".to_owned(),
     ]);
-    let content_scan = static_scan_for_prefix(prefix, 1);
+    let scan = |name: String| match path {
+        CurrentAccessPath::PrimaryKey(prefix) => Ok(GraphBuilder::table_scan(
+            name,
+            static_scan_for_prefix(prefix.clone(), 1),
+        )),
+        CurrentAccessPath::PrimaryKeySet(values) => {
+            lookup_by_row_id(GraphBuilder::table(name), primary_key_rows(values)?)
+        }
+        _ => unreachable!("primary-key source requires a primary-key access path"),
+    };
     let mut image_fields = content_fields.clone();
     image_fields.push("_deletion".to_owned());
     let current = if tier == DurabilityTier::Global {
-        GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-            .project(image_fields)
+        scan(global_current_table_name(&table.name))?.project(image_fields)
     } else {
         GraphBuilder::arg_max_by(
             GraphBuilder::union([
-                GraphBuilder::table_scan(
-                    global_current_table_name(&table.name),
-                    content_scan.clone(),
-                )
-                .project(image_fields.clone()),
-                GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan)
-                    .project(image_fields.clone()),
+                scan(global_current_table_name(&table.name))?.project(image_fields.clone()),
+                scan(ahead_current_table_name(&table.name))?.project(image_fields.clone()),
             ]),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
         .project(image_fields)
     };
-    current
+    Ok(current
         .filter(not_deleted_predicate())
-        .project(content_fields)
+        .project(content_fields))
 }
 
 /// How a branch-view source reads each of its branch layers.
@@ -4119,6 +4192,7 @@ pub(super) enum BranchLayerAccess {
     /// The rows under one row-id prefix, in every layer and in both the
     /// content and deletion registers.
     PrimaryKey(Vec<Value>),
+    PrimaryKeySet(Vec<Value>),
     /// Content rows under one index prefix; see
     /// `live_branch_view_registers` for what stays whole.
     Index {
@@ -4138,6 +4212,22 @@ enum PresenceRead {
     Lookup(GraphBuilder),
     /// Every row id the layer holds.
     Whole,
+}
+
+fn primary_key_rows(values: &[Value]) -> Result<GraphBuilder, Error> {
+    let ids = values
+        .iter()
+        .map(|value| match value {
+            Value::Uuid(id) => Ok(*id),
+            _ => Err(Error::InvalidStoredValue(
+                "primary-key probe must be a UUID",
+            )),
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(GraphBuilder::values(
+        RecordDescriptor::new([("row_uuid", ValueType::Uuid)]),
+        ids.into_iter().map(|id| [Value::Uuid(id)]),
+    )?)
 }
 
 /// The rows of a physical current table source, keyed `(branch_key,
@@ -5034,6 +5124,30 @@ where
                 paths.insert(source, path);
             }
         }
+        // A conjunctive IN predicate can bound primary-key probes just as an
+        // equality does; retain the predicate itself
+        // in the graph so additional/intersecting constraints still apply.
+        for node in input.shape.nodes.values() {
+            if let RowSetExpr::Filter {
+                input: source_node,
+                predicate,
+            } = node
+                && let Some(mut sources) = normalized_program_equalities(
+                    &input.shape,
+                    source_node,
+                    &input.binding,
+                    policy,
+                )?
+            {
+                sources.retain(|source, _| {
+                    matches!(
+                        read_view.source_current_tier(source),
+                        Some(DurabilityTier::Local | DurabilityTier::Global)
+                    )
+                });
+                collect_primary_key_sets(predicate, &input.binding, policy, &sources, &mut paths)?;
+            }
+        }
         Ok(paths)
     }
 
@@ -5199,7 +5313,12 @@ where
                     .unwrap_or(DurabilityTier::None);
                 self.one_shot_access_paths(shape, binding, tier)?
                     .into_iter()
-                    .filter(|(_, path)| matches!(path, CurrentAccessPath::PrimaryKey(_)))
+                    .filter(|(_, path)| {
+                        matches!(
+                            path,
+                            CurrentAccessPath::PrimaryKey(_) | CurrentAccessPath::PrimaryKeySet(_)
+                        )
+                    })
                     .collect()
             }
         };
@@ -5428,6 +5547,26 @@ where
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),
+            );
+        }
+        if !access_paths.contains_key(&root_source_id(&query.table))
+            && let Some(operands) = query.primary_key_operands()
+        {
+            let values = operands
+                .into_iter()
+                .map(|operand| match operand {
+                    Operand::Literal(value) => Ok(value.clone()),
+                    Operand::Param(name) => binding
+                        .values()
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| Error::from(QueryError::MissingParam(name.clone()))),
+                    _ => unreachable!("validated primary-key bound"),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            access_paths.insert(
+                root_source_id(&query.table),
+                CurrentAccessPath::PrimaryKeySet(values),
             );
         }
         self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
@@ -5806,6 +5945,56 @@ where
 /// may retain equality restrictions from an enclosing conjunction. A full
 /// normalized program still runs after the scan, so this is a physical
 /// candidate-selection optimization, never a second evaluator.
+fn collect_primary_key_sets(
+    predicate: &NormalizedPredicateExpr,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+    sources: &BTreeMap<SourceId, BTreeMap<String, Value>>,
+    paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+) -> Result<(), Error> {
+    match predicate {
+        NormalizedPredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_primary_key_sets(predicate, binding, policy, sources, paths)?;
+            }
+        }
+        NormalizedPredicateExpr::In { value, options } => {
+            if let Some((source, field)) = normalized_program_source_field(value)
+                && field == "id"
+                && sources.contains_key(&source)
+                && !matches!(
+                    paths.get(&source),
+                    Some(CurrentAccessPath::PrimaryKey(_) | CurrentAccessPath::PrimaryKeySet(_))
+                )
+            {
+                let values = options
+                    .iter()
+                    .map(|option| normalized_bound_value(option, binding, policy))
+                    .collect::<Result<Option<Vec<_>>, _>>()?;
+                if let Some(values) = values {
+                    paths.insert(source, CurrentAccessPath::PrimaryKeySet(values));
+                }
+            }
+        }
+        NormalizedPredicateExpr::False => {
+            for source in sources.keys() {
+                paths.insert(source.clone(), CurrentAccessPath::PrimaryKeySet(Vec::new()));
+            }
+        }
+        NormalizedPredicateExpr::Or(predicates) if predicates.is_empty() => {
+            collect_primary_key_sets(
+                &NormalizedPredicateExpr::False,
+                binding,
+                policy,
+                sources,
+                paths,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn normalized_program_equalities(
     shape: &NormalizedRowSetShape,
     node_id: &RowSetNodeId,

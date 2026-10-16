@@ -3611,9 +3611,10 @@ impl PublicQueryDecoder {
         let keys = rows
             .iter()
             .map(|row| {
-                if query
-                    .table
-                    .starts_with(crate::schema::history::HISTORY_PREFIX)
+                if query.aggregate.is_none()
+                    && query
+                        .table
+                        .starts_with(crate::schema::history::HISTORY_PREFIX)
                 {
                     let Some(CoreValue::Tuple(version)) =
                         row.application_field(crate::schema::history::TRANSACTION_ID_COLUMN)
