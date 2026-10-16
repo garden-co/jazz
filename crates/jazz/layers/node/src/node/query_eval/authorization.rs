@@ -1598,20 +1598,20 @@ where
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let policy_bytes = postcard::to_allocvec(&(operation, &policies))
+        let policy_bytes = crate::codec::try_encode(&(operation, policies.clone()))
             .map_err(|_| Error::InvalidStoredValue("authorization policy serialization failed"))?;
-        let claim_bytes = postcard::to_allocvec(&claim_values)
+        let claim_bytes = crate::codec::try_encode(&claim_values)
             .map_err(|_| Error::InvalidStoredValue("authorization claims serialization failed"))?;
-        let support_bytes = postcard::to_allocvec(&(
+        let support_bytes = crate::codec::try_encode(&(
             operation,
-            &options,
+            options.clone(),
             subscriptions
                 .iter()
                 .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
                 .collect::<Vec<_>>(),
         ))
         .map_err(|_| Error::InvalidStoredValue("authorization scope serialization failed"))?;
-        let action_bytes = postcard::to_allocvec(action).map_err(|_| {
+        let action_bytes = crate::codec::try_encode(action).map_err(|_| {
             Error::InvalidStoredValue("authorization operation serialization failed")
         })?;
         let operation_key =
@@ -1914,26 +1914,31 @@ mod authorization_scope_compiler_tests {
             patch: BTreeMap::new(),
         };
         let (operation, table_name) = authorization_scope_action(&first);
-        let policy_bytes =
-            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
-                .unwrap();
+        let policy_bytes = crate::codec::try_encode(&(
+            operation,
+            authorization_policy_queries(&table(), operation),
+        ))
+        .unwrap();
         let first_key = authorization_operation_key(
             operation,
             table_name,
             &first,
-            postcard::to_allocvec(&first).unwrap(),
+            crate::codec::try_encode(&first).unwrap(),
         );
         let second_key = authorization_operation_key(
             operation,
             table_name,
             &second,
-            postcard::to_allocvec(&second).unwrap(),
+            crate::codec::try_encode(&second).unwrap(),
         );
         assert_ne!(first_key, second_key);
         assert_eq!(
             policy_bytes,
-            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
-                .unwrap()
+            crate::codec::try_encode(&(
+                operation,
+                authorization_policy_queries(&table(), operation)
+            ))
+            .unwrap()
         );
     }
 

@@ -7151,9 +7151,9 @@ pub enum RelayError {
     #[error("native relay peer message exceeds the logical-message limit: {0}")]
     PeerMessageTooLarge(String),
     #[error("failed to decode native relay peer message: {0}")]
-    DecodePeerMessage(postcard::Error),
+    DecodePeerMessage(jazz::codec::CodecError),
     #[error("failed to encode native relay peer message: {0}")]
-    EncodePeerMessage(postcard::Error),
+    EncodePeerMessage(jazz::codec::CodecError),
     #[error(
         "native relay {direction} queue capacity exceeded ({queued_messages} messages, {queued_bytes} encoded bytes); drain or pump before retrying"
     )]

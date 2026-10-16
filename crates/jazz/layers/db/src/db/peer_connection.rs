@@ -13,6 +13,7 @@ use super::node_runtime::{
     take_relay_upstream_subscription_owner,
 };
 use super::*;
+use crate::codec::WireCodec;
 
 /// Both wire rejections and receiver validation failures terminate the same
 /// downstream usages. A relay has no public SubscriptionList of its own.
@@ -134,13 +135,12 @@ fn relay_upstream_subscription_key(
     // direct downstream claim refresh must therefore get a fresh opaque handle
     // rather than reusing a wire subscription whose authority has retained the
     // old delegated context.
-    let identity = postcard::to_allocvec(&(
-        connection_epoch,
-        downstream,
-        upstream_read_view,
-        policy_binding,
-    ))
-    .expect("relay subscription identity is postcard encodable");
+    let mut identity = Vec::new();
+    connection_epoch.put(&mut identity);
+    downstream.put(&mut identity);
+    upstream_read_view.put(&mut identity);
+    policy_binding.0.put(&mut identity);
+    policy_binding.1.put(&mut identity);
     SubscriptionKey {
         shape_id: downstream.shape_id,
         binding_id: BindingId(uuid::Uuid::new_v5(
@@ -167,8 +167,8 @@ pub fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKe
         .policy_binding
         .as_ref()
         .map_or(coverage.binding_id, |policy| {
-            let identity = postcard::to_allocvec(&(coverage.binding_id, policy))
-                .expect("coverage policy identity is postcard encodable");
+            let mut identity = crate::codec::encode(&coverage.binding_id);
+            policy.put(&mut identity);
             BindingId(uuid::Uuid::new_v5(
                 &COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE,
                 &identity,
@@ -4135,7 +4135,8 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 if pending_catalogue_admission {
                                     let policy_binding = session_claim_binding.expect("admitted above");
-                                    let encoded_bytes = postcard::experimental::serialized_size(&(&subscribe, &policy_binding))
+                                    let encoded_bytes = crate::codec::encoded_len(&subscribe)
+                                        .and_then(|subscribe| Ok(subscribe + crate::codec::encoded_len(&policy_binding.0)? + crate::codec::encoded_len(&policy_binding.1)?))
                                         .map_err(|_| Error::new(ErrorCode::Protocol, "cannot size pending catalogue subscription"))?;
                                     let retained_bytes = pending_catalogue_subscriptions.values()
                                         .map(|pending| pending.encoded_bytes).sum::<usize>();
@@ -6828,10 +6829,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let snapshot = node.borrow().catalogue_snapshot()?;
-    let catalogue_fingerprint = *blake3::hash(
-        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
-    )
-    .as_bytes();
+    let Ok(encoded) = crate::codec::try_encode(&snapshot) else {
+        // An unencodable snapshot is never fingerprinted; sending it reports
+        // the encode error through the transport.
+        return transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error);
+    };
+    let catalogue_fingerprint = *blake3::hash(&encoded).as_bytes();
     if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
         transport
             .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))

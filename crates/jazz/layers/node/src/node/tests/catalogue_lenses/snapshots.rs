@@ -50,9 +50,9 @@ fn trusted_snapshot_carries_policy_source_and_receiver_recompiles_it_after_reope
         .expect("compile authority source");
     let (_authority_dir, authority) = open_node_with_schema(node(0x33), compiled.clone());
     let snapshot = authority.catalogue_snapshot().expect("authority snapshot");
-    let encoded = postcard::to_allocvec(&snapshot).expect("encode source snapshot");
+    let encoded = crate::codec::try_encode(&snapshot).expect("encode source snapshot");
     let snapshot: crate::protocol::CatalogueSnapshot =
-        postcard::from_bytes(&encoded).expect("decode and compile source snapshot");
+        crate::codec::decode_exact(&encoded).expect("decode and compile source snapshot");
 
     let empty = empty_public_test_schema();
     let receiver_dir = tempfile::tempdir().expect("create receiver store");

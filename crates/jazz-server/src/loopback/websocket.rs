@@ -710,7 +710,7 @@ async fn send_frame_batches(socket: &mut WebSocketStream<TcpStream>, frames: &[V
     true
 }
 
-fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, jazz::codec::CodecError> {
     jazz::wire::decode_websocket_frame_batch(bytes)
 }
 

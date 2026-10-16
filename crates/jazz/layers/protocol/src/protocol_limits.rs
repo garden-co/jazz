@@ -110,7 +110,7 @@ pub fn validate_logical_message_len(len: usize) -> Result<(), String> {
 
 /// Validate the shape AST independently of its registration options.
 pub fn validate_shape_ast_size(ast: &ShapeAst) -> Result<(), String> {
-    let size = postcard::experimental::serialized_size(ast)
+    let size = crate::codec::encoded_len(ast)
         .map_err(|err| format!("failed to measure shape AST payload: {err}"))?;
     validate_len("shape AST", size, MAX_SHAPE_AST_BYTES)
 }
@@ -121,8 +121,11 @@ pub fn validate_shape_registration_size(
     ast: &ShapeAst,
     opts: &RegisterShapeOptions,
 ) -> Result<(), String> {
-    let size = postcard::experimental::serialized_size(&(ast, opts))
-        .map_err(|err| format!("failed to measure shape registration payload: {err}"))?;
+    let measure = || -> Result<usize, crate::codec::CodecError> {
+        Ok(crate::codec::encoded_len(ast)? + crate::codec::encoded_len(opts)?)
+    };
+    let size =
+        measure().map_err(|err| format!("failed to measure shape registration payload: {err}"))?;
     validate_len("shape registration", size, MAX_SHAPE_REGISTRATION_BYTES)
 }
 

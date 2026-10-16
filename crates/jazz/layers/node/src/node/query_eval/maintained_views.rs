@@ -194,6 +194,12 @@ pub struct LocalMaintainedViewSubscriptionFootprint {
 /// Encoded postcard size of `value`, the footprint's proxy for its heap
 /// bytes; an unencodable value counts as zero.
 #[cfg(feature = "testing")]
+fn encoded_len(value: &impl crate::codec::WireCodec) -> usize {
+    crate::codec::encoded_len(value).unwrap_or(0)
+}
+
+/// Relation-IR projections keep their postcard form.
+#[cfg(feature = "testing")]
 fn postcard_len(value: &impl serde::Serialize) -> usize {
     postcard::to_allocvec(value).map_or(0, |bytes| bytes.len())
 }
@@ -258,14 +264,14 @@ impl LocalMaintainedViewSubscription {
             .sum::<usize>()
             + self.tables.len() * 96;
         let result_set_bytes =
-            self.result_set.iter().map(postcard_len).sum::<usize>() + self.result_set.len() * 64;
+            self.result_set.iter().map(encoded_len).sum::<usize>() + self.result_set.len() * 64;
         let result_payloads_bytes = self
             .result_payloads
             .iter()
-            .map(|(member, payload)| postcard_len(member) + postcard_len(payload))
+            .map(|(member, payload)| encoded_len(member) + encoded_len(payload))
             .sum::<usize>()
             + self.result_payloads.len() * 96;
-        let program_facts_bytes = self.program_facts.iter().map(postcard_len).sum::<usize>()
+        let program_facts_bytes = self.program_facts.iter().map(encoded_len).sum::<usize>()
             + self.program_facts.len() * 64;
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes

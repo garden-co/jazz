@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use jazz::protocol_limits::PolicyExpressionLimitError;
+use jazz::codec::{Wire, read_bytes, read_u8};
 use jazz::query::policy_limits::PolicyExpressionBudget;
 use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{CmpOp, Operation, OperationPolicy, PolicyExpr, PolicyValue};
@@ -19,98 +19,9 @@ use jazz::tools::public_schema::{
     RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef, RowDescriptor,
     Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
+use jazz::{wire_enum, wire_struct};
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
-
-/// Describes a struct once, as its fields' codecs in wire order, and derives
-/// both its writer and its reader (a [`Wire`] impl) from that description.
-/// An optional `(param: Type)` works as for [`wire_enum!`].
-macro_rules! wire_struct {
-    ($name:ident $(($param:ident: $param_ty:ty))?: $ty:ident {
-        $($field:ident: $codec:expr),+ $(,)?
-    }) => {
-        struct $name$(($param_ty))?;
-
-        impl Wire<$ty> for $name {
-            fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
-                $(let $param: $param_ty = self.0;)?
-                $(Wire::put(&$codec, buf, &value.$field);)+
-            }
-
-            fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
-                $(let $param: $param_ty = self.0;)?
-                Ok($ty { $($field: Wire::get(&$codec, data, offset)?),+ })
-            }
-        }
-    };
-}
-
-/// Describes an enum once, as a tag byte → variant table listing each
-/// variant's field codecs in wire order (`Unit`, `Tuple(binding: codec)` or
-/// `Struct { field: codec, .. }`), and derives both its writer and its reader.
-///
-/// With a context string the table is complete: it implements [`Wire`] and an
-/// unknown tag decodes to `InvalidTypeTag` with that context. With `partial`
-/// it covers only the listed variants, and `get_variant` returns `None` for the
-/// rest, which the caller codes by hand. The caller's encoder matches every
-/// variant exhaustively and names the listed ones in the arm that calls
-/// `put_variant`, so a new variant fails to build until it is placed.
-/// An optional `(param: Type)` makes the codec a value carrying a parameter
-/// that the field codecs can use.
-macro_rules! wire_enum {
-    (partial $($rest:tt)*) => {
-        wire_enum!(@impl [_ => unreachable!("encoder arm names a variant missing from the table"),] $($rest)*);
-    };
-    (@impl [$($fallback:tt)*] $name:ident $(($param:ident: $param_ty:ty))?: $ty:ident
-        $(, $context:literal)? {
-        $($tag:tt => $variant:ident $(($binding:ident: $codec:expr))?
-            $({ $($field:ident: $field_codec:expr),* $(,)? })?),+ $(,)?
-    }) => {
-        struct $name$(($param_ty))?;
-
-        impl $name {
-            fn put_variant(&self, buf: &mut Vec<u8>, value: &$ty) {
-                $(let $param: $param_ty = self.0;)?
-                match value {
-                    $($ty::$variant $(($binding))? $({ $($field),* })? => {
-                        buf.push($tag);
-                        $(Wire::put(&$codec, buf, $binding);)?
-                        $($(Wire::put(&$field_codec, buf, $field);)*)?
-                    })+
-                    $($fallback)*
-                }
-            }
-
-            #[allow(unused_variables)]
-            fn get_variant(
-                &self,
-                tag: u8,
-                data: &[u8],
-                offset: &mut usize,
-            ) -> Result<Option<$ty>, CatalogueEncodingError> {
-                $(let $param: $param_ty = self.0;)?
-                Ok(Some(match tag {
-                    $($tag => $ty::$variant $((Wire::get(&$codec, data, offset)?))?
-                        $({ $($field: Wire::get(&$field_codec, data, offset)?),* })?,)+
-                    _ => return Ok(None),
-                }))
-            }
-        }
-
-        $(impl Wire<$ty> for $name {
-            fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
-                self.put_variant(buf, value);
-            }
-
-            fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
-                let tag = read_u8(data, offset)?;
-                self.get_variant(tag, data, offset)?
-                    .ok_or(CatalogueEncodingError::InvalidTypeTag { tag, context: $context })
-            }
-        })?
-    };
-    ($($rest:tt)*) => { wire_enum!(@impl [] $($rest)*); };
-}
 
 /// Current catalogue payload encoding versions.
 const SCHEMA_VERSION: u8 = 2;
@@ -120,52 +31,7 @@ const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
 const PERMISSIONS_HEAD_VERSION: u8 = 1;
 
 /// Encoding errors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CatalogueEncodingError {
-    /// Data too short.
-    TruncatedData { expected: usize, actual: usize },
-    /// Unknown version byte.
-    UnsupportedVersion { found: u8, expected: u8 },
-    /// Invalid type tag.
-    InvalidTypeTag { tag: u8, context: &'static str },
-    /// Invalid UTF-8 string.
-    InvalidUtf8 { context: &'static str },
-    /// A named recursive-policy protocol boundary was crossed.
-    ProtocolLimit(PolicyExpressionLimitError),
-    /// Generic decode error.
-    DecodeError { message: String },
-}
-
-impl std::fmt::Display for CatalogueEncodingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CatalogueEncodingError::TruncatedData { expected, actual } => {
-                write!(f, "truncated data: expected {expected} bytes, got {actual}")
-            }
-            CatalogueEncodingError::UnsupportedVersion { found, expected } => {
-                write!(f, "unsupported version: found {found}, expected {expected}")
-            }
-            CatalogueEncodingError::InvalidTypeTag { tag, context } => {
-                write!(f, "invalid type tag {tag} in {context}")
-            }
-            CatalogueEncodingError::InvalidUtf8 { context } => {
-                write!(f, "invalid UTF-8 in {context}")
-            }
-            CatalogueEncodingError::ProtocolLimit(error) => std::fmt::Display::fmt(error, f),
-            CatalogueEncodingError::DecodeError { message } => {
-                write!(f, "decode error: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CatalogueEncodingError {}
-
-impl From<PolicyExpressionLimitError> for CatalogueEncodingError {
-    fn from(error: PolicyExpressionLimitError) -> Self {
-        Self::ProtocolLimit(error)
-    }
-}
+pub use jazz::codec::CodecError as CatalogueEncodingError;
 
 // ============================================================================
 // Schema Encoding
@@ -1936,34 +1802,6 @@ fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, CatalogueEncodingErr
     Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, CatalogueEncodingError> {
-    if *offset >= data.len() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: *offset + 1,
-            actual: data.len(),
-        });
-    }
-    let val = data[*offset];
-    *offset += 1;
-    Ok(val)
-}
-
-fn read_bytes<'a>(
-    data: &'a [u8],
-    offset: &mut usize,
-    len: usize,
-) -> Result<&'a [u8], CatalogueEncodingError> {
-    if *offset + len > data.len() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: *offset + len,
-            actual: data.len(),
-        });
-    }
-    let bytes = &data[*offset..*offset + len];
-    *offset += len;
-    Ok(bytes)
-}
-
 fn ensure_consumed(data: &[u8], offset: usize) -> Result<(), CatalogueEncodingError> {
     if offset == data.len() {
         return Ok(());
@@ -2124,14 +1962,6 @@ fn read_string(
 // ============================================================================
 // Symmetric wire descriptions
 // ============================================================================
-
-/// One description of a wire shape, used for both directions so encode and
-/// decode cannot drift. Codecs are small values; a `&'static str` they hold
-/// names the context that decode errors report.
-trait Wire<T> {
-    fn put(&self, buf: &mut Vec<u8>, value: &T);
-    fn get(&self, data: &[u8], offset: &mut usize) -> Result<T, CatalogueEncodingError>;
-}
 
 /// Anything stored as a name: written as a string, and checked for
 /// duplicates by [`Unique`].
@@ -2378,30 +2208,10 @@ impl Wire<SchemaHash> for HashWire {
     }
 }
 
-/// A tuple of codecs describes a tuple of values written in order.
-macro_rules! tuple_wire {
-    ($(($($codec:ident $value:ident $index:tt),+)),+) => {$(
-        impl<$($value, $codec: Wire<$value>),+> Wire<($($value,)+)> for ($($codec,)+) {
-            fn put(&self, buf: &mut Vec<u8>, value: &($($value,)+)) {
-                $(self.$index.put(buf, &value.$index);)+
-            }
-
-            fn get(
-                &self,
-                data: &[u8],
-                offset: &mut usize,
-            ) -> Result<($($value,)+), CatalogueEncodingError> {
-                Ok(($(self.$index.get(data, offset)?,)+))
-            }
-        }
-    )+};
-}
-
-tuple_wire!((A TA 0, B TB 1, C TC 2), (A TA 0, B TB 1, C TC 2, D TD 3));
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::protocol_limits::PolicyExpressionLimitError;
     use jazz::protocol_limits::{MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES};
     use jazz::tools::public_schema::SchemaBuilder;
     use jazz::tools::public_schema::{

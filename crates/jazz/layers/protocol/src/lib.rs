@@ -29,6 +29,7 @@ use jazz_types::account_registry;
 use jazz_types::{debug_env, ids, object, postcard_exact, time};
 
 pub mod authorization_scope;
+pub mod codec;
 /// Simulation-first sync and local event messages.
 pub mod protocol;
 /// Protocol admission and semantic size limits.

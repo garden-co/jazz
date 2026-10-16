@@ -53,7 +53,7 @@ impl Store {
         let mut tx_ids = Vec::<jazz::tx::TxId>::new();
         for (tx, bytes, fate) in input {
             let decoded: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
-            let row: jazz::protocol::VersionRecord = postcard::from_bytes(bytes).unwrap();
+            let row: jazz::protocol::VersionRecord = jazz::codec::decode_exact(bytes).unwrap();
             let key = (row.table().to_owned(), row.row_uuid().0);
             if history_mode {
                 // Explicit shallow-history contract; never silently approximate

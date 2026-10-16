@@ -3,31 +3,52 @@
 //! Epochs order only semantic barriers. Ordinary streams in one epoch remain
 //! independent. Admission means insertion in the single canonical FIFO, not
 //! query completion, durability or remote transaction settlement.
+use crate::codec::WireCodec;
 use crate::protocol::SyncMessage;
 use crate::wire::channel_credit::BufferLease;
 use crate::wire::channels::{ChannelClass, MAX_CHANNEL_QUEUED_MESSAGES, MAX_CHANNELS};
 use crate::wire::{WireError, WireInboundContext};
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 pub const ENVELOPE_VERSION: u8 = 1;
 /// Bounded metadata allowance within the existing raw byte-message limit.
 pub const MAX_ENVELOPE_OVERHEAD: usize = 1024;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Routed envelope v1: `version` byte, varint `epoch` and `ordinal`, an
+/// optional list of `(u16, u64)` varint pairs, then the length-prefixed
+/// semantic payload.
+#[derive(Debug, PartialEq)]
 struct Envelope<'a> {
     version: u8,
     epoch: u64,
     ordinal: u64,
     predecessors: Option<Vec<(u16, u64)>>,
-    #[serde(borrow)]
     payload: &'a [u8],
 }
 
+fn encode_envelope(envelope: &Envelope<'_>) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(envelope.payload.len() + 32);
+    buf.push(envelope.version);
+    envelope.epoch.put(&mut buf);
+    envelope.ordinal.put(&mut buf);
+    envelope.predecessors.put(&mut buf);
+    crate::codec::put_bytes(&mut buf, envelope.payload);
+    buf
+}
+
 fn decode_envelope(bytes: &[u8]) -> Result<Envelope<'_>, String> {
-    let (envelope, rest) = postcard::take_from_bytes(bytes)
-        .map_err(|error| format!("invalid routed envelope: {error}"))?;
-    if !rest.is_empty() {
+    let offset = &mut 0;
+    let envelope = (|| {
+        Ok::<_, crate::codec::CodecError>(Envelope {
+            version: u8::get(bytes, offset)?,
+            epoch: u64::get(bytes, offset)?,
+            ordinal: u64::get(bytes, offset)?,
+            predecessors: WireCodec::get(bytes, offset)?,
+            payload: crate::codec::get_bytes(bytes, offset)?,
+        })
+    })()
+    .map_err(|error| format!("invalid routed envelope: {error}"))?;
+    if *offset != bytes.len() {
         return Err("trailing bytes after routed envelope".into());
     }
     Ok(envelope)
@@ -140,14 +161,13 @@ impl RoutedMessages {
                 .filter_map(|(slot, n)| (*n != 0).then_some((slot as u16, *n)))
                 .collect()
         });
-        postcard::to_allocvec(&Envelope {
+        Ok(encode_envelope(&Envelope {
             version: ENVELOPE_VERSION,
             epoch: self.sent_epoch,
             ordinal,
             predecessors,
             payload: &payload,
-        })
-        .map_err(|e| e.to_string())
+        }))
     }
     pub(super) fn accepted(&mut self, channel: u16, barrier: bool) {
         self.sent[channel as usize] += 1;
@@ -270,7 +290,7 @@ mod tests {
         assert_eq!(barrier, [1, 0, 1, 1, 1, 3, 1, 1, 0xcc]);
         for bytes in [ordinary, barrier] {
             let envelope = decode_envelope(&bytes).unwrap();
-            assert_eq!(postcard::to_allocvec(&envelope).unwrap(), bytes);
+            assert_eq!(encode_envelope(&envelope), bytes);
             let mut trailing = bytes.clone();
             trailing.push(0);
             assert!(
@@ -292,10 +312,10 @@ mod tests {
         assert_eq!(router.sent[0], 0);
         router.accepted(0, true);
         let next_bytes = router.prepare(1, false, vec![2]).unwrap();
-        let next: Envelope = postcard::from_bytes(&next_bytes).unwrap();
+        let next = decode_envelope(&next_bytes).unwrap();
         assert_eq!(next.epoch, 1);
         assert_eq!(next.ordinal, 1);
-        let barrier: Envelope = postcard::from_bytes(&first).unwrap();
+        let barrier = decode_envelope(&first).unwrap();
         assert_eq!(barrier.predecessors, Some(vec![(3, 1)]));
     }
 }

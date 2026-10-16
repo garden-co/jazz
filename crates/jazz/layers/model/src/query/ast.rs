@@ -90,6 +90,52 @@ pub mod relation_query_wire {
             .transpose()
     }
 
+    /// Append the non-human-readable encoding of a `Query::relation` field to
+    /// `buf`: exactly the bytes [`serialize`] gives Postcard (an optional
+    /// typed [`WireRelationQuery`]). On error nothing is appended.
+    pub fn encode_postcard(
+        value: &Option<RelationQuery>,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        let wire = value
+            .as_ref()
+            .map(relation_query_to_wire)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        buf.extend(postcard::to_allocvec(&wire).map_err(|error| error.to_string())?);
+        Ok(())
+    }
+
+    /// Decode a `Query::relation` field written by [`encode_postcard`] from
+    /// the start of `data`, returning it and the number of bytes it used.
+    pub fn decode_postcard(data: &[u8]) -> Result<(Option<RelationQuery>, usize), String> {
+        let (wire, rest) = postcard::take_from_bytes::<Option<WireRelationQuery>>(data)
+            .map_err(|error| error.to_string())?;
+        let value = wire
+            .map(relation_query_from_wire)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        Ok((value, data.len() - rest.len()))
+    }
+
+    /// Append the non-human-readable encoding of a required relation (as in
+    /// `ShapeBody::Relation`): exactly the bytes [`serialize_required`] gives
+    /// Postcard. On error nothing is appended.
+    pub fn encode_postcard_required(value: &RelationQuery, buf: &mut Vec<u8>) -> Result<(), String> {
+        let wire = relation_query_to_wire(value).map_err(|error| error.to_string())?;
+        buf.extend(postcard::to_allocvec(&wire).map_err(|error| error.to_string())?);
+        Ok(())
+    }
+
+    /// Decode a required relation written by [`encode_postcard_required`]
+    /// from the start of `data`, returning it and the number of bytes used.
+    pub fn decode_postcard_required(data: &[u8]) -> Result<(RelationQuery, usize), String> {
+        let (wire, rest) = postcard::take_from_bytes::<WireRelationQuery>(data)
+            .map_err(|error| error.to_string())?;
+        let value = relation_query_from_wire(wire).map_err(|error| error.to_string())?;
+        Ok((value, data.len() - rest.len()))
+    }
+
     #[doc(hidden)]
     pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
     where

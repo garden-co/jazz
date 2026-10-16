@@ -991,10 +991,10 @@ impl SyncCapture {
                 json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
                     "schema": version.schema_version(), "branch": version.branch_key(),
                     "cells": cells,
-                    "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
+                    "wire_hex": capture_hex(&jazz::codec::try_encode(version).unwrap())})
             }).collect::<Vec<_>>();
             json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),
-                "scope": bundle.scope, "fate": bundle.fate, "global_time": bundle.global_time,
+                "scope": version_bundle_scope_name(bundle.scope), "fate": bundle.fate, "global_time": bundle.global_time,
                 "durability": bundle.durability, "versions": versions})
         }).collect::<Vec<_>>();
         serde_json::to_writer(
@@ -1034,7 +1034,8 @@ fn measure_capture_decode(path: &Path) {
         let mut decoded = Vec::with_capacity(encoded.len());
         for (tx, version) in &encoded {
             let tx: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
-            let version: jazz::protocol::VersionRecord = postcard::from_bytes(version).unwrap();
+            let version: jazz::protocol::VersionRecord =
+                jazz::codec::decode_exact(version).unwrap();
             let table = schema
                 .tables
                 .iter()
@@ -3400,10 +3401,27 @@ struct EncodedMessageMeasurement {
     raw_payload: Option<Vec<u8>>,
 }
 
+/// The fixture's JSON name for a bundle scope (its former serde spelling).
+pub fn version_bundle_scope_name(scope: jazz::protocol::VersionBundleScope) -> &'static str {
+    match scope {
+        jazz::protocol::VersionBundleScope::CompleteTransaction => "CompleteTransaction",
+        jazz::protocol::VersionBundleScope::ViewScoped => "ViewScoped",
+    }
+}
+
+/// Parse a bundle scope written by [`version_bundle_scope_name`].
+pub fn version_bundle_scope_from_name(name: &str) -> jazz::protocol::VersionBundleScope {
+    match name {
+        "CompleteTransaction" => jazz::protocol::VersionBundleScope::CompleteTransaction,
+        "ViewScoped" => jazz::protocol::VersionBundleScope::ViewScoped,
+        other => panic!("unknown version bundle scope {other:?}"),
+    }
+}
+
 fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasurement {
     #[cfg(feature = "cold-settle-attribution")]
     let serialize_start = Instant::now();
-    let encoded = postcard::to_allocvec(message);
+    let encoded = jazz::codec::try_encode(message);
     #[cfg(feature = "cold-settle-attribution")]
     let serialize_ns = serialize_start.elapsed().as_nanos() as u64;
     let Ok(bytes) = encoded else {

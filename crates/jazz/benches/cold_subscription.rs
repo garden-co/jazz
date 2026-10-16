@@ -130,7 +130,7 @@ fn current_state_history_depth_contract() {
         // The transported immutable winner body is the history-independent
         // payload: all measured winners have an equally-sized value and one
         // parent, and this encoding must therefore be exactly identical.
-        let winner_wire_bytes = postcard::to_allocvec(&bundles[0].versions[0])
+        let winner_wire_bytes = jazz::codec::try_encode(&bundles[0].versions[0])
             .expect("encode delivered winner body")
             .len();
         // Authorities send exact inputs, not a second terminal result. The

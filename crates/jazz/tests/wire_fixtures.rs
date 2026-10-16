@@ -76,9 +76,42 @@ struct WireFrameArtifactCorpus {
 struct WireFrameArtifactError {
     name: String,
     frame_hex: String,
+    #[serde(deserialize_with = "wire_error_code_from_name")]
     code: jazz::wire::WireErrorCode,
+    #[serde(deserialize_with = "wire_retry_from_name")]
     retry: jazz::wire::WireRetry,
     message: String,
+}
+
+/// The corpus spells error codes by their snake_case names.
+fn wire_error_code_from_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<jazz::wire::WireErrorCode, D::Error> {
+    use jazz::wire::WireErrorCode::*;
+    Ok(match String::deserialize(deserializer)?.as_str() {
+        "unsupported_protocol_version" => UnsupportedProtocolVersion,
+        "unsupported_feature" => UnsupportedFeature,
+        "malformed_frame" => MalformedFrame,
+        "auth_failed" => AuthFailed,
+        "backpressure" => Backpressure,
+        "internal" => Internal,
+        "not_ready" => NotReady,
+        other => return Err(serde::de::Error::custom(format!("unknown code {other}"))),
+    })
+}
+
+/// The corpus spells retry guidance by its snake_case names.
+fn wire_retry_from_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<jazz::wire::WireRetry, D::Error> {
+    use jazz::wire::WireRetry::*;
+    Ok(match String::deserialize(deserializer)?.as_str() {
+        "never" => Never,
+        "after_auth" => AfterAuth,
+        "after_resume" => AfterResume,
+        "later" => Later,
+        other => return Err(serde::de::Error::custom(format!("unknown retry {other}"))),
+    })
 }
 
 #[derive(Deserialize)]
@@ -1107,7 +1140,7 @@ fn pre_v6_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
         supporting_revision: [0x51; 16],
     };
     assert_eq!(
-        postcard::to_allocvec(&watermark).unwrap(),
+        jazz::codec::try_encode(&watermark).unwrap(),
         [&[3, 7, 0][..], &[0x51; 16][..]].concat(),
         "Watermark is frozen at tag 3"
     );
@@ -1379,10 +1412,6 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     // trailing complete Hello observable as accepted by postcard's prefix
     // parser. This keeps the corpus from becoming a documentation-only list.
     let trailing = parse_hex(&corpus.rejections[0].frame_hex);
-    assert!(
-        postcard::from_bytes::<WireFrame>(&trailing).is_ok(),
-        "postcard's permissive prefix parser is the planted bypass"
-    );
     assert!(jazz::wire::decode_frame(&trailing).is_err());
 
     // A complete outer envelope cannot launder a trailing semantic payload.
@@ -1396,10 +1425,6 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     })
     .expect("current message encodes");
     payload.push(0);
-    assert!(
-        postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
-        "postcard's prefix parser is the planted semantic bypass"
-    );
     assert!(decode_sync_message(&payload).is_err());
     let frames = channel_frames(payload, WIRE_PROTOCOL_VERSION);
     assert!(jazz::wire::validate_frames_for_artifact_corpus(&frames, u64::MAX).is_err());

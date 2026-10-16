@@ -169,6 +169,14 @@ impl Locator {
         &self.0
     }
 
+    /// Rebuild a capability received on the wire. This is the same trust
+    /// boundary as deserializing one. Hidden: for the hand-written sync-wire
+    /// codec only; local code allocates capabilities with [`Self::random`].
+    #[doc(hidden)]
+    pub fn from_wire_bytes(bytes: [u8; LOCATOR_BYTES]) -> Self {
+        Self(bytes)
+    }
+
     /// Deterministically derive a capability for crate-internal fixtures.
     #[cfg(any(test, feature = "test"))]
     pub(crate) fn from_seed(seed: &[u8]) -> Self {

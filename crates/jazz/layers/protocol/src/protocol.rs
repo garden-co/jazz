@@ -28,11 +28,11 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 
 /// Uninhabited payload preserving retired postcard discriminants.
 #[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReservedWireMessage {}
 
 /// Messages exchanged between Jazz nodes.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SyncMessage {
     /// Auxiliary, non-canonical requests for immutable Groove chunks that are
     /// absent from the receiver's local chunk storage.
@@ -226,7 +226,7 @@ pub enum SyncMessage {
 pub const MAX_CURRENT_ROWS: usize = 64;
 
 /// Exact current-default-view coordinate. Local physical aliases never cross this wire.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentRowCoordinate {
     /// Exact current schema identity.
     pub schema: SchemaVersionId,
@@ -239,7 +239,7 @@ pub struct CurrentRowCoordinate {
 }
 
 /// Caller supplies known coordinates, never an enumeration query or policy predicate.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CurrentRowsRequest {
     /// Opaque correlation restricted to this live connection.
     pub request_id: PermissionAdviceRequestId,
@@ -250,7 +250,7 @@ pub struct CurrentRowsRequest {
 }
 
 /// No unavailable outcome distinguishes missing, deleted, and denied.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CurrentRowOutcome {
     /// Authorized current content, including an authorized deletion preimage.
     Readable,
@@ -262,7 +262,7 @@ pub enum CurrentRowOutcome {
 
 /// Core evaluation evidence. The authenticated local relay may forward this after
 /// validating its selected upstream nonce/epoch; this is not a signature chain.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CurrentRowsReceipt {
     /// Opaque correlation restricted to this live connection.
     pub request_id: PermissionAdviceRequestId,
@@ -294,7 +294,7 @@ pub struct CurrentRowsReceipt {
 /// [`SyncMessage::AuthorizationScopeView`] adds scope metadata around the same
 /// payload. Keeping the payload separate from `SyncMessage` makes recursive
 /// authorization-scope wrappers impossible to construct and decode.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ViewUpdatePayload {
     /// Target subscription whose supporting input set this update changes.
     pub subscription: SubscriptionKey,
@@ -313,7 +313,7 @@ pub struct ViewUpdatePayload {
 /// scoped to the admitted subscription/authority, never history timestamps.
 /// Postcard discriminants are pinned: Snapshot = 0, Delta = 1; field order is
 /// declaration order. There is no v1 complete-manifest compatibility decoder.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SupportingRowsUpdate {
     /// Initial or recovery complete set; supersedes pending predecessors.
     Snapshot {
@@ -418,64 +418,14 @@ impl ViewUpdatePayload {
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkRequestBatch {
     /// Exact requests coalesced for one transport frame.
-    #[serde(deserialize_with = "deserialize_chunk_requests")]
     pub requests: Vec<ChunkRequestEntry>,
 }
 
-fn deserialize_chunk_requests<'de, D>(deserializer: D) -> Result<Vec<ChunkRequestEntry>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct ChunkRequestsVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for ChunkRequestsVisitor {
-        type Value = Vec<ChunkRequestEntry>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                formatter,
-                "at most {} chunk requests",
-                crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
-            )
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            let declared = sequence.size_hint();
-            if declared.is_some_and(|count| {
-                count > crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
-            }) {
-                return Err(<A::Error as serde::de::Error>::custom(
-                    "chunk request batch exceeds cardinality limit",
-                ));
-            }
-            let mut requests = Vec::with_capacity(
-                declared
-                    .unwrap_or_default()
-                    .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES),
-            );
-            while let Some(request) = sequence.next_element()? {
-                if requests.len() >= crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES {
-                    return Err(<A::Error as serde::de::Error>::custom(
-                        "chunk request batch exceeds cardinality limit",
-                    ));
-                }
-                requests.push(request);
-            }
-            Ok(requests)
-        }
-    }
-
-    deserializer.deserialize_seq(ChunkRequestsVisitor)
-}
-
 /// One hop-local request. `remaining_hops` is decremented before forwarding.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkRequestEntry {
     /// Identifier meaningful only on this peer hop.
     pub request_id: u64,
@@ -489,14 +439,14 @@ pub struct ChunkRequestEntry {
 }
 
 /// Bounded batch of replies addressed by the request id allocated on this hop.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkResponseBatch {
     /// Replies coalesced for one transport frame.
     pub responses: Vec<ChunkResponseEntry>,
 }
 
 /// One hop-local immutable-chunk reply.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkResponseEntry {
     /// Request identifier allocated by the receiver of this response.
     pub request_id: u64,
@@ -505,7 +455,7 @@ pub struct ChunkResponseEntry {
 }
 
 /// Result of one auxiliary immutable-chunk request.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkResponse {
     /// Exact stored bytes; Groove still verifies the expected hash.
     Found(Vec<u8>),
@@ -520,14 +470,14 @@ pub enum ChunkResponse {
 
 /// Root-first upload announcement. The descriptor, already carried by the
 /// later transaction, is the protocol identity.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkUploadStart {
     /// Exact immutable value whose root the receiver checks first.
     pub value_ref: groove::large_values::LargeValueRef,
 }
 
 /// A bounded collection of receiver-requested immutable Groove nodes.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkUploadNodes {
     /// Descriptor whose current missing frontier requested these nodes.
     pub value_ref: groove::large_values::LargeValueRef,
@@ -537,7 +487,7 @@ pub struct ChunkUploadNodes {
 
 /// Hop-local upload outcome. A rejected upload must be retried from its first
 /// batch; no referencing row may be sent before `Staged`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkUploadResult {
     /// Descriptor whose derived receiver state changed.
     pub value_ref: groove::large_values::LargeValueRef,
@@ -546,7 +496,7 @@ pub struct ChunkUploadResult {
 }
 
 /// Receiver outcome for one push-upload step.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkUploadStatus {
     /// Authenticated nodes still absent from local Groove storage.
     Need(Vec<groove::large_values::NodeRef>),
@@ -559,13 +509,11 @@ pub enum ChunkUploadStatus {
 }
 
 /// Opaque identity for one permission-advice exchange.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PermissionAdviceRequestId(pub [u8; 16]);
 
 /// Hypothetical operation sent to a trusted serving authority.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PermissionAdviceAction {
     /// Insert a candidate row.
     Insert {
@@ -601,9 +549,7 @@ pub enum PermissionAdviceAction {
 }
 
 /// The policy operation proven by an authorization-scope receipt.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AuthorizationScopeOperation {
     /// Read-policy evaluation.
     Read,
@@ -616,7 +562,7 @@ pub enum AuthorizationScopeOperation {
 }
 
 /// Stable, action-specific identity for one authority-hydrated policy scope.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AuthorizationSupportScopeKey {
     /// Compiled policy support shape, including the selected operation clause.
     pub support_shape_digest: [u8; 32],
@@ -629,7 +575,7 @@ pub struct AuthorizationSupportScopeKey {
 }
 
 /// Ephemeral candidate-specific key used only for final evaluation.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizationOperationKey {
     /// Exact operation to evaluate.
     pub operation: AuthorizationScopeOperation,
@@ -642,7 +588,7 @@ pub struct AuthorizationOperationKey {
 }
 
 /// Authority-issued receipt proving one scope was hydrated through its stated cut.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizationScopeReceipt {
     /// Scope covered by this receipt.
     pub key: AuthorizationSupportScopeKey,
@@ -665,7 +611,7 @@ pub struct AuthorizationScopeReceipt {
 }
 
 /// Advisory result of a permission preflight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionAdvice {
     /// A trusted serving authority determined that the operation is allowed.
     Allowed,
@@ -676,7 +622,7 @@ pub enum PermissionAdvice {
 }
 
 /// Ordered schema lineage metadata shipped ahead of authored row payloads.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CatalogueSnapshot {
     /// Authority-issued permanent identities for the unique genesis schema.
     pub genesis_physical_identities: PhysicalIdentityManifest,
@@ -847,7 +793,7 @@ pub fn validate_version_records(versions: &[VersionRecord]) -> Result<(), Versio
 }
 
 /// Exact row-version identity used by known-state repair requests.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowVersionRef {
     /// Table containing the row.
     pub table: groove::Intern<String>,
@@ -881,7 +827,7 @@ impl RowVersionRef {
 /// This inventory is peer-scoped, not subscription-scoped. Today it can only
 /// reference full transaction payloads; future tiers can add row-version and
 /// view-complete coverage without overloading tx-level knowledge.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeerPayloadInventory {
     /// Transactions whose full version payload has already been shipped to the
     /// peer and can be referenced by tx id. Partial mergeable or view-scoped
@@ -894,7 +840,6 @@ pub struct PeerPayloadInventory {
     /// Authority explicitly published a fail-closed opening snapshot while
     /// authorization coverage is unavailable. This snapshot is observable but
     /// remains pending until a later authoritative reset.
-    #[serde(default)]
     pub opening_pending: bool,
 }
 
@@ -908,16 +853,14 @@ pub struct PeerPayloadInventory {
 /// in the same envelope, flagged by its head (SPEC 16). The receiver
 /// validates each descriptor against the declared schema before translating
 /// columns into its node-local physical catalogue.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
     /// Exact branch coordinate of this version's branch-local row.
-    #[serde(default)]
     branch_key: BranchKey,
     /// The row, and the union cells of a Core image (`UnionExtraCells`),
     /// in one `JVRR` v3 blob.
-    #[serde(with = "version_record_wire_row")]
     row: WireRow,
     /// `None` denotes a legacy or lens-translated payload whose authored
     /// presence is unavailable; consumers must conservatively treat every
@@ -1000,19 +943,7 @@ impl UnionExtraCells {
 /// `pending` is the writer's own previous pending write to the row whose
 /// patch that image included. An insert and a blind update (a write to a row
 /// the writer's node holds no image of) carry neither.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowBase {
     /// Seq of the settled image the writer's image rested on.
     pub seq: Option<GlobalTime>,
@@ -1028,6 +959,8 @@ impl RowBase {
 }
 
 pub(crate) use version_record_wire_row::with_message_descriptor_table;
+
+mod wire_codecs_a;
 
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
 /// and resource bounds; this record role owns its discriminator and schema.
@@ -1403,58 +1336,6 @@ mod version_record_wire_row {
         })
     }
 
-    pub(super) fn serialize<S: serde::Serializer>(
-        row: &WireRow,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let bytes = encode_row(row).map_err(serde::ser::Error::custom)?;
-        // Postcard's byte blob and u8 sequence have the same canonical
-        // varint length + raw bytes contract. Extend the output in bulk.
-        serializer.serialize_bytes(&bytes)
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<WireRow, D::Error> {
-        struct RowVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for RowVisitor {
-            type Value = WireRow;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JVRR v3 row byte blob")
-            }
-
-            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-                // Decode from the deserializer's slice; only the resulting
-                // owned record needs a payload copy. Admission remains separate.
-                decode_row(bytes).map_err(E::custom)
-            }
-
-            fn visit_borrowed_bytes<E: serde::de::Error>(
-                self,
-                bytes: &'de [u8],
-            ) -> Result<Self::Value, E> {
-                self.visit_bytes(bytes)
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                // Human-readable formats such as JSON still represent bytes
-                // as arrays. Never reserve from an untrusted size hint.
-                let mut bytes = Vec::new();
-                while let Some(byte) = sequence.next_element::<u8>()? {
-                    bytes.push(byte);
-                }
-                self.visit_bytes(&bytes)
-            }
-        }
-
-        deserializer.deserialize_bytes(RowVisitor)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1474,34 +1355,30 @@ mod version_record_wire_row {
             Ok(row.record)
         }
 
-        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-        struct WireRow(#[serde(with = "record_only")] OwnedRecord);
-
         /// The envelope of a row without union cells.
-        mod record_only {
-            use super::*;
+        #[derive(Clone, Debug, PartialEq)]
+        struct WireRow(OwnedRecord);
 
-            pub(super) fn serialize<S: serde::Serializer>(
-                record: &OwnedRecord,
-                serializer: S,
-            ) -> Result<S::Ok, S::Error> {
-                super::super::serialize(
-                    &super::super::super::WireRow {
-                        record: record.clone(),
+        impl crate::codec::WireCodec for WireRow {
+            fn put(&self, buf: &mut Vec<u8>) {
+                crate::codec::Wire::put(
+                    &super::super::wire_codecs_a::RowBlob,
+                    buf,
+                    &super::super::WireRow {
+                        record: self.0.clone(),
                         extras: Vec::new(),
                     },
-                    serializer,
-                )
+                );
             }
-
-            pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-                deserializer: D,
-            ) -> Result<OwnedRecord, D::Error> {
-                let row = super::super::deserialize(deserializer)?;
+            fn get(data: &[u8], offset: &mut usize) -> Result<Self, crate::codec::CodecError> {
+                let row =
+                    crate::codec::Wire::get(&super::super::wire_codecs_a::RowBlob, data, offset)?;
                 if !row.extras.is_empty() {
-                    return Err(serde::de::Error::custom("unexpected union cells"));
+                    return Err(crate::codec::CodecError::DecodeError {
+                        message: "unexpected union cells".into(),
+                    });
                 }
-                Ok(row.record)
+                Ok(Self(row.record))
             }
         }
 
@@ -1526,23 +1403,27 @@ mod version_record_wire_row {
                 }
                 expected.push(remaining as u8);
                 expected.extend_from_slice(&bytes);
-                assert_eq!(postcard::to_allocvec(&row).unwrap(), expected);
-                assert_eq!(postcard::to_allocvec(&bytes).unwrap(), expected);
-                assert_eq!(postcard::from_bytes::<WireRow>(&expected).unwrap(), row);
-                assert_eq!(postcard::from_bytes::<Vec<u8>>(&expected).unwrap(), bytes);
-
-                // A following field must retain its boundary in both directions.
-                let old = postcard::to_allocvec(&(bytes.clone(), 999u64)).unwrap();
-                assert_eq!(postcard::to_allocvec(&(&row, 999u64)).unwrap(), old);
+                assert_eq!(crate::codec::try_encode(&row).unwrap(), expected);
+                assert_eq!(crate::codec::try_encode(&bytes).unwrap(), expected);
                 assert_eq!(
-                    postcard::from_bytes::<(WireRow, u64)>(&old).unwrap(),
-                    (row, 999)
+                    crate::codec::decode_exact::<WireRow>(&expected).unwrap(),
+                    row
+                );
+                assert_eq!(
+                    crate::codec::decode_exact::<Vec<u8>>(&expected).unwrap(),
+                    bytes
                 );
 
-                let json = serde_json::to_string(&bytes).unwrap();
-                let json_row: WireRow = serde_json::from_str(&json).unwrap();
-                assert_eq!(serde_json::to_string(&json_row).unwrap(), json);
-                assert_eq!(encode(&json_row.0).unwrap(), bytes);
+                // A following field must retain its boundary in both directions.
+                let old = crate::codec::try_encode(&(bytes.clone(), 999u64)).unwrap();
+                assert_eq!(
+                    crate::codec::try_encode(&(row.clone(), 999u64)).unwrap(),
+                    old
+                );
+                assert_eq!(
+                    crate::codec::decode_exact::<(WireRow, u64)>(&old).unwrap(),
+                    (row, 999)
+                );
             }
         }
 
@@ -1647,20 +1528,15 @@ mod version_record_wire_row {
                 // A table reference outside any message scope.
                 b"JVRR\x03\x02".to_vec(),
             ] {
-                let wire = postcard::to_allocvec(&bytes).unwrap();
-                assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
-                assert!(
-                    serde_json::from_str::<WireRow>(&serde_json::to_string(&bytes).unwrap())
-                        .is_err()
-                );
+                let wire = crate::codec::try_encode(&bytes).unwrap();
+                assert!(crate::codec::decode_exact::<WireRow>(&wire).is_err());
             }
             let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
             let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
-            let wire = postcard::to_allocvec(&WireRow(record)).unwrap();
+            let wire = crate::codec::try_encode(&WireRow(record)).unwrap();
             for end in 0..wire.len() {
-                assert!(postcard::from_bytes::<WireRow>(&wire[..end]).is_err());
+                assert!(crate::codec::decode_exact::<WireRow>(&wire[..end]).is_err());
             }
-            assert!(serde_json::from_str::<WireRow>("[256]").is_err());
         }
 
         /// Actors: a node replicating one of its global-current rows.
@@ -2090,7 +1966,7 @@ mod version_record_wire_row {
                 &trailing[10 + u32::from_le_bytes(trailing[6..10].try_into().unwrap()) as usize..]
             );
             assert!(decode(&encoded[..9]).is_err());
-            assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
+            assert!(decode(&crate::codec::try_encode(&original).unwrap()).is_err());
         }
     }
 }
@@ -2573,7 +2449,7 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
 }
 
 /// Transaction plus row-version payload and the upstream state observed with it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VersionBundleScope {
     /// The bundle carries every write authored by the transaction.
     CompleteTransaction,
@@ -2587,7 +2463,7 @@ pub enum VersionBundleScope {
 }
 
 /// Transaction plus row-version payload and the upstream state observed with it.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VersionBundle {
     /// Transaction payload for the versions.
     pub tx: Transaction,
@@ -2649,7 +2525,7 @@ impl VersionBundle {
 }
 
 /// One row-version carrier in a view-update stream.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum VersionCarrier {
     /// Existing singleton carrier. This is semantically a run of length 1.
     Bundle(VersionBundle),
@@ -2676,7 +2552,7 @@ impl VersionCarrier {
 }
 
 /// Shared header plus row-version bodies for adjacent view-update carriers.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VersionBundleRun {
     /// Shared/default metadata for the run.
     pub header: VersionBundleRunHeader,
@@ -2859,7 +2735,7 @@ impl VersionBundleRun {
 }
 
 /// Shared/default metadata for a packed version-bundle run.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VersionBundleRunHeader {
     /// Shared table context when every carried row-version belongs to one table.
     pub table: Option<groove::Intern<String>>,
@@ -2878,14 +2754,14 @@ pub struct VersionBundleRunHeader {
 }
 
 /// Row-version payload body inside a packed run.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionBundleRunBody {
     /// Row versions carried by this body.
     pub versions: Vec<VersionRecord>,
 }
 
 /// Per-body override for metadata that differs from the run header.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VersionBundleRunOverride {
     /// Zero-based index into `VersionBundleRun::bodies`.
     pub body_index: u32,
@@ -3047,9 +2923,7 @@ fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>>
 /// This key addresses `Subscribe`, `ViewUpdate`, and `Unsubscribe` messages on
 /// one link. Its `binding_id` is the subscriber-chosen usage-site handle, not
 /// necessarily the canonical binding id derived from the query's bound values.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubscriptionKey {
     /// Registered query shape.
     pub shape_id: ShapeId,
@@ -3067,9 +2941,7 @@ pub struct SubscriptionKey {
 /// keyed by the actual canonical binding values and serving-options identity, so
 /// multiple usage-site subscriptions for the same binding share one settled
 /// result/fact state.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingViewKey {
     /// Registered query shape.
     pub shape_id: ShapeId,
@@ -3085,9 +2957,7 @@ pub struct BindingViewKey {
 /// carry the same query for two delegated claim snapshots. The full policy
 /// snapshot is therefore part of the Jazz result identity, never a truncated
 /// or hash-only discriminator.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthorityResultKey {
     /// Canonical query binding and requested serving view.
     pub binding_view: BindingViewKey,
@@ -3137,9 +3007,7 @@ impl BindingViewKey {
 }
 
 /// Shared coverage group for equivalent query bindings.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoverageKey {
     /// Registered query shape.
     pub shape_id: ShapeId,
@@ -3153,9 +3021,7 @@ pub struct CoverageKey {
 }
 
 /// Collision-safe canonical identity of a subscription policy snapshot.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PolicyBindingKey {
     /// Logical session subject selected at subscription admission.
     pub identity: AuthorSubject,
@@ -3213,17 +3079,6 @@ impl Ord for CanonicalPolicyClaims {
 impl std::hash::Hash for CanonicalPolicyClaims {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.comparison_key.hash(state)
-    }
-}
-
-impl serde::Serialize for CanonicalPolicyClaims {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.claims.serialize(serializer)
-    }
-}
-impl<'de> serde::Deserialize<'de> for CanonicalPolicyClaims {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self::new(BTreeMap::deserialize(deserializer)?))
     }
 }
 
@@ -3310,7 +3165,7 @@ pub use crate::model::policy_directory::{
 };
 
 /// Versioned query AST carried by shape registration.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShapeAst {
     /// Wire AST version.
     pub version: u32,
@@ -3321,18 +3176,12 @@ pub struct ShapeAst {
 }
 
 /// Facade syntax accepted by shape registration.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ShapeBody {
     /// Ordinary root-table query.
     Query(Query),
     /// Output-changing relation query, normalized by the query compiler.
-    Relation(
-        #[serde(
-            serialize_with = "crate::query::relation_query_wire::serialize_required",
-            deserialize_with = "crate::query::relation_query_wire::deserialize_required"
-        )]
-        RelationQuery,
-    ),
+    Relation(RelationQuery),
 }
 
 impl ShapeAst {
@@ -3372,21 +3221,16 @@ impl ShapeAst {
 }
 
 /// Shape registration options.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegisterShapeOptions {
     /// Durability tier the subscriber wants this shape served at.
-    #[serde(default = "default_register_shape_tier")]
     pub tier: DurabilityTier,
     /// Semantic read-view request for this shape registration.
-    #[serde(default)]
     pub read_view: ReadViewSpec,
     /// Internal ownership of the binding whose ViewUpdates a local relay may
     /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
     /// relay code creates `RelayAuthoritySession` only for its own upstream
     /// coverage handle.
-    #[serde(default)]
     #[doc(hidden)]
     pub binding_source: BindingSource,
 }
@@ -3405,19 +3249,7 @@ impl Default for RegisterShapeOptions {
 ///
 /// It participates in [`RegisterShapeOptions::read_view_key`], so a local
 /// relay authority receipt cannot be confused with an ordinary Global read.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BindingSource {
     #[default]
     #[doc(hidden)]
@@ -3479,19 +3311,7 @@ impl ReadViewSpec {
 /// Despite the historical name, this key is derived from the full
 /// [`RegisterShapeOptions`], including durability tier, semantic read view, and
 /// upstream-routing intent.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReadViewKey {
     /// Canonical id of the resolved read view. Nil means the legacy
     /// current/global default.
@@ -3638,7 +3458,7 @@ pub enum ReadViewSourceSpec {
 }
 
 /// Usage-site subscription attach for one registered shape.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Subscribe {
     /// Shape whose binding set changes.
     pub shape_id: ShapeId,
@@ -3661,7 +3481,7 @@ pub struct Subscribe {
 /// This is intentionally a subscription-local snapshot rather than a lookup
 /// by identity: two active sessions may share an identity but carry different
 /// provider claims.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DelegatedSessionBinding {
     /// Identity whose `session` values the subscription may evaluate.
     pub identity: AuthorSubject,
@@ -3670,7 +3490,7 @@ pub struct DelegatedSessionBinding {
 }
 
 /// Known-state declaration echoed by a subscriber on resubscribe.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KnownStateDeclaration {
     /// Fast optimistic declaration for the current-membership view.
     Fast {
@@ -3712,7 +3532,7 @@ pub enum KnownStateDeclaration {
 }
 
 /// Known-state declaration completeness class.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KnownStateCompleteness {
     /// The subscriber has an unevicted fast current membership view through the
     /// declared settled position.
@@ -3720,7 +3540,7 @@ pub enum KnownStateCompleteness {
 }
 
 /// Reason a serving peer rejected one subscription attach.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscribeRejectReason {
     /// The shape/read-view cannot currently be maintained by the serving peer.
     UnsupportedShapeCapability {
@@ -3749,7 +3569,7 @@ pub enum SubscribeRejectReason {
 }
 
 /// Client-safe classes for server-side subscription failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscribeServerFailureCode {
     /// The requested table was not present in the server's schema.
     TableNotFound,
@@ -3774,7 +3594,7 @@ pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
 /// Aggregate result rows have no revision or version. The runtime needs a
 /// token solely to pair a retracted aggregate record with its replacement;
 /// callers cannot inspect or construct the token as a meaningful value.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SyntheticReplacementToken(Vec<u8>);
 
 impl std::fmt::Debug for SyntheticReplacementToken {
@@ -3813,7 +3633,7 @@ mod synthetic_replacement_token_tests {
 /// [`ResultRowEntry`] projection, but the member also carries enough optional
 /// identity to represent deleted-row, historical, branch, and schema-projected
 /// rows without creating a second result-set protocol.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResultMemberEntry {
     /// Real table row membership.
     Row(RealRowMemberEntry),
@@ -3855,7 +3675,7 @@ pub enum ResultMemberEntry {
 /// Real table row membership, including both the ordinary current-content
 /// compatibility identity and the extra branch columns needed by historic,
 /// branch/prefix, include-deleted, and schema-projected reads.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RealRowMemberEntry {
     /// Logical table.
     pub table: groove::Intern<String>,
@@ -3867,36 +3687,26 @@ pub struct RealRowMemberEntry {
     /// so replacements retain their output address.
     pub occurrence_id: Option<OutputOccurrenceId>,
     /// Visible content transaction, when this member has a content row.
-    #[serde(default)]
     pub content_tx: Option<TxId>,
     /// Which register/layer this member represents.
-    #[serde(default)]
     pub layer: ResultRowLayer,
     /// Deletion-register transaction when membership is tombstone-aware.
-    #[serde(default)]
     pub deletion_tx: Option<TxId>,
     /// Source/read frontier this member was produced from.
-    #[serde(default)]
     pub source: ResultRowSource,
     /// Resolved read-view key for this member.
-    #[serde(default)]
     pub read_view: ReadViewKey,
     /// Schema version after lens/projection, when known on the result member.
-    #[serde(default)]
     pub schema_version: Option<SchemaVersionId>,
     /// Branch/prefix discriminator when it participates in member identity.
-    #[serde(default)]
     pub branch_or_prefix: Option<Vec<u8>>,
     /// Optional stable digest of the visible member row.
-    #[serde(default)]
     pub row_digest: Option<Vec<u8>>,
     /// Batch/transaction grouping identity for batch-centric visibility.
-    #[serde(default)]
     pub batch: Option<TxId>,
     /// Settled global position of this member's visible current winner, when
     /// known. Unfated/local members carry `None` and are never eligible for
     /// fast known-state body skipping.
-    #[serde(default)]
     pub settle_position: Option<GlobalTime>,
 }
 
@@ -3959,19 +3769,7 @@ impl RealRowMemberEntry {
 }
 
 /// Version/register layer represented by a real-row result member.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResultRowLayer {
     /// Visible content register.
     #[default]
@@ -3983,18 +3781,7 @@ pub enum ResultRowLayer {
 }
 
 /// Source/read frontier that produced a real-row result member.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResultRowSource {
     /// Current default source.
     #[default]
@@ -4120,13 +3907,12 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
 /// One exact native row version in a subscription's atomic supporting set.
 ///
 /// No query source occurrence, role or completeness claim crosses this boundary.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SupportingRow {
     /// Permanent physical table identity; logical scan aliases never identify a row.
     pub physical_table: crate::ids::GlobalPhysicalTableId,
     /// Authored native-record table name used by the existing exact version repair API.
     /// This is lookup metadata, not a query-source label; physical identity is authoritative.
-    #[serde(deserialize_with = "supporting_table_name::deserialize")]
     pub version_table: groove::Intern<String>,
     /// Physical row identity.
     pub row: RowUuid,
@@ -4142,10 +3928,9 @@ impl SupportingRow {
 }
 
 mod supporting_table_name {
-    use std::{borrow::Cow, cell::Cell, fmt};
+    use std::{borrow::Cow, cell::Cell};
 
     use groove::Intern;
-    use serde::de::{Error, Unexpected, Visitor};
 
     thread_local! {
         // Intern handles own permanent pool entries, never input-buffer references.
@@ -4153,11 +3938,9 @@ mod supporting_table_name {
         static LAST: Cell<Option<Intern<String>>> = const { Cell::new(None) };
         #[cfg(test)]
         pub(super) static LOOKUPS: Cell<usize> = const { Cell::new(0) };
-        #[cfg(test)]
-        pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
     }
 
-    fn intern(name: Cow<'_, str>) -> Intern<String> {
+    pub(super) fn intern(name: Cow<'_, str>) -> Intern<String> {
         LAST.with(|last| {
             if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
                 return found;
@@ -4173,61 +3956,15 @@ mod supporting_table_name {
         })
     }
 
-    struct TableName;
-
-    impl<'de> Visitor<'de> for TableName {
-        type Value = Intern<String>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string")
-        }
-
-        fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
-            Ok(intern(Cow::Borrowed(value)))
-        }
-
-        fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
-            #[cfg(test)]
-            OWNED_VISITS.set(OWNED_VISITS.get() + 1);
-            Ok(intern(Cow::Owned(value)))
-        }
-
-        fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-            match std::str::from_utf8(value) {
-                Ok(value) => self.visit_str(value),
-                Err(_) => Err(E::invalid_value(Unexpected::Bytes(value), &self)),
-            }
-        }
-
-        fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
-            match String::from_utf8(value) {
-                Ok(value) => self.visit_string(value),
-                Err(error) => Err(E::invalid_value(
-                    Unexpected::Bytes(&error.into_bytes()),
-                    &self,
-                )),
-            }
-        }
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Intern<String>, D::Error> {
-        // Serialization stays the existing string representation. Request borrowing
-        // during decode instead of String::deserialize's allocate-before-intern path.
-        deserializer.deserialize_str(TableName)
-    }
-
     #[cfg(test)]
     pub(super) fn reset() {
         LAST.set(None);
         LOOKUPS.set(0);
-        OWNED_VISITS.set(0);
     }
 }
 
 /// One typed non-row fact emitted by a maintained view.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProgramFactEntry {
     /// Payload bytes for a non-versioned result member, such as aggregate/window output.
     ResultPayload(ResultMemberPayloadEntry),
@@ -4283,7 +4020,7 @@ pub type ViewFactEntry = ProgramFactEntry;
 /// Ordinary real rows travel via `VersionBundle`; synthetic/aggregate/window
 /// outputs use this fact to keep member identity and row bytes in the same
 /// typed program-output stream.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResultMemberPayloadEntry {
     /// Member whose payload is encoded here.
     pub member: ResultMemberEntry,
@@ -4294,7 +4031,7 @@ pub struct ResultMemberPayloadEntry {
 }
 
 /// Relation edge fact emitted by query payloads.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RelationEdgeEntry {
     /// Logical path or relation name.
     pub path: String,
@@ -4307,58 +4044,44 @@ pub struct RelationEdgeEntry {
     /// Target row id.
     pub target_row: RowUuid,
     /// Edge kind, when this is more specific than a plain include/join edge.
-    #[serde(default)]
     pub kind: Option<RelationEdgeKind>,
     /// Source version identity, when edge membership depends on a concrete version.
-    #[serde(default)]
     pub source_version: Option<RowVersionRefEntry>,
     /// Target version identity, when edge membership depends on a concrete version.
-    #[serde(default)]
     pub target_version: Option<RowVersionRefEntry>,
     /// Recursive depth for reachability/gather paths.
-    #[serde(default)]
     pub depth: Option<u32>,
     /// Multipath/edge id when several edges connect the same source/target.
-    #[serde(default)]
     pub edge_id: Option<Vec<u8>>,
     /// Union/policy branch alternative.
-    #[serde(default)]
     pub branch: Option<Vec<u8>>,
     /// Terminal role for intermediate/frontier/output relation rows.
-    #[serde(default)]
     pub role: Option<RelationEdgeRole>,
     /// Stable edge order when order affects the maintained output.
-    #[serde(default)]
     pub order: Option<Vec<u8>>,
     /// Whether this edge is a materialized match or a hole/null placeholder.
-    #[serde(default)]
     pub hole_state: Option<PathHoleState>,
 }
 
 /// Concrete row-version reference used by facts.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowVersionRefEntry {
     /// Transaction containing the version.
     pub tx: TxId,
     /// Schema version carried by the version row, when available.
-    #[serde(default)]
     pub schema_version: Option<SchemaVersionId>,
     /// Version/register layer.
-    #[serde(default)]
     pub layer: ResultRowLayer,
     /// Batch/transaction grouping identity.
-    #[serde(default)]
     pub batch: Option<TxId>,
     /// Branch/prefix discriminator.
-    #[serde(default)]
     pub branch_or_prefix: Option<Vec<u8>>,
     /// Optional visible row digest.
-    #[serde(default)]
     pub row_digest: Option<Vec<u8>>,
 }
 
 /// Version/replacement witness for payload and removal materialization.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VersionWitnessEntry {
     /// Witness role, such as payload, replacement, or deletion.
     pub role: String,
@@ -4373,7 +4096,7 @@ pub struct VersionWitnessEntry {
 /// The surrounding `ViewUpdate` supplies the exact subscription (and an
 /// authorization-scope wrapper, when present); `source` preserves the stable
 /// row occurrence and `version` pins the concrete content or deletion layer.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CoveredInputEntry {
     /// Stable normalized query source occurrence, never a runtime-local slot.
     pub source: ProgramSourceId,
@@ -4404,7 +4127,7 @@ impl CoveredInputEntry {
 /// It deliberately distinguishes repeated scans of the same table (aliases,
 /// relation paths, policy sources, and recursive roles) without referring to
 /// a collector slot or runtime allocation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProgramSourceId {
     /// Logical table emitted by this source occurrence.
     pub table: groove::Intern<String>,
@@ -4440,7 +4163,7 @@ impl ProgramSourceId {
 }
 
 /// One component of a [`ProgramSourceId`] path.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProgramSourceRole {
     /// Root query source.
     Root,
@@ -4457,7 +4180,7 @@ pub enum ProgramSourceRole {
 }
 
 /// Policy dependency witness fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PolicyWitnessEntry {
     /// Protected result member or row.
     pub protected: ResultMemberEntry,
@@ -4470,7 +4193,7 @@ pub struct PolicyWitnessEntry {
 }
 
 /// Derived-output provenance fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContributingMembersEntry {
     /// Derived result member.
     pub result: ResultMemberEntry,
@@ -4483,7 +4206,7 @@ pub struct ContributingMembersEntry {
 }
 
 /// Predicate-read validation fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PredicateReadEntry {
     /// Validation side: base or now.
     pub role: PredicateOutputSetRoleEntry,
@@ -4498,7 +4221,7 @@ pub struct PredicateReadEntry {
 }
 
 /// Point row-read validation fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PointReadEntry {
     /// Whether the row was present in this read.
     pub present: bool,
@@ -4515,9 +4238,7 @@ pub struct PointReadEntry {
 }
 
 /// Relation edge kind.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RelationEdgeKind {
     /// Include edge.
     Include,
@@ -4532,9 +4253,7 @@ pub enum RelationEdgeKind {
 }
 
 /// Role of a relation edge in the maintained program.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RelationEdgeRole {
     /// Internal edge only.
     Intermediate,
@@ -4545,9 +4264,7 @@ pub enum RelationEdgeRole {
 }
 
 /// Placeholder state for optional relation/include paths.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PathHoleState {
     /// Concrete matched edge.
     Matched,
@@ -4556,7 +4273,7 @@ pub enum PathHoleState {
 }
 
 /// Correlation coverage fact for relation/path materialization.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PathCorrelationCoverageEntry {
     /// Logical path or relation name.
     pub path: String,
@@ -4576,7 +4293,7 @@ pub struct PathCorrelationCoverageEntry {
 /// receipt has exactly one entry for every compiled [`ProgramSourceId`], even
 /// when that source contributes zero rows. Its enclosing view-update generation
 /// identifies the immutable closure being installed.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProgramSourceCoverageEntry {
     /// Exact normalized source occurrence whose input closure is complete.
     pub source: ProgramSourceId,
@@ -4585,7 +4302,7 @@ pub struct ProgramSourceCoverageEntry {
 }
 
 /// Settled read-frontier fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReadFrontierSettledEntry {
     /// Scope this frontier settles.
     pub scope: String,
@@ -4598,7 +4315,7 @@ pub struct ReadFrontierSettledEntry {
 }
 
 /// Complete transaction payload coverage fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CompleteTxPayloadCoverageEntry {
     /// Covered transaction/batch.
     pub tx: TxId,
@@ -4609,7 +4326,7 @@ pub struct CompleteTxPayloadCoverageEntry {
 }
 
 /// View-complete exclusive transaction coverage fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ViewCompleteExclusiveCoverageEntry {
     /// Covered transaction/batch.
     pub tx: TxId,
@@ -4624,7 +4341,7 @@ pub struct ViewCompleteExclusiveCoverageEntry {
 }
 
 /// Tri-state policy decision fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PolicyDecisionEntry {
     /// Decision identity inside the program.
     pub decision: Vec<u8>,
@@ -4635,7 +4352,7 @@ pub struct PolicyDecisionEntry {
 }
 
 /// Wire policy decision outcome.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PolicyDecisionOutcomeEntry {
     /// Policy grants the operation.
     Allowed,
@@ -4656,7 +4373,7 @@ pub enum PolicyDecisionOutcomeEntry {
 }
 
 /// Predicate output-set fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PredicateOutputSetEntry {
     /// Validation side: base or now.
     pub role: PredicateOutputSetRoleEntry,
@@ -4673,9 +4390,7 @@ pub struct PredicateOutputSetEntry {
 }
 
 /// Predicate output-set comparison side.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PredicateOutputSetRoleEntry {
     /// Base snapshot side.
     Base,
@@ -4701,15 +4416,6 @@ pub struct SchemaVersion {
     pub id: SchemaVersionId,
     /// Compiled runtime schema. Serialization emits its retained public schema.
     pub schema: JazzSchema,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct SchemaVersionWire {
-    id: SchemaVersionId,
-    /// Canonical public schema and PolicyExpr values encoded as JSON so public
-    /// Value remains portable across both JSON storage and postcard transport
-    /// serializers.
-    public_schema_json: Vec<u8>,
 }
 
 fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
@@ -4741,40 +4447,8 @@ fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     crate::model::public_schema_convert::decode_public_schema_json(bytes)
 }
 
-impl serde::Serialize for SchemaVersion {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let public_schema_json =
-            durable_public_schema_json(&self.schema).map_err(serde::ser::Error::custom)?;
-        let wire = SchemaVersionWire {
-            id: self.id,
-            public_schema_json,
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SchemaVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let SchemaVersionWire {
-            id,
-            public_schema_json,
-        } = SchemaVersionWire::deserialize(deserializer)?;
-        let schema =
-            compile_public_schema_json(&public_schema_json).map_err(serde::de::Error::custom)?;
-        // Keep identity validation at catalogue admission/open, where callers
-        // receive the established domain error rather than a codec error.
-        Ok(Self { id, schema })
-    }
-}
-
 /// Atomic catalogue payload that admits one non-genesis schema.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub struct SchemaLineagePublication {
     /// Content-addressed identity of this complete bundle.
     pub id: SchemaLineagePublicationId,
@@ -4789,7 +4463,7 @@ pub struct SchemaLineagePublication {
 }
 
 /// One incoming migration and its source-relative table declarations.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub struct SchemaPredecessor {
     /// Migration from this predecessor into the published schema.
     pub lens: MigrationLens,
@@ -4829,14 +4503,14 @@ impl PartialEq for SchemaLineagePublication {
 /// Immutable globally meaningful physical identities for one published schema
 /// descriptor. UUIDs are allocated by the catalogue authority and replicated
 /// in the publication; receivers may choose unrelated local u64 aliases.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhysicalIdentityManifest {
     /// Logical table lookup metadata paired with authority-issued UUIDs.
     pub tables: BTreeMap<String, PhysicalTableIdentity>,
 }
 
 /// One table's permanent physical identity and its child identities.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhysicalTableIdentity {
     /// Permanent table-lineage UUID.
     pub id: crate::ids::GlobalPhysicalTableId,
@@ -4845,7 +4519,7 @@ pub struct PhysicalTableIdentity {
 }
 
 /// One column epoch's permanent physical identity and enum occurrences.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhysicalColumnIdentity {
     /// Permanent column-epoch UUID.
     pub id: crate::ids::GlobalPhysicalColumnId,
@@ -5800,53 +5474,6 @@ pub struct MigrationLens {
     pub table_lenses: Vec<TableLens>,
 }
 
-impl serde::Serialize for MigrationLens {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&canonical_lens_bytes(self))
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MigrationLens {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct LensBytes;
-        impl<'de> serde::de::Visitor<'de> for LensBytes {
-            type Value = MigrationLens;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a bounded canonical migration-lens byte blob")
-            }
-            fn visit_borrowed_bytes<E>(self, bytes: &'de [u8]) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
-                    return Err(E::custom(
-                        "migration lens blob exceeds aggregate byte budget",
-                    ));
-                }
-                decode_canonical_lens_bytes(bytes).map_err(E::custom)
-            }
-            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
-                    return Err(E::custom(
-                        "migration lens blob exceeds aggregate byte budget",
-                    ));
-                }
-                decode_canonical_lens_bytes(bytes).map_err(E::custom)
-            }
-        }
-        deserializer.deserialize_bytes(LensBytes)
-    }
-}
-
 impl MigrationLens {
     /// Immutable content-addressed identity.
     pub fn id(&self) -> MigrationLensId {
@@ -6308,7 +5935,7 @@ fn put_len(bytes: &mut Vec<u8>, len: usize) {
 }
 
 /// Lens operations for one logical table.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TableLens {
     /// Source logical table.
     pub source_table: String,
@@ -6319,7 +5946,7 @@ pub struct TableLens {
 }
 
 /// v0 migration lens operation set.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LensOp {
     /// Rename a table.
     RenameTable {
@@ -6371,7 +5998,7 @@ pub enum LensOp {
 }
 
 /// Core-ordered current write-schema pointer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CurrentWriteSchema {
     /// Monotone catalogue revision assigned by the core/admin lane.
     pub revision: u64,
@@ -6380,7 +6007,7 @@ pub struct CurrentWriteSchema {
 }
 
 /// Acknowledgement for catalogue lane messages.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogueAck {
     /// Applied catalogue revision, if the message carried one.
     pub revision: Option<u64>,
@@ -6483,12 +6110,14 @@ mod tests {
     // observed through row queries. Public sync suites still gate visible behavior.
     #[test]
     fn supporting_table_borrowing_preserves_existing_wire_bytes_and_validation() {
-        #[derive(serde::Serialize, serde::Deserialize)]
         struct PreviousSupportingRow {
             physical_table: crate::ids::GlobalPhysicalTableId,
             version_table: groove::Intern<String>,
             row: RowUuid,
             version: RowVersionRefEntry,
+        }
+        crate::wire_struct! {
+            for PreviousSupportingRow { physical_table, version_table, row, version }
         }
         for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
             for populated in [false, true] {
@@ -6508,98 +6137,96 @@ mod tests {
                         row_digest: populated.then(|| vec![42; 32]),
                     },
                 };
-                let bytes = postcard::to_allocvec(&old).unwrap();
-                let row: SupportingRow = postcard::from_bytes(&bytes).unwrap();
+                let bytes = crate::codec::try_encode(&old).unwrap();
+                let row: SupportingRow = crate::codec::decode_exact(&bytes).unwrap();
                 assert_eq!(row.physical_table, old.physical_table);
                 assert_eq!(row.version_table, old.version_table);
                 assert_eq!(row.row, old.row);
                 assert_eq!(row.version, old.version);
                 assert_eq!(row.is_wire_valid(), !name.is_empty());
-                assert_eq!(postcard::to_allocvec(&row).unwrap(), bytes);
+                assert_eq!(crate::codec::try_encode(&row).unwrap(), bytes);
                 let old_again: PreviousSupportingRow =
-                    postcard::from_bytes(&postcard::to_allocvec(&row).unwrap()).unwrap();
+                    crate::codec::decode_exact(&crate::codec::try_encode(&row).unwrap()).unwrap();
                 assert_eq!(old_again.version_table, old.version_table);
-                let json = serde_json::to_vec(&old).unwrap();
-                assert_eq!(serde_json::from_slice::<SupportingRow>(&json).unwrap(), row);
-                assert_eq!(serde_json::to_vec(&row).unwrap(), json);
                 // Match existing postcard acceptance at every truncated boundary,
                 // including optional/default field semantics, rather than assuming it.
                 for end in 0..bytes.len() {
                     assert_eq!(
-                        postcard::from_bytes::<SupportingRow>(&bytes[..end]).is_ok(),
-                        postcard::from_bytes::<PreviousSupportingRow>(&bytes[..end]).is_ok()
+                        crate::codec::decode_exact::<SupportingRow>(&bytes[..end]).is_ok(),
+                        crate::codec::decode_exact::<PreviousSupportingRow>(&bytes[..end]).is_ok()
                     );
                 }
                 let mut trailing = bytes.clone();
                 trailing.push(0);
-                let (_, new_tail) = postcard::take_from_bytes::<SupportingRow>(&trailing).unwrap();
-                let (_, old_tail) =
-                    postcard::take_from_bytes::<PreviousSupportingRow>(&trailing).unwrap();
-                assert_eq!(new_tail, old_tail);
-                assert_eq!(new_tail, &[0]);
+                let (_, new_used) =
+                    crate::codec::decode_prefix::<SupportingRow>(&trailing).unwrap();
+                let (_, old_used) =
+                    crate::codec::decode_prefix::<PreviousSupportingRow>(&trailing).unwrap();
+                assert_eq!(new_used, old_used);
+                assert_eq!(&trailing[new_used..], &[0]);
             }
         }
 
-        #[derive(serde::Deserialize, serde::Serialize)]
-        struct Name(
-            #[serde(deserialize_with = "supporting_table_name::deserialize")]
-            groove::Intern<String>,
-        );
+        struct Name(groove::Intern<String>);
+        impl crate::codec::WireCodec for Name {
+            fn put(&self, buf: &mut Vec<u8>) {
+                self.0.put(buf);
+            }
+            fn get(data: &[u8], offset: &mut usize) -> Result<Self, crate::codec::CodecError> {
+                let name = crate::codec::get_str(data, offset)?;
+                Ok(Self(supporting_table_name::intern(
+                    std::borrow::Cow::Borrowed(name),
+                )))
+            }
+        }
         // Existing postcard string grammar: unsigned length varint, then UTF-8.
         const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
         assert_eq!(
-            postcard::from_bytes::<Name>(GOLDEN).unwrap().0.as_str(),
+            crate::codec::decode_exact::<Name>(GOLDEN)
+                .unwrap()
+                .0
+                .as_str(),
             "todos"
         );
         assert_eq!(
-            postcard::to_allocvec(&Name("todos".to_owned().into())).unwrap(),
+            crate::codec::try_encode(&Name("todos".to_owned().into())).unwrap(),
             GOLDEN
         );
         for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
-            assert!(postcard::from_bytes::<Name>(invalid).is_err());
-            assert!(postcard::from_bytes::<groove::Intern<String>>(invalid).is_err());
+            assert!(crate::codec::decode_exact::<Name>(invalid).is_err());
+            assert!(crate::codec::decode_exact::<groove::Intern<String>>(invalid).is_err());
         }
-        use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
-        assert!(
-            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(&[255])).is_err()
-        );
-        assert_eq!(
-            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(b"valid"))
-                .unwrap()
-                .as_str(),
-            "valid"
-        );
-        assert_eq!(
-            supporting_table_name::deserialize(StringDeserializer::<Error>::new("owned".into()))
-                .unwrap()
-                .as_str(),
-            "owned"
-        );
     }
 
     #[test]
     fn supporting_table_borrowing_uses_one_bounded_cache_entry_without_input_ownership() {
-        #[derive(serde::Deserialize)]
-        struct Name(
-            #[serde(deserialize_with = "supporting_table_name::deserialize")]
-            groove::Intern<String>,
-        );
+        struct Name(groove::Intern<String>);
+        impl crate::codec::WireCodec for Name {
+            fn put(&self, buf: &mut Vec<u8>) {
+                self.0.put(buf);
+            }
+            fn get(data: &[u8], offset: &mut usize) -> Result<Self, crate::codec::CodecError> {
+                let name = crate::codec::get_str(data, offset)?;
+                Ok(Self(supporting_table_name::intern(
+                    std::borrow::Cow::Borrowed(name),
+                )))
+            }
+        }
         let first = groove::Intern::<String>::from_ref("table_name_cache_first");
         let second = groove::Intern::<String>::from_ref("table_name_cache_second");
-        let bytes = postcard::to_allocvec(&first).unwrap();
+        let bytes = crate::codec::try_encode(&first).unwrap();
         supporting_table_name::reset();
         for _ in 0..1000 {
-            assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+            assert_eq!(crate::codec::decode_exact::<Name>(&bytes).unwrap().0, first);
         }
         assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
-        assert_eq!(supporting_table_name::OWNED_VISITS.get(), 0);
         assert_eq!(
-            postcard::from_bytes::<Name>(&postcard::to_allocvec(&second).unwrap())
+            crate::codec::decode_exact::<Name>(&crate::codec::try_encode(&second).unwrap())
                 .unwrap()
                 .0,
             second
         );
-        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        assert_eq!(crate::codec::decode_exact::<Name>(&bytes).unwrap().0, first);
         assert_eq!(
             supporting_table_name::LOOKUPS.get(),
             3,
@@ -6609,9 +6236,10 @@ mod tests {
         assert_eq!(first.as_str(), "table_name_cache_first");
         let independent = std::thread::spawn(move || {
             supporting_table_name::reset();
-            let decoded = postcard::from_bytes::<Name>(&postcard::to_allocvec(&first).unwrap())
-                .unwrap()
-                .0;
+            let decoded =
+                crate::codec::decode_exact::<Name>(&crate::codec::try_encode(&first).unwrap())
+                    .unwrap()
+                    .0;
             assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
             decoded
         })
@@ -6859,19 +6487,6 @@ mod tests {
         );
     }
 
-    /// Forces postcard's `serialize_bytes` representation rather than the
-    /// collection representation used by `Vec<u8>`.
-    struct PostcardByteBlob<'a>(&'a [u8]);
-
-    impl serde::Serialize for PostcardByteBlob<'_> {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.serialize_bytes(self.0)
-        }
-    }
-
     #[test]
     fn protocol_lens_storage_codec_covers_every_declared_operation_and_value_arm() {
         let values = vec![
@@ -7017,8 +6632,10 @@ mod tests {
         let mut malformed = canonical_lens_bytes(&valid);
         malformed.push(0);
         assert!(
-            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&malformed).unwrap())
-                .is_err()
+            crate::codec::decode_exact::<MigrationLens>(
+                &crate::codec::try_encode(&malformed).unwrap()
+            )
+            .is_err()
         );
         // Planted sensitivity: if Deserialize stopped routing through the
         // canonical parser, this trailing wire would decode and later reach
@@ -7044,9 +6661,10 @@ mod tests {
             put_str(&mut malformed, target);
             put_len(&mut malformed, 0);
         }
-        let wire = postcard::to_allocvec(&PostcardByteBlob(&malformed)).expect("wrap lens blob");
+        let wire = crate::codec::try_encode(&malformed.to_vec()).expect("wrap lens blob");
 
-        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        let decoded =
+            std::panic::catch_unwind(|| crate::codec::decode_exact::<MigrationLens>(&wire));
         assert!(
             decoded.is_ok(),
             "malformed lens wire must return an error, not panic"
@@ -7077,27 +6695,10 @@ mod tests {
         )
         .expect("unique coordinates are valid");
         assert!(
-            postcard::from_bytes::<MigrationLens>(
-                &postcard::to_allocvec(&valid).expect("wrap valid lens blob")
+            crate::codec::decode_exact::<MigrationLens>(
+                &crate::codec::try_encode(&valid).expect("wrap valid lens blob")
             )
             .is_ok()
-        );
-    }
-
-    /// The serde visitor must reject an oversized byte blob while it is still
-    /// borrowed from the input. This direct deserializer preserves the custom
-    /// error message that postcard's public error type intentionally erases.
-    #[test]
-    fn migration_lens_borrowed_visitor_rejects_oversized_blob_before_parsing() {
-        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
-        let error = <MigrationLens as serde::Deserialize>::deserialize(
-            serde::de::value::BorrowedBytesDeserializer::<serde::de::value::Error>::new(&oversized),
-        )
-        .expect_err("oversized borrowed blob must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "migration lens blob exceeds aggregate byte budget",
-            "the borrowed visitor must reject the declared blob before parsing"
         );
     }
 
@@ -7108,9 +6709,9 @@ mod tests {
         let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
         // `serialize_bytes` emits postcard's byte-blob length varint followed
         // by this data. The payload is intentionally not a lens marker.
-        let wire =
-            postcard::to_allocvec(&PostcardByteBlob(&oversized)).expect("wrap oversized blob");
-        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        let wire = crate::codec::try_encode(&oversized).expect("wrap oversized blob");
+        let decoded =
+            std::panic::catch_unwind(|| crate::codec::decode_exact::<MigrationLens>(&wire));
         assert!(
             decoded.is_ok(),
             "oversized lens wire must return an error, not panic"
@@ -7238,10 +6839,10 @@ mod tests {
         let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
         let version = SchemaVersion::new(compiled);
 
-        let stored = serde_json::to_string(&version).expect("source schema serializes");
-        let SchemaVersionWire {
-            public_schema_json, ..
-        } = serde_json::from_str(&stored).expect("decode stored schema envelope");
+        let stored = crate::codec::try_encode(&version).expect("source schema serializes");
+        let (_, public_schema_json) =
+            crate::codec::decode_exact::<(SchemaVersionId, Vec<u8>)>(&stored)
+                .expect("decode stored schema envelope");
         let stored_source_json =
             String::from_utf8(public_schema_json).expect("public schema JSON is UTF-8");
         let stored_source: serde_json::Value =
@@ -7255,9 +6856,9 @@ mod tests {
         assert!(!stored_source_json.contains("read_policy"));
         assert!(!stored_source_json.contains("write_policies"));
 
-        let bytes = postcard::to_allocvec(&version).expect("source schema crosses the wire");
+        let bytes = crate::codec::try_encode(&version).expect("source schema crosses the wire");
         let decoded: SchemaVersion =
-            postcard::from_bytes(&bytes).expect("source schema recompiles on decode");
+            crate::codec::decode_exact(&bytes).expect("source schema recompiles on decode");
         assert_eq!(decoded, version);
         assert_eq!(
             decoded.schema.public_schema(),
@@ -7278,9 +6879,10 @@ mod tests {
         // recompiling here puts schema-size work on every propagated write.
         version.schema.runtime_mut_for_testing().tables.clear();
 
-        let encoded = postcard::to_allocvec(&version)
+        let encoded = crate::codec::try_encode(&version)
             .expect("serialization trusts the source established at construction");
-        let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
+        let decoded: SchemaVersion =
+            crate::codec::decode_exact(&encoded).expect("source recompiles");
         assert_eq!(decoded.schema.public_schema(), &source);
         assert_eq!(decoded.schema.tables().len(), 1);
     }
@@ -7301,7 +6903,7 @@ mod tests {
         let manifest = PhysicalIdentityManifest::allocate(&schema);
         manifest.validate_for_schema(&schema).unwrap();
         let round_trip: PhysicalIdentityManifest =
-            serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+            crate::codec::decode_exact(&crate::codec::encode(&manifest)).unwrap();
         assert_eq!(round_trip, manifest);
 
         let version = SchemaVersion::new(schema.clone());
@@ -7729,10 +7331,10 @@ mod tests {
     #[test]
     fn wire_v5_registration_options_bytes() {
         let options = RegisterShapeOptions::default();
-        let bytes = postcard::to_allocvec(&options).unwrap();
+        let bytes = crate::codec::try_encode(&options).unwrap();
         assert_eq!(hex::encode(&bytes), "020000");
         assert_eq!(
-            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            crate::codec::decode_exact::<RegisterShapeOptions>(&bytes).unwrap(),
             options
         );
     }
@@ -7788,8 +7390,8 @@ mod tests {
         ))
         .with_occurrence_id(occurrence.clone())
         .into();
-        let bytes = postcard::to_allocvec(&member).unwrap();
-        let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
+        let bytes = crate::codec::try_encode(&member).unwrap();
+        let decoded: ResultMemberEntry = crate::codec::decode_exact(&bytes).unwrap();
         assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
     }
 
@@ -7805,8 +7407,8 @@ mod tests {
             RowUuid::from_bytes([1; 16]),
             TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
         )));
-        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
-        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(crate::codec::try_encode(&member).unwrap(), LEGACY);
+        let decoded: ResultMemberEntry = crate::codec::decode_exact(LEGACY).unwrap();
         assert_eq!(decoded, member);
     }
 
@@ -7886,7 +7488,7 @@ mod tests {
             .with_extra_cells(vec![legacy(3, Some("x")), legacy(1, None)]);
         union.validate_receipt().unwrap();
         let decoded: VersionRecord =
-            postcard::from_bytes(&postcard::to_allocvec(&union).unwrap()).unwrap();
+            crate::codec::decode_exact(&crate::codec::try_encode(&union).unwrap()).unwrap();
         assert_eq!(decoded, union);
         assert_eq!(decoded.extra_cells()[0].schema_version(), schema_id(1));
         assert_eq!(
@@ -7975,8 +7577,8 @@ mod tests {
         .with_authored_columns(Some(BTreeSet::from(["count".to_owned()])));
         let negative = image.clone().with_counter_signs(vec![0b1]);
 
-        let image_bytes = postcard::to_allocvec(&image).unwrap();
-        let negative_bytes = postcard::to_allocvec(&negative).unwrap();
+        let image_bytes = crate::codec::try_encode(&image).unwrap();
+        let negative_bytes = crate::codec::try_encode(&negative).unwrap();
         // ... authored_columns, base (none, none), counter_signs.
         assert_eq!(&image_bytes[image_bytes.len() - 3..], &[0, 0, 0]);
         assert_eq!(&negative_bytes[negative_bytes.len() - 4..], &[0, 0, 1, 0b1]);
@@ -7984,7 +7586,7 @@ mod tests {
             image_bytes[..image_bytes.len() - 1],
             negative_bytes[..negative_bytes.len() - 2]
         );
-        let decoded: VersionRecord = postcard::from_bytes(&negative_bytes).unwrap();
+        let decoded: VersionRecord = crate::codec::decode_exact(&negative_bytes).unwrap();
         assert_eq!(decoded.counter_signs(), &[0b1]);
         assert_eq!(decoded, negative);
         assert_ne!(image.cmp(&negative), Ordering::Equal);
@@ -7995,7 +7597,7 @@ mod tests {
             seq: Some(GlobalTime(5)),
             pending: Some(TxId::new(TxTime(7), NodeUuid::from_bytes([2; 16]))),
         });
-        let based_bytes = postcard::to_allocvec(&based).unwrap();
+        let based_bytes = crate::codec::try_encode(&based).unwrap();
         let mut tail = vec![1, 5, 1, 7, 16];
         tail.extend([2; 16]);
         tail.push(0);
@@ -8004,7 +7606,7 @@ mod tests {
             image_bytes[..image_bytes.len() - 3],
             based_bytes[..based_bytes.len() - tail.len()]
         );
-        let decoded: VersionRecord = postcard::from_bytes(&based_bytes).unwrap();
+        let decoded: VersionRecord = crate::codec::decode_exact(&based_bytes).unwrap();
         assert_eq!(decoded, based);
         assert_eq!(decoded.base().seq, Some(GlobalTime(5)));
     }
@@ -8078,23 +7680,20 @@ mod tests {
             },
             crate::ids::SchemaVersionId(uuid::Uuid::nil()),
         );
-        let mut shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        let mut shape_bytes = crate::codec::try_encode(&shape).unwrap();
         assert!(shape_bytes.ends_with(&table_scan));
         shape_bytes.truncate(shape_bytes.len() - table_scan.len());
         shape_bytes.extend(&relation);
         assert!(
-            std::panic::catch_unwind(|| postcard::from_bytes::<crate::protocol::ShapeAst>(
+            std::panic::catch_unwind(|| crate::codec::decode_exact::<crate::protocol::ShapeAst>(
                 &shape_bytes
             ))
             .is_ok()
         );
-        assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
-        let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert!(crate::codec::decode_exact::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
+        let valid_shape_bytes = crate::codec::try_encode(&shape).unwrap();
         assert_eq!(
-            crate::postcard_exact::decode_postcard_exact::<crate::protocol::ShapeAst>(
-                &valid_shape_bytes
-            )
-            .unwrap(),
+            crate::codec::decode_exact::<crate::protocol::ShapeAst>(&valid_shape_bytes).unwrap(),
             shape
         );
 
@@ -8118,9 +7717,9 @@ mod tests {
             relation,
             crate::ids::SchemaVersionId(uuid::Uuid::nil()),
         );
-        let shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        let shape_bytes = crate::codec::try_encode(&shape).unwrap();
         assert_eq!(
-            postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
+            crate::codec::decode_exact::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
             shape
         );
     }
@@ -8128,6 +7727,7 @@ mod tests {
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod supporting_set_test_oracle;
+mod wire_codecs_b;
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.

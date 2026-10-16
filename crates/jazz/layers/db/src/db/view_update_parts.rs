@@ -172,8 +172,8 @@ fn encoded_len(message: &SyncMessage) -> usize {
     crate::wire::encoded_sync_message_len(message).unwrap_or(usize::MAX)
 }
 
-fn serialized_size<T: serde::Serialize>(value: &T) -> usize {
-    postcard::experimental::serialized_size(value).unwrap_or(usize::MAX)
+fn serialized_size<T: crate::codec::WireCodec>(value: &T) -> usize {
+    crate::codec::encoded_len(value).unwrap_or(usize::MAX)
 }
 
 #[derive(Default)]
