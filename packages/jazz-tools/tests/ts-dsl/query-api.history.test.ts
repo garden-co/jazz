@@ -177,7 +177,7 @@ describe("TS Query API history (connected client)", () => {
   it("rejects history reads without an exact row id", async () => {
     await expect(db.all(app.notes.history)).rejects.toMatchObject({
       message:
-        "Query: unsupported relation query: Reading anything other than one exact id equality filter is not supported in history queries yet",
+        "Query: unsupported relation query: Reading history without an exact id equality constraint is not supported in history queries yet",
       code: "query",
     });
   });
@@ -197,15 +197,126 @@ describe("TS Query API history (connected client)", () => {
     }).toThrow(new Error('History table "history.notes" is read-only'));
   });
 
-  it("rejects additional history predicates at type and runtime boundaries", async () => {
+  it("filters historical values", async () => {
+    const note = await insertNote("before");
+    await db.update(app.notes, note.id, { title: "after" }).wait({ tier: "global" });
+    const rows = await db.all(
+      app.notes.history.where({ id: note.id, title: "before" }).select("title"),
+    );
+    expect(rows).toEqual([{ id: note.id, title: "before" }]);
+  });
+
+  it("combines chained application predicates with an exact id", async () => {
+    const note = await insertNote("a");
+    await db.update(app.notes, note.id, { title: "b" }).wait({ tier: "global" });
+    await db.update(app.notes, note.id, { title: "c" }).wait({ tier: "global" });
+    const query = app.notes.history
+      .where({ id: note.id })
+      .where({ title: { in: ["b", "c"], ne: "c" }, done: false })
+      .select("title");
+    expect(await db.all(query)).toEqual([{ id: note.id, title: "b" }]);
+  });
+
+  it("orders and paginates by an unselected application column", async () => {
+    const note = await insertNote("b");
+    await db.update(app.notes, note.id, { title: "c" }).wait({ tier: "global" });
+    await db.update(app.notes, note.id, { title: "a" }).wait({ tier: "global" });
+    const query = app.notes.history.where({ id: note.id });
+    const byAcceptance = await db.all(query.orderBy("$acceptedAt"));
+    expect(
+      await db.all(query.orderBy("title").offset(1).limit(1).select("$transactionId")),
+    ).toEqual([{ id: note.id, $transactionId: byAcceptance[0]!.$transactionId }]);
+    expect(
+      (await db.all(query.orderBy("title", "desc").select("title"))).map((row) => row.title),
+    ).toEqual(["c", "b", "a"]);
+  });
+
+  it("keeps matching old versions when a new version fails the subscription filter", async () => {
+    const note = await insertNote("keep");
+    const query = app.notes.history.where({ id: note.id, title: "keep" }).select("title");
+    const latest = watch(query);
+    const expected = { id: note.id, title: "keep" };
+    await expect.poll(latest).toEqual([expected]);
+    await db.update(app.notes, note.id, { title: "other" }).wait({ tier: "global" });
+    expect(await db.all(query)).toEqual([expected]);
+    await db.update(app.notes, note.id, { title: "keep" }).wait({ tier: "global" });
+    await expect.poll(latest).toEqual([expected, expected]);
+  });
+
+  it("updates an application-ordered subscription window", async () => {
+    const note = await insertNote("z");
+    const latest = watch(
+      app.notes.history.where({ id: note.id }).orderBy("title").limit(1).select("title"),
+    );
+    await expect.poll(latest).toEqual([{ id: note.id, title: "z" }]);
+    await db.update(app.notes, note.id, { title: "a" }).wait({ tier: "global" });
+    await expect.poll(latest).toEqual([{ id: note.id, title: "a" }]);
+  });
+
+  it.each(["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"] as const)(
+    "applies millisecond semantics to $acceptedAt %s predicates",
+    async (op) => {
+      const note = await insertNote("first");
+      await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
+      const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+      const rows = await db.all(query);
+      const date = rows[0]!.$acceptedAt;
+      const matches = (value: Date) => {
+        const left = value.getTime(),
+          right = date.getTime();
+        switch (op) {
+          case "eq":
+          case "in":
+            return left === right;
+          case "ne":
+          case "notIn":
+            return left !== right;
+          case "gt":
+            return left > right;
+          case "gte":
+            return left >= right;
+          case "lt":
+            return left < right;
+          case "lte":
+            return left <= right;
+        }
+      };
+      const predicate = op === "in" || op === "notIn" ? { [op]: [date] } : { [op]: date };
+      const filtered = query.where({ $acceptedAt: predicate });
+      const expected = rows.filter((row) => matches(row.$acceptedAt));
+      expect(await db.all(filtered)).toEqual(expected);
+      await expect.poll(watch(filtered)).toEqual(expected);
+    },
+  );
+
+  it("handles $acceptedAt dates outside the HLC range", async () => {
     const note = await insertNote();
-    // @ts-expect-error Only exact row-id filtering is supported initially.
-    const query = app.notes.history.where({ id: note.id, title: "first" });
-    await expect(db.all(query)).rejects.toMatchObject({
+    const query = app.notes.history.where({ id: note.id });
+    const rows = await db.all(query);
+    expect(await db.all(query.where({ $acceptedAt: { gt: new Date(-1) } }))).toEqual(rows);
+    expect(await db.all(query.where({ $acceptedAt: { lt: new Date(-1) } }))).toEqual([]);
+    expect(await db.all(query.where({ $acceptedAt: { lt: new Date(8e15) } }))).toEqual(rows);
+    expect(await db.all(query.where({ $acceptedAt: { gte: new Date(8e15) } }))).toEqual([]);
+  });
+
+  it("rejects application filters without an exact id constraint", async () => {
+    await expect(db.all(app.notes.history.where({ title: "first" }))).rejects.toMatchObject({
       message:
-        "Query: unsupported relation query: Reading anything other than one exact id equality filter is not supported in history queries yet",
+        "Query: unsupported relation query: Reading history without an exact id equality constraint is not supported in history queries yet",
       code: "query",
     });
+  });
+
+  it("rejects user-provided transaction ID predicates", async () => {
+    const note = await insertNote();
+    const query = app.notes.history.where({
+      id: note.id,
+      // @ts-expect-error Transaction IDs can be selected but not supplied as predicates.
+      $transactionId: "0123456789abcdef0123456789abcdef",
+    });
+    await expect(db.all(query)).rejects.toThrow(
+      new Error("History $transactionId predicates do not accept user-provided values"),
+    );
   });
 
   it("rejects current-row provenance in history projections", async () => {

@@ -1595,24 +1595,35 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
   $acceptedAt: Date;
 };
 
+type HistoryWhere<TWhere> = {
+  [K in keyof TWhere as K extends `$${string}` ? never : K]: TWhere[K];
+};
+
 /** Read-only query over locally retained accepted content versions.
  * Start with one exact row ID;
- * joins, additional filters, remote coverage and branched tables are not supported yet.
+ * joins, transaction-ID predicates, remote coverage and branched tables are not supported yet.
  */
 export interface HistoryQuery<
   TRow extends { id: string },
+  TWhere,
   TSelection extends keyof HistoryRow<TRow> = keyof HistoryRow<TRow>,
 > extends QueryBuilder<Pick<HistoryRow<TRow>, TSelection | "id">> {
-  where(input: { id: string | { eq: string } }): HistoryQuery<TRow, TSelection>;
+  where(
+    input: HistoryWhere<TWhere> & { $acceptedAt?: TimestampWhere<false> },
+  ): HistoryQuery<TRow, TWhere, TSelection>;
   select<TColumn extends keyof HistoryRow<TRow> | "*">(
     ...columns: [TColumn, ...TColumn[]]
   ): HistoryQuery<
     TRow,
+    TWhere,
     "*" extends TColumn ? keyof HistoryRow<TRow> : Extract<TColumn, keyof HistoryRow<TRow>>
   >;
-  orderBy(column: "$acceptedAt", direction?: "asc" | "desc"): HistoryQuery<TRow, TSelection>;
-  limit(count: number): HistoryQuery<TRow, TSelection>;
-  offset(count: number): HistoryQuery<TRow, TSelection>;
+  orderBy(
+    column: keyof TRow | "$acceptedAt",
+    direction?: "asc" | "desc",
+  ): HistoryQuery<TRow, TWhere, TSelection>;
+  limit(count: number): HistoryQuery<TRow, TWhere, TSelection>;
+  offset(count: number): HistoryQuery<TRow, TWhere, TSelection>;
 }
 
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
@@ -1622,7 +1633,10 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   TSchema
 > {
   /** Query locally retained accepted content versions of this table. */
-  readonly history: HistoryQuery<TableRowFromMeta<SchemaMeta<TTable, TSchema>>>;
+  readonly history: HistoryQuery<
+    TableRowFromMeta<SchemaMeta<TTable, TSchema>>,
+    TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
+  >;
 }
 
 export type QueryHandle<

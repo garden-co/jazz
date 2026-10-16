@@ -1118,8 +1118,17 @@ pub(super) fn operand_column_type(
     if column == "id" {
         return Ok(Some(ColumnType::Uuid));
     }
-    Ok(table_schema(schema, &source.table)?
-        .columns
+    let history;
+    let columns = if let Some(table) = source
+        .table
+        .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+    {
+        history = crate::schema::history::HistoryRelationSchema::new(table_schema(schema, table)?);
+        history.columns()
+    } else {
+        &table_schema(schema, &source.table)?.columns
+    };
+    Ok(columns
         .iter()
         .find(|candidate| candidate.name == *column)
         .map(|column| column.column_type.clone()))

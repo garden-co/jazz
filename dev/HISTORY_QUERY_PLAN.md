@@ -35,8 +35,8 @@ adds a result; losing current read permission retracts the row's history.
   Trusted local subscriptions use `Db::subscribe_for_identity` with
   `ReadTier::LocalOnly`. Client-local reads expose locally retained accepted history without evaluating
   policies. Peer history delivery remains deferred.
-- One exact `id` equality filter and ordering by `$acceptedAt`. Additional filters,
-  other orderings, and branched tables are rejected in this increment.
+- An exact `id` equality constraint, additional application-field predicates, and
+  ordering by application fields or `$acceptedAt`. Branched tables remain rejected.
 - Accepted, settled content images. Pending authored patches are not exposed as
   complete historical images, and rejected transactions are excluded. Requests
   for pending/local-history semantics fail explicitly in this initial scope.
@@ -104,13 +104,15 @@ NAPI/WASM row publication boundary derives it with
 `TransactionId::from_committed_tx`; core values and occurrence keys retain the
 full `(time, node)` identity. This changes only the host-facing value and its
 existing descriptor type, not persisted records or peer protocol encodings.
-Transaction equality filters remain outside the current exact-row-filter boundary. It identifies the version's transaction, independently
+User-provided `$transactionId` predicate literals and parameters are rejected. It identifies the version's transaction, independently
 of field-level `$updatedBy` provenance, which can name an earlier writer.
 
 `$acceptedAt` is the authority's acceptance HLC, not the authored transaction
 time. The core retains its full `u64` physical/logical value for query processing,
-including ordering and pagination. Additional filters remain outside the initial
-exact-ID query boundary.
+including ordering and pagination. TypeScript Date predicates use whole-millisecond
+semantics: equality covers every logical counter in that millisecond; `gt` and
+`lt` exclude that millisecond, while `gte` and `lte` include it. The adapter
+translates these predicates into exact HLC bounds before execution.
 
 At the shared NAPI/WASM output boundary, convert the HLC to physical Unix
 milliseconds. TypeScript exposes a `Date`, deliberately discarding the logical
@@ -210,9 +212,8 @@ The initial admission rules are:
 | History filtered only by an unindexed application field        | Reject if it requires scanning unrelated history.                              |
 | Small limit over otherwise unbounded history                   | Reject; a limit alone does not establish a bounded access path.                |
 
-These rules apply to both reads and live subscriptions. A `$transactionId`
-equality filter can narrow an admitted row-history query; it does not by itself
-promise a table-wide transaction-history access path.
+These rules apply to both reads and live subscriptions. `$transactionId` remains
+selectable, but predicates with user-provided transaction IDs are rejected.
 
 History access cost may grow with the selected row's retained history, not
 unrelated table history. The same rule applies to initial subscription
@@ -306,7 +307,8 @@ support does not claim to implement this coverage protocol.
    against `history.tasks`, retaining the original application schema for
    admission. Query-only descriptor resolution adds the two metadata columns;
    no virtual table is deployed or persisted. The read-only handle supports one
-   exact `id` filter, projection, `$acceptedAt` ordering, offset and limit. Application
+   exact `id` constraint, application-field and `$acceptedAt` predicates, projection,
+   application-field or `$acceptedAt` ordering, offset and limit. Application
    columns retain their types/transforms; `$transactionId` is
    `TxId` and `$acceptedAt` is `Date`.
    Existing occurrence keys preserve multiple versions in subscription collections.

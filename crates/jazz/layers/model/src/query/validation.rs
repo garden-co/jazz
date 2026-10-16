@@ -401,18 +401,23 @@ fn validate_query_with_schema_version_as(
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
 impl Query {
-    /// Exact row operand admitted by the initial one-shot history reader.
+    /// A conjunctive exact row constraint bounds the history source.
     #[doc(hidden)]
     pub fn history_row_operand(&self) -> Option<&Operand> {
-        match self.filters.as_slice() {
-            [Predicate::Eq(Operand::Column(column), value)]
-            | [Predicate::Eq(value, Operand::Column(column))]
-                if column == "id" && matches!(value, Operand::Literal(_) | Operand::Param(_)) =>
-            {
-                Some(value)
+        fn exact_id(predicate: &Predicate) -> Option<&Operand> {
+            match predicate {
+                Predicate::All(predicates) => predicates.iter().find_map(exact_id),
+                Predicate::Eq(Operand::Column(column), value)
+                | Predicate::Eq(value, Operand::Column(column))
+                    if column == "id"
+                        && matches!(value, Operand::Literal(_) | Operand::Param(_)) =>
+                {
+                    Some(value)
+                }
+                _ => None,
             }
-            _ => None,
         }
+        self.filters.iter().find_map(exact_id)
     }
 }
 
@@ -450,15 +455,42 @@ fn validate_history_query(
     }
     if query.history_row_operand().is_none() {
         return Err(unsupported(
-            "anything other than one exact id equality filter",
+            "history without an exact id equality constraint",
         ));
     }
-    if query.order_by.iter().any(|order| order.column != "$acceptedAt") {
-        return Err(unsupported("ordering by columns other than $acceptedAt"));
+    fn supplied_transaction_id(predicate: &Predicate) -> bool {
+        match predicate {
+            Predicate::All(predicates) | Predicate::Any(predicates) => {
+                predicates.iter().any(supplied_transaction_id)
+            }
+            Predicate::Not(predicate)
+            | Predicate::EnumMatch {
+                payload: predicate, ..
+            } => supplied_transaction_id(predicate),
+            predicate => {
+                predicate.any_operand(&mut |operand| {
+                    matches!(operand,
+                Operand::Column(column) if column == "$transactionId")
+                }) && predicate.any_operand(&mut |operand| {
+                    matches!(operand, Operand::Literal(_) | Operand::Param(_))
+                })
+            }
+        }
+    }
+    if query.filters.iter().any(supplied_transaction_id) {
+        return Err(unsupported("user-provided $transactionId predicates"));
+    }
+    if query
+        .order_by
+        .iter()
+        .any(|order| order.column == "$transactionId")
+    {
+        return Err(unsupported("ordering by $transactionId"));
     }
     if query.select.as_ref().is_some_and(|columns| {
         columns.iter().any(|column| {
-            column.starts_with('$') && !crate::schema::history::HistoryMetadataColumn::contains(column)
+            column.starts_with('$')
+                && !crate::schema::history::HistoryMetadataColumn::contains(column)
         })
     }) {
         return Err(unsupported("current-row provenance columns"));
@@ -1084,7 +1116,9 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
-    if query.table.starts_with(crate::schema::history::HISTORY_PREFIX)
+    if query
+        .table
+        .starts_with(crate::schema::history::HISTORY_PREFIX)
         && !schema.tables.iter().any(|table| table.name == query.table)
     {
         return validate_history_query(query, schema, role);
@@ -1911,8 +1945,10 @@ fn validate_aggregate_order_by(
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
         "id" => Ok(()),
-        name if table.name.starts_with(crate::schema::history::HISTORY_PREFIX)
-                && crate::schema::history::HistoryMetadataColumn::contains(name) =>
+        name if table
+            .name
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && crate::schema::history::HistoryMetadataColumn::contains(name) =>
         {
             column_type(table, column).map(|_| ())
         }
@@ -1924,10 +1960,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
 
 /// Borrows the table: validation runs for every policy and subscription, and
 /// copying a table schema per lookup dominated its cost.
-fn schema_table<'a>(
-    schema: &'a RuntimeSchema,
-    name: &str,
-) -> Result<&'a TableSchema, QueryError> {
+fn schema_table<'a>(schema: &'a RuntimeSchema, name: &str) -> Result<&'a TableSchema, QueryError> {
     schema
         .tables
         .iter()
