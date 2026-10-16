@@ -28,6 +28,25 @@ pub(super) struct TopBySortPart {
     pub(super) direction: TopByDirection,
 }
 
+impl TopBySortPart {
+    /// Bytes of the sort value, for state footprints.
+    pub(super) fn encoded_len(&self) -> usize {
+        match &self.key {
+            TopBySortKey::Null => 0,
+            TopBySortKey::U8(_) | TopBySortKey::Bool(_) | TopBySortKey::EnumTag(_) => 1,
+            TopBySortKey::U16(_) => 2,
+            TopBySortKey::U32(_) | TopBySortKey::I32(_) => 4,
+            TopBySortKey::U64(_)
+            | TopBySortKey::U48(_)
+            | TopBySortKey::I64(_)
+            | TopBySortKey::F64(_) => 8,
+            TopBySortKey::String(value) => value.len(),
+            TopBySortKey::Bytes(value) => value.len(),
+            TopBySortKey::Uuid(_) => 16,
+        }
+    }
+}
+
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let ordering = self.key.cmp(&other.key);
