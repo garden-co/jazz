@@ -2628,12 +2628,13 @@ fn oversized_view_updates_hydrate_through_body_repair() {
         bytes[..2].copy_from_slice(&id.to_be_bytes());
         RowUuid::from_bytes(bytes)
     };
-    // Bulky titles make each inline body ~3.4 KiB (~670 KiB per batch),
-    // well above the lowered limit, while the manifest and the repair reply
-    // for the omitted remainder each fit below it.
+    // Bulky titles make each inline body ~3.4 KiB (~670 KiB per batch; the
+    // row descriptor is written once per message, so the title carries the
+    // bulk), well above the lowered limit, while the manifest and the repair
+    // reply for the omitted remainder each fit below it.
     let insert_batch = |ids: std::ops::RangeInclusive<u16>| {
         for id in ids {
-            let title = format!("{id:04}-{}", "x".repeat(1500));
+            let title = format!("{id:04}-{}", "x".repeat(3400));
             server
                 .insert_with_id("todos", bulky_row(id), cells(&title, id % 2 == 0, alice))
                 .unwrap();
@@ -2713,7 +2714,7 @@ impl OversizedSnapshotLink {
             let row = RowUuid::from_bytes(bytes);
             // Exceed the split threshold with payload bytes alone, independently
             // of record-descriptor encoding overhead.
-            let title = format!("{id:04}-{}", "x".repeat(3000));
+            let title = format!("{id:04}-{}", "x".repeat(3400));
             server
                 .insert_with_id("todos", row, cells(&title, id % 2 == 0, alice))
                 .unwrap();

@@ -970,6 +970,7 @@ pub(super) struct FrameInputs<'a> {
 
 pub(super) struct TickEvaluator<'a> {
     pub(super) schema: &'a DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
@@ -1000,6 +1001,7 @@ pub(super) struct TickEvaluator<'a> {
 /// This avoids giving recursion ownership of the whole [`IvmRuntime`].
 pub(super) struct GraphRuntimeView<'a> {
     pub(super) schema: &'a DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
@@ -1024,6 +1026,7 @@ pub(super) struct GraphRuntimeView<'a> {
 #[allow(clippy::too_many_arguments)]
 fn graph_runtime_view<'a>(
     schema: &'a DatabaseSchema,
+    dictionaries: &'a crate::dictionary::SharedDictionaries,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
@@ -1046,6 +1049,7 @@ fn graph_runtime_view<'a>(
 ) -> GraphRuntimeView<'a> {
     GraphRuntimeView {
         schema,
+        dictionaries,
         graph,
         variant_projections,
         table_deltas,
@@ -1078,6 +1082,7 @@ impl GraphRuntimeView<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
@@ -1128,6 +1133,7 @@ impl GraphRuntimeView<'_> {
         }
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas,
@@ -1171,6 +1177,7 @@ impl GraphRuntimeView<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
@@ -3539,6 +3546,7 @@ impl TickEvaluator<'_> {
                 recursive_as_of.value_mut(),
                 super::recursion::HydrationRecomputeContext {
                     schema: self.schema,
+                    dictionaries: self.dictionaries,
                     graph: self.graph,
                     variant_projections: self.variant_projections,
                     inputs: self.evaluation_inputs.as_deref_mut(),
@@ -3572,6 +3580,7 @@ impl TickEvaluator<'_> {
             };
             let mut runtime = graph_runtime_view(
                 self.schema,
+                self.dictionaries,
                 self.graph,
                 self.variant_projections,
                 self.table_deltas,
@@ -3627,6 +3636,7 @@ impl TickEvaluator<'_> {
             recursive_as_of.value_mut(),
             graph_runtime_view(
                 self.schema,
+                self.dictionaries,
                 self.graph,
                 self.variant_projections,
                 self.table_deltas,

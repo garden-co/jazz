@@ -1360,6 +1360,7 @@ impl<'a> IncrementalEvaluation<'a> {
         let dropped_subscriptions = Vec::new();
         let mut evaluator = TickEvaluator {
             schema: &runtime.schema,
+            dictionaries: &runtime.dictionaries,
             graph: &runtime.graph,
             variant_projections: &runtime.variant_projections,
             table_deltas: &self.table_deltas,
@@ -2038,6 +2039,7 @@ impl<'a> EvaluationSession<'a> {
                 } else {
                     let mut evaluator = TickEvaluator {
                         schema: &runtime.schema,
+                        dictionaries: &runtime.dictionaries,
                         graph: &runtime.graph,
                         variant_projections: &runtime.variant_projections,
                         table_deltas: &[],
@@ -3990,6 +3992,7 @@ impl IvmRuntime {
             let input = {
                 let mut evaluator = TickEvaluator {
                     schema: &self.schema,
+                    dictionaries: &self.dictionaries,
                     graph: &self.graph,
                     variant_projections: &self.variant_projections,
                     table_deltas,

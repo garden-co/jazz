@@ -11,13 +11,13 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc::TryRecvError;
 
-use groove::db::{Database, GraphBuilder, PredicateExpr, PrimaryKeyValue};
+use groove::db::{Database, GraphBuilder, PredicateExpr, PrimaryKeyValue, ProjectField};
 use groove::ivm::{AggregateExpr, AggregateFunction, LiteralValue, StaticScanSpec};
 use groove::records::RecordDescriptor;
 use groove::records::Value;
 use groove::schema::{
-    ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, PrimaryKeyColumn,
-    PrimaryKeyType, TableSchema,
+    ColumnSchema, ColumnType, DatabaseSchema, DictionarySchema, IntegerKeyType, PrimaryKey,
+    PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use groove::storage::MemoryStorage;
 
@@ -783,4 +783,71 @@ async fn recursive_relations_agree_with_the_held_plan() {
         lives.push(live);
     }
     assert_eq!(lives[0], lives[1]);
+}
+
+fn author(name: &str) -> Value {
+    let descriptor = RecordDescriptor::new([("name", ColumnType::String)]);
+    let raw = descriptor.create(&[Value::String(name.into())]).unwrap();
+    Value::Record(groove::records::OwnedRecord::new(raw, descriptor))
+}
+
+/// Docs and notes whose `author` is interned: rows store a dictionary code.
+async fn open_interned(stored: bool) -> Database {
+    let author_type = ColumnType::Record(Box::new(RecordDescriptor::new([(
+        "name",
+        ColumnType::String,
+    )])));
+    let schema = DatabaseSchema::new([
+        schema().table("docs").unwrap().clone(),
+        TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new(
+                    "author",
+                    ColumnType::interned("authors", author_type.clone()),
+                ),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64).user_supplied()),
+    ])
+    .with_dictionary(DictionarySchema::new("authors", author_type));
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema, storage).await.unwrap();
+    db.set_stored_arrangements_enabled(stored);
+    apply(&mut db, |batch| {
+        for (id, project) in [(1, 1), (2, 1), (3, 2)] {
+            batch.insert("docs", doc(id, project, 0));
+        }
+        batch.insert("notes", vec![Value::U64(1), author("alice")]);
+        batch.insert("notes", vec![Value::U64(2), author("bob")]);
+    })
+    .await;
+    db
+}
+
+/// A stored source with an interned column is read from storage as codes;
+/// its probed rows must reach the join as values, as the held side's do.
+#[futures_test::test]
+async fn stored_sources_resolve_interned_columns() {
+    let notes = GraphBuilder::table("notes").project_fields([
+        ProjectField::named("id"),
+        ProjectField::record_field("author", ["name"], "author_name"),
+    ]);
+    let graph = GraphBuilder::join(GraphBuilder::table("docs"), notes, ["project"], ["id"]);
+    let edits = || -> Vec<Edit> {
+        vec![
+            Box::new(|batch| batch.update("notes", vec![Value::U64(2), author("carol")])),
+            Box::new(|batch| batch.insert("docs", doc(4, 2, 0))),
+            Box::new(|batch| batch.insert("notes", vec![Value::U64(3), author("alice")])),
+            Box::new(|batch| batch.insert("docs", doc(5, 3, 0))),
+        ]
+    };
+    let stored = open_interned(true).await;
+    let held = open_interned(false).await;
+    let count = check_agree(stored, held, graph.clone(), edits, false).await;
+    assert!(count > 0, "the notes source is stored");
+    let mut stored = open_interned(true).await;
+    let rows = snapshot(&mut stored, graph).await;
+    assert!(rows.keys().any(|row| row.contains("alice")), "{rows:?}");
 }

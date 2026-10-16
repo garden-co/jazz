@@ -1202,7 +1202,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
     // Exact version-set declarations are retired: without a watermark a
     // receiver declares nothing and the serving peer ships the full set.
 
-    let mut writer = open_node_with_uuid(node(1)).1;
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let tx_id = commit_mergeable_global(
         &mut writer,
         &mut core,

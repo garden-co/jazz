@@ -676,6 +676,13 @@ where
                     .await?;
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                // Reuse the selected source's bound enum registries and runtime
+                // carriers. Rebuilding these from ColumnSchema loses registry identity.
+                let base_descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&base)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => base,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -720,7 +727,7 @@ where
                 };
                 let (graph, descriptor, metadata) = with_requested_author_paths(
                     graph,
-                    include_deleted_current_row_descriptor(&table),
+                    base_descriptor,
                     BTreeMap::new(),
                     &request.requirements,
                 )
@@ -3131,7 +3138,11 @@ where
             )?;
             layer_stack::Layer::masked_by(head_content, layer_stack::Mask::Presence(presence))
         } else {
-            layer_stack::Layer::new(head_content)
+            // Mask by physical presence, not by the projected rows: a head
+            // row this reader's schema must omit still hides the base row.
+            let presence =
+                self.presence(request, Ref::stack(tier), &head_keys, PresenceRead::Whole)?;
+            layer_stack::Layer::masked_by(head_content, layer_stack::Mask::Presence(presence))
         };
         Ok((
             layer_stack::compose([head_content, layer_stack::Layer::new(base_content)]),
@@ -4670,11 +4681,16 @@ fn branch_view_storage_source_fields(
                 .map_err(|_| {
                     Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
                 })?;
-            fields.push(ProjectField::literal_with_identity(
-                user_column_field(&column.name),
-                value,
-                records::FieldIdentity::Name(column.name.clone()),
-            ));
+            // Type the literal like the stored column, so an enum branch value
+            // keeps its enum carrier instead of an inferred scalar.
+            fields.push(ProjectField {
+                output_identity: records::FieldIdentity::Name(column.name.clone()),
+                ..ProjectField::literal_typed(
+                    user_column_field(&column.name),
+                    value,
+                    current_row_column_type(column),
+                )
+            });
         } else {
             fields.push(ProjectField::named_with_identity(
                 user_column_field(&column.name),

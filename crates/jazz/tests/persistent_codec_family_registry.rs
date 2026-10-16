@@ -219,15 +219,16 @@ fn validate_registry_with_profiles(
         "jazz.catalogue.write-pointer.v1",
         "jazz.server-catalogue-entry.v1",
         "jazz.transaction-durability.v2",
-        "jazz.transaction-record.v1",
+        "jazz.tx-record.v2",
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
         "groove.jazz-physical-class.v2",
         "groove.durable-index.v2",
+        "groove.dictionary.v1",
         // Linear row-state history retired `jazz.history-version-current.v1`,
         // `jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`; the
         // touched-rows transaction record retired `...v2` (history `by_tx`),
-        // and implicit history `updated_by` retired `...v3`.
+        // and the node-local touched-row list retired `...v3`.
         "jazz.history-version-current.v4",
         "jazz.subscription-watermark.v1",
         "jazz.idb-page.v1",

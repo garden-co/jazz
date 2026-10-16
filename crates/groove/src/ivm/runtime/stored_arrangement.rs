@@ -600,7 +600,7 @@ impl TickEvaluator<'_> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let rows = rows.into_iter().flatten().map(|(_, row)| row.as_slice());
-                let grouped = NodeState::group_source_rows(table, rows)?;
+                let grouped = NodeState::group_source_rows(table, self.dictionaries, rows)?;
                 NodeState::update_table_source(
                     source,
                     self.schema,
