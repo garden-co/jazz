@@ -21,7 +21,7 @@ Invariant digest:
 - `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v2`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the u32 big-endian UTF-8 logical-family length followed by the logical-family UTF-8 bytes then the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. Missing, malformed, old (`class-cf-v1`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
-- `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
+- `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record. The stored value MUST leave out the primary-key fields, and every read MUST restore them from the decoded key, refusing a key that does not decode as exactly the table's primary key.
 - `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
 - `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
 - `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple members MUST use the big-endian order-preserving member encoding on encode, decode and structural validation alike, recursively through nested tuple and nullable members (a present nullable member's payload is itself a member), with `F64` members in the §2.8 ordered-index transform.
@@ -649,6 +649,16 @@ write with no primary key is rejected (`Error::MissingPrimaryKey`), and a key
 value whose type does not match the declared `key_type` is also rejected
 (`INV-STORAGE-15`). Public insert and update values are provided in
 `TableSchema.columns` declaration order (`INV-STORAGE-7`).
+
+The stored value holds no copy of the primary key. It is the variant tag
+followed by the physical record without the primary-key fields
+(`TableSchema::storage_record_schema*`); the key already holds them. Every
+point, scan and index read, every old row of a write's delta, and every IVM
+table, index, lookup and recursion source decodes the key and puts the key
+fields back at their declared positions, so callers only ever see the full
+logical record (`TableSchema::stored_record_layout`). A stored row whose key
+does not decode as exactly the primary key is refused
+(`Error::InvalidDirectRecordStoreKey`). Direct record stores are unchanged.
 
 Primary keys are encoded separately from record values by an
 **order-preserving** scheme. As a result, lexicographic byte order matches
