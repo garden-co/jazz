@@ -923,3 +923,105 @@ fn schema_hash_matches_composite_index_cross_runtime_fixture() {
         "declaration order of distinct composite indexes is not identity"
     );
 }
+
+#[test]
+fn value_json_shape_is_pinned() {
+    let id = crate::object::ObjectId::from_uuid(Uuid::from_bytes([7; 16]));
+    let value = Value::Array(vec![
+        Value::Integer(-1),
+        Value::BigInt(i64::MIN),
+        Value::Double(0.5),
+        Value::Boolean(false),
+        Value::Text("t".into()),
+        Value::Timestamp(9),
+        Value::Uuid(id),
+        Value::TransactionId([1; 16]),
+        Value::Bytea(vec![0, 255]),
+        Value::Row {
+            id: Some(id),
+            values: vec![Value::Null],
+        },
+        Value::Row {
+            id: None,
+            values: vec![],
+        },
+        Value::Enum {
+            case: "c".into(),
+            values: vec![Value::Array(vec![Value::Integer(2)])],
+        },
+        Value::Null,
+    ]);
+    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Enum","value":{"case":"c","values":[{"type":"Array","value":[{"type":"Integer","value":2}]}]}},{"type":"Null"}]}"#;
+    assert_eq!(serde_json::to_string(&value).unwrap(), json);
+    assert_eq!(serde_json::from_str::<Value>(json).unwrap(), value);
+    let row = |values| Value::Row { id: None, values };
+    for (input, decoded) in [
+        (
+            r#"{"value":[{"value":{"values":[{"type":"Null"}]},"type":"Row"}],"type":"Array"}"#,
+            Value::Array(vec![row(vec![Value::Null])]),
+        ),
+        (
+            r#"{"value":[{"value":["c",[]],"type":"Enum"}],"type":"Array"}"#,
+            Value::Array(vec![Value::Enum {
+                case: "c".into(),
+                values: vec![],
+            }]),
+        ),
+        (
+            r#"{"type":"Row","value":{"values":[],"extra":1}}"#,
+            row(vec![]),
+        ),
+        (r#"{"type":"Null","value":null}"#, Value::Null),
+        (r#"["Integer",3]"#, Value::Integer(3)),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<Value>(input).unwrap(),
+            decoded,
+            "{input}"
+        );
+    }
+    for (input, error) in [
+        (
+            r#"{"value":[{"value":{"values":[],"id":"x"},"type":"Row"}],"type":"Array"}"#,
+            "UUID parsing failed: invalid character: found `x` at 1 at line 1 column 72",
+        ),
+        (
+            r#"{"type":"Row","value":{"id":null}}"#,
+            "missing field `values` at line 1 column 33",
+        ),
+        (
+            r#"{"type":"Enum","value":{"values":[]}}"#,
+            "missing field `case` at line 1 column 36",
+        ),
+        (
+            r#"{"type":"Nope"}"#,
+            "unknown variant `Nope`, expected one of `Integer`, `BigInt`, `Double`, `Boolean`, \
+             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, `Enum`, \
+             `Null` at line 1 column 14",
+        ),
+        (
+            r#"{"type":"Integer"}"#,
+            "missing field `value` at line 1 column 18",
+        ),
+        (
+            r#"{"type":"Array","value":[{"type":"BigInt","value":"x"}]}"#,
+            "bigint string must be a signed 64-bit integer at line 1 column 53",
+        ),
+    ] {
+        let actual = serde_json::from_str::<Value>(input)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(actual, error, "{input}");
+    }
+    for input in [r#"{"type":"Row","value":3}"#, r#""x""#] {
+        assert!(serde_json::from_str::<Value>(input).is_err(), "{input}");
+    }
+    assert_eq!(
+        postcard::to_allocvec(&value).unwrap_err(),
+        postcard::Error::SerdeSerCustom
+    );
+    assert_eq!(
+        postcard::from_bytes::<Value>(&[0, 1]).unwrap_err(),
+        postcard::Error::SerdeDeCustom
+    );
+}

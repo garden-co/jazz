@@ -953,16 +953,12 @@ fn validate_parameter_contexts(
     for join in &mut query.joins {
         validate_join(schema, root, &query.table, join, phase)?;
     }
-    for predicate in &mut query.filters {
-        validate_predicate(filter_schema, predicate, phase)?;
-    }
+    validate_predicates(filter_schema, &mut query.filters, phase)?;
     for reachable in &mut query.reachable {
         validate_reachable(schema, root, reachable, phase)?;
     }
     for branch in &mut query.policy_branches {
-        for predicate in &mut branch.filters {
-            validate_predicate(root, predicate, phase)?;
-        }
+        validate_predicates(root, &mut branch.filters, phase)?;
         for join in &mut branch.joins {
             validate_join(schema, root, &query.table, join, phase)?;
         }
@@ -1401,10 +1397,7 @@ fn flat_join_source_tables<'a>(
             .insert(name.clone(), schema_table(schema, &source.table)?)
             .is_some()
         {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join duplicate source".to_owned(),
-                column: name,
-            });
+            return Err(unknown_column("flat join duplicate source", &name));
         }
     }
     Ok(sources)
@@ -1551,10 +1544,7 @@ fn qualify_flat_join_column(
     if let Ok((scope, field)) = flat_join_qualified_field(column) {
         let table = sources
             .get(scope)
-            .ok_or_else(|| QueryError::UnknownColumn {
-                table: "flat join source".to_owned(),
-                column: scope.to_owned(),
-            })?;
+            .ok_or_else(|| unknown_column("flat join source", &scope))?;
         flat_join_column_type(table, field)?;
         return Ok(column.to_owned());
     }
@@ -1564,16 +1554,13 @@ fn qualify_flat_join_column(
         .filter(|(_, table)| flat_join_column_type(table, column).is_ok())
         .map(|(scope, _)| scope.clone());
     let Some(scope) = matches.next() else {
-        return Err(QueryError::UnknownColumn {
-            table: "flat join".to_owned(),
-            column: column.to_owned(),
-        });
+        return Err(unknown_column("flat join", &column));
     };
     if matches.next().is_some() {
-        return Err(QueryError::UnknownColumn {
-            table: "ambiguous flat join column; qualify its source".to_owned(),
-            column: column.to_owned(),
-        });
+        return Err(unknown_column(
+            "ambiguous flat join column; qualify its source",
+            &column,
+        ));
     }
     Ok(format!("{scope}.{column}"))
 }
@@ -1588,10 +1575,7 @@ fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
     }
     field
         .rsplit_once('.')
-        .ok_or_else(|| QueryError::UnknownColumn {
-            table: "flat join qualified source".to_owned(),
-            column: field.to_owned(),
-        })
+        .ok_or_else(|| unknown_column("flat join qualified source", &field))
 }
 
 fn flat_join_column_type<'a>(
@@ -1617,25 +1601,16 @@ fn validate_flat_join(
     for source in &flat_join.sources {
         let name = flat_join_source_name(&source.table, &source.alias);
         if sources.contains_key(&name) {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join duplicate source".to_owned(),
-                column: name,
-            });
+            return Err(unknown_column("flat join duplicate source", &name));
         }
         schema_table(schema, &source.table)?;
         let (left_source, left_column) = flat_join_qualified_field(&source.on.left)?;
         let (right_source, right_column) = flat_join_qualified_field(&source.on.right)?;
         let left_table = sources
             .get(left_source)
-            .ok_or_else(|| QueryError::UnknownColumn {
-                table: "flat join accumulated source".to_owned(),
-                column: left_source.to_owned(),
-            })?;
+            .ok_or_else(|| unknown_column("flat join accumulated source", &left_source))?;
         if right_source != name {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join source".to_owned(),
-                column: right_source.to_owned(),
-            });
+            return Err(unknown_column("flat join source", &right_source));
         }
         let left_schema = schema_table(schema, left_table)?;
         let right_schema = schema_table(schema, &source.table)?;
@@ -1664,19 +1639,13 @@ fn validate_join(
             || join.source_lookup.is_some()
             || !join.correlated_filters.is_empty()
         {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: join.table.clone(),
-                column: join.on_column.clone(),
-                target_table: "uncorrelated existence (no join keys)".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &join.table,
+                &join.on_column,
+                "uncorrelated existence (no join keys)",
+            ));
         }
-        for predicate in &mut join.filters {
-            validate_predicate(join_table, predicate, params)?;
-        }
-        for nested in &mut join.nested_joins {
-            validate_join(schema, join_table, &join.table, nested, params)?;
-        }
-        return Ok(());
+        return validate_join_conditions(schema, join_table, join, params);
     }
     match join.target {
         JoinTarget::Uncorrelated => unreachable!("validated above"),
@@ -1685,10 +1654,7 @@ fn validate_join(
         }
         JoinTarget::RowId => {
             if join.on_column != "id" {
-                return Err(QueryError::UnknownColumn {
-                    table: join.table.clone(),
-                    column: join.on_column.clone(),
-                });
+                return Err(unknown_column(&join.table, &join.on_column));
             }
         }
     }
@@ -1720,13 +1686,7 @@ fn validate_join(
                     return Err(QueryError::OperandTypeMismatch);
                 }
             }
-            for predicate in &mut join.filters {
-                validate_predicate(join_table, predicate, params)?;
-            }
-            for nested in &mut join.nested_joins {
-                validate_join(schema, join_table, &join.table, nested, params)?;
-            }
-            return Ok(());
+            return validate_join_conditions(schema, join_table, join, params);
         }
     }
     let target_table = if let Some(lookup) = &join.source_lookup {
@@ -1735,20 +1695,20 @@ fn validate_join(
         match root.references.get(&lookup.row_id_source_column) {
             Some(target) if target == &lookup.table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: root_table.to_owned(),
-                    column: lookup.row_id_source_column.clone(),
-                    target_table: lookup.table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &root_table,
+                    &lookup.row_id_source_column,
+                    &lookup.table,
+                ));
             }
         }
         planner_column_type(lookup_table, &lookup.value_column)?;
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: lookup.table.clone(),
-                column: lookup.value_column.clone(),
-                target_table: "join source column".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &lookup.table,
+                &lookup.value_column,
+                "join source column",
+            ));
         }
         if lookup.value_column == "id" {
             lookup.table.clone()
@@ -1757,10 +1717,8 @@ fn validate_join(
                 .references
                 .get(&lookup.value_column)
                 .cloned()
-                .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                    join_table: lookup.table.clone(),
-                    column: lookup.value_column.clone(),
-                    target_table: "referenced table".to_owned(),
+                .ok_or_else(|| {
+                    not_ref_compatible(&lookup.table, &lookup.value_column, "referenced table")
                 })?
         }
     } else if let Some(source_column) = &join.source_column {
@@ -1769,11 +1727,7 @@ fn validate_join(
         } else {
             planner_column_type(root, source_column)?;
             root.references.get(source_column).cloned().ok_or_else(|| {
-                QueryError::JoinNotRefCompatible {
-                    join_table: root_table.to_owned(),
-                    column: source_column.clone(),
-                    target_table: "referenced table".to_owned(),
-                }
+                not_ref_compatible(&root_table, &source_column, "referenced table")
             })?
         }
     } else {
@@ -1794,30 +1748,24 @@ fn validate_join(
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: join.table.clone(),
-                    column: join.on_column.clone(),
-                    target_table: target_table.to_owned(),
-                });
+                return Err(not_ref_compatible(
+                    &join.table,
+                    &join.on_column,
+                    &target_table,
+                ));
             }
         },
         JoinTarget::RowId => {
             if join.table != target_table {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: join.table.clone(),
-                    column: join.on_column.clone(),
-                    target_table: target_table.to_owned(),
-                });
+                return Err(not_ref_compatible(
+                    &join.table,
+                    &join.on_column,
+                    &target_table,
+                ));
             }
         }
     }
-    for predicate in &mut join.filters {
-        validate_predicate(join_table, predicate, params)?;
-    }
-    for nested in &mut join.nested_joins {
-        validate_join(schema, join_table, &join.table, nested, params)?;
-    }
-    Ok(())
+    validate_join_conditions(schema, join_table, join, params)
 }
 
 fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result<(), QueryError> {
@@ -1879,10 +1827,7 @@ fn validate_aggregate_order_by(
             .iter()
             .any(|aggregate| aggregate.alias == order.column);
         if !is_group_by && !is_aggregate {
-            return Err(QueryError::UnknownColumn {
-                table: format!("{table}_aggregate"),
-                column: order.column.clone(),
-            });
+            return Err(unknown_column(&format!("{table}_aggregate"), &order.column));
         }
     }
     Ok(())
@@ -1892,10 +1837,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
     match column {
         "id" => Ok(()),
         name if executable_magic_column_type(name)?.is_some() => Ok(()),
-        name if name.starts_with('$') => Err(QueryError::UnknownColumn {
-            table: table.name.clone(),
-            column: name.to_owned(),
-        }),
+        name if name.starts_with('$') => Err(unknown_column(&table.name, &name)),
         name => column_type(table, name).map(|_| ()),
     }
 }
@@ -1925,10 +1867,7 @@ fn column_schema<'a>(
         .columns
         .iter()
         .find(|candidate| candidate.name == column)
-        .ok_or_else(|| QueryError::UnknownColumn {
-            table: table.name.clone(),
-            column: column.to_owned(),
-        })
+        .ok_or_else(|| unknown_column(&table.name, &column))
 }
 
 fn planner_column_type<'a>(
@@ -2015,9 +1954,7 @@ fn validate_array_subquery(
     if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
-    for predicate in &mut subquery.filters {
-        validate_predicate(child, predicate, params)?;
-    }
+    validate_predicates(child, &mut subquery.filters, params)?;
     if let Some(select) = &subquery.select {
         for column in select {
             validate_select_column(child, column)?;
@@ -2052,30 +1989,30 @@ fn validate_reachable(
     let root_key_type = &ColumnType::Uuid;
     if reachable.access_row_column == "id" {
         if access.name != root.name {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_row_column,
+                &root.name,
+            ));
         }
     } else if access.name == root.name {
         let access_column_type = planner_column_type(access, &reachable.access_row_column)?;
         if !column_types_comparable(access_column_type, root_key_type) {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_row_column,
+                &root.name,
+            ));
         }
     } else {
         match access.references.get(&reachable.access_row_column) {
             Some(target) if target == &root.name => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.access_table.clone(),
-                    column: reachable.access_row_column.clone(),
-                    target_table: root.name.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_row_column,
+                    &root.name,
+                ));
             }
         }
         if !column_types_comparable(
@@ -2087,27 +2024,29 @@ fn validate_reachable(
     }
     let team_table = match reachable.access_team_target {
         JoinTarget::Uncorrelated => {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_team_column.clone(),
-                target_table: "reachability requires a team reference".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_team_column,
+                "reachability requires a team reference",
+            ));
         }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)
-            .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_team_column.clone(),
-                target_table: "referenced table".to_owned(),
+            .ok_or_else(|| {
+                not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_team_column,
+                    "referenced table",
+                )
             })?,
         JoinTarget::RowId => {
             if reachable.access_team_column != "id" {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.access_table.clone(),
-                    column: reachable.access_team_column.clone(),
-                    target_table: reachable.access_table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_team_column,
+                    &reachable.access_table,
+                ));
             }
             &access.name
         }
@@ -2121,11 +2060,11 @@ fn validate_reachable(
         match edge.references.get(column) {
             Some(target) if target == team_table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.edge_table.clone(),
-                    column: column.clone(),
-                    target_table: team_table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.edge_table,
+                    &column,
+                    &team_table,
+                ));
             }
         }
     }
@@ -2146,15 +2085,13 @@ fn validate_reachable(
             )
         };
         if !seed_projects_team {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: seed.table.clone(),
-                column: seed.team_column.clone(),
-                target_table: team_table.clone(),
-            });
+            return Err(not_ref_compatible(
+                &seed.table,
+                &seed.team_column,
+                &team_table,
+            ));
         }
-        for predicate in &mut seed.filters {
-            validate_predicate(seed_table, predicate, params)?;
-        }
+        validate_predicates(seed_table, &mut seed.filters, params)?;
     } else {
         match params {
             ParameterPhase::Prepare(domain) => {
@@ -2173,12 +2110,8 @@ fn validate_reachable(
             },
         }
     }
-    for predicate in &mut reachable.access_filters {
-        validate_predicate(access, predicate, params)?;
-    }
-    for predicate in &mut reachable.edge_filters {
-        validate_predicate(edge, predicate, params)?;
-    }
+    validate_predicates(access, &mut reachable.access_filters, params)?;
+    validate_predicates(edge, &mut reachable.edge_filters, params)?;
     Ok(())
 }
 
@@ -2186,11 +2119,48 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
     planner_column_type(root, &inherits.parent_column)?;
     root.references
         .get(&inherits.parent_column)
-        .ok_or_else(|| QueryError::JoinNotRefCompatible {
-            join_table: root.name.clone(),
-            column: inherits.parent_column.clone(),
-            target_table: "referenced table".to_owned(),
+        .ok_or_else(|| {
+            not_ref_compatible(&root.name, &inherits.parent_column, "referenced table")
         })?;
+    Ok(())
+}
+
+fn not_ref_compatible(join_table: &str, column: &str, target_table: &str) -> QueryError {
+    QueryError::JoinNotRefCompatible {
+        join_table: join_table.to_owned(),
+        column: column.to_owned(),
+        target_table: target_table.to_owned(),
+    }
+}
+
+fn unknown_column(table: &str, column: &str) -> QueryError {
+    QueryError::UnknownColumn {
+        table: table.to_owned(),
+        column: column.to_owned(),
+    }
+}
+
+fn validate_predicates(
+    table: &TableSchema,
+    predicates: &mut [Predicate],
+    params: &mut ParameterPhase<'_>,
+) -> Result<(), QueryError> {
+    predicates
+        .iter_mut()
+        .try_for_each(|predicate| validate_predicate(table, predicate, params))
+}
+
+/// Validates a join's own filters, then its nested joins.
+fn validate_join_conditions(
+    schema: &RuntimeSchema,
+    join_table: &TableSchema,
+    join: &mut JoinVia,
+    params: &mut ParameterPhase<'_>,
+) -> Result<(), QueryError> {
+    validate_predicates(join_table, &mut join.filters, params)?;
+    for nested in &mut join.nested_joins {
+        validate_join(schema, join_table, &join.table, nested, params)?;
+    }
     Ok(())
 }
 

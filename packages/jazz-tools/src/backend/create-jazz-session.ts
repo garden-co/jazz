@@ -39,6 +39,7 @@ import {
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
+import { formatUuidAt } from "../runtime/hex.js";
 
 export type JazzSessionConfig = Omit<
   BackendContextConfig,
@@ -75,10 +76,10 @@ function uuidBytes(uuid: string): Uint8Array {
 function backendNodeId(config: JazzSessionConfig): string {
   if (config.driver.type === "memory") return randomUUID();
   // Preserve the existing persistent backend node identity across this API migration.
-  const hex = Buffer.from(
+  return formatUuidAt(
     deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.driver.dataPath}:node`),
-  ).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    0,
+  );
 }
 
 /** Each selected user opens an ordinary native client, never a backend facade. */

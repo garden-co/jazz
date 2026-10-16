@@ -86,37 +86,6 @@ pub enum PathHolePolicy {
     DropIncompleteParent,
 }
 
-/// Stable key for safe sharing of compiled semantic work.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ProgramSharingKey {
-    /// Binding-independent normalized row-set shape id.
-    pub shape_id: ShapeId,
-    /// Resolved read/source identity.
-    pub reads: ResolvedReadSet,
-    /// Policy identity and claims.
-    pub policy: PolicySharingKey,
-}
-
-/// Stable key for one semantic program instance before usage-site subscription
-/// handle assignment.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ProgramInstanceKey {
-    /// Shared compiled semantic work.
-    pub program: ProgramSharingKey,
-    /// Binding values identity for this instance.
-    pub binding_id: BindingId,
-}
-
-/// Stable output identity. This can vary independently from
-/// [`ProgramSharingKey`] when two consumers share one semantic graph but need
-/// different sinks/facts.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ProgramOutputKey {
-    /// Canonical identity derived from [`RowSetOutputRequest`]. The request is
-    /// the semantic source of truth; this key is only for cache/output sharing.
-    pub fingerprint: Vec<u8>,
-}
-
 /// Stable fact-output identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProgramFactKey {

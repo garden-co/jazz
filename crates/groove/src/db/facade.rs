@@ -194,7 +194,7 @@ where
 async fn completed_large_value_upload_journal<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
-) -> Result<Option<crate::large_values::PendingLargeValueUpload>, Error>
+) -> Result<Option<CompletedLargeValueUpload>, Error>
 where
     S: OrderedKvStorage + ?Sized,
 {
@@ -206,9 +206,7 @@ where
         return Ok(None);
     };
     let completed = decode_completed_large_value_upload_at_key(&upload_key, &encoded)?;
-    let receipt_id = completed.receipt_id.ok_or_else(|| {
-        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
-    })?;
+    let receipt_id = completed.receipt_id;
     let receipt_key = completed_large_value_receipt_key(receipt_id);
     let reverse = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
@@ -218,8 +216,8 @@ where
                 "completed upload has no receipt reverse binding".to_owned(),
             )
         })?;
-    let reverse_completed = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
-    if reverse != encoded || reverse_completed != completed {
+    let reverse_upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
+    if reverse_upload_id != upload_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -242,9 +240,7 @@ where
     let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
         return Ok(None);
     };
-    let receipt_id = completed
-        .receipt_id
-        .expect("completed journal requires a receipt id");
+    let receipt_id = completed.receipt_id;
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -259,7 +255,7 @@ where
     let staged_key = staged_large_value_key(receipt_id);
     let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
-        || completed.descriptor.as_ref() != Some(&staged.value_ref)
+        || completed.descriptor != staged.value_ref
         || staged.accounting != completed.accounting
     {
         return Err(Error::InvalidLargeValueMetadata(
@@ -302,8 +298,8 @@ where
     else {
         return Ok(Vec::new());
     };
-    let completed = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
-    let upload_key = completed_large_value_upload_key(completed.id);
+    let upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
+    let upload_key = completed_large_value_upload_key(upload_id);
     let forward = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
         .await?
@@ -311,7 +307,7 @@ where
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
     let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
-    if forward != encoded || forward_completed != completed {
+    if forward_completed.receipt_id != receipt_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -609,6 +605,9 @@ impl Database {
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        // A rebuild keeps how this database reads stored tables.
+        runtime.set_stored_arrangements_enabled(self.ivm_runtime.stored_arrangements_enabled());
+        runtime.set_cache_memory_budget(self.ivm_runtime.own_cache_memory_budget());
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -660,6 +659,19 @@ impl Database {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Read arrangements of stored tables by primary key from storage instead
+    /// of holding them, for arrangements compiled from now on. On by default.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Bound the memory the buckets of stored arrangements keep resident;
+    /// `None` (the default) is unbounded. See
+    /// `IvmRuntime::set_cache_memory_budget`.
+    pub fn set_cache_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_cache_memory_budget(budget);
     }
 
     /// Enable or disable generic root positions (insert indices and moves in
@@ -1504,17 +1516,22 @@ impl Database {
         )
         .await?;
         promotion_state.borrow_mut().extend(registration_operations);
-        let completed = encode_pending_large_value_upload(&bound_upload)?;
+        let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+            id: upload_id,
+            receipt_id,
+            descriptor: staged.value_ref.clone(),
+            accounting: staged.accounting,
+        })?;
         promotion_state.borrow_mut().extend([
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_upload_key(upload_id),
-                value: completed.clone(),
+                value: completed,
             },
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_receipt_key(receipt_id),
-                value: completed,
+                value: upload_id.0.to_vec(),
             },
         ]);
         self.storage
@@ -2077,6 +2094,11 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Live subscriptions, without the state walk of `runtime_stats()`.
+    pub fn active_subscription_count(&self) -> usize {
+        self.ivm_runtime.active_subscription_count()
     }
 
     /// Lifetime topology-cache counters, independent of transactional state.

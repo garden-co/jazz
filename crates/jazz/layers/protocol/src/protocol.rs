@@ -210,6 +210,16 @@ pub enum SyncMessage {
     /// tag stays reserved and is never reused.
     #[doc(hidden)]
     Reserved29(ReservedWireMessage),
+    /// Read-your-writes barrier on the requests channel (SPEC 8 §8.2.1).
+    /// The receiver holds this and every later request from this link until
+    /// it has answered the first `writes_through` commit units this link sent
+    /// it, each with its first `FateUpdate`. Writes and requests travel on
+    /// independently credited channels, so without it a read can overtake an
+    /// earlier write from the same writer.
+    ReadBarrier {
+        /// Commit units the sender put on this link before this barrier.
+        writes_through: u64,
+    },
 }
 
 /// Maximum known rows in one current-availability request.
@@ -891,10 +901,13 @@ pub struct PeerPayloadInventory {
 /// One immutable row-version payload carried by a committed transaction.
 ///
 /// The outer message retains table, schema UUID, branch and authored-column
-/// identity. The row uses the explicit `JVRR` v2 envelope: persisted schema
-/// descriptor plus canonical record bytes, never runtime `OwnedRecord` serde.
-/// The receiver validates that descriptor against the declared schema before
-/// translating columns into its node-local physical catalogue.
+/// identity. The row uses the explicit `JVRR` v3 envelope: a reference into
+/// the enclosing message's descriptor table (defining the persisted schema
+/// descriptor inline on its first use) plus canonical record bytes, never
+/// runtime `OwnedRecord` serde. A Core union image's `UnionExtraCells` travel
+/// in the same envelope, flagged by its head (SPEC 16). The receiver
+/// validates each descriptor against the declared schema before translating
+/// columns into its node-local physical catalogue.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct VersionRecord {
     table: groove::Intern<String>,
@@ -902,8 +915,10 @@ pub struct VersionRecord {
     /// Exact branch coordinate of this version's branch-local row.
     #[serde(default)]
     branch_key: BranchKey,
+    /// The row, and the union cells of a Core image (`UnionExtraCells`),
+    /// in one `JVRR` v3 blob.
     #[serde(with = "version_record_wire_row")]
-    record: OwnedRecord,
+    row: WireRow,
     /// `None` denotes a legacy or lens-translated payload whose authored
     /// presence is unavailable; consumers must conservatively treat every
     /// present payload cell as authored.
@@ -920,6 +935,63 @@ pub struct VersionRecord {
     /// op cell's low bits it carries the exact delta of any single write.
     /// See SPEC ch. 4, "Counter ops".
     counter_signs: Vec<u8>,
+}
+
+/// A version's row record and its union cells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WireRow {
+    record: OwnedRecord,
+    /// Sorted by `(schema_version, table)`, at most one entry each.
+    extras: Vec<UnionExtraCells>,
+}
+
+/// Cells of a Core row image for columns of the table's lineage that the
+/// image's own schema version does not map (SPEC ch. 4 §4.6, "Across schema
+/// versions"; SPEC ch. 10 §10.3, "Union row cases"): a column an older
+/// writer edited after a newer schema dropped it. One entry per schema
+/// version that maps such columns: `record` holds the cells in that schema's
+/// authored spelling, one nullable `_app_<column>` field per column, in the
+/// schema's column order, so a receiver validates and converts them exactly
+/// as it does an authored row of that schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnionExtraCells {
+    schema_version: SchemaVersionId,
+    table: groove::Intern<String>,
+    record: OwnedRecord,
+}
+
+impl UnionExtraCells {
+    /// Cells of `schema_version`'s `table` named by `record`'s fields.
+    pub fn new(
+        schema_version: SchemaVersionId,
+        table: impl Into<String>,
+        record: OwnedRecord,
+    ) -> Self {
+        Self {
+            schema_version,
+            table: groove::Intern::new(table.into()),
+            record,
+        }
+    }
+
+    /// The schema version whose columns these are.
+    pub fn schema_version(&self) -> SchemaVersionId {
+        self.schema_version
+    }
+
+    /// That schema version's name for the table.
+    pub fn table(&self) -> &str {
+        self.table.as_str()
+    }
+
+    /// One nullable `_app_<column>` field per column.
+    pub fn record(&self) -> &OwnedRecord {
+        &self.record
+    }
+
+    fn sort_key(&self) -> (SchemaVersionId, &str) {
+        (self.schema_version, self.table())
+    }
 }
 
 /// The row image a version's writer made it over (SPEC ch. 4 §4.6).
@@ -955,22 +1027,52 @@ impl RowBase {
     }
 }
 
+pub(crate) use version_record_wire_row::with_message_descriptor_table;
+
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
     use super::*;
 
-    // Version 2 (wire protocol v6): the record no longer carries `parents`,
-    // gains the `_deletion` cell, and travels beside `base`. Version 1
-    // rows (the DAG-history layout) are rejected rather than reinterpreted.
-    const MAGIC: &[u8; 5] = b"JVRR\x02";
+    // Version 3 (alpha.60). The persisted descriptor is defined once per
+    // sync message and referenced by later rows (#3380), and a Core union
+    // image carries its union cells (`UnionExtraCells`) in the same blob:
+    //
+    //   blob  = "JVRR\x03" use(row) [union] row-bytes
+    //   use   = head [u32 descriptor length, descriptor]
+    //   union = count entry{count}
+    //   entry = schema version (16 bytes) | u32 table length | table (UTF-8)
+    //           | use(cells) | u32 cell-bytes length | cell bytes
+    //
+    // `head` and `count` are canonical (shortest) unsigned LEB128 and `u32`
+    // lengths are little-endian. `head` is `reference << 1 | union`:
+    //
+    // - `reference == 0` defines the next descriptor-table entry inline (the
+    //   descriptor length and bytes follow); `reference == k > 0` reuses
+    //   table entry `k - 1`, defined earlier in the message;
+    // - `union` is set only in the row's own `use` and only when union cells
+    //   follow; then `count >= 1` and the entries are in strictly ascending
+    //   `(schema version, table)` order (admission checks the order).
+    //
+    // Every row without union cells is `"JVRR\x03" use row-bytes` with the
+    // low head bit clear. The row's canonical bytes consume the remainder. A
+    // blob encoded outside a message (no table in scope) defines every
+    // descriptor inline. Version 2 (every row repeats its descriptor) and
+    // version 1 (the DAG row with `parents`) are rejected rather than
+    // reinterpreted.
+    const MAGIC: &[u8; 5] = b"JVRR\x03";
+    /// Largest descriptor-table reference (`u32` table index plus one).
+    const MAX_REFERENCE: u64 = u32::MAX as u64 + 1;
+    /// Largest `head` (a maximal reference with the union bit set).
+    const MAX_HEAD: u64 = (MAX_REFERENCE << 1) | 1;
 
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
     // untrusted receipt admission is separate from this representation codec.
     //
-    // Every row of a view update repeats its descriptor, so a miss costs a
-    // full descriptor encode or canonical decode per row. Retain enough
+    // A message defines each descriptor once in its table, and rows encoded
+    // outside a message define theirs inline, so a miss costs a full
+    // descriptor encode or canonical decode per definition. Retain enough
     // distinct descriptors (tables x schema versions x nested shapes) that a
     // multi-table stream does not evict itself; lookups are hashed so the
     // larger bound does not turn each hit into a linear scan.
@@ -1083,35 +1185,274 @@ mod version_record_wire_row {
         Ok(proof)
     }
 
-    pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
-        let proof = descriptor_for_encode(record.descriptor())?;
-        let descriptor = &proof.encoded;
-        let length =
-            u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
-        let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + descriptor.len() + record.raw().len());
-        bytes.extend_from_slice(MAGIC);
+    /// Descriptors defined so far by the sync message being encoded, keyed by
+    /// their exact persisted bytes: two execution descriptors that differ only
+    /// in identities the grammar drops share one entry.
+    #[derive(Default)]
+    struct EncodeTable {
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u32>,
+    }
+
+    /// Descriptors defined so far by the sync message being decoded, in
+    /// definition order. `defined` rejects a second inline definition of the
+    /// same bytes, which the encoder never emits.
+    #[derive(Default)]
+    struct DecodeTable {
+        entries: Vec<RecordDescriptor>,
+        defined: rustc_hash::FxHashSet<std::sync::Arc<[u8]>>,
+    }
+
+    thread_local! {
+        static ENCODE_TABLE: std::cell::RefCell<Option<EncodeTable>> =
+            const { std::cell::RefCell::new(None) };
+        static DECODE_TABLE: std::cell::RefCell<Option<DecodeTable>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `f` with a fresh, empty descriptor table for one sync message.
+    ///
+    /// Every encode, size measurement and decode of one message must run in
+    /// exactly one such scope, so the encoder's first-use order and the
+    /// decoder's definition order are the same traversal. Scopes nest: the
+    /// previous tables are restored on exit, including on unwind.
+    pub(crate) fn with_message_descriptor_table<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore {
+            encode: Option<EncodeTable>,
+            decode: Option<DecodeTable>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ENCODE_TABLE.with(|table| *table.borrow_mut() = self.encode.take());
+                DECODE_TABLE.with(|table| *table.borrow_mut() = self.decode.take());
+            }
+        }
+        let _restore = Restore {
+            encode: ENCODE_TABLE.with(|table| table.replace(Some(EncodeTable::default()))),
+            decode: DECODE_TABLE.with(|table| table.replace(Some(DecodeTable::default()))),
+        };
+        f()
+    }
+
+    fn push_leb128(bytes: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                bytes.push(byte);
+                return;
+            }
+            bytes.push(byte | 0x80);
+        }
+    }
+
+    /// Read one canonical (shortest) unsigned LEB128 value no larger than
+    /// `max`, returning it and the remaining bytes.
+    fn take_leb128(bytes: &[u8], max: u64) -> Option<(u64, &[u8])> {
+        let mut value = 0u64;
+        for (index, &byte) in bytes.iter().enumerate().take(5) {
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                // A zero final continuation byte is an overlong spelling.
+                if index > 0 && byte == 0 {
+                    return None;
+                }
+                return (value <= max).then(|| (value, &bytes[index + 1..]));
+            }
+        }
+        None
+    }
+
+    /// Append `descriptor`'s `use`: a table reference when this message
+    /// already defined it, else an inline definition (SPEC 16).
+    fn put_use(
+        bytes: &mut Vec<u8>,
+        descriptor: &RecordDescriptor,
+        union: bool,
+    ) -> Result<(), groove::records::Error> {
+        let proof = descriptor_for_encode(descriptor)?;
+        let encoded = &proof.encoded;
+        let reference = ENCODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let table = table.as_mut()?;
+            if let Some(index) = table.by_encoded.get(encoded) {
+                return Some(u64::from(*index) + 1);
+            }
+            let index = u32::try_from(table.by_encoded.len()).ok()?;
+            table.by_encoded.insert(encoded.clone(), index);
+            None
+        });
+        let reference = reference.unwrap_or(0);
+        push_leb128(bytes, (reference << 1) | u64::from(union));
+        if reference == 0 {
+            put_len(bytes, encoded.len())?;
+            bytes.extend_from_slice(encoded);
+        }
+        Ok(())
+    }
+
+    /// Read one `use`: its descriptor, its union bit, and the bytes after it.
+    fn take_use(body: &[u8]) -> Result<(RecordDescriptor, bool, &[u8]), groove::records::Error> {
+        let invalid = || groove::records::Error::NonCanonicalRecord;
+        let (head, body) = take_leb128(body, MAX_HEAD).ok_or_else(invalid)?;
+        let (reference, union) = (head >> 1, head & 1 == 1);
+        if reference > 0 {
+            let index = usize::try_from(reference - 1).map_err(|_| invalid())?;
+            let descriptor = DECODE_TABLE
+                .with(|table| table.borrow().as_ref()?.entries.get(index).copied())
+                .ok_or_else(invalid)?;
+            return Ok((descriptor, union, body));
+        }
+        let (length, body) = take_len(body)?;
+        let encoded = body.get(..length).ok_or_else(invalid)?;
+        let proof = descriptor_for_decode(encoded)?;
+        let defined = DECODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let Some(table) = table.as_mut() else {
+                return true;
+            };
+            if !table.defined.insert(proof.encoded.clone()) {
+                return false;
+            }
+            table.entries.push(proof.canonical);
+            true
+        });
+        if !defined {
+            return Err(invalid());
+        }
+        Ok((proof.canonical, union, &body[length..]))
+    }
+
+    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), groove::records::Error> {
+        let length = u32::try_from(length).map_err(|_| groove::records::Error::LengthOverflow)?;
         bytes.extend_from_slice(&length.to_le_bytes());
-        bytes.extend_from_slice(&descriptor);
+        Ok(())
+    }
+
+    fn take_len(body: &[u8]) -> Result<(usize, &[u8]), groove::records::Error> {
+        let (length, body) = body
+            .split_first_chunk::<4>()
+            .ok_or(groove::records::Error::NonCanonicalRecord)?;
+        Ok((u32::from_le_bytes(*length) as usize, body))
+    }
+
+    fn take(body: &[u8], length: usize) -> Result<(&[u8], &[u8]), groove::records::Error> {
+        body.split_at_checked(length)
+            .ok_or(groove::records::Error::NonCanonicalRecord)
+    }
+
+    fn encode_parts(
+        record: &OwnedRecord,
+        extras: &[UnionExtraCells],
+    ) -> Result<Vec<u8>, groove::records::Error> {
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + 4 + record.raw().len());
+        bytes.extend_from_slice(MAGIC);
+        put_use(&mut bytes, record.descriptor(), !extras.is_empty())?;
+        if !extras.is_empty() {
+            push_leb128(&mut bytes, extras.len() as u64);
+            for extra in extras {
+                bytes.extend_from_slice(extra.schema_version.0.as_bytes());
+                put_len(&mut bytes, extra.table.len())?;
+                bytes.extend_from_slice(extra.table.as_bytes());
+                put_use(&mut bytes, extra.record.descriptor(), false)?;
+                put_len(&mut bytes, extra.record.raw().len())?;
+                bytes.extend_from_slice(extra.record.raw());
+            }
+        }
         bytes.extend_from_slice(record.raw());
         Ok(bytes)
     }
 
-    pub(super) fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
+    /// A row and its union cells, if any, in one blob.
+    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, groove::records::Error> {
+        encode_parts(&row.record, &row.extras)
+    }
+
+    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, groove::records::Error> {
         let invalid = || groove::records::Error::NonCanonicalRecord;
-        if !bytes.starts_with(MAGIC) {
-            return Err(invalid());
+        let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
+        let (descriptor, union, mut body) = take_use(body)?;
+        let mut extras = Vec::new();
+        if union {
+            let (count, rest) = take_leb128(body, MAX_REFERENCE).ok_or_else(invalid)?;
+            if count == 0 {
+                return Err(invalid());
+            }
+            body = rest;
+            for _ in 0..count {
+                let (schema_version, rest) = body.split_first_chunk::<16>().ok_or_else(invalid)?;
+                let (length, rest) = take_len(rest)?;
+                let (table, rest) = take(rest, length)?;
+                let table = std::str::from_utf8(table).map_err(|_| invalid())?;
+                let (cells, nested_union, rest) = take_use(rest)?;
+                if nested_union {
+                    return Err(invalid());
+                }
+                let (length, rest) = take_len(rest)?;
+                let (raw, rest) = take(rest, length)?;
+                extras.push(UnionExtraCells::new(
+                    SchemaVersionId(uuid::Uuid::from_bytes(*schema_version)),
+                    table,
+                    OwnedRecord::new(raw.to_vec(), cells),
+                ));
+                body = rest;
+            }
         }
-        let length = u32::from_le_bytes(
-            bytes
-                .get(5..9)
-                .ok_or_else(invalid)?
-                .try_into()
-                .map_err(|_| invalid())?,
-        ) as usize;
-        let end = 9usize.checked_add(length).ok_or_else(invalid)?;
-        let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
-        let raw = bytes.get(end..).ok_or_else(invalid)?;
-        Ok(OwnedRecord::new(raw.to_vec(), descriptor))
+        Ok(WireRow {
+            record: OwnedRecord::new(body.to_vec(), descriptor),
+            extras,
+        })
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        row: &WireRow,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let bytes = encode_row(row).map_err(serde::ser::Error::custom)?;
+        // Postcard's byte blob and u8 sequence have the same canonical
+        // varint length + raw bytes contract. Extend the output in bulk.
+        serializer.serialize_bytes(&bytes)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<WireRow, D::Error> {
+        struct RowVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RowVisitor {
+            type Value = WireRow;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JVRR v3 row byte blob")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                // Decode from the deserializer's slice; only the resulting
+                // owned record needs a payload copy. Admission remains separate.
+                decode_row(bytes).map_err(E::custom)
+            }
+
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                bytes: &'de [u8],
+            ) -> Result<Self::Value, E> {
+                self.visit_bytes(bytes)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                // Human-readable formats such as JSON still represent bytes
+                // as arrays. Never reserve from an untrusted size hint.
+                let mut bytes = Vec::new();
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                self.visit_bytes(&bytes)
+            }
+        }
+
+        deserializer.deserialize_bytes(RowVisitor)
     }
 
     #[cfg(test)]
@@ -1119,8 +1460,50 @@ mod version_record_wire_row {
         use super::*;
         use groove::records::{DescriptorField, FieldIdentity};
 
+        /// A row without union cells.
+        fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
+            encode_parts(record, &[])
+        }
+
+        /// A row that must carry no union cells.
+        fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
+            let row = decode_row(bytes)?;
+            if !row.extras.is_empty() {
+                return Err(groove::records::Error::NonCanonicalRecord);
+            }
+            Ok(row.record)
+        }
+
         #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-        struct WireRow(#[serde(with = "super")] OwnedRecord);
+        struct WireRow(#[serde(with = "record_only")] OwnedRecord);
+
+        /// The envelope of a row without union cells.
+        mod record_only {
+            use super::*;
+
+            pub(super) fn serialize<S: serde::Serializer>(
+                record: &OwnedRecord,
+                serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                super::super::serialize(
+                    &super::super::super::WireRow {
+                        record: record.clone(),
+                        extras: Vec::new(),
+                    },
+                    serializer,
+                )
+            }
+
+            pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<OwnedRecord, D::Error> {
+                let row = super::super::deserialize(deserializer)?;
+                if !row.extras.is_empty() {
+                    return Err(serde::de::Error::custom("unexpected union cells"));
+                }
+                Ok(row.record)
+            }
+        }
 
         // Pin the outer Postcard byte-blob contract independently of its
         // serializer implementation, including both varint length boundaries.
@@ -1163,13 +1546,106 @@ mod version_record_wire_row {
             }
         }
 
+        fn union_row() -> super::super::WireRow {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let cells = RecordDescriptor::new([(
+                "_app_legacy",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            )]);
+            let extra = OwnedRecord::new(
+                cells
+                    .create(&[Value::Nullable(Some(Box::new(Value::String("x".into()))))])
+                    .unwrap(),
+                cells,
+            );
+            super::super::WireRow {
+                record,
+                extras: vec![super::super::UnionExtraCells::new(
+                    SchemaVersionId(uuid::Uuid::from_u128(1)),
+                    "todos",
+                    extra,
+                )],
+            }
+        }
+
+        // One grammar for both kinds of row. A row without union cells has
+        // the head's union bit clear and is exactly `encode`'s bytes; a Core
+        // union image sets it and carries its entries between the row's
+        // descriptor and its row bytes. Every truncation before the row
+        // bytes is rejected, and `decode` refuses union cells.
+        #[test]
+        fn union_cells_share_the_v3_envelope_and_round_trip() {
+            let row = union_row();
+            let plain = encode_row(&super::super::WireRow {
+                record: row.record.clone(),
+                extras: Vec::new(),
+            })
+            .unwrap();
+            assert_eq!(plain, encode(&row.record).unwrap());
+            assert_eq!(&plain[..6], b"JVRR\x03\x00");
+
+            let bytes = encode_row(&row).unwrap();
+            assert_eq!(&bytes[..6], b"JVRR\x03\x01", "inline definition, union bit");
+            assert_eq!(decode_row(&bytes).unwrap(), row);
+            assert!(decode(&bytes).is_err());
+            let row_bytes = bytes.len() - row.record.raw().len();
+            assert_eq!(&bytes[row_bytes..], row.record.raw());
+            for end in MAGIC.len()..row_bytes {
+                assert!(decode_row(&bytes[..end]).is_err(), "truncated at {end}");
+            }
+
+            // Union cells with no entry, and an entry whose own descriptor
+            // claims union cells, are not the encoder's spelling.
+            let descriptor_end = plain.len() - row.record.raw().len();
+            let mut empty = bytes[..descriptor_end].to_vec();
+            empty.push(0);
+            empty.extend_from_slice(row.record.raw());
+            assert!(decode_row(&empty).is_err());
+            let cells_head = descriptor_end + 1 + 16 + 4 + "todos".len();
+            assert_eq!(bytes[cells_head], 0);
+            let mut nested = bytes.clone();
+            nested[cells_head] = 1;
+            assert!(decode_row(&nested).is_err());
+
+            // Inside one message the second image references both the row's
+            // and the cells' descriptors defined by the first.
+            let rows =
+                with_message_descriptor_table(|| [&row, &row].map(|row| encode_row(row).unwrap()));
+            let cells = &row.extras[0];
+            assert_eq!(
+                rows[1],
+                [
+                    b"JVRR\x03\x03\x01".as_slice(),
+                    cells.schema_version().0.as_bytes(),
+                    &5u32.to_le_bytes(),
+                    b"todos",
+                    &[4],
+                    &(cells.record().raw().len() as u32).to_le_bytes(),
+                    cells.record().raw(),
+                    row.record.raw(),
+                ]
+                .concat()
+            );
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|bytes| decode_row(bytes).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(decoded, [row.clone(), row]);
+        }
+
         #[test]
         fn row_bulk_bytes_reject_truncated_and_invalid_envelopes() {
             for bytes in [
                 vec![],
                 b"JVRR\x01".to_vec(),
+                b"JVRR\x02".to_vec(),
                 b"JVRR\x03".to_vec(),
-                b"JVRR\x02\xff\xff\xff\xff".to_vec(),
+                b"JVRR\x04\x00".to_vec(),
+                b"JVRR\x03\x00\xff\xff\xff\xff".to_vec(),
+                // A table reference outside any message scope.
+                b"JVRR\x03\x02".to_vec(),
             ] {
                 let wire = postcard::to_allocvec(&bytes).unwrap();
                 assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
@@ -1261,10 +1737,10 @@ mod version_record_wire_row {
             let raw = descriptor.create(&[Value::U64(7)]).unwrap();
             let record = OwnedRecord::new(raw.clone(), descriptor);
             let encoded = encode(&record).unwrap();
-            let descriptor_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+            let descriptor_len = u32::from_le_bytes(encoded[6..10].try_into().unwrap()) as usize;
             let mut malformed_descriptor = encoded.clone();
-            malformed_descriptor.insert(9 + descriptor_len, 0);
-            malformed_descriptor[5..9]
+            malformed_descriptor.insert(10 + descriptor_len, 0);
+            malformed_descriptor[6..10]
                 .copy_from_slice(&((descriptor_len + 1) as u32).to_le_bytes());
             let mut malformed_row = encoded.clone();
             malformed_row.push(0);
@@ -1419,6 +1895,133 @@ mod version_record_wire_row {
             });
         }
 
+        fn u64_record(name: &str, value: u64) -> OwnedRecord {
+            let descriptor = RecordDescriptor::new([(name, ValueType::U64)]);
+            OwnedRecord::new(descriptor.create(&[Value::U64(value)]).unwrap(), descriptor)
+        }
+
+        // Pinned `JVRR` v3 bytes (#3380): inside one message scope the first
+        // row defines its descriptor and every later row with the same
+        // descriptor names it by table reference (head `reference << 1`, the
+        // union bit clear). A different descriptor defines the next entry.
+        // Outside a scope every row defines inline.
+        #[test]
+        fn message_descriptor_table_defines_once_and_references_after() {
+            let first = u64_record("value", 7);
+            let second = u64_record("value", 8);
+            let other = u64_record("other", 9);
+            let descriptor_bytes =
+                groove::records::encode_persisted_record_descriptor(first.descriptor()).unwrap();
+            let define = |record: &OwnedRecord, descriptor: &[u8]| {
+                [
+                    b"JVRR\x03\x00".as_slice(),
+                    &(descriptor.len() as u32).to_le_bytes(),
+                    descriptor,
+                    record.raw(),
+                ]
+                .concat()
+            };
+            let reference = |index: u8, record: &OwnedRecord| {
+                [b"JVRR\x03".as_slice(), &[index << 1], record.raw()].concat()
+            };
+            let other_bytes =
+                groove::records::encode_persisted_record_descriptor(other.descriptor()).unwrap();
+
+            let rows = with_message_descriptor_table(|| {
+                [&first, &second, &other, &first, &other].map(|record| encode(record).unwrap())
+            });
+            assert_eq!(rows[0], define(&first, &descriptor_bytes));
+            assert_eq!(rows[1], reference(1, &second));
+            assert_eq!(rows[2], define(&other, &other_bytes));
+            assert_eq!(rows[3], reference(1, &first));
+            assert_eq!(rows[4], reference(2, &other));
+            assert_eq!(
+                rows[1],
+                [b"JVRR\x03\x02".as_slice(), &8u64.to_le_bytes()].concat()
+            );
+
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|row| decode(row).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                decoded,
+                [
+                    first.clone(),
+                    second.clone(),
+                    other.clone(),
+                    first.clone(),
+                    other
+                ]
+            );
+
+            // Outside a message, rows stand alone.
+            assert_eq!(encode(&second).unwrap(), define(&second, &descriptor_bytes));
+            assert!(decode(&rows[1]).is_err());
+        }
+
+        // The decoder admits exactly the encoder's spelling: a reference must
+        // name an entry already defined in this message, a descriptor is
+        // defined at most once, and references are shortest LEB128.
+        #[test]
+        fn message_descriptor_table_rejects_non_canonical_references() {
+            let record = u64_record("value", 7);
+            let defined = encode(&record).unwrap();
+            let decode_all = |rows: &[Vec<u8>]| {
+                with_message_descriptor_table(|| {
+                    rows.iter()
+                        .map(|row| decode(row))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            };
+            let with_reference =
+                |reference: &[u8]| [b"JVRR\x03".as_slice(), reference, record.raw()].concat();
+            assert!(decode_all(&[defined.clone(), with_reference(&[2])]).is_ok());
+            // Forward reference, unknown entry, duplicate definition.
+            assert!(decode_all(&[with_reference(&[2]), defined.clone()]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[4])]).is_err());
+            assert!(decode_all(&[defined.clone(), defined.clone()]).is_err());
+            // The union bit on a row without union cells: its row bytes do
+            // not parse as union entries.
+            assert!(decode_all(&[defined.clone(), with_reference(&[3])]).is_err());
+            // Overlong and out-of-range references.
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x82, 0x00])]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x80, 0x00])]).is_err());
+            assert!(
+                decode_all(&[
+                    defined.clone(),
+                    with_reference(&[0xff, 0xff, 0xff, 0xff, 0x7f])
+                ])
+                .is_err()
+            );
+            // Each message starts with an empty table, and nested scopes
+            // restore the outer table.
+            assert!(decode_all(std::slice::from_ref(&defined)).is_ok());
+            assert!(decode_all(&[with_reference(&[2])]).is_err());
+            with_message_descriptor_table(|| {
+                decode(&defined).unwrap();
+                assert!(decode_all(&[with_reference(&[2])]).is_err());
+                decode(&with_reference(&[2])).unwrap();
+            });
+        }
+
+        #[test]
+        fn leb128_references_round_trip_at_boundaries() {
+            for value in [0, 1, 127, 128, 16383, 16384, MAX_REFERENCE, MAX_HEAD] {
+                let mut bytes = Vec::new();
+                push_leb128(&mut bytes, value);
+                assert_eq!(
+                    take_leb128(&bytes, MAX_HEAD),
+                    Some((value, &[][..])),
+                    "{value}"
+                );
+            }
+            let mut bytes = Vec::new();
+            push_leb128(&mut bytes, MAX_HEAD + 1);
+            assert_eq!(take_leb128(&bytes, MAX_HEAD), None);
+        }
+
         #[test]
         fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
             let descriptor = RecordDescriptor::new([
@@ -1447,9 +2050,9 @@ mod version_record_wire_row {
             let encoded = encode(&original).unwrap();
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
-                "ec3b67be19dc025171263e46873fb5d8d3179b360d1527bebd135ee9b8803340"
+                "18d2325b449fa54152ec1f34c699ebdcfab7650b1ad9204087e3550ee979391d"
             );
-            assert_eq!(&encoded[..5], b"JVRR\x02");
+            assert_eq!(&encoded[..6], b"JVRR\x03\x00");
             assert_eq!(decode(&encoded).unwrap(), original);
 
             let mut fields = descriptor.fields().to_vec();
@@ -1474,8 +2077,9 @@ mod version_record_wire_row {
                 encoded,
                 "logical field identity remains authoritative"
             );
-            // Version 1 (the DAG row with `parents`) is retired; 3 is unknown.
-            for version in [1, 3] {
+            // Version 1 (the DAG row with `parents`) and version 2 (a
+            // descriptor in every row) are retired; 4 is unknown.
+            for version in [1, 2, 4] {
                 let mut other_version = encoded.clone();
                 other_version[4] = version;
                 assert!(decode(&other_version).is_err());
@@ -1484,63 +2088,11 @@ mod version_record_wire_row {
             trailing.push(0);
             assert_eq!(
                 decode(&trailing).unwrap().raw(),
-                &trailing[9 + u32::from_le_bytes(trailing[5..9].try_into().unwrap()) as usize..]
+                &trailing[10 + u32::from_le_bytes(trailing[6..10].try_into().unwrap()) as usize..]
             );
-            assert!(decode(&encoded[..8]).is_err());
+            assert!(decode(&encoded[..9]).is_err());
             assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
         }
-    }
-
-    pub(super) fn serialize<S: serde::Serializer>(
-        record: &OwnedRecord,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let bytes = encode(record).map_err(serde::ser::Error::custom)?;
-        // Postcard's byte blob and u8 sequence have the same canonical
-        // varint length + raw bytes contract. Extend the output in bulk.
-        serializer.serialize_bytes(&bytes)
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<OwnedRecord, D::Error> {
-        struct RowVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for RowVisitor {
-            type Value = OwnedRecord;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JVRR v2 row byte blob")
-            }
-
-            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-                // Decode from the deserializer's slice; only the resulting
-                // owned record needs a payload copy. Admission remains separate.
-                decode(bytes).map_err(E::custom)
-            }
-
-            fn visit_borrowed_bytes<E: serde::de::Error>(
-                self,
-                bytes: &'de [u8],
-            ) -> Result<Self::Value, E> {
-                self.visit_bytes(bytes)
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                // Human-readable formats such as JSON still represent bytes
-                // as arrays. Never reserve from an untrusted size hint.
-                let mut bytes = Vec::new();
-                while let Some(byte) = sequence.next_element::<u8>()? {
-                    bytes.push(byte);
-                }
-                self.visit_bytes(&bytes)
-            }
-        }
-
-        deserializer.deserialize_bytes(RowVisitor)
     }
 }
 
@@ -1562,7 +2114,7 @@ impl VersionRecord {
                 .as_deref()
                 .is_some_and(|name| name.starts_with(crate::schema::APP_COLUMN_PREFIX))
         };
-        let fields = self.record.descriptor().fields();
+        let fields = self.row.record.descriptor().fields();
         let fixed_names = [
             "row_uuid",
             "created_by",
@@ -1582,7 +2134,7 @@ impl VersionRecord {
         {
             return Err(malformed());
         }
-        let borrowed = self.record.borrowed();
+        let borrowed = self.row.record.borrowed();
         let row_uuid = RowUuid(
             borrowed
                 .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
@@ -1607,7 +2159,7 @@ impl VersionRecord {
                 .map_err(|_| malformed())?,
         )
         .map_err(|_| malformed())?;
-        let typed = WireRowRecord::new(self.record.clone());
+        let typed = WireRowRecord::new(self.row.record.clone());
         for index in 0..fields.len() - WireRowRecord::USER_CELLS {
             typed.cell(index).map_err(|_| malformed())?;
         }
@@ -1619,12 +2171,41 @@ impl VersionRecord {
             .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
             .collect::<Result<Vec<_>, _>>()?;
         let canonical = self
+            .row
             .record
             .descriptor()
             .create(&values)
             .map_err(|_| malformed())?;
-        if canonical.as_slice() != self.record.raw() {
+        if canonical.as_slice() != self.row.record.raw() {
             return Err(malformed());
+        }
+        // Union cells: canonical `(schema, table)` order, and each record a
+        // non-empty canonical row of nullable user cells.
+        for (index, extra) in self.row.extras.iter().enumerate() {
+            if index > 0 && self.row.extras[index - 1].sort_key() >= extra.sort_key() {
+                return Err(malformed());
+            }
+            let fields = extra.record.descriptor().fields();
+            if fields.is_empty()
+                || fields.iter().any(|field| {
+                    !is_user_cell_field(field)
+                        || !matches!(field.value_type, groove::records::ValueType::Nullable(_))
+                })
+            {
+                return Err(malformed());
+            }
+            let borrowed = extra.record.borrowed();
+            let values = (0..fields.len())
+                .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let canonical = extra
+                .record
+                .descriptor()
+                .create(&values)
+                .map_err(|_| malformed())?;
+            if canonical.as_slice() != extra.record.raw() {
+                return Err(malformed());
+            }
         }
         let _ = row_uuid;
         Ok(())
@@ -1640,7 +2221,10 @@ impl VersionRecord {
             table: groove::Intern::new(table.into()),
             schema_version,
             branch_key: BranchKey::default(),
-            record,
+            row: WireRow {
+                record,
+                extras: Vec::new(),
+            },
             authored_columns: None,
             base: RowBase::default(),
             counter_signs: Vec::new(),
@@ -1678,6 +2262,19 @@ impl VersionRecord {
     /// The image this version's writer made it over (see the `base` field).
     pub fn base(&self) -> RowBase {
         self.base
+    }
+
+    /// The union cells of a Core image (see `UnionExtraCells`); empty for
+    /// every other version.
+    pub fn extra_cells(&self) -> &[UnionExtraCells] {
+        &self.row.extras
+    }
+
+    #[doc(hidden)]
+    pub fn with_extra_cells(mut self, mut extras: Vec<UnionExtraCells>) -> Self {
+        extras.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        self.row.extras = extras;
+        self
     }
 
     #[doc(hidden)]
@@ -1783,13 +2380,14 @@ impl VersionRecord {
 
     /// Encoded wire record.
     pub fn record(&self) -> &OwnedRecord {
-        &self.record
+        &self.row.record
     }
 
     /// Stable row identity.
     pub fn row_uuid(&self) -> RowUuid {
         RowUuid(
-            self.record
+            self.row
+                .record
                 .borrowed()
                 .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
                 .expect("valid wire row uuid"),
@@ -1813,7 +2411,8 @@ impl VersionRecord {
     /// deleted or restored.
     pub fn deletion(&self) -> Option<DeletionEvent> {
         deletion_from_value(
-            self.record
+            self.row
+                .record
                 .borrowed()
                 .get_idx(WireRowRecord::FIELD__DELETION_IDX)
                 .expect("valid wire deletion"),
@@ -1824,7 +2423,8 @@ impl VersionRecord {
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
         RowAuthor::from_record(
-            self.record
+            self.row
+                .record
                 .borrowed()
                 .get_record(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
@@ -1835,7 +2435,8 @@ impl VersionRecord {
 
     /// Original creation timestamp for this logical row in Unix milliseconds.
     pub fn created_at_ms(&self) -> u64 {
-        self.record
+        self.row
+            .record
             .borrowed()
             .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
             .expect("valid wire created_at_ms")
@@ -1844,7 +2445,8 @@ impl VersionRecord {
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
         RowAuthor::from_record(
-            self.record
+            self.row
+                .record
                 .borrowed()
                 .get_record(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
@@ -1855,7 +2457,8 @@ impl VersionRecord {
 
     /// Update timestamp for this row version in Unix milliseconds.
     pub fn updated_at_ms(&self) -> u64 {
-        self.record
+        self.row
+            .record
             .borrowed()
             .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
             .expect("valid wire updated_at_ms")
@@ -1863,7 +2466,8 @@ impl VersionRecord {
 
     /// Cell value by application-schema column position.
     pub fn cell_at(&self, column_position: usize) -> Option<Value> {
-        self.record
+        self.row
+            .record
             .borrowed()
             .get_idx(WireRowRecord::USER_CELLS + column_position)
             .expect("valid wire cell")
@@ -1875,10 +2479,11 @@ impl VersionRecord {
     /// present in the wire payload as absent.
     pub fn optional_cell_at(&self, column_position: usize) -> Option<Value> {
         let field = WireRowRecord::USER_CELLS + column_position;
-        if field >= self.record.descriptor().fields().len() {
+        if field >= self.row.record.descriptor().fields().len() {
             return None;
         }
-        self.record
+        self.row
+            .record
             .borrowed()
             .get_idx(field)
             .ok()?
@@ -1889,7 +2494,8 @@ impl VersionRecord {
 
     #[doc(hidden)]
     pub fn application_cell_count(&self) -> usize {
-        self.record
+        self.row
+            .record
             .descriptor()
             .fields()
             .len()
@@ -1923,7 +2529,20 @@ impl Ord for VersionRecord {
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
             .then_with(|| self.branch_key.cmp(&other.branch_key))
-            .then_with(|| self.record.raw().cmp(other.record.raw()))
+            .then_with(|| self.row.record.raw().cmp(other.row.record.raw()))
+            .then_with(|| {
+                self.row
+                    .extras
+                    .iter()
+                    .map(|extra| (extra.sort_key(), extra.record.raw()))
+                    .cmp(
+                        other
+                            .row
+                            .extras
+                            .iter()
+                            .map(|extra| (extra.sort_key(), extra.record.raw())),
+                    )
+            })
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
             .then_with(|| self.base.cmp(&other.base))
             .then_with(|| self.counter_signs.cmp(&other.counter_signs))
@@ -4098,35 +4717,13 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
     serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
-/// Frozen CATS schema envelope for schemas without composite indexes.
-pub const CATALOGUE_SCHEMA_V1: u8 = 1;
-/// CATS schema envelope for schemas that declare at least one composite
-/// index. The layout is identical to v1; the version byte exists so a reader
-/// that predates `composite_indexes` rejects the payload by version instead of
-/// silently dropping the unknown public-schema JSON field.
-pub const CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES: u8 = 2;
+/// Storage encoding version shared by all catalogue schemas.
+pub const CATALOGUE_SCHEMA_VERSION: u8 = 2;
 
-/// The only CATS schema envelope version that may carry `schema`.
-///
-/// v1 bytes of every schema without composite indexes are unchanged; v2 is
-/// used exactly when some table declares one, so each schema has one
-/// canonical payload.
-pub fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
-    if schema
-        .public_schema()
-        .values()
-        .any(|table| !table.composite_indexes.is_empty())
-    {
-        CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES
-    } else {
-        CATALOGUE_SCHEMA_V1
-    }
-}
-
-/// Canonical CATS payload used by catalogue storage and publication identity.
+/// Canonical schema bytes used by catalogue storage and publication identity.
 ///
 /// This is deliberately a small explicit envelope rather than the serde layout
-/// of `SchemaVersion`: version (see [`catalogue_schema_payload_version`]), raw
+/// of `SchemaVersion`: version (see [`CATALOGUE_SCHEMA_VERSION`]), raw
 /// schema UUID, little-endian JSON length, and the canonical public-schema
 /// JSON bytes.
 pub fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
@@ -4134,7 +4731,7 @@ pub fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8
     let length = u32::try_from(public_schema.len())
         .map_err(|_| "catalogue public schema payload too large".to_owned())?;
     let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
-    payload.push(catalogue_schema_payload_version(&schema.schema));
+    payload.push(CATALOGUE_SCHEMA_VERSION);
     payload.extend_from_slice(schema.id.0.as_bytes());
     payload.extend_from_slice(&length.to_le_bytes());
     payload.extend_from_slice(&public_schema);
@@ -5146,24 +5743,15 @@ impl SchemaLineagePublication {
     /// Return the content-addressed id implied by this payload.
     pub fn content_id(&self) -> SchemaLineagePublicationId {
         let mut bytes = Vec::new();
-        put_str(
-            &mut bytes,
-            if self.predecessors.len() == 1 {
-                "jazz-schema-lineage-publication-v1"
-            } else {
-                "jazz-schema-lineage-publication-v2"
-            },
-        );
+        put_str(&mut bytes, "jazz-schema-lineage-publication-v2");
         put_bytes(
             &mut bytes,
             &canonical_catalogue_schema_bytes(&self.schema)
-                .expect("schema publication has a canonical CATS v1 payload"),
+                .expect("schema publication has canonical catalogue schema bytes"),
         );
         let mut predecessors = self.predecessors.iter().collect::<Vec<_>>();
         predecessors.sort_by_key(|predecessor| predecessor.lens.source);
-        if predecessors.len() != 1 {
-            put_len(&mut bytes, predecessors.len());
-        }
+        put_len(&mut bytes, predecessors.len());
         for predecessor in predecessors {
             put_bytes(&mut bytes, &canonical_lens_bytes(&predecessor.lens));
             let mut new_tables = predecessor.new_tables.clone();
@@ -6233,7 +6821,7 @@ mod tests {
         }
         assert_eq!(
             receipt.finalize().to_hex().as_str(),
-            "475d72b7c78a532386605e6391d57c02f6a69eae69993c97cb2e4414bd9d52b4"
+            "115d7dd21a7920aff3799d618abdfdedf47dd42e20401bcb744e689314bf907b"
         );
         assert_eq!(
             policy_binding_directory_claims_from_value(encoded).unwrap(),
@@ -6582,7 +7170,7 @@ mod tests {
             BranchColumnValue::encode_typed(&Value::String("hi".to_owned()), &ValueType::String)
                 .unwrap();
         assert_eq!(integer.0, [1, 2, 4, 3, 2, 1]);
-        assert_eq!(string.0, [1, 6, 2, b'h', b'i']);
+        assert_eq!(string.0, [1, 6, 0, b'h', b'i']);
 
         let stable_enum = ValueType::EnumTag(
             groove::records::ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap(),
@@ -6605,7 +7193,7 @@ mod tests {
             1, 0, 0, 0, b'a', // first name
             6, 0, 0, 0, 1, 2, 4, 3, 2, 1, // first value
             1, 0, 0, 0, b'z', // second name
-            5, 0, 0, 0, 1, 6, 2, b'h', b'i', // second value
+            5, 0, 0, 0, 1, 6, 0, b'h', b'i', // second value
         ];
         assert_eq!(key.canonical_bytes(), expected);
         assert_eq!(BranchKey::from_canonical_bytes(&expected).unwrap(), key);
@@ -7244,6 +7832,125 @@ mod tests {
 
         assert_ne!(base, authored);
         assert_ne!(base.cmp(&authored), Ordering::Equal);
+    }
+
+    /// Union cells (`UnionExtraCells`) on a Core image: a `NULL` cell and a
+    /// value both survive the wire, and admission (`validate_receipt`)
+    /// rejects entries out of `(schema, table)` order or repeated, a
+    /// non-nullable cell and a cell that is not an application column. A
+    /// commit unit, whose versions are authored writes, never carries them.
+    #[test]
+    fn union_cells_round_trip_and_admission_rejects_non_canonical_entries() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let image = VersionRecord::from_cells(
+            &table,
+            schema_id(2),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let nullable_text = ValueType::Nullable(Box::new(ValueType::String));
+        let cells = |fields: &[(&str, ValueType)], values: &[Value]| {
+            let descriptor = RecordDescriptor::new(
+                fields
+                    .iter()
+                    .map(|(name, value_type)| (*name, value_type.clone())),
+            );
+            OwnedRecord::new(descriptor.create(values).unwrap(), descriptor)
+        };
+        let legacy = |schema: u8, value: Option<&str>| {
+            UnionExtraCells::new(
+                schema_id(schema),
+                "todos",
+                cells(
+                    &[
+                        ("_app_legacy", nullable_text.clone()),
+                        ("_app_note", nullable_text.clone()),
+                    ],
+                    &[
+                        Value::Nullable(
+                            value.map(|value| Box::new(Value::String(value.to_owned()))),
+                        ),
+                        Value::Nullable(None),
+                    ],
+                ),
+            )
+        };
+
+        let union = image
+            .clone()
+            .with_extra_cells(vec![legacy(3, Some("x")), legacy(1, None)]);
+        union.validate_receipt().unwrap();
+        let decoded: VersionRecord =
+            postcard::from_bytes(&postcard::to_allocvec(&union).unwrap()).unwrap();
+        assert_eq!(decoded, union);
+        assert_eq!(decoded.extra_cells()[0].schema_version(), schema_id(1));
+        assert_eq!(
+            decoded.extra_cells()[0]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(None),
+            "a NULL union cell stays NULL"
+        );
+        assert_eq!(
+            decoded.extra_cells()[1]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(Some(Box::new(Value::String("x".to_owned()))))
+        );
+
+        let mut unordered = union.clone();
+        unordered.row.extras.reverse();
+        assert!(
+            unordered.validate_receipt().is_err(),
+            "entries out of order"
+        );
+        let mut repeated = union.clone();
+        repeated.row.extras = vec![legacy(1, None), legacy(1, Some("x"))];
+        assert!(repeated.validate_receipt().is_err(), "entry repeated");
+        let not_nullable = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("_app_legacy", ValueType::String)],
+                &[Value::String("x".to_owned())],
+            ),
+        )]);
+        assert!(
+            not_nullable.validate_receipt().is_err(),
+            "non-nullable cell"
+        );
+        let not_app = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("row_uuid", nullable_text.clone())],
+                &[Value::Nullable(None)],
+            ),
+        )]);
+        assert!(
+            not_app.validate_receipt().is_err(),
+            "not an application cell"
+        );
+
+        assert_eq!(
+            crate::protocol_limits::commit_unit_limit_violation(&[image]),
+            None
+        );
+        assert!(
+            crate::protocol_limits::commit_unit_limit_violation(&[union])
+                .is_some_and(|reason| reason.contains("carries union cells")),
+            "a commit unit carrying union cells is rejected"
+        );
     }
 
     /// A `VersionRecord` ends with `base` (two postcard options), then

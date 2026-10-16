@@ -3277,7 +3277,7 @@ mod tests {
                 "jazz_albums_register_ahead_current",
                 "jazz_tracks_register_ahead_current",
             ),
-            ("jazz_global_changes", "jazz_known_state_facts"),
+            ("jazz_global_changes", "jazz_authority_policy_bindings"),
             ("jazz_nodes", "jazz_transactions"),
         ];
         let all_logical = logical_cfs

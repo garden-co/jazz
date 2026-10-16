@@ -10,8 +10,10 @@ name: Nightly tests
 #   runtime is measured. PR CI runs one bounded seed.
 # - browser-soak: the two JAZZ_BROWSER_SOAK worker-bridge tests, which no
 #   other workflow enables.
-# - benchmark-api: benchmark-smoke.sh --compile-ci, whose only other home is
-#   the realistic benchmark workflow on the self-hosted jazz-bench runner.
+# - benchmark-api: benchmark-smoke.sh --compile-ci, which checks every
+#   maintained benchmark API (including `cargo check -p jazz-sim --benches`).
+#   This is its only CI home since the realistic benchmark workflow was
+#   retired on 2026-10-15.
 #
 # Starters E2E is not part of the nightly: it runs only on release PRs
 # (see starters-e2e.yml).

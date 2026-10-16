@@ -701,7 +701,7 @@ where
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.view_scoped_cardinality
+                || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -777,7 +777,7 @@ where
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
-            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
+            if version_bundles.is_empty() && !existing.is_partial {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
                     .await?;
                 return Ok(());
@@ -1048,6 +1048,7 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
+                let stored = self.with_wire_union_cells(stored, version)?;
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
