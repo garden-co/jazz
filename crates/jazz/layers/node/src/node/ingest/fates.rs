@@ -1003,7 +1003,7 @@ where
         {
             let record = raw.record();
             let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
-            let alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let alias = NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
                 "transaction node alias must exist",
             ))?;
@@ -1094,7 +1094,7 @@ where
             TX_TOUCHED_ROWS_TABLE,
             PrimaryKeyValue::Composite(vec![
                 PrimaryKeyValue::U64(tx_id.time.0),
-                PrimaryKeyValue::U64(tx.node_alias.0),
+                PrimaryKeyValue::U32(tx.node_alias.0),
             ]),
         );
         self.invalidate_tx_version_tables_cache(tx_id);

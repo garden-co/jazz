@@ -50,7 +50,11 @@ uuid_id! {
 
 id_newtype! {
     /// Node-local integer alias for compact storage.
-    NodeAlias(u64)
+    ///
+    /// Stored as a fixed 4-byte `U32` in every column that names a node (SPEC 2,
+    /// "Node aliases"). Allocation refuses rather than wraps past `u32::MAX`; the
+    /// wire never carries an alias, only the node's [`NodeUuid`].
+    NodeAlias(u32)
 }
 
 uuid_id! {
@@ -1313,7 +1317,7 @@ mod tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_u64!(NodeAlias);
+groove::impl_record_field_u32!(NodeAlias);
 groove::impl_record_field_u64!(SchemaVersionAlias);
 groove::impl_record_field_uuid!(NodeUuid);
 groove::impl_record_field_uuid!(SchemaFamilyId);

@@ -1286,7 +1286,7 @@ where
             .await?
         {
             let record = raw.record();
-            let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
+            let alias = NodeAlias(record.get_u32(NodeAliasRowRecord::FIELD_ID_IDX)?);
             max_alias = max_alias.max(alias.0);
             if record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)? == node_uuid.0 {
                 self.node_aliases.insert(node_uuid, alias);
@@ -1296,15 +1296,11 @@ where
                 return Ok(alias);
             }
         }
-        let alias = NodeAlias(
-            max_alias
-                .checked_add(1)
-                .ok_or(Error::InvalidStoredValue("node alias exhausted"))?,
-        );
+        let alias = next_node_alias(max_alias)?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_nodes",
-            vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
+            vec![Value::U32(alias.0), Value::Uuid(node_uuid.0)],
         );
         self.apply_and_persist_node_batch(batch).await?;
         // This mapping is a durable prerequisite for every later row that

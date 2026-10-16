@@ -281,7 +281,7 @@ where
         let current = current.borrowed();
         let tx_time = TxTime(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
-            NodeAlias(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            NodeAlias(current.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias_in_branch(
             schema_version,
             table,
@@ -350,7 +350,7 @@ where
         let current = current.borrowed();
         let tx_time = TxTime(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
-            NodeAlias(current.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            NodeAlias(current.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias_in_branch(
             schema_version,
             table,
@@ -460,10 +460,12 @@ where
                     _ => None,
                 };
                 if let Some(ms) = value {
-                    let time = TxTime::from_physical_ms(ms).map_err(|_| {
+                    // Both layouts store Unix milliseconds; refuse what the
+                    // internal HLC cannot hold.
+                    TxTime::from_physical_ms(ms).map_err(|_| {
                         Error::InvalidStoredValue("current provenance ms exceeds HLC range")
                     })?;
-                    history_descriptor.encode_field_into(index, &Value::U64(time.0), output)?;
+                    history_descriptor.encode_field_into(index, &Value::U64(ms), output)?;
                     return Ok(());
                 }
                 let source = source_of(index);
@@ -755,7 +757,7 @@ where
         if let Some(seq) = self.history_tx_seqs.borrow().get(&(tx_time, tx_node_alias)) {
             return Ok(Some(*seq));
         }
-        let primary_key = [Value::U64(tx_time.0), Value::U64(tx_node_alias.0)];
+        let primary_key = [Value::U64(tx_time.0), Value::U32(tx_node_alias.0)];
         let raw = match batch {
             Some(batch) => {
                 self.database
@@ -810,7 +812,7 @@ where
         };
         let table_schema = self.table_in_schema_ref(&table, schema_version)?;
         let record_view = record.borrowed();
-        let tx_node_alias = NodeAlias(record_view.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let tx_node_alias = NodeAlias(record_view.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
         let tx_node =
             self.node_aliases
                 .node_for_alias(tx_node_alias)
@@ -913,7 +915,7 @@ where
         {
             let record = raw.record();
             if record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)? == tx_id.node.0 {
-                let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
+                let alias = NodeAlias(record.get_u32(NodeAliasRowRecord::FIELD_ID_IDX)?);
                 aliases.push(alias);
             }
         }
@@ -986,13 +988,13 @@ where
                 .database
                 .primary_key_scan_range_raw(
                     "jazz_transactions",
-                    &[Value::U64(min_time.0), Value::U64(0)],
-                    &[Value::U64(end_time), Value::U64(0)],
+                    &[Value::U64(min_time.0), Value::U32(0)],
+                    &[Value::U64(end_time), Value::U32(0)],
                 )
                 .await?
             {
                 let record = raw.record();
-                let row_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+                let row_alias = NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
                 let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
                 if row_alias != alias || !times.contains(&time) {
                     continue;
@@ -1038,14 +1040,14 @@ where
             .database
             .primary_key_get_raw(
                 "jazz_transactions",
-                &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
+                &[Value::U64(tx_id.time.0), Value::U32(expected_alias.0)],
             )
             .await?
         else {
             return Ok(None);
         };
         let record = raw.record();
-        let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+        let node_alias = NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
         let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
         if node_alias != expected_alias || time != tx_id.time {
             return Ok(None);
@@ -1078,7 +1080,7 @@ where
         let global_time = record
             .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
             .map(GlobalTime);
-        let key = [Value::U64(tx_id.time.0), Value::U64(expected_alias.0)];
+        let key = [Value::U64(tx_id.time.0), Value::U32(expected_alias.0)];
         let pending = if global_time.is_none() && !matches!(fate, Fate::Rejected(_)) {
             self.database
                 .primary_key_get_raw(PENDING_TRANSACTIONS_TABLE, &key)
@@ -1185,7 +1187,7 @@ where
             .database
             .primary_key_get_raw(
                 "jazz_transactions",
-                &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
+                &[Value::U64(tx_id.time.0), Value::U32(expected_alias.0)],
             )
             .await?
             .is_some())

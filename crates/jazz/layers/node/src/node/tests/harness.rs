@@ -76,3 +76,4 @@ include!("native_storage_corpus.rs");
 include!("accepted_fate_replay.rs");
 include!("linear_history.rs");
 include!("offline_chains.rs");
+include!("compact_storage.rs");

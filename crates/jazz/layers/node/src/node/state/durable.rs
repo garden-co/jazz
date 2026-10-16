@@ -397,7 +397,7 @@ where
                 continue;
             }
             candidates.push((
-                NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
+                NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
                 TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
             ));
         }
@@ -446,7 +446,7 @@ where
         {
             scan.records_visited += 1;
             let record = raw.record();
-            if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
+            if NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
                 || RowAuthor::from_record(
                     record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
@@ -591,12 +591,12 @@ where
                 .database
                 .primary_key_scan_raw(
                     &storage_table,
-                    &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+                    &[Value::U64(tx_id.time.0), Value::U32(alias.0)],
                 )
                 .await?
             {
                 let record = raw.record();
-                let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
+                let node_id = record.get_u32(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 let time = record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?;
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;

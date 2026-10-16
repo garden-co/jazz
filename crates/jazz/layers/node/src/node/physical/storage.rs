@@ -913,9 +913,12 @@ where
         ))
     }
 
-    /// Reuse encoded history fields; only current timestamps and enum tags
-    /// need representation changes. Plans belong to the catalogue and are
-    /// invalidated alongside physical registry/descriptor changes.
+    /// Reuse encoded history fields; only enum tags need representation
+    /// changes. History and current rows both store `created_at` /
+    /// `updated_at` as Unix milliseconds (`INV-DATA-27`), so the current
+    /// timestamps written from the version equal the history fields. Plans
+    /// belong to the catalogue and are invalidated alongside physical
+    /// registry/descriptor changes.
     pub(super) fn encode_physical_version_record(
         &self,
         plan: &PreparedPhysicalWritePlan,

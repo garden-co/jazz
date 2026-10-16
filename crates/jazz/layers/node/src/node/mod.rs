@@ -418,6 +418,7 @@ mod ingest;
 mod layer_stack;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
+use node_aliases::next_node_alias;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
 pub mod legacy_test_future;
@@ -2269,10 +2270,10 @@ impl CurrentRow {
         if let Some((time, node)) = self.projected_tx_alias() {
             descriptor_fields.extend([
                 records::DescriptorField::new("tx_time", records::ValueType::U64),
-                records::DescriptorField::new("tx_node_id", records::ValueType::U64),
+                records::DescriptorField::new("tx_node_id", records::ValueType::U32),
             ]);
             values.push(Value::U64(time.0));
-            values.push(Value::U64(node.0));
+            values.push(Value::U32(node.0));
             binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
             binding_field_names.extend(std::iter::repeat_n(None, 2));
         }
@@ -2388,7 +2389,7 @@ impl CurrentRow {
         }
         let borrowed = self.record.borrowed();
         let time = borrowed.get_u64(stamp_idx).ok()?;
-        let alias = borrowed.get_u64(alias_idx).ok()?;
+        let alias = borrowed.get_u32(alias_idx).ok()?;
         if time == 0 && alias == 0 {
             return None;
         }
@@ -3283,6 +3284,10 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// Every node alias up to `u32::MAX` is allocated; the store cannot name
+    /// another node. Aliases are stored as fixed 4-byte values and never wrap.
+    #[error("node alias space exhausted: every alias up to u32::MAX is allocated")]
+    NodeAliasExhausted,
     /// The store's history was truncated at or below a horizon, which this
     /// build cannot read (SPEC 2 §2.8, `jazz_history_horizon`).
     #[error(

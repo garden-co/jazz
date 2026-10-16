@@ -1912,7 +1912,7 @@ where
             .await?
         {
             let record = raw.record();
-            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node_alias = NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = self
                 .node_for_alias(node_alias)
                 .ok_or(Error::InvalidStoredValue(
@@ -2409,6 +2409,11 @@ impl StagedWrites {
     /// Number of staged writes.
     pub(super) fn len(&self) -> usize {
         self.live
+    }
+
+    /// Whether no write is staged.
+    pub(super) fn is_empty(&self) -> bool {
+        self.live == 0
     }
 
     /// Every staged write, in staging order.

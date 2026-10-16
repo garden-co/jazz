@@ -23,12 +23,12 @@ where
                 .database
                 .primary_key_scan_raw(
                     &storage_table,
-                    &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+                    &[Value::U64(tx_id.time.0), Value::U32(alias.0)],
                 )
                 .await?
             {
                 let record = raw.record();
-                let node_id = record.get_u64(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
+                let node_id = record.get_u32(RejectedVersionRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 let time = record.get_u64(RejectedVersionRowRecord::FIELD_TX_TIME_IDX)?;
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
@@ -88,7 +88,7 @@ where
             .await?
         {
             let record = raw.record();
-            let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
+            let alias = record.get_u32(NodeAliasRowRecord::FIELD_ID_IDX)?;
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
             if let Some(existing) = self.node_aliases.get(&uuid) {
                 if *existing != NodeAlias(alias) {
@@ -198,7 +198,7 @@ where
             if let Some(global_time) = global_time {
                 let node = self
                     .node_for_alias(NodeAlias(
-                        record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
+                        record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
                     ))
                     .ok_or(Error::InvalidStoredValue(
                         "transaction node alias must exist",
@@ -242,7 +242,7 @@ where
         {
             let record = raw.record();
             let node_alias =
-                NodeAlias(record.get_u64(RejectedTransactionRowRecord::FIELD_NODE_ID_IDX)?);
+                NodeAlias(record.get_u32(RejectedTransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = *alias_to_node
                 .get(&node_alias)
                 .ok_or(Error::InvalidStoredValue(

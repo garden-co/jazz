@@ -14,7 +14,7 @@ Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
 - `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) as exactly 16 canonical bytes, whose lexicographic byte order is their ordering; `RowAuthor` MUST use its non-null account/identity native record; node-local alias and intern types MUST NOT be part of wire identity.
-- `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
+- `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`. A `NodeAlias` MUST be stored as a fixed 4-byte `U32` in every column that names a node, and allocation MUST refuse (`NodeAliasExhausted`) rather than wrap past `u32::MAX`.
 - `INV-DATA-3`: Persisted system authors MUST use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node UUID subject; this provenance MUST NOT grant the internal SYSTEM policy-bypass capability, and external admission MUST reject the reserved account and issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
@@ -33,6 +33,7 @@ Invariant digest:
 - `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 - `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical native author records and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
+- `INV-DATA-27`: History, global-current and ahead-current rows MUST store `created_at` and `updated_at` as Unix milliseconds in a Groove U64-stored-as-U48 column (exactly 6 bytes, `INV-STORAGE-39`), exposed as `U64` above storage; a value above `2^48 - 1` MUST be refused with a typed error, never truncated.
 
 ## Details
 
@@ -114,8 +115,12 @@ Those are host adapters for the same lease contract, not alternate TxId
 formats or durability semantics.
 
 Storage may use compact local aliases without changing the wire identity model.
-Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
-(`NodeAlias`, `SchemaVersionAlias`). The boundary is strict: aliases are
+Each node interns `NodeUuid` to a local `u32` alias (`NodeAlias`) and
+`SchemaVersionId` to a local `u64` alias (`SchemaVersionAlias`). Every stored
+column that names a node (history and current `tx_node_id`, the
+`jazz_transactions`, pending, provenance, touched-rows and rejected-transaction
+keys, `jazz_nodes.id`) holds the alias as a fixed 4-byte `U32`; allocation
+fails with `NodeAliasExhausted` rather than wrapping once `u32::MAX` is taken. The boundary is strict: aliases are
 node-local, never appear on the wire, and every value leaving stored rows for
 the wire resolves its alias back to the corresponding `NodeUuid` or
 `SchemaVersionId` (`INV-DATA-1`, `INV-DATA-2`). Aliases are rebuilt on recovery.
@@ -306,7 +311,14 @@ the transaction's seq (from its `jazz_transactions` record) and its
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. Every history image,
 global-current record and ahead-overlay record stores all four provenance
-fields. An image takes `updated_by` from the write it applies, so it is the
+fields. `created_at` and `updated_at` are public Unix milliseconds in all three
+(history no longer stores a packed HLC there; the in-memory `TxTime` it
+rebuilds has logical counter zero, as wire provenance always had). Each is a
+Groove U64-stored-as-U48 column (Groove SPEC 2, "U64 columns stored in 6
+bytes", `INV-STORAGE-39`): 6 bytes on disk, a `U64` to every read, query,
+policy and the wire, and a write above `2^48 - 1` is refused rather than
+truncated. The packed HLC's 46 physical bits always fit (`INV-DATA-27`).
+An image takes `updated_by` from the write it applies, so it is the
 author of the row's latest applied write (SPEC 4 §4.6). `created_by` and
 `updated_by` are interned columns (Groove SPEC 2, "Interned columns and
 dictionaries", codec family `groove.dictionary.v1`): each stores a 4-byte code
@@ -425,7 +437,7 @@ bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 what a node needs for as long as it keeps a transaction, so fate, seq and
 durability reads never load anything that grows with the transaction or that
 matters only while it is pending. Its fields are, in order: `(time: TxTime,
-node_id: NodeAlias, kind, flags: U8, n_total_writes: U32, made_by: RowAuthor
+node_id: NodeAlias (U32), kind, flags: U8, n_total_writes: U32, made_by: RowAuthor
 interned into `authors`, fate,
 global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
 rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorSubject>)`, keyed
@@ -496,7 +508,7 @@ start truncating without another layout change.
 
 **Touched-row list.** The history rows this node stored for a transaction
 are listed in the node-local table `jazz_tx_touched_rows`, one record per
-transaction keyed `(tx_time: U64, tx_node_id: U64)` with the field
+transaction keyed `(tx_time: U64, tx_node_id: U32)` with the field
 `touched_rows: Array<{physical_table_id: U64, branch_key: Bytes, row_uuids:
 Array<Uuid>}>`, grouped by physical table and branch in ascending order with
 strictly ascending, unique row UUIDs per group; empty groups and any other

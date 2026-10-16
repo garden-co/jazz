@@ -41,7 +41,7 @@ where
         );
         let tx_node_alias = NodeAlias(
             record
-                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
                 .ok()?,
         );
         Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
@@ -110,7 +110,7 @@ where
         let mut moved = BTreeMap::new();
         for record in self.global_current_records_after(table, position).await? {
             let record = record.borrowed();
-            let alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let alias = NodeAlias(record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
                 "global current node alias must exist",
             ))?;
@@ -217,7 +217,7 @@ where
         );
         let tx_node_alias = NodeAlias(
             record
-                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
                 .ok()?,
         );
         let deleted = record

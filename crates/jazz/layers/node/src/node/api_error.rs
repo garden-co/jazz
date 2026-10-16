@@ -136,7 +136,9 @@ impl From<crate::node::Error> for Error {
             crate::node::Error::HistoricalReadRequiresServer => {
                 ErrorCode::HistoricalReadRequiresServer
             }
-            crate::node::Error::Groove(_) => ErrorCode::Storage,
+            crate::node::Error::Groove(_) | crate::node::Error::NodeAliasExhausted => {
+                ErrorCode::Storage
+            }
             crate::node::Error::Query(_) | crate::node::Error::UnsupportedExclusiveRead(_) => {
                 ErrorCode::Query
             }

@@ -1713,6 +1713,7 @@ mod version_record_wire_row {
                         ValueType::Bytes => Value::Bytes(vec![1]),
                         ValueType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
                         ValueType::U64 => Value::U64(9),
+                        ValueType::U32 => Value::U32(9),
                         ValueType::Nullable(_) => Value::Nullable(None),
                         other => panic!("unexpected global-current field type {other:?}"),
                     },

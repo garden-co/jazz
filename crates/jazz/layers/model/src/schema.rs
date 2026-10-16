@@ -992,7 +992,7 @@ impl TableSchema {
     pub fn rejected_versions_storage_table(&self) -> GrooveTableSchema {
         let mut columns = vec![
             column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U32),
             column("row_uuid", GrooveColumnType::Uuid),
             column("_deletion", deletion_column().nullable()),
         ];
@@ -1005,7 +1005,7 @@ impl TableSchema {
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U32),
                 PrimaryKeyColumn::uuid("row_uuid"),
             ]))
     }
@@ -1026,12 +1026,12 @@ impl TableSchema {
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U32),
             column("schema_version", GrooveColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", provenance_ms_column()),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
+            column("updated_at", provenance_ms_column()),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
         ];
@@ -1071,7 +1071,7 @@ impl TableSchema {
             PrimaryKeyColumn::uuid("row_uuid"),
             PrimaryKeyColumn::integer(SEQ_FIELD, IntegerKeyType::U64),
             PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U32),
         ]))
         // No secondary index: the rows one transaction wrote are listed in its
         // `jazz_tx_touched_rows` record, so "versions of transaction T" is a
@@ -1085,12 +1085,12 @@ impl TableSchema {
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U32),
             column("schema_version", GrooveColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", provenance_ms_column()),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
+            column("updated_at", provenance_ms_column()),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
         ];
@@ -1145,12 +1145,12 @@ impl TableSchema {
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
             column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U32),
             column("schema_version", GrooveColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", provenance_ms_column()),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
+            column("updated_at", provenance_ms_column()),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
         ];
@@ -1355,6 +1355,15 @@ pub fn history_base_pending_storage_type() -> GrooveColumnType {
 #[doc(hidden)]
 pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
 
+/// Storage type of the `created_at` / `updated_at` provenance columns of the
+/// history, global-current and ahead-current tables: Unix milliseconds kept in
+/// a fixed 6-byte slot (SPEC 2, "Provenance timestamps"). Reads and writes see
+/// a `U64`; Groove refuses a value above `2^48 - 1` instead of truncating it.
+/// The wire keeps 8-byte milliseconds.
+fn provenance_ms_column() -> GrooveColumnType {
+    GrooveColumnType::u64_stored_as_u48()
+}
+
 fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {
     groove::schema::ColumnSchema::new(name, column_type)
 }
@@ -1399,12 +1408,13 @@ fn nodes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_nodes",
         [
-            // node-local-derived: allocated by node alias interning.
-            column("id", GrooveColumnType::U64),
+            // node-local-derived: allocated by node alias interning. A fixed
+            // 4-byte alias; allocation refuses past `u32::MAX`.
+            column("id", GrooveColumnType::U32),
             column("uuid", GrooveColumnType::Uuid),
         ],
     )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U32))
 }
 
 /// `jazz_transactions` (`jazz.tx-record.v2`): the permanent record of one
@@ -1425,7 +1435,7 @@ fn transactions_table() -> GrooveTableSchema {
         "jazz_transactions",
         [
             column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U32),
             column("kind", tx_kind_column()),
             // Bit 0: `n_total_writes` is only the view-redacted cardinality.
             // Bit 1: a `jazz_tx_provenance` record exists.
@@ -1454,7 +1464,7 @@ fn transactions_table() -> GrooveTableSchema {
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U32),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
 }
@@ -1472,7 +1482,7 @@ fn pending_transactions_table() -> GrooveTableSchema {
         "jazz_pending_transactions",
         [
             column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U32),
             column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column("row_read_set", GrooveColumnType::Bytes.nullable()),
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
@@ -1481,7 +1491,7 @@ fn pending_transactions_table() -> GrooveTableSchema {
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U32),
     ]))
 }
 
@@ -1495,13 +1505,13 @@ fn tx_provenance_table() -> GrooveTableSchema {
         TX_PROVENANCE_TABLE,
         [
             column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U32),
             column("contribution_merge", contribution_merge_column()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U32),
     ]))
 }
 
@@ -1537,13 +1547,13 @@ fn tx_touched_rows_table() -> GrooveTableSchema {
         "jazz_tx_touched_rows",
         [
             column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U32),
             column("touched_rows", touched_rows_column()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U32),
     ]))
 }
 
@@ -1917,7 +1927,7 @@ fn rejected_transactions_table() -> GrooveTableSchema {
         "jazz_rejected_transactions",
         [
             column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U32),
             column("kind", tx_kind_column()),
             column("made_by", interned_author_type()),
             column("rejection_reason", rejection_reason_column()),
@@ -1926,7 +1936,7 @@ fn rejected_transactions_table() -> GrooveTableSchema {
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U32),
     ]))
 }
 

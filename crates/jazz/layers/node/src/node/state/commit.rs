@@ -1051,7 +1051,7 @@ where
                 let tx_time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
                 let node = self
                     .node_for_alias(NodeAlias(
-                        record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                        record.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
                     ))
                     .ok_or(Error::InvalidStoredValue("overlay node alias must exist"))?;
                 self.ahead_current_keys
@@ -1100,7 +1100,7 @@ where
         tx_time: TxTime,
         node_alias: NodeAlias,
     ) -> Result<TouchedRows, Error> {
-        let key = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
+        let key = [Value::U64(tx_time.0), Value::U32(node_alias.0)];
         let raw = match batch {
             Some(batch) => {
                 self.database
@@ -1479,7 +1479,7 @@ where
         );
         let tx_node_alias = NodeAlias(
             record
-                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
                 .map_err(malformed)?,
         );
         let tx_node = self

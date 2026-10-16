@@ -239,7 +239,7 @@ where
             .await?
         {
             let record = raw.record();
-            if NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?) != alias {
+            if NodeAlias(record.get_u32(NodeAliasRowRecord::FIELD_ID_IDX)?) != alias {
                 continue;
             }
             let node = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);

@@ -21,7 +21,7 @@ pub struct NodeAliases {
     by_alias: FxHashMap<NodeAlias, NodeUuid>,
     /// Highest alias ever installed. Monotonic: `remove` does not lower it,
     /// which is conservative for allocating the next alias.
-    max_alias: u64,
+    max_alias: u32,
     /// Counts dropped `node ↔ alias` pairs (a replacement of either side, or
     /// a removal). Inserting a fresh pair never lowers it: a consumer that
     /// observed an unchanged count knows every alias it resolved still
@@ -72,7 +72,7 @@ impl NodeAliases {
     }
 
     /// Highest alias ever installed, or 0 when none was.
-    pub fn max_alias(&self) -> u64 {
+    pub fn max_alias(&self) -> u32 {
         self.max_alias
     }
 
@@ -95,6 +95,18 @@ impl NodeAliases {
     pub fn len(&self) -> usize {
         self.by_node.len()
     }
+}
+
+/// The alias after `max_alias`, the highest alias this node has allocated.
+///
+/// Aliases are stored as fixed 4-byte values, so allocation refuses with
+/// [`Error::NodeAliasExhausted`](super::Error::NodeAliasExhausted) rather than
+/// wrapping once `u32::MAX` is taken.
+pub(crate) fn next_node_alias(max_alias: u32) -> Result<NodeAlias, super::Error> {
+    max_alias
+        .checked_add(1)
+        .map(NodeAlias)
+        .ok_or(super::Error::NodeAliasExhausted)
 }
 
 impl PartialEq for NodeAliases {
@@ -159,5 +171,15 @@ mod tests {
         assert_eq!(aliases.node_for_alias(NodeAlias(2)), None);
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases.max_alias(), 3);
+    }
+
+    #[test]
+    fn alias_allocation_refuses_past_u32_max() {
+        assert_eq!(next_node_alias(0).unwrap(), NodeAlias(1));
+        assert_eq!(next_node_alias(u32::MAX - 1).unwrap(), NodeAlias(u32::MAX));
+        assert!(matches!(
+            next_node_alias(u32::MAX),
+            Err(super::super::Error::NodeAliasExhausted)
+        ));
     }
 }

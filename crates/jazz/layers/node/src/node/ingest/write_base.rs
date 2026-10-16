@@ -258,7 +258,7 @@ where
                 Value::Uuid(row_uuid.0),
                 Value::U64(seq),
                 Value::U64(0),
-                Value::U64(0),
+                Value::U32(0),
             ]
         };
         let (start, end) = (
@@ -276,7 +276,7 @@ where
                 if time <= writer.time {
                     continue;
                 }
-                let alias = NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                let alias = NodeAlias(record.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
                 if self.node_for_alias(alias) == Some(writer.node) {
                     return Ok(true);
                 }
@@ -603,7 +603,7 @@ where
                 .await?
             {
                 let record = raw.record();
-                if NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?) != own_alias {
+                if NodeAlias(record.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?) != own_alias {
                     continue;
                 }
                 let time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);

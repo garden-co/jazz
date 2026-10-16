@@ -727,12 +727,12 @@ where
             let source_table = record.get_str(source_table_idx)?.to_owned();
             let source_row = RowUuid(record.get_uuid(source_row_idx)?);
             let source_tx_time = TxTime(record.get_u64(source_tx_time_idx)?);
-            let source_tx_node = NodeAlias(record.get_u64(source_tx_node_idx)?);
+            let source_tx_node = NodeAlias(record.get_u32(source_tx_node_idx)?);
             let relation = record.get_str(relation_idx)?.to_owned();
             let target_table_name = record.get_str(target_table_idx)?.to_owned();
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
-            let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
+            let target_tx_node = NodeAlias(record.get_u32(target_tx_node_idx)?);
             let branch_discriminator = |idx| -> Result<Option<Vec<u8>>, Error> {
                 let Some(idx) = idx else {
                     return Ok(None);

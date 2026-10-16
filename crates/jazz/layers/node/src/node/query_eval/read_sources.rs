@@ -4824,7 +4824,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
             records::DescriptorField::new("$updatedAt", ValueType::U64),
             records::DescriptorField::new("tx_time", ValueType::U64),
-            records::DescriptorField::new("tx_node_id", ValueType::U64),
+            records::DescriptorField::new("tx_node_id", ValueType::U32),
         ])
         .collect::<Vec<_>>();
     for requirement in metadata.keys() {
@@ -5952,7 +5952,7 @@ fn inline_current_record(
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
-    values.push(Value::U64(tx_node_alias.0));
+    values.push(Value::U32(tx_node_alias.0));
     append_author_projection_values(
         &mut values,
         descriptor,
@@ -6245,7 +6245,7 @@ fn inline_current_values_with_source_metadata_and_deletion(
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
-    values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+    values.extend([Value::U64(tx_time.0), Value::U32(tx_node_alias.0)]);
     append_author_projection_values(
         &mut values,
         descriptor,
@@ -6389,7 +6389,7 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 ("$updatedBy".to_owned(), RowAuthor::value_type()),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
-                ("tx_node_id".to_owned(), ValueType::U64),
+                ("tx_node_id".to_owned(), ValueType::U32),
             ])
             .chain([("__jazz_deleted".to_owned(), ValueType::Bool)]),
     )

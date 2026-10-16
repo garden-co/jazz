@@ -1378,13 +1378,13 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             table: table.name.clone(),
             branch_key: BranchKey::default(),
             row_uuid: RowUuid(uuid::Uuid::from_bytes([seed; 16])),
-            tx_node_alias: NodeAlias(u64::from(seed) + 10),
+            tx_node_alias: NodeAlias(u32::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
             tx_time: TxTime::from(u64::from(seed) + 30),
             created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
-            created_at: TxTime::from(u64::from(seed) + 40),
+            created_at: TxTime::from_physical_ms(u64::from(seed) + 40).unwrap(),
             updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
-            updated_at: TxTime::from(u64::from(seed) + 50),
+            updated_at: TxTime::from_physical_ms(u64::from(seed) + 50).unwrap(),
             cells: table
                 .columns
                 .iter()
@@ -1730,7 +1730,7 @@ fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_tran
         .unwrap();
     let transaction = node
         .database
-        .primary_key_get_raw("jazz_transactions", &[Value::U64(tx_id.time.0), Value::U64(alias.0)])
+        .primary_key_get_raw("jazz_transactions", &[Value::U64(tx_id.time.0), Value::U32(alias.0)])
         .unwrap()
         .unwrap()
         .owned_record();
@@ -1746,14 +1746,14 @@ fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_tran
         TX_TOUCHED_ROWS_TABLE,
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx_id.time.0),
-            PrimaryKeyValue::U64(alias.0),
+            PrimaryKeyValue::U32(alias.0),
         ]),
     );
     forget.delete(
         "jazz_transactions",
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx_id.time.0),
-            PrimaryKeyValue::U64(alias.0),
+            PrimaryKeyValue::U32(alias.0),
         ]),
     );
     let applied = crate::local_executor::block_on(node.database.apply_batch(forget)).unwrap();

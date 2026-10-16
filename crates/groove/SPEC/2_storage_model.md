@@ -27,6 +27,7 @@ Invariant digest:
 - `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple members MUST use the big-endian order-preserving member encoding on encode, decode and structural validation alike, recursively through nested tuple and nullable members (a present nullable member's payload is itself a member), with `F64` members in the §2.8 ordered-index transform.
 - `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
 - `INV-STORAGE-38`: Durable index ids MUST be assigned per `(table, index, definition)` from a monotonic counter starting at 1, recorded in the `indices` registry (`\0groove-index-id\0` keys) no later than the storage-atomic write of the first entry that uses them, stable across reopen and index reordering, and never reused: a changed definition or a runtime (re)registration receives a fresh id, so entries of an earlier incarnation are never read. An `indices` family holding entries without the `groove-durable-index-v2` layout marker, or with another marker, MUST fail open with `InvalidStorageLayout`; node roots declare `groove.durable-index.v2` in their manifest.
+- `INV-STORAGE-39`: A U64-stored-as-U48 column (`ValueType::u64_stored_as_u48()`) MUST store each value as exactly 6 bytes little-endian (`Nullable`: flag plus a 6-byte payload, zero when null) and MUST expose `U64` to every read, scan, index backfill, IVM source and write; a write of a value above `2^48-1` MUST fail with `U48OutOfRange` and store nothing. It is storage-only: its descriptor is not encodable, and schema admission refuses it nested, in a primary key, index or foreign key, or in a direct record store.
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
@@ -838,6 +839,32 @@ undeclared dictionary or a different value type than the dictionary holds,
 and a dictionary whose value type contains an engine storage type or an enum.
 A schema rebuild keeps the dictionaries loaded at open and refuses to declare
 another (`DictionaryError::NotLoaded`).
+
+### U64 columns stored in 6 bytes
+
+A table column may be declared `ValueType::u64_stored_as_u48()`
+(`INV-STORAGE-39`): a `U64` whose stored form is a `U48` slot. A row stores
+the value's low 6 bytes little-endian in the fixed-width region; for
+`Nullable`, a presence byte followed by the 6 bytes (`00` and six zero bytes
+when null). It suits values that fit 48 bits by construction, such as Unix
+milliseconds (Jazz stores row provenance timestamps this way).
+
+Like an interned column it is storage-only and goes through the same
+transcoding: `record_schema*` name the column `U64`, `storage_record_schema*`
+name the slot; every point, scan and index read, every old row of a write's
+delta and every IVM table source widens the 6 bytes back to the 8-byte `U64`
+before a caller or operator sees the record, so queries, filters, policies
+and the wire only ever see `U64`. Every write narrows the value while
+preparing the stored payload; a value above `2^48 - 1` fails the write with
+`records::Error::U48OutOfRange` (surfaced as `Error::RecordEncoding`) and
+nothing is stored or truncated. A descriptor carrying the slot type cannot be
+encoded as a persisted or wire descriptor
+(`records::Error::StoredU48TypeNotEncodable`).
+
+Schema admission refuses (`InternedColumnError::StoredU48Placement`) the slot
+type in a primary key, an index or a foreign key (a key that needs 6 bytes
+declares `U48`, `INV-STORAGE-37`), in a direct record store, and nested
+anywhere but at top level or directly under a top-level `Nullable`.
 
 ### 2.6 Commit ordering
 
