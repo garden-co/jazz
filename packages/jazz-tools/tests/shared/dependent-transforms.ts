@@ -159,6 +159,40 @@ export function testDependentTransforms(create: () => Promise<Db>) {
       });
     });
 
+    it("keeps immediate insert results when a conversion starts dependency preparation", async () => {
+      let duringConversion = () => {};
+      const models = s.defineApp({
+        ...definition,
+        events: s.table(
+          {
+            value: s.float().transform({
+              from: (value) => value,
+              to: (value: number) => {
+                duringConversion();
+                return value;
+              },
+            }),
+          },
+          {},
+        ),
+      });
+      const db = await open();
+      const { value: product } = db.insert(models.products, { price: 1 });
+      duringConversion = () => {
+        duringConversion = () => {};
+        db.update(models.products, product.id, { price: 2 });
+      };
+      const inserted = db.insert(models.events, { value: 3 });
+      expect(inserted.value).toEqual({ id: expect.any(String), value: 3 });
+      await inserted.wait({ tier: "local" });
+      await expect(db.one(models.events.where({ id: inserted.value.id }))).resolves.toEqual(
+        inserted.value,
+      );
+      await expect(db.one(models.products.where({ id: product.id }))).resolves.toMatchObject({
+        price: 2,
+      });
+    });
+
     it("cancels late preparation on rollback and waits for preparation on commit", async () => {
       const db = await open();
       const { value: row } = db.insert(app.products, { price: 1 });
