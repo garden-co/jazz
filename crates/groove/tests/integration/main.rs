@@ -39,6 +39,8 @@ mod prepared_batches;
 mod prepared_binding_regressions;
 #[path = "../prepared_binding_scale.rs"]
 mod prepared_binding_scale;
+#[path = "../query_template_shared_inputs.rs"]
+mod query_template_shared_inputs;
 #[path = "../query_templates.rs"]
 mod query_templates;
 #[path = "../recursive_cycle_regressions.rs"]
