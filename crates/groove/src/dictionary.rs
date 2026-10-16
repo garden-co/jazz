@@ -148,11 +148,89 @@ impl Dictionaries {
         descriptor: records::RecordDescriptor,
         record: &[u8],
     ) -> Result<(Vec<u8>, records::RecordDescriptor), DictionaryTranscodeError> {
-        let Some(transcoder) = records::RecordTranscoder::new(descriptor)? else {
-            return Ok((record.to_vec(), descriptor));
+        let transcoder = match records::RecordTranscoder::new(descriptor) {
+            Ok(Some(transcoder)) => transcoder,
+            Ok(None) => return Ok((record.to_vec(), descriptor)),
+            // Query output can nest stored rows, so codes sit inside arrays,
+            // records or enums (a query's included rows). Resolve those value
+            // by value; the byte-copying transcoder handles only top level.
+            Err(records::Error::UnsupportedInternedPlacement { .. }) => {
+                let values = descriptor
+                    .fields()
+                    .iter()
+                    .zip(descriptor.bind(record).to_values()?)
+                    .map(|(field, value)| self.resolve_value(value, &field.value_type))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let logical = descriptor.logical();
+                return Ok((logical.create(&values)?, logical));
+            }
+            Err(error) => return Err(error.into()),
         };
         let bytes = transcode_to_logical(&transcoder, &self.0.borrow(), record)?;
         Ok((bytes, transcoder.logical()))
+    }
+
+    /// `value`, of `value_type`, with every interned code at any depth
+    /// replaced by the value it stands for; the result has
+    /// `value_type.logical()`.
+    pub fn resolve_value(
+        &self,
+        value: records::Value,
+        value_type: &records::ValueType,
+    ) -> Result<records::Value, DictionaryTranscodeError> {
+        use records::{EnumValue, OwnedRecord, Value, ValueType};
+
+        if !value_type.contains_interned() {
+            return Ok(value);
+        }
+        if let Some((dictionary, logical)) = value_type.as_interned() {
+            let Value::U32(code) = value else {
+                return Err(records::Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }
+                .into());
+            };
+            let bytes = self.resolve(dictionary, code)?;
+            return Ok(records::decode_single_field_value(&bytes, logical)?);
+        }
+        let resolve_record = |record: OwnedRecord| {
+            let (raw, descriptor) = self.resolve_record(*record.descriptor(), record.raw())?;
+            Ok::<_, DictionaryTranscodeError>(OwnedRecord::new(raw, descriptor))
+        };
+        Ok(match (value, value_type) {
+            (Value::Nullable(None), ValueType::Nullable(_)) => Value::Nullable(None),
+            (Value::Nullable(Some(inner)), ValueType::Nullable(inner_type)) => {
+                Value::Nullable(Some(Box::new(self.resolve_value(*inner, inner_type)?)))
+            }
+            (Value::Array(items), ValueType::Array(item_type)) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| self.resolve_value(item, item_type))
+                    .collect::<Result<_, _>>()?,
+            ),
+            (Value::Tuple(members), ValueType::Tuple(member_types))
+                if members.len() == member_types.len() =>
+            {
+                Value::Tuple(
+                    members
+                        .into_iter()
+                        .zip(member_types)
+                        .map(|(member, member_type)| self.resolve_value(member, member_type))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            (Value::Record(record), ValueType::Record(_)) => Value::Record(resolve_record(record)?),
+            (Value::Enum(value), ValueType::Enum(_)) => {
+                let tag = value.tag();
+                Value::Enum(EnumValue::new(tag, resolve_record(value.into_record())?))
+            }
+            _ => {
+                return Err(records::Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }
+                .into());
+            }
+        })
     }
 
     /// The record bytes of `record`, laid out by `descriptor`'s logical form
@@ -566,6 +644,55 @@ mod tests {
                 dictionary: "names".to_owned(),
                 code: 0
             })
+        );
+    }
+
+    /// A code nested in an array of records (a query's included rows)
+    /// resolves value by value; the top-level transcoder refuses it.
+    #[test]
+    fn nested_codes_resolve_value_by_value() {
+        use crate::records::{OwnedRecord, RecordDescriptor, Value};
+
+        let dictionaries =
+            Dictionaries::detached(&[DictionarySchema::new("names", ValueType::String)]);
+        let ada = dictionaries.intern("names", &name("ada")).unwrap();
+        let child = RecordDescriptor::new([(
+            "author",
+            ValueType::interned("names", ValueType::String).nullable(),
+        )]);
+        let root = RecordDescriptor::new([(
+            "children",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        )]);
+        let child_record = |value| OwnedRecord::new(child.create(&[value]).unwrap(), child);
+        let record = root
+            .create(&[Value::Array(vec![
+                Value::Record(child_record(Value::Nullable(Some(Box::new(Value::U32(
+                    ada,
+                )))))),
+                Value::Record(child_record(Value::Nullable(None))),
+            ])])
+            .unwrap();
+
+        let (raw, logical) = dictionaries.resolve_record(root, &record).unwrap();
+        assert_eq!(logical, root.logical());
+        assert!(!logical.contains_interned());
+        let Value::Array(children) = logical.bind(&raw).get_idx(0).unwrap() else {
+            panic!("children stay an array");
+        };
+        let authors = children
+            .iter()
+            .map(|child| match child {
+                Value::Record(record) => record.borrowed().get_idx(0).unwrap(),
+                other => panic!("child is a record, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authors,
+            [
+                Value::Nullable(Some(Box::new(Value::String("ada".to_owned())))),
+                Value::Nullable(None),
+            ]
         );
     }
 }

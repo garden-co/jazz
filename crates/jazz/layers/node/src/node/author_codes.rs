@@ -102,13 +102,11 @@ impl AuthorCodes {
         value: Value,
         value_type: &groove::records::ValueType,
     ) -> Result<(Value, groove::records::ValueType), Error> {
-        if !value_type.contains_interned() {
-            return Ok((value, value_type.clone()));
-        }
-        let descriptor = RecordDescriptor::new([("value", value_type.clone())]);
-        let raw = descriptor.create(&[value])?;
-        let (raw, logical) = self.resolve_record(descriptor, &raw)?;
-        Ok((logical.bind(&raw).get_idx(0)?, value_type.logical()))
+        let value = self
+            .0
+            .resolve_value(value, value_type)
+            .map_err(groove::db::Error::from)?;
+        Ok((value, value_type.logical()))
     }
 
     /// The code `subject` already has, without interning it: a subject
