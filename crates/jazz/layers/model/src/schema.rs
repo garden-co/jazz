@@ -506,8 +506,7 @@ impl RuntimeSchema {
                 // application view is registered. Keep the shared physical
                 // row classes available even for the empty bootstrap schema.
                 .chain(std::iter::once("jazz_physical_history"))
-                .chain(std::iter::once("jazz_physical_global_current"))
-                .chain(std::iter::once("jazz_physical_ahead_current")),
+                .chain(std::iter::once("jazz_physical_global_current")),
         )
     }
 
@@ -1253,6 +1252,9 @@ impl TableSchema {
         // Same layout as global current.
         push_current_base_columns(&mut content_columns);
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
+            // Derived from history@0 over global current: kept in memory only
+            // and rebuilt on open (SPEC 4 §4.7).
+            .non_durable()
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::bytes("branch_key"),

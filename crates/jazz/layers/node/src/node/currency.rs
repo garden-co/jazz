@@ -809,6 +809,19 @@ where
         let Some(tx) = self.query_transaction(tx_id).await? else {
             return Ok(Vec::new());
         };
+        self.query_versions_for_tx_header(tx_id, tx.node_alias, tx.global_time)
+            .await
+    }
+
+    /// [`Self::query_versions_for_tx`] for a transaction whose alias and seq
+    /// the caller already read from its record, without assembling (and so
+    /// auditing) the whole transaction.
+    pub(super) async fn query_versions_for_tx_header(
+        &mut self,
+        tx_id: TxId,
+        node_alias: NodeAlias,
+        global_time: Option<GlobalTime>,
+    ) -> Result<Vec<VersionRow>, Error> {
         if let Some(mut versions) = self.cached_tx_versions(tx_id) {
             versions.sort_by(|left, right| {
                 left.table()
@@ -822,9 +835,9 @@ where
         // no longer stored (evicted) is skipped.
         let mut versions = Vec::new();
         let touched_rows = self
-            .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
+            .load_tx_touched_rows(None, tx_id.time, node_alias)
             .await?;
-        let seqs = history_seq_candidates(tx.global_time);
+        let seqs = history_seq_candidates(global_time);
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
             let found = self
@@ -835,7 +848,7 @@ where
                     row_uuid,
                     &seqs,
                     tx_id.time,
-                    tx.node_alias,
+                    node_alias,
                 )
                 .await?;
             let Some(record) = found else {
@@ -1089,7 +1102,7 @@ where
         .await
     }
 
-    async fn query_transaction_fields<T>(
+    pub(in crate::node) async fn query_transaction_fields<T>(
         &mut self,
         tx_id: TxId,
         decode: impl Fn(&Self, NodeAlias, BorrowedRecord<'_>) -> Result<T, Error>,

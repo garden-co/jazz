@@ -388,6 +388,15 @@ impl AheadCurrentKeys {
         self.rows_per_branch.clear();
     }
 
+    /// Every overlay key and the transaction whose image it holds, ordered.
+    #[cfg(test)]
+    pub(in crate::node) fn snapshot_for_test(&self) -> BTreeMap<(PhysicalTableId, Vec<u8>), TxId> {
+        self.keys
+            .iter()
+            .map(|(key, tx_id)| (key.clone(), *tx_id))
+            .collect()
+    }
+
     /// How many pending rows `table_id`'s local delta holds under
     /// `branch_key`.
     pub(in crate::node) fn branch_rows(
@@ -490,7 +499,8 @@ pub struct NodeOpenReceipt {
     pub recover_pending_and_rejected: Duration,
     /// Persisted maintained-query known-state recovery time.
     pub recover_known_state: Duration,
-    /// In-memory ahead-current index reconstruction time.
+    /// Time to fold history@0 over global current into the in-memory
+    /// ahead-current overlay.
     pub rebuild_ahead_current: Duration,
     /// Final catalogue persistence time, when applicable.
     pub finalize_catalogue: Duration,
@@ -500,7 +510,7 @@ pub struct NodeOpenReceipt {
     pub accepted_global_times: usize,
     /// Transaction index records inspected for global timestamps.
     pub global_time_records_scanned: usize,
-    /// Physical ahead-current records consumed while rebuilding indexes.
+    /// Ahead-current overlay rows the open-time fold wrote.
     pub ahead_current_entries: usize,
 }
 

@@ -138,3 +138,13 @@ pre-durability-v2 node manifest SHA-256 was
 `06e335498e562c06e78207cddd8027752c673d981640c78ef584aa95406775db`
 (without `groove.durable-index.v2`:
 `73ece466df8d410135a648b0697126d9e3a77b977ecd6aaae0718e48bac3f319`).
+
+## Derived ahead-current (alpha.60)
+
+The ahead-current tables keep their record layout and codec ids, but no longer
+reach a backend: they are Groove non-durable tables (`INV-STORAGE-40`), held
+in memory and rebuilt on open by folding history@0 over global current
+(Jazz SPEC 4 §4.7, `INV-REF-6`). No family is added or removed and the
+manifest is unchanged. The physical `__groove_class_ahead_current` column
+family is no longer created; on a root written before the change its bytes
+are inert (`dev/proofs/linear-history-storage-compatibility.md`).

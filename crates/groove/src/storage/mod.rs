@@ -17,6 +17,7 @@ mod idb;
 mod key_codec;
 mod manifest;
 mod memory;
+mod non_durable;
 #[cfg(any(test, feature = "test"))]
 mod test;
 
@@ -36,6 +37,10 @@ pub use manifest::{
     StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
+pub(crate) use non_durable::NonDurableClass;
+pub use non_durable::{
+    NonDurablePartition, NonDurableResidency, process_non_durable_resident_bytes,
+};
 #[cfg(any(test, feature = "test"))]
 pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
@@ -745,7 +750,6 @@ where
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
 const CLASS_REGISTER_CF: &str = "__groove_class_register";
 const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
-const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
@@ -873,11 +877,6 @@ fn is_jazz_global_current_table(name: &str) -> bool {
         && !name.contains("_ahead_current")
 }
 
-fn is_jazz_ahead_current_table(name: &str) -> bool {
-    name.starts_with("jazz_")
-        && (name.ends_with("_ahead_current") || name.ends_with("_register_ahead_current"))
-}
-
 fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
     if is_jazz_history_table(logical_cf) {
         Some(CLASS_HISTORY_CF)
@@ -885,8 +884,6 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
         Some(CLASS_REGISTER_CF)
     } else if is_jazz_global_current_table(logical_cf) {
         Some(CLASS_GLOBAL_CURRENT_CF)
-    } else if is_jazz_ahead_current_table(logical_cf) {
-        Some(CLASS_AHEAD_CURRENT_CF)
     } else if logical_cf == "jazz_global_changes" {
         Some(CLASS_CHANGES_CF)
     } else if logical_cf == "indices" {
@@ -906,6 +903,9 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
 pub struct LayoutStorage {
     inner: BoxedStorage,
     layout: StorageLayout,
+    /// Rows and index entries of non-durable tables, which never reach
+    /// `inner` (see `non_durable`).
+    non_durable: NonDurableClass,
 }
 
 impl LayoutStorage {
@@ -917,7 +917,11 @@ impl LayoutStorage {
     }
 
     pub async fn new_boxed(inner: BoxedStorage, layout: StorageLayout) -> Result<Self, Error> {
-        let storage = Self { inner, layout };
+        let storage = Self {
+            inner,
+            layout,
+            non_durable: NonDurableClass::default(),
+        };
         storage.ensure_layout_marker().await?;
         Ok(storage)
     }
@@ -930,6 +934,9 @@ impl LayoutStorage {
     ) -> Result<Option<u64>, Error> {
         let mut physical_families = BTreeSet::new();
         for logical_cf in logical_families {
+            if self.non_durable.owns(logical_cf, &[]) {
+                continue;
+            }
             physical_families.insert(self.layout.map_cf(logical_cf)?.physical_cf);
         }
 
@@ -949,6 +956,25 @@ impl LayoutStorage {
 
     pub fn into_inner(self) -> BoxedStorage {
         self.inner
+    }
+
+    /// Keep `table`'s rows and index entries in memory only.
+    pub(crate) fn declare_non_durable_table(&self, table: &str) {
+        self.non_durable.declare_table(table);
+    }
+
+    /// Resolve `indices` keys to their table, so a non-durable table's index
+    /// entries stay in memory with its rows.
+    pub(crate) fn attach_non_durable_index_ids(
+        &self,
+        index_ids: crate::ivm::runtime::SharedIndexIds,
+    ) {
+        self.non_durable.attach_index_ids(index_ids);
+    }
+
+    /// What the non-durable tables hold in memory.
+    pub fn non_durable_residency(&self) -> NonDurableResidency {
+        self.non_durable.residency()
     }
 
     async fn ensure_layout_marker(&self) -> Result<(), Error> {
@@ -1000,7 +1026,6 @@ impl LayoutStorage {
             CLASS_HISTORY_CF,
             CLASS_REGISTER_CF,
             CLASS_GLOBAL_CURRENT_CF,
-            CLASS_AHEAD_CURRENT_CF,
             CLASS_CHANGES_CF,
             CLASS_INDICES_CF,
             CLASS_META_CF,
@@ -1077,6 +1102,13 @@ impl OrderedKvStorage for LayoutStorage {
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                return Ok(match self.non_durable.get(&cf, &key) {
+                    None => ValueComparison::Absent,
+                    Some(value) if value == expected => ValueComparison::Identical,
+                    Some(_) => ValueComparison::Different,
+                });
+            }
             let (cf, key) = self.physical_key(&cf, &key)?;
             self.inner.compare_value(cf, key, expected).await
         })
@@ -1084,6 +1116,9 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                return Ok(self.non_durable.get(&cf, &key));
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.get(physical_cf, physical_key).await
         })
@@ -1096,6 +1131,13 @@ impl OrderedKvStorage for LayoutStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                if let Some(existing) = self.non_durable.get(&cf, &key) {
+                    return Ok(Some(existing));
+                }
+                self.non_durable.write(&cf, &key, Some(&value));
+                return Ok(None);
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner
                 .put_if_absent(physical_cf, physical_key, value)
@@ -1110,6 +1152,13 @@ impl OrderedKvStorage for LayoutStorage {
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<bool, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                if self.non_durable.get(&cf, &key).as_deref() != Some(expected.as_slice()) {
+                    return Ok(false);
+                }
+                self.non_durable.write(&cf, &key, None);
+                return Ok(true);
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner
                 .compare_and_delete(physical_cf, physical_key, expected)
@@ -1124,6 +1173,10 @@ impl OrderedKvStorage for LayoutStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                self.non_durable.write(&cf, &key, Some(&value));
+                return Ok(());
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.set(physical_cf, physical_key, value).await
         })
@@ -1131,6 +1184,10 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                self.non_durable.write(&cf, &key, None);
+                return Ok(());
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.delete(physical_cf, physical_key).await
         })
@@ -1156,6 +1213,18 @@ impl OrderedKvStorage for LayoutStorage {
             max_items,
         } = request;
         Box::pin(async move {
+            if self.non_durable.owns_bounds(&cf, &bounds) {
+                return Ok(Box::new(ReadyStorageCursor::new(
+                    self.non_durable.scan(&cf, &bounds, direction, max_items),
+                )) as StorageScan<'_>);
+            }
+            // A scan wider than one non-durable table or index (such as a
+            // whole-family `indices` scan) reads both classes.
+            let in_memory = if self.non_durable.is_empty() {
+                Vec::new()
+            } else {
+                self.non_durable.scan(&cf, &bounds, direction, max_items)
+            };
             let (physical_cf, physical_bounds, strip_len) = match bounds {
                 ScanBounds::Prefix(prefix) => {
                     let (physical_cf, physical_prefix, strip_len) =
@@ -1185,7 +1254,18 @@ impl OrderedKvStorage for LayoutStorage {
                     max_items,
                 })
                 .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+            let durable = Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>;
+            if in_memory.is_empty() {
+                return Ok(durable);
+            }
+            let mut merged = collect_scan(durable).await?;
+            merged.extend(in_memory);
+            merged.sort_by(|left, right| match direction {
+                ScanDirection::Forward => left.0.cmp(&right.0),
+                ScanDirection::Reverse => right.0.cmp(&left.0),
+            });
+            merged.truncate(max_items.unwrap_or(usize::MAX));
+            Ok(Box::new(ReadyStorageCursor::new(merged)) as StorageScan<'_>)
         })
     }
 
@@ -1195,6 +1275,18 @@ impl OrderedKvStorage for LayoutStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &prefix) {
+                return Ok(self
+                    .non_durable
+                    .scan(
+                        &cf,
+                        &ScanBounds::Prefix(prefix),
+                        ScanDirection::Reverse,
+                        Some(1),
+                    )
+                    .into_iter()
+                    .next());
+            }
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             Ok(collect_scan(
                 self.inner
@@ -1219,6 +1311,18 @@ impl OrderedKvStorage for LayoutStorage {
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &prefix) {
+                return Ok(self
+                    .non_durable
+                    .scan(
+                        &cf,
+                        &ScanBounds::Prefix(prefix),
+                        ScanDirection::Forward,
+                        None,
+                    )
+                    .into_iter()
+                    .rfind(|(key, _)| key <= &upper));
+            }
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             let (_, physical_upper, _) = self.physical_prefix(&cf, &upper)?;
             Ok(collect_scan(
@@ -1238,9 +1342,14 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.inner
-                .write_many(self.physical_operations(operations)?)
-                .await
+            let (non_durable, durable) = self.non_durable.split(operations);
+            if !durable.is_empty() {
+                self.inner
+                    .write_many(self.physical_operations(durable)?)
+                    .await?;
+            }
+            self.non_durable.apply(&non_durable);
+            Ok(())
         })
     }
 
@@ -1249,10 +1358,19 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
         Box::pin(async move {
-            match self.physical_operations(operations) {
-                Ok(operations) => self.inner.write_many_outcome(operations).await,
-                Err(error) => WriteManyOutcome::Uncommitted(error),
+            let (non_durable, durable) = self.non_durable.split(operations);
+            let outcome = if durable.is_empty() {
+                WriteManyOutcome::Committed
+            } else {
+                match self.physical_operations(durable) {
+                    Ok(operations) => self.inner.write_many_outcome(operations).await,
+                    Err(error) => WriteManyOutcome::Uncommitted(error),
+                }
+            };
+            if outcome.is_committed() {
+                self.non_durable.apply(&non_durable);
             }
+            outcome
         })
     }
 
@@ -1261,6 +1379,34 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<WriteOperation<'a>>,
     ) -> StorageFuture<'a, WriteManyOutcome> {
         Box::pin(async move {
+            // Non-durable writes own their bodies in memory; they are applied
+            // only once the durable rest has committed.
+            let (non_durable, operations): (Vec<_>, Vec<_>) =
+                operations.into_iter().partition(|operation| {
+                    let (cf, key) = match operation {
+                        WriteOperation::Set { cf, key, .. }
+                        | WriteOperation::Delete { cf, key } => (*cf, *key),
+                    };
+                    self.non_durable.owns(cf, key)
+                });
+            let non_durable = non_durable
+                .into_iter()
+                .map(|operation| match operation {
+                    WriteOperation::Set { cf, key, value } => OwnedWriteOperation::Set {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    },
+                    WriteOperation::Delete { cf, key } => OwnedWriteOperation::Delete {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                    },
+                })
+                .collect::<Vec<_>>();
+            if operations.is_empty() {
+                self.non_durable.apply(&non_durable);
+                return WriteManyOutcome::Committed;
+            }
             // Mapping owns only physical keys/names, never another value body.
             // Complete all fallible mapping before entering the backend.
             let mapped = operations
@@ -1285,7 +1431,11 @@ impl OrderedKvStorage for LayoutStorage {
                     WriteOperation::Delete { .. } => WriteOperation::Delete { cf, key },
                 })
                 .collect();
-            self.inner.write_many_borrowed_outcome(operations).await
+            let outcome = self.inner.write_many_borrowed_outcome(operations).await;
+            if outcome.is_committed() {
+                self.non_durable.apply(&non_durable);
+            }
+            outcome
         })
     }
 
@@ -1295,6 +1445,10 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         Box::pin(async move {
+            // A non-durable table holds no backend bytes.
+            if self.non_durable.owns(&cf, &[]) {
+                return Ok(Some(0));
+            }
             let physical_cf = self.layout.map_cf(&cf)?.physical_cf.to_owned();
             self.inner.approximate_class_bytes(physical_cf).await
         })
@@ -2700,7 +2854,6 @@ mod tests {
                 CLASS_HISTORY_CF,
                 CLASS_REGISTER_CF,
                 CLASS_GLOBAL_CURRENT_CF,
-                CLASS_AHEAD_CURRENT_CF,
                 CLASS_CHANGES_CF,
                 CLASS_INDICES_CF,
                 CLASS_META_CF,
@@ -3272,11 +3425,6 @@ mod tests {
                 "jazz_albums_register_global_current",
                 "jazz_tracks_register_global_current",
             ),
-            ("jazz_albums_ahead_current", "jazz_tracks_ahead_current"),
-            (
-                "jazz_albums_register_ahead_current",
-                "jazz_tracks_register_ahead_current",
-            ),
             ("jazz_global_changes", "jazz_known_state_facts"),
             ("jazz_nodes", "jazz_transactions"),
         ];
@@ -3429,9 +3577,11 @@ mod tests {
             jazz_physical_class("jazz_album_register_global_current"),
             Some(CLASS_GLOBAL_CURRENT_CF)
         );
+        // Ahead-current tables are non-durable (their rows never reach the
+        // backend), so they have no class of their own.
         assert_eq!(
             jazz_physical_class("jazz_album_register_ahead_current"),
-            Some(CLASS_AHEAD_CURRENT_CF)
+            Some(CLASS_META_CF)
         );
         assert_eq!(
             jazz_physical_class("jazz_global_changes"),

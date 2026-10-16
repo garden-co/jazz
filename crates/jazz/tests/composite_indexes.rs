@@ -231,8 +231,17 @@ fn composite_index_declarations_are_canonical_and_validated() {
 /// Groove keys each entry by a LEB128 index id and records the id in its
 /// `\0groove-index-id\0` registry (table and index names, then a `u32` BE id).
 fn composite_index_entries(storage: &LayoutStorage) -> Vec<(String, String, Vec<u8>)> {
+    composite_index_entries_in(block_on(storage.prefix("indices".into(), Vec::new())).unwrap())
+}
+
+/// [`composite_index_entries`] as an open database reads them: the ahead
+/// overlay's entries live only in memory (Jazz SPEC 4 §4.7, `INV-REF-6`).
+fn open_db_composite_index_entries(db: &Db) -> Vec<(String, String, Vec<u8>)> {
+    composite_index_entries_in(block_on(db.storage_prefix_for_test("indices", Vec::new())).unwrap())
+}
+
+fn composite_index_entries_in(entries: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(String, String, Vec<u8>)> {
     const REGISTRY: &[u8] = b"\0groove-index-id\0";
-    let entries = block_on(storage.prefix("indices".into(), Vec::new())).unwrap();
     let mut names = BTreeMap::new();
     for (key, value) in &entries {
         let Some(rest) = key.strip_prefix(REGISTRY) else {
@@ -271,16 +280,27 @@ fn composite_index_entries(storage: &LayoutStorage) -> Vec<(String, String, Vec<
 /// (branch key, then each indexed column in declared order, then the row
 /// key) are restart-authoritative bytes that no query result exposes, so a
 /// silent respelling would orphan every existing entry. Alice's one local
-/// row pins the exact key on the ahead-current tier; the global-current table
-/// declares the same index name and columns from the same helper.
+/// row pins the exact key on the in-memory ahead-current tier, which a
+/// reopen rebuilds byte for byte; the global-current table declares the same
+/// index name and columns from the same helper.
 #[test]
 fn physical_composite_index_entry_keys_are_pinned() {
     let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
     let directory = tempfile::tempdir().unwrap();
-    {
+    let hex_keys = |entries: Vec<(String, String, Vec<u8>)>| {
+        entries
+            .into_iter()
+            .map(|(table, index, key)| (table, index, hex::encode(key)))
+            .collect::<Vec<_>>()
+    };
+    let written = {
         let db = open_rocks_db(directory.path(), &schema);
         insert_task(&db, row(0x0a), "alice", 7, "ship");
-    }
+        hex_keys(open_db_composite_index_entries(&db))
+    };
+    // The ahead overlay is derived and kept in memory (Jazz SPEC 4 §4.7,
+    // `INV-REF-6`): nothing of it reaches disk, and a reopened node folds
+    // the same entry back from history@0.
     let families = schema.column_families();
     let storage = RocksDbStorage::open(
         directory.path(),
@@ -288,10 +308,13 @@ fn physical_composite_index_entry_keys_are_pinned() {
     )
     .unwrap();
     let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
-    let keys = composite_index_entries(&storage)
-        .into_iter()
-        .map(|(table, index, key)| (table, index, hex::encode(key)))
-        .collect::<Vec<_>>();
+    assert!(composite_index_entries(&storage).is_empty());
+    drop(storage);
+    let keys = hex_keys(open_db_composite_index_entries(&open_rocks_db(
+        directory.path(),
+        &schema,
+    )));
+    assert_eq!(keys, written, "reopen folds the same overlay entry back");
     // After the index id: the index columns written once, single-escaped:
     // branch key bytes `01 00000000`, nullable text "alice", nullable
     // order-preserving i32 7; then `ff` and the primary-key columns the index
@@ -317,14 +340,9 @@ fn physical_composite_index_entry_keys_are_pinned() {
 /// order the index would serve `(owner, rank)` pages in, and each key ends in
 /// the row's primary key, whose 16-byte row uuid is `[n; 16]` in these tests.
 fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec<u8> {
-    let families = schema.column_families();
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
-    composite_index_entries(&storage)
+    // These rows are local writes, so their entries are on the in-memory
+    // ahead overlay that opening the store rebuilds (`INV-REF-6`).
+    open_db_composite_index_entries(&open_rocks_db(path, schema))
         .into_iter()
         .map(|(_, _, key)| {
             (1..=u8::MAX)

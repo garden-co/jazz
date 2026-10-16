@@ -28,6 +28,7 @@ Invariant digest:
 - `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
 - `INV-STORAGE-38`: Durable index ids MUST be assigned per `(table, index, definition)` from a monotonic counter starting at 1, recorded in the `indices` registry (`\0groove-index-id\0` keys) no later than the storage-atomic write of the first entry that uses them, stable across reopen and index reordering, and never reused: a changed definition or a runtime (re)registration receives a fresh id, so entries of an earlier incarnation are never read. An `indices` family holding entries without the `groove-durable-index-v2` layout marker, or with another marker, MUST fail open with `InvalidStorageLayout`; node roots declare `groove.durable-index.v2` in their manifest.
 - `INV-STORAGE-39`: A U64-stored-as-U48 column (`ValueType::u64_stored_as_u48()`) MUST store each value as exactly 6 bytes little-endian (`Nullable`: flag plus a 6-byte payload, zero when null) and MUST expose `U64` to every read, scan, index backfill, IVM source and write; a write of a value above `2^48-1` MUST fail with `U48OutOfRange` and store nothing. It is storage-only: its descriptor is not encodable, and schema admission refuses it nested, in a primary key, index or foreign key, or in a direct record store.
+- `INV-STORAGE-40`: The rows and schema-index entries of a table declared `TableSchema::non_durable` MUST NOT reach the storage backend: `LayoutStorage` MUST hold them in memory, serve every read of them from there, and apply a batch's non-durable writes only once its durable writes commit. It MUST count their exact key and value bytes per `(table, leading key part)` partition with a last-touched tick (`NonDurableResidency`).
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
@@ -335,8 +336,7 @@ it carries.
 RocksDB V1 uses the internal `__groove_storage_internal_v1` column family and
 the `value-format` key with raw value `raw-v1`. Its Jazz/Groove-owned families
 are `__groove_class_history`, `__groove_class_register`,
-`__groove_class_global_current`, `__groove_class_ahead_current`,
-`__groove_class_changes`, `__groove_class_indices`, and
+`__groove_class_global_current`, `__groove_class_changes`, `__groove_class_indices`, and
 `__groove_class_meta`; application names cannot collide with them, any
 `__groove_*` name, `indices`, or RocksDB's `default`. Keys in every family use
 RocksDB's bytewise comparator (unsigned lexicographic bytes). The adapter uses
@@ -379,10 +379,13 @@ empty class store is not a legacy logical-family store.
 | starts `jazz_`, ends `_history`                                                                             | `__groove_class_history`        |
 | starts `jazz_`, ends `_register`, but not `_register_global_current` or `_register_ahead_current`           | `__groove_class_register`       |
 | starts `jazz_`, ends `_global_current` or `_register_global_current`, and does not contain `_ahead_current` | `__groove_class_global_current` |
-| starts `jazz_`, ends `_ahead_current` or `_register_ahead_current`                                          | `__groove_class_ahead_current`  |
 | exactly `jazz_global_changes`                                                                               | `__groove_class_changes`        |
 | exactly `indices`                                                                                           | `__groove_class_indices`        |
 | starts `jazz_`                                                                                              | `__groove_class_meta`           |
+
+There is no `__groove_class_ahead_current` family: Jazz's ahead-current
+tables are non-durable (below), so their names never reach the classifier's
+output. A store that still holds that family was written before alpha.60.
 
 For a mapped logical family `L` and its logical key `K`, the physical key is
 exactly `u32be(len(utf8(L))) | utf8(L) | K`, except in `__groove_class_indices`:
@@ -654,6 +657,21 @@ They are carried as schema annotations for validation and planning.
 _Further invariants._ `INV-STORAGE-16` — an insert rejects an already-present
 primary key, including one introduced by an earlier op in the same batch
 (`Error::DuplicatePrimaryKey`).
+
+**Non-durable tables.** A table declared `TableSchema::non_durable` holds
+derived state its owner rebuilds from durable tables. `LayoutStorage` keeps
+its rows, and the entries of its schema indexes in `indices`, in an in-process
+ordered map and never passes them to the backend, under any layout
+(`INV-STORAGE-40`). Batches, resident publications, ticks, scans, index scans
+and keyed lookups see an ordinary table; the class only differs across a
+restart, when it opens empty. A batch's non-durable writes are applied once
+its durable writes commit. The class reports its exact key-plus-value bytes per
+partition, a table's rows under one value of the leading key part (the first
+primary-key part, or the first index-key part after the index id), with the
+process-wide tick of each partition's last read or write
+(`Database::non_durable_residency`, `process_non_durable_resident_bytes`). It
+evicts nothing; a memory budget that does must let the owner refill a
+partition before the next read of it.
 
 ### 2.4 Directly-exposed record stores
 

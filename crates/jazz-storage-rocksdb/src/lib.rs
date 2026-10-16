@@ -65,7 +65,6 @@ const ROCKSDB_WAL_SYNC_WRITE_BATCHES: usize = 64;
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
 const CLASS_REGISTER_CF: &str = "__groove_class_register";
 const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
-const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
@@ -692,9 +691,7 @@ enum RocksDbClassProfile {
 fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
     match cf {
         CLASS_HISTORY_CF | CLASS_REGISTER_CF | CLASS_CHANGES_CF => RocksDbClassProfile::AppendRange,
-        CLASS_GLOBAL_CURRENT_CF | CLASS_AHEAD_CURRENT_CF | CLASS_INDICES_CF => {
-            RocksDbClassProfile::OverwriteHot
-        }
+        CLASS_GLOBAL_CURRENT_CF | CLASS_INDICES_CF => RocksDbClassProfile::OverwriteHot,
         CLASS_META_CF => RocksDbClassProfile::Meta,
         _ => RocksDbClassProfile::Default,
     }
@@ -1131,8 +1128,8 @@ mod tests {
     use tar::Archive;
 
     use crate::{
-        CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, Durability, ROCKSDB_EPOCH_MANIFEST_KEY,
+        CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF, CLASS_INDICES_CF,
+        CLASS_META_CF, CLASS_REGISTER_CF, Durability, ROCKSDB_EPOCH_MANIFEST_KEY,
         ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V1,
         RocksDbClassProfile, RocksDbStorage, any_available, inspect_existing_column_families,
         rocksdb_class_profile, rocksdb_manifest, sum_available,
@@ -1331,11 +1328,7 @@ mod tests {
             );
         }
 
-        for cf in [
-            CLASS_GLOBAL_CURRENT_CF,
-            CLASS_AHEAD_CURRENT_CF,
-            CLASS_INDICES_CF,
-        ] {
+        for cf in [CLASS_GLOBAL_CURRENT_CF, CLASS_INDICES_CF] {
             let profile = rocksdb_class_profile(cf);
             assert_eq!(profile, RocksDbClassProfile::OverwriteHot);
             assert!(profile.uses_blooms(), "{cf} should keep point-probe blooms");

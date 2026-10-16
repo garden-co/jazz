@@ -78,3 +78,4 @@ include!("linear_history.rs");
 include!("offline_chains.rs");
 include!("compact_storage.rs");
 include!("superseded_history.rs");
+include!("derived_ahead.rs");

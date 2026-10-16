@@ -90,6 +90,24 @@ merge.
   Markers are not part of history: a Core rebuilt from history alone
   (`INV-HIST-17`) starts with none.
 
+- **Derived ahead-current (alpha.60 epoch):** the local delta
+  `jazz_physical_{id}_ahead_current` is no longer stored. It is a Groove
+  non-durable table (`TableSchema::non_durable`, SPEC groove 2 §2.3,
+  `INV-STORAGE-40`): `LayoutStorage` keeps its rows and index entries in
+  memory, and the node rebuilds it on open by folding history@0 over global
+  current (SPEC 4 §4.7, `INV-REF-6`). history@0 stays the only durable copy
+  of a pending write. The `__groove_class_ahead_current` physical family is
+  gone from the class layout and from the RocksDB adapter's class list. No
+  codec id changes: the delta's record layout is unchanged, it just never
+  reaches a backend. A root of this epoch written before the change opens
+  normally. A RocksDB root still lists its old `__groove_class_ahead_current`
+  family and opens it (the adapter opens every existing family), and an
+  IndexedDB root keeps its old pages. Nothing reads those bytes: they are
+  inert until the next wipe, and the rebuilt delta equals the stored one,
+  because both are the fold of the same history@0. The frozen native and
+  browser corpora still list `jazz_physical_*_ahead_current` entries, so their
+  inventory receipts go red until track F regenerates them.
+
 ## What old peers see
 
 | Pair                                                 | Where it fails                                                                                                                                                                               | Exact error                                                                                                                                                                                                                                                                           |
