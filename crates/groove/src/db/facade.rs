@@ -588,6 +588,9 @@ impl Database {
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        // A rebuild keeps how this database reads stored tables.
+        runtime.set_stored_arrangements_enabled(self.ivm_runtime.stored_arrangements_enabled());
+        runtime.set_cache_memory_budget(self.ivm_runtime.own_cache_memory_budget());
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(

@@ -493,6 +493,10 @@ impl IvmRuntime {
     /// Read arrangements compiled from now on from storage when they arrange
     /// a stored table by its primary key. Existing arrangements keep their
     /// representation.
+    pub fn stored_arrangements_enabled(&self) -> bool {
+        self.stored_arrangements_enabled
+    }
+
     pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
         self.stored_arrangements_enabled = enabled;
     }

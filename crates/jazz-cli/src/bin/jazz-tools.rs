@@ -215,7 +215,8 @@ enum Commands {
 
         /// Bytes the query cache may keep while memory is plentiful.
         /// Defaults to a quarter of the memory limit; it is lowered under
-        /// memory pressure either way.
+        /// memory pressure either way. `0` keeps nothing resident, so every
+        /// query reads the indexes of stored tables from storage.
         #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
         query_cache_budget_bytes: Option<u64>,
 

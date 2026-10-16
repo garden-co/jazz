@@ -113,6 +113,11 @@ impl IvmRuntime {
         self.enforce_cache_budget();
     }
 
+    /// This runtime's own budget, if it overrides the process-wide one.
+    pub fn own_cache_memory_budget(&self) -> Option<usize> {
+        self.cache_budget
+    }
+
     pub fn cache_memory_budget(&self) -> Option<usize> {
         self.cache_budget.or_else(process_cache_budget)
     }

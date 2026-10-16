@@ -89,7 +89,14 @@ pub struct CacheBudgetGovernor {
     lowered_at_rss: Option<u64>,
     /// The RSS at which lowering stopped moving RSS.
     unresponsive_at_rss: Option<u64>,
+    /// Steps spent waiting for arrangements to evict down to a lowered
+    /// budget.
+    waited_steps: u32,
 }
+
+/// Steps the governor waits for arrangements to evict down to a lowered
+/// budget before judging whether lowering helped.
+const CACHE_EVICTION_WAIT_STEPS: u32 = 10;
 
 /// The floor of the budget, as a fraction of its ceiling: the hot buckets
 /// every query reads stay resident under any pressure.
@@ -114,6 +121,7 @@ impl ServerResourceLimits {
             budget: ceiling,
             lowered_at_rss: None,
             unresponsive_at_rss: None,
+            waited_steps: 0,
         })
     }
 
@@ -178,8 +186,10 @@ impl CacheBudgetGovernor {
             }
         }
         if let Some(at) = self.lowered_at_rss {
-            if resident_bytes > self.budget {
-                // Arrangements evict at their next install; judge after.
+            if resident_bytes > self.budget && self.waited_steps < CACHE_EVICTION_WAIT_STEPS {
+                // Arrangements evict at their next install; judge after, or
+                // after a while if an idle runtime never installs.
+                self.waited_steps += 1;
                 return self.budget;
             }
             if rss_bytes + noise >= at {
@@ -197,6 +207,11 @@ impl CacheBudgetGovernor {
         if lowered < self.budget {
             self.budget = lowered;
             self.lowered_at_rss = Some(rss_bytes);
+            self.waited_steps = 0;
+        } else {
+            // At the floor and still over target: the rest of the memory is
+            // held elsewhere, so treat it as lowering that did not help.
+            self.unresponsive_at_rss = Some(rss_bytes);
         }
         self.budget
     }
@@ -366,17 +381,59 @@ mod tests {
     }
 
     #[test]
+    fn cache_budget_does_not_stay_at_the_floor_when_rss_plateaus() {
+        let mut governor = governor(1000);
+        let ceiling = governor.ceiling_bytes();
+        let target = 1000 * MIB / 100 * 80;
+        // RSS climbs past the target and keeps following evictions down to
+        // the floor, then plateaus above the target.
+        let mut rss = target + 500 * MIB;
+        let mut budget = ceiling;
+        while budget > governor.floor_bytes() {
+            budget = governor.step(rss, budget);
+            rss -= 10 * MIB;
+        }
+        let plateau = rss;
+        assert!(plateau > target);
+        // At the floor, lowering can no longer help: the budget grows back
+        // while RSS stays flat, rather than staying at the floor for good.
+        assert_eq!(governor.step(plateau, budget), governor.floor_bytes());
+        for _ in 0..200 {
+            budget = governor.step(plateau, budget);
+        }
+        assert_eq!(budget, ceiling);
+    }
+
+    #[test]
+    fn cache_budget_judges_lowering_when_eviction_never_catches_up() {
+        // An idle runtime that never installs keeps its buckets resident.
+        let mut governor = governor(1000);
+        let ceiling = governor.ceiling_bytes();
+        let rss = 1000 * MIB / 100 * 85;
+        let lowered = governor.step(rss, ceiling);
+        assert!(lowered < ceiling);
+        for _ in 0..CACHE_EVICTION_WAIT_STEPS {
+            assert_eq!(governor.step(rss, ceiling), lowered);
+        }
+        // RSS did not move: the budget holds, then grows back.
+        assert_eq!(governor.step(rss, ceiling), lowered);
+        assert!(governor.step(rss, ceiling) > lowered);
+    }
+
+    #[test]
     fn cache_budget_grows_back_within_the_headroom() {
         let mut governor = governor(1000);
         let ceiling = governor.ceiling_bytes();
         let target = 1000 * MIB / 100 * 80;
         let mut rss = target + 500 * MIB;
         let mut budget = ceiling;
-        for _ in 0..40 {
+        // Stay above the floor, where flat RSS would start probing back up.
+        for _ in 0..12 {
             budget = governor.step(rss, budget);
             rss -= 10 * MIB;
         }
         let low = budget;
+        assert!(low > governor.floor_bytes());
         assert!(low < ceiling / 2);
         // Back under the target it grows by at most a tenth of the ceiling
         // per step, and no further than the headroom.
