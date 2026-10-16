@@ -15007,10 +15007,24 @@ mod tests {
         let path = directory.path().join("alice.sqlite");
         let families = schema().column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        // A root from the build before the compact durable index: it lacks
-        // `groove.durable-index.v2`, which this build requires.
-        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-            .and_then(|profile| profile.with_additional_codecs(["jazz.history-version-current.v4"]))
+        // A root from the build before the compact durable index and the
+        // consolidated node-storage profile: it lacks
+        // `groove.durable-index.v2` and `jazz.node-storage.v1`, which this
+        // build requires.
+        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs([
+                "jazz.branch-key.v1",
+                "jazz.catalogue.activation.v1",
+                "jazz.catalogue.bootstrap-ready.v1",
+                "jazz.catalogue.lens.v1",
+                "jazz.catalogue.lineage.v1",
+                "jazz.catalogue.physical-mapping.v1",
+                "jazz.catalogue.schema.v1",
+                "jazz.catalogue.write-pointer.v1",
+                "jazz.transaction-durability.v2",
+                "jazz.history-version-current.v4",
+                "jazz.transaction-record.v1",
+            ])
             .expect("pre-index-v2 profile");
         drop(
             SqliteStorage::open_with_durability_and_codec_profile(
