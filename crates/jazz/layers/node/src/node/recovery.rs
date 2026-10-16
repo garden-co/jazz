@@ -108,6 +108,21 @@ where
             }
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
+        // A later release may truncate history at or below a horizon. This
+        // one reads every transaction's history as complete, so it refuses
+        // such a store instead of answering from missing history.
+        if let Some(raw) = self
+            .database
+            .primary_key_get_raw(HISTORY_HORIZON_TABLE, &[Value::U8(0)])
+            .await?
+        {
+            let horizon = raw
+                .record()
+                .get_u64(HistoryHorizonRowRecord::FIELD_HORIZON_IDX)?;
+            if horizon != 0 {
+                return Err(Error::TruncatedHistoryUnsupported { horizon });
+            }
+        }
         let alias_to_node = self
             .node_aliases
             .iter()
@@ -263,8 +278,8 @@ where
 // Historical exclusive-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
-    /// Rewrite a pending transaction's audit row as a build from before
-    /// `jazz.exclusive-read-evidence.v1` wrote it: slots 5-8 null.
+    /// Rewrite a pending transaction's records as a build from before
+    /// `jazz.exclusive-read-evidence.v1` wrote them: no read evidence.
     #[doc(hidden)]
     pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
@@ -273,20 +288,20 @@ impl<S: OrderedKvStorage> NodeState<S> {
         tx.row_read_set = None;
         tx.absent_read_set = None;
         tx.predicate_read_set = None;
-        let contribution_merge = self
-            .contribution_merge_storage_value(tx.contribution_merge.as_ref())
-            .unwrap();
-        let values = transaction_values(
+        let mut batch = self.database.open_batch();
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
             stored.node_alias,
             &tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            contribution_merge,
+            &TransactionRecordStatus::new(
+                stored.fate.clone(),
+                stored.global_time,
+                stored.durability,
+            )
+            .view_scoped(stored.is_partial),
         )
         .unwrap();
-        let mut batch = self.database.open_batch();
-        batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted).unwrap();

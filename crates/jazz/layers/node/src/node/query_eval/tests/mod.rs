@@ -5,6 +5,7 @@ use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt a
 
 mod authorization;
 mod bindings;
+mod exclusive_aggregates;
 mod execution;
 mod lowering;
 mod maintained_views;

@@ -1,22 +1,30 @@
-/// Slots 5-8 of `jazz_transactions` for `tx_id`, as stored.
+/// The read-evidence slots of `tx_id`'s `jazz_pending_transactions` record, as
+/// stored; all null when the transaction has no pending record.
 fn stored_exclusive_evidence_slots(node: &NodeState, tx_id: TxId) -> Vec<Value> {
+    pending_record_evidence_slots(node, tx_id).unwrap_or_else(|| vec![Value::Nullable(None); 4])
+}
+
+/// The read-evidence slots of `tx_id`'s `jazz_pending_transactions` record, or
+/// `None` when the transaction has no pending record.
+fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Value>> {
     let alias = node.node_aliases[&tx_id.node];
     let raw = crate::local_executor::block_on(node.database.primary_key_get_raw(
-        "jazz_transactions",
+        PENDING_TRANSACTIONS_TABLE,
         &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
     ))
-    .unwrap()
-    .unwrap();
+    .unwrap()?;
     let record = raw.record();
-    [
-        TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX,
-        TransactionRowRecord::FIELD_ROW_READ_SET_IDX,
-        TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX,
-        TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX,
-    ]
-    .into_iter()
-    .map(|index| record.get_idx(index).unwrap())
-    .collect()
+    Some(
+        [
+            PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX,
+            PendingTransactionRowRecord::FIELD_ROW_READ_SET_IDX,
+            PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX,
+            PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX,
+        ]
+        .into_iter()
+        .map(|index| record.get_idx(index).unwrap())
+        .collect(),
+    )
 }
 
 /// Internal because the contract is the durable audit row: a pending
@@ -76,7 +84,8 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
             .is_some_and(|reads| !reads.is_empty())
     );
     assert!(
-        stored_exclusive_evidence_slots(&client, tx_id)
+        pending_record_evidence_slots(&client, tx_id)
+            .expect("a pending exclusive transaction keeps a pending record")
             .iter()
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
@@ -119,11 +128,9 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
         client.transaction_state_settled(tx_id).unwrap().0,
         Fate::Accepted
     );
-    assert!(
-        stored_exclusive_evidence_slots(&client, tx_id)
-            .iter()
-            .all(|slot| *slot == Value::Nullable(None))
-    );
+    // The batch that stored the seq deleted the pending record, evidence
+    // included.
+    assert_eq!(pending_record_evidence_slots(&client, tx_id), None);
     let SyncMessage::CommitUnit { tx, .. } = client.commit_unit_for(tx_id).unwrap() else {
         panic!("expected commit unit");
     };
@@ -141,15 +148,7 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
         )
         .unwrap();
     let stored = writer.query_transaction(tx_id).unwrap().unwrap();
-    let mut values = transaction_values(
-        stored.node_alias,
-        &stored.tx,
-        stored.fate.clone(),
-        stored.global_time,
-        stored.durability,
-        Value::Nullable(None),
-    )
-    .unwrap();
+    assert_eq!(stored.global_time, None, "the planted record must be read");
     let snapshot =
         crate::tx::Snapshot::exclusive_base(node(1), GlobalTime(0), TxTime::from(1), Vec::new())
             .unwrap();
@@ -158,9 +157,27 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     exclusive.base_snapshot = Some(snapshot);
     let [base, ..] =
         super::super::exclusive_read_evidence::evidence_slot_values(&exclusive, true).unwrap();
-    values[TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
+    assert_eq!(
+        pending_transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(Fate::Pending, None, stored.durability),
+        )
+        .unwrap(),
+        None,
+        "a mergeable transaction writes no pending record"
+    );
+    let mut values = vec![
+        Value::U64(tx_id.time.0),
+        Value::U64(stored.node_alias.0),
+        Value::Nullable(None),
+        Value::Nullable(None),
+        Value::Nullable(None),
+        Value::Nullable(None),
+    ];
+    values[PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
     let mut batch = writer.database.open_batch();
-    batch.update("jazz_transactions", values);
+    batch.update(PENDING_TRANSACTIONS_TABLE, values);
     let applied = crate::local_executor::block_on(writer.database.apply_batch(batch)).unwrap();
     let persisted = crate::local_executor::block_on(applied.persist());
     writer.database.finish_persistence(persisted).unwrap();
