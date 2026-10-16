@@ -416,8 +416,10 @@ where
             tables,
             initial_received,
             covered_input_sources,
-        ) = self
-            .open_seeded_maintained_subscription_view_in_authorization_mode(
+        ) = Box::pin(
+            // Boxed: this future is large, and debug builds open
+            // subscriptions from deep, unboxed caller stacks.
+            self.open_seeded_maintained_subscription_view_in_authorization_mode(
                 shape,
                 binding,
                 identity,
@@ -435,8 +437,9 @@ where
                 PreparedClaimBindingMode::Strict,
                 pending_overlay,
                 progress_waker,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
