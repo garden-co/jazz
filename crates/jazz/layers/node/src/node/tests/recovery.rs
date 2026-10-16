@@ -777,7 +777,7 @@ fn opening_defers_malformed_current_row_to_read() {
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         storage
             .set(
                 table.clone(),
@@ -2336,7 +2336,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
             .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
             .collect::<BTreeMap<_, _>>();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         let marker = b"\0groove-declared-index-generation".to_vec();
         storage.delete("indices".into(), marker).unwrap();
         // Damage index entries only: keys starting with `00` are Groove's
@@ -2385,7 +2385,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         );
     }
     let storage =
-        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
     let indexes = storage
         .prefix("indices".into(), Vec::new())
         .unwrap()
@@ -2479,10 +2479,19 @@ fn author_columns_store_dictionary_codes() {
                 dictionary.push((key.to_vec(), value.to_vec()));
                 continue;
             }
-            let Some((name, table)) = tables.iter().find(|(name, _)| {
-                key.len() > 4 + name.len()
-                    && key[..4] == (name.len() as u32).to_be_bytes()
-                    && &key[4..4 + name.len()] == name.as_bytes()
+            // Class table ids are unique per class, so match the class too.
+            let classes = [
+                "__groove_class_meta",
+                "__groove_class_history",
+                "__groove_class_global_current",
+                "__groove_class_ahead_current",
+            ];
+            let Some((name, table)) = tables.iter().zip(classes).find_map(|((name, table), class)| {
+                (family == class
+                    && key.len() > 4
+                    && groove::storage::class_table_id(name)
+                        .is_ok_and(|id| key[..4] == id.to_be_bytes()))
+                .then_some((name, table))
             }) else {
                 continue;
             };
