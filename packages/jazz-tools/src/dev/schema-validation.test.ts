@@ -42,11 +42,23 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
     const app = s.defineApp({
       projects: s.table({ label: s.string() }, {}),
       teams: s.table({ name: s.string() }, {}),
-      resource_access_edges: s.table({ resource: s.uuid(), team: s.uuid() }, {}),
-      team_team_edges: s.table({ child_team: s.uuid(), parent_team: s.uuid() }, {}),
-      user_team_edges: s.table({ user_id: s.string(), team: s.uuid() }, {}),
+      resource_access_edges: s.table(
+        { resource: s.uuid(), team: s.uuid() },
+        { resourceRelation: s.rel("projects", "resource"), teamRelation: s.rel("teams", "team") },
+      ),
+      team_team_edges: s.table(
+        { child_team: s.uuid(), parent_team: s.uuid() },
+        {
+          child_teamRelation: s.rel("teams", "child_team"),
+          parent_teamRelation: s.rel("teams", "parent_team"),
+        },
+      ),
+      user_team_edges: s.table(
+        { user_id: s.uuid(), user_sub: s.string(), team: s.uuid() },
+        { teamRelation: s.rel("teams", "team") },
+      ),
     });
-    const seededFrom = (from: (session: SessionContext) => unknown) =>
+    const seededFrom = (userColumn: string, from: (session: SessionContext) => unknown) =>
       s.definePermissions(app, ({ policy, session }) => {
         policy.projects.allowRead.where(
           policy.exists(
@@ -60,14 +72,14 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
                 "child_team",
                 "parent_team",
               )
-              .seeded_by("user_team_edges", "user_id", from(session) as never, "team"),
+              .seeded_by("user_team_edges", userColumn, from(session) as never, "team"),
           ),
         );
       });
 
     for (const permissions of [
-      seededFrom((session) => session.user),
-      seededFrom((session) => session.claims["sub"]),
+      seededFrom("user_id", (session) => session.user.account),
+      seededFrom("user_sub", (session) => session.claims["sub"]),
     ]) {
       expect(() =>
         binding.validateSchema(
@@ -75,6 +87,8 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
         ),
       ).not.toThrow();
     }
-    expect(() => seededFrom(() => "sub")).toThrow("seeded_by(...) takes a session reference");
+    expect(() => seededFrom("user_sub", () => "sub")).toThrow(
+      "seeded_by(...) takes a session reference",
+    );
   });
 });

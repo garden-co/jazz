@@ -277,7 +277,7 @@ export interface PermissionRelation {
 export interface ReachableSeedBuilder {
   /**
    * Seed the walk with `team_column` of the `seed_table` rows whose `user_column`
-   * equals `from`, such as `session.user` or `session.claims["sub"]`.
+   * equals `from`, such as `session.user.account` or `session.claims["sub"]`.
    */
   seeded_by(
     seed_table: string,
@@ -627,7 +627,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
   ): PermissionRelation {
     if (!isSessionRefValue(from)) {
       throw new Error(
-        'seeded_by(...) takes a session reference such as session.user or session.claims["sub"].',
+        'seeded_by(...) takes a session reference such as session.user.account or session.claims["sub"].',
       );
     }
     const accessScope = "__reachable_access_0";
