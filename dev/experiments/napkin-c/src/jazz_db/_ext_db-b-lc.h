@@ -137,4 +137,26 @@ jz_err LCX(tick)(const jazz_db_Db *db);
 jz_err LCX(refresh_subscriptions_for_tables)(const jazz_db_Db *db, const jz_hmap *changed_tables, u32 *out);
 #undef LCX
 
+/* ---- catalogue.rs dependencies ---- */
+#include "db/view_update_parts.h"
+jz_err jazz_db__db__mutations__Db__check_catalogue_admin(const jazz_db_Db *self);
+/* PublicationOutcome<Vec<SyncMessage>>::value moved out (db-a helper) */
+jz_err jazz_db__db__PublicationOutcome__responses(jazz_db_bPublicationOutcome *o, jazz_db_SyncMessageVec *out);
+void jazz_protocol__protocol__SyncMessage__publish_schema(jazz_protocol_SyncMessage *out, jazz_types_AuthorSubject author, jazz_model_SchemaVersion *schema);
+void jazz_protocol__protocol__SyncMessage__publish_lens(jazz_protocol_SyncMessage *out, jazz_types_AuthorSubject author, jazz_protocol_MigrationLens *lens);
+void jazz_protocol__protocol__SyncMessage__drop(void *m);
+jz_err jazz_node__node__NodeState__validate_schema_activation(jazz_node_NodeState *n, u64 revision, jazz_model_JazzSchema schema);
+/* public_schema: BTreeMap<TableName (jz_str), PublicTable> */
+typedef struct jazz_model_PublicTable jazz_model_PublicTable;
+typedef struct jazz_model_TablePolicies { void *p; } jazz_model_TablePolicies;
+void jazz_model__schema__JazzSchema__public_schema_clone(const jazz_model_JazzSchema *s, jz_btree *out);
+void jazz_model__public_schema__TablePolicies__clone(void *dst, const void *src);
+void jazz_model__public_schema__TablePolicies__default(jazz_model_TablePolicies *out);
+void jazz_model__public_schema__PublicTable__set_policies(jazz_model_PublicTable *t, jazz_model_TablePolicies policies);
+extern const jz_hmap_desc jazz_model_table_policies_map_desc; /* HashMap<TableName, TablePolicies> */
+jz_err jazz_model__schema__JazzSchema__new(const jz_btree *source, jazz_model_JazzSchema *out);
+jz_err jazz_db__db__node_runtime__Node__set_permissions_ready(jazz_db_Node *self, bool ready);
+const jazz_protocol_MigrationLens *jazz_node__node__NodeState__catalogue_lens(const jazz_node_NodeState *n, const void *lens_id);
+void jazz_protocol__protocol__MigrationLens__clone(jazz_protocol_MigrationLens **dst, const jazz_protocol_MigrationLens *src);
+
 #endif

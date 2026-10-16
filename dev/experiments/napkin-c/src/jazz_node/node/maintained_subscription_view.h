@@ -149,7 +149,6 @@ typedef JZ_VEC(jazz_protocol_SupportingRow) jzn_SupportingRowVec;
 
 /* ---- public API ---- */
 void jazz_node_MaintainedSubscriptionView_default(jazz_node_MaintainedSubscriptionView *m);
-void jazz_node_MaintainedSubscriptionView_clone(jazz_node_MaintainedSubscriptionView *dst, const jazz_node_MaintainedSubscriptionView *src);
 void jazz_node_MaintainedSubscriptionView_drop(jazz_node_MaintainedSubscriptionView *m);
 void MSV(MaintainedSubscriptionView__hold_client_local_literal_token)(jazz_node_MaintainedSubscriptionView *m, void *token /* Arc<()> */);
 void MSV(MaintainedSubscriptionView__set_read_view)(jazz_node_MaintainedSubscriptionView *m, jazz_protocol_ReadViewKey read_view);
@@ -188,6 +187,5 @@ jz_err jazz_node__node__MaintainedTerminalSchemas__current_payload_schema(const 
 jz_err jazz_node__node__MaintainedTerminalSchemas__direct_app_row_schema(const jazz_node_MaintainedTerminalSchemas *s, const jazz_engine_AppRowSchema **out);
 jz_err jazz_node__node__MaintainedTerminalSchemas__aggregate_app_row_schema(const jazz_node_MaintainedTerminalSchemas *s, const jazz_engine_AppRowSchema **out);
 void jazz_node_MaintainedTerminalSchemas_drop(jazz_node_MaintainedTerminalSchemas *s);
-void jazz_node_MaintainedTerminalSchemas_clone(jazz_node_MaintainedTerminalSchemas *dst, const jazz_node_MaintainedTerminalSchemas *src);
 
 #endif
