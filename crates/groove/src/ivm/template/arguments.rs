@@ -24,6 +24,19 @@ impl TemplateScalarArgument {
     }
 }
 
+pub(crate) fn validate_project_expression(
+    expression: &ProjectExpr,
+    arguments: &[TemplateScalarArgument],
+) -> Result<(), TemplateBindingError> {
+    if let ProjectExpr::TemplateArgument { slot, value_type } = expression {
+        arguments
+            .get(*slot as usize)
+            .filter(|argument| argument.value_type == *value_type)
+            .ok_or(TemplateBindingError::ScalarArgument(*slot))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_project_expression(
     expression: &mut ProjectExpr,
     arguments: &[TemplateScalarArgument],

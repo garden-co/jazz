@@ -86,6 +86,22 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Describe one borrowed operator using already inferred input contracts.
+    /// This is analysis only: it neither installs sources nor grants authority.
+    pub fn graph_operator_output_descriptor(
+        &self,
+        graph: &GraphBuilder,
+        input_output: impl FnMut(
+            &GraphBuilder,
+        )
+            -> Result<RecordDescriptor, crate::ivm::runtime::IvmRuntimeError>,
+    ) -> Result<RecordDescriptor, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .infer_builder_output_with_inputs(graph, input_output)
+            .map_err(Into::into)
+    }
+
     /// Allocate an opaque mutable input source for graphs maintained by this
     /// database. The identity is runtime-local and cannot be reused after the
     /// database closes.
