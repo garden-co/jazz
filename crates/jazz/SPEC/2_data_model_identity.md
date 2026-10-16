@@ -458,7 +458,7 @@ rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorS
   `message: String` (an empty message is allowed). Any other spelling is
   refused. The retry store `jazz_rejected_transactions` uses the same enum,
   required, with fields `(time, node_id, kind, made_by, rejection_reason,
-  user_metadata)`.
+user_metadata)`.
 
 This layout is covered by the `jazz.node-storage.v1` root profile (with
 `groove.dictionary.v1` for the interned authors). Roots written with an
