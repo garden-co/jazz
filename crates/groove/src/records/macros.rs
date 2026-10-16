@@ -17,6 +17,7 @@ pub use paste;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldKind {
     U64,
+    U48,
     I64,
     U32,
     I32,
@@ -39,6 +40,7 @@ impl FieldKind {
         matches!(
             (self, value_type),
             (Self::U64, ValueType::U64)
+                | (Self::U48, ValueType::U48)
                 | (Self::I64, ValueType::I64)
                 | (Self::U32, ValueType::U32)
                 | (Self::I32, ValueType::I32)
@@ -107,6 +109,82 @@ impl RecordField for u64 {
             });
         }
         read_exact_array::<8>(bytes).map(u64::from_be_bytes)
+    }
+}
+
+/// A `u64` constrained to the [`ValueType::U48`] domain `0..=2^48 - 1`.
+///
+/// Construction rejects out-of-range values, so a typed `U48` always encodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct U48(u64);
+
+impl U48 {
+    pub const MAX: u64 = super::values::U48_MAX;
+
+    pub fn new(value: u64) -> Result<Self, Error> {
+        if value > Self::MAX {
+            Err(Error::U48OutOfRange(value))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for U48 {
+    type Error = Error;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<U48> for u64 {
+    fn from(value: U48) -> Self {
+        value.0
+    }
+}
+
+impl From<U48> for Value {
+    fn from(value: U48) -> Self {
+        Value::U48(value.0)
+    }
+}
+
+impl RecordField for U48 {
+    fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
+        record.get_u48(idx).map(Self)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::U48(self.0)
+    }
+
+    const COLUMN_KIND: FieldKind = FieldKind::U48;
+
+    fn read_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+        if value_type != &ValueType::U48 {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::U48,
+            });
+        }
+        read_exact_array::<6>(bytes)
+            .map(super::values::u48_from_le_bytes)
+            .map(Self)
+    }
+
+    fn read_tuple_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+        if value_type != &ValueType::U48 {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::U48,
+            });
+        }
+        read_exact_array::<6>(bytes)
+            .map(super::values::u48_from_be_bytes)
+            .map(Self)
     }
 }
 
@@ -586,6 +664,48 @@ macro_rules! impl_record_field_u64 {
                 value_type: &$crate::records::ValueType,
             ) -> Result<Self, $crate::records::Error> {
                 <u64 as $crate::records::RecordField>::read_tuple_raw(bytes, value_type).map(Self)
+            }
+        }
+    };
+}
+
+/// Implement [`RecordField`](crate::records::RecordField) for a `u64` newtype
+/// stored as a [`ValueType::U48`](crate::records::ValueType::U48) field. The
+/// wrapper's value must stay within `0..=2^48 - 1`; encoding rejects anything
+/// larger with `Error::U48OutOfRange`.
+#[macro_export]
+macro_rules! impl_record_field_u48 {
+    ($ty:ty) => {
+        impl $crate::records::RecordField for $ty {
+            fn read(
+                record: &$crate::records::BorrowedRecord<'_>,
+                idx: usize,
+            ) -> Result<Self, $crate::records::Error> {
+                record.get_u48(idx).map(Self)
+            }
+
+            fn to_value(&self) -> $crate::records::Value {
+                $crate::records::Value::U48(self.0)
+            }
+
+            const COLUMN_KIND: $crate::records::FieldKind = $crate::records::FieldKind::U48;
+
+            fn read_raw(
+                bytes: &[u8],
+                value_type: &$crate::records::ValueType,
+            ) -> Result<Self, $crate::records::Error> {
+                <$crate::records::U48 as $crate::records::RecordField>::read_raw(bytes, value_type)
+                    .map(|value| Self(value.get()))
+            }
+
+            fn read_tuple_raw(
+                bytes: &[u8],
+                value_type: &$crate::records::ValueType,
+            ) -> Result<Self, $crate::records::Error> {
+                <$crate::records::U48 as $crate::records::RecordField>::read_tuple_raw(
+                    bytes, value_type,
+                )
+                .map(|value| Self(value.get()))
             }
         }
     };

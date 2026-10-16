@@ -288,7 +288,8 @@ type NativeDb = {
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
-  foregroundTxTimeHighWater?(): bigint;
+  /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
+  foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
   subscribe?(
     query: Uint8Array,
@@ -723,6 +724,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  private readonly localSettlementListeners = new Set<(pending: boolean) => void>();
   // A streaming mutation can wait on its source while owning a native upload
   // handle. A foreground lease cannot return until every admitted handle has
   // published its write (and advanced the HLC) or has been aborted. Local
@@ -806,6 +808,11 @@ export class NativeRuntimeAdapter implements Runtime {
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
+  // While that drain runs, already-started native futures may hold the node
+  // lock until a core tick completes their host continuation (cold storage,
+  // admission deadlines). Mutation admission stays closed, but core progress
+  // must continue, or the HLC readout waits behind them forever.
+  private foregroundLeaseDraining = false;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
@@ -1081,7 +1088,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /** @internal Return the native HLC high-water for a foreground lease handoff. */
-  foregroundTxTimeHighWater(): bigint {
+  foregroundTxTimeHighWater(): bigint | Promise<bigint> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
     if (!this.db.foregroundTxTimeHighWater) {
       throw new Error("Native runtime does not expose foreground transaction high-water");
@@ -1105,16 +1112,25 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closed = true;
     this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
-    const capture = this.captureForegroundTxTimeHighWater();
+    this.foregroundLeaseDraining = true;
+    const capture = this.captureForegroundTxTimeHighWater().finally(() => {
+      this.foregroundLeaseDraining = false;
+      this.clearCoreDeadline();
+    });
     this.foregroundLeaseCapture = capture;
     return capture;
+  }
+
+  /** Core ticks run while open, and while a lease handoff drains started work. */
+  private coreProgressAllowed(): boolean {
+    return !this.closed || this.foregroundLeaseDraining;
   }
 
   private async captureForegroundTxTimeHighWater(): Promise<bigint> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
     await this.coreOperation?.completion.catch(() => undefined);
-    return this.foregroundTxTimeHighWater();
+    return await this.foregroundTxTimeHighWater();
   }
 
   /** @internal Seed a foreground lease high-water before the first local write. */
@@ -1420,6 +1436,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
+    this.localSettlementListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
@@ -2780,6 +2797,14 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /** Observe worker durability work, including fire-and-forget mutations. */
+  onLocalSettlementChange(listener: (pending: boolean) => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onLocalSettlementChange(listener);
+    this.localSettlementListeners.add(listener);
+    listener(this.pendingLocalSettlements.size > 0);
+    return () => this.localSettlementListeners.delete(listener);
+  }
+
   private deliverMutationError(event: MutationErrorEvent): void {
     const transactionId = event.transaction.transactionId;
     if (this.deliveredMutationErrors.has(transactionId)) return;
@@ -2797,8 +2822,17 @@ export class NativeRuntimeAdapter implements Runtime {
     // failures available for a real waiter or the mutation-error callback.
     settlement = this.waitForTransaction(txId, "local", { observeOnly: true })
       .catch(() => undefined)
-      .finally(() => this.pendingLocalSettlements.delete(settlement));
+      .finally(() => {
+        this.pendingLocalSettlements.delete(settlement);
+        if (this.pendingLocalSettlements.size === 0) {
+          for (const listener of this.localSettlementListeners) listener(false);
+        }
+      });
+    const wasEmpty = this.pendingLocalSettlements.size === 0;
     this.pendingLocalSettlements.add(settlement);
+    if (wasEmpty) {
+      for (const listener of this.localSettlementListeners) listener(true);
+    }
   }
 
   private finishInsert(
@@ -3381,7 +3415,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreWake(urgency: CoreTickWake): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (urgency === "after-current-turn") {
       // A microtask would set `coreTickAgain` while a core tick is still
       // running, recursively entering the next tick before the browser can
@@ -3420,7 +3454,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreTick(): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (this.coreOperation) {
       this.coreTickAgain = true;
       return;
@@ -3445,7 +3479,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private runCoreTick(): Promise<void> {
-    if (this.closed) return Promise.resolve();
+    if (!this.coreProgressAllowed()) return Promise.resolve();
     const operation = this.coreOperation;
     if (operation) {
       this.coreTickAgain = true;
@@ -3475,7 +3509,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();
-        if (this.closed || !this.coreTickAgain) break;
+        if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
           break;
@@ -3485,7 +3519,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.drainTransportRetirements();
       this.coreOperation = null;
     }
-    if (yielded && !this.closed) {
+    if (yielded && this.coreProgressAllowed()) {
       setTimeout(() => this.scheduleCoreTick(), 0);
     }
   }
@@ -3903,6 +3937,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionAttempt = null;
     this.serverCarrier = null;
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    // Frames the retired socket buffered belong to its channel state, not the next connection's.
+    this.pendingInboundServerFrames.length = 0;
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const now = Date.now();

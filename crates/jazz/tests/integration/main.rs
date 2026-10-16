@@ -59,6 +59,9 @@ mod fate_regressions;
 #[cfg(feature = "testing")]
 #[path = "../fate_replay.rs"]
 mod fate_replay;
+#[cfg(feature = "testing")]
+#[path = "../gather_policy_double_ref.rs"]
+mod gather_policy_double_ref;
 #[path = "../large_json_wire.rs"]
 mod large_json_wire;
 #[path = "../large_value_append.rs"]
@@ -77,6 +80,9 @@ mod local_first_first_load_gate;
 #[cfg(feature = "testing")]
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[cfg(feature = "testing")]
+#[path = "../mixed_nullable_uuid_claims.rs"]
+mod mixed_nullable_uuid_claims;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[cfg(feature = "testing")]
@@ -98,6 +104,11 @@ mod shared_coverage_differential;
 #[cfg(feature = "testing")]
 #[path = "../shared_query_hydration.rs"]
 mod shared_query_hydration;
+#[path = "../storage_format_refusal.rs"]
+mod storage_format_refusal;
+#[cfg(feature = "testing")]
+#[path = "../storage_per_row_bytes.rs"]
+mod storage_per_row_bytes;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[cfg(feature = "testing")]

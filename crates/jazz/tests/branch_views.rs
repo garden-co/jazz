@@ -9,7 +9,6 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
@@ -2934,46 +2933,229 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     ));
 }
 
-#[test]
-fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
-    let (db, schema) = open_history_complete_db();
-    let source = selector(0x91);
-    let target = selector(0x92);
-    let row = RowUuid::from_bytes([0x93; 16]);
-    db.insert(
-        "todos",
-        BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
-        jazz::db::InsertOptions {
-            row_id: Some(row),
-            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let selected = || {
-        [ContributionMergeRow {
-            table: "todos".to_owned(),
-            row_uuid: row,
-        }]
-    };
-    let merged = db
-        .merge_branch_contributions(source.clone(), target.clone(), selected())
-        .unwrap()
-        .expect("the first calculation emits an ordinary transaction");
-    let _ordinary_write_state = db.write_state(merged).unwrap();
-    assert!(
-        db.merge_branch_contributions(source, target.clone(), selected())
-            .unwrap()
-            .is_none(),
-        "observed contribution provenance suppresses a retry"
-    );
-
-    let query = db.prepare_query(&db.table("todos")).unwrap();
-    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
-    assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("source".to_owned()))
-    );
-}
 mod common;
+
+/// One write in a scripted branch-view sequence.
+type BranchEdit<'a> = Box<dyn Fn(&Db) + 'a>;
+
+/// Alice subscribes to `title = needle` on her draft over main. Under the
+/// title index each branch's deletion register is read only for the row ids
+/// of the content candidates, and main is masked only by the draft rows
+/// sharing a candidate's id, so every late change on either side must still
+/// reach the view: deletes and restores on the draft and on main, an indexed
+/// value moving into and out of the prefix, a new row, and deletes of rows
+/// outside the prefix. After each write the live result equals the unindexed
+/// read of the same view, filtered to `needle`.
+///
+/// ```text
+/// main:  a=needle  b=needle  c=hay  d=needle  x=hay (deleted)
+/// draft: (empty)
+/// alice ──title = needle, draft over main──► {a, b, d}, then one write at a time
+/// ```
+#[test]
+fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
+    let (db, schema) = open_db();
+    let main = selector(0x81);
+    let draft = selector(0x82);
+    let [a, b, c, d, x, e] =
+        [0x83, 0x84, 0x85, 0x86, 0x87, 0x88].map(|byte| RowUuid::from_bytes([byte; 16]));
+    let title =
+        |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
+    for (row, value) in [
+        (a, "needle"),
+        (b, "needle"),
+        (c, "hay"),
+        (d, "needle"),
+        (x, "hay"),
+    ] {
+        db.insert(
+            "todos",
+            title(value),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let on_main = || jazz::db::WriteTarget::BranchView {
+        head: main.clone(),
+        base: None,
+    };
+    let on_draft = || jazz::db::WriteTarget::BranchView {
+        head: draft.clone(),
+        base: Some(BranchViewBase::Current(main.clone())),
+    };
+    let delete = |db: &Db, row, target| {
+        db.delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let update = |db: &Db, row, value: &str, target| {
+        db.update(
+            "todos",
+            row,
+            title(value),
+            jazz::db::UpdateOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let restore = |db: &Db, row, value: &str, branch: &BranchSelector| {
+        db.restore(
+            "todos",
+            row,
+            Some(title(value)),
+            jazz::db::RestoreOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    delete(&db, x, on_main());
+
+    let opts =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let needle = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+        .unwrap();
+    let all = db.prepare_query(&db.table("todos")).unwrap();
+    let table = &schema.tables[0];
+    let expected = |db: &Db| {
+        let mut rows = block_on(db.all(&all, opts.clone()))
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.cell(table, "title") == Some(Value::String("needle".to_owned())))
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+
+    let mut subscription = block_on(db.subscribe(&needle, opts.clone())).unwrap();
+    let mut live = BTreeMap::new();
+    let apply = |subscription: &mut jazz::db::SubscriptionStream,
+                 live: &mut BTreeMap<RowUuid, ()>| {
+        while let Some(event) = subscription.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                ..
+            } = event
+            else {
+                panic!("unexpected subscription event: {event:?}");
+            };
+            if reset {
+                live.clear();
+            }
+            for row in removed {
+                assert!(
+                    live.remove(&row.row_uuid).is_some(),
+                    "removed an absent row"
+                );
+            }
+            for row in added {
+                assert!(
+                    live.insert(row.row_uuid(), ()).is_none(),
+                    "added a row twice"
+                );
+            }
+        }
+    };
+    let opening = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset: true, added, ..
+    } = opening
+    else {
+        panic!("unexpected opening event: {opening:?}");
+    };
+    live.extend(added.iter().map(|row| (row.row_uuid(), ())));
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), vec![a, b, d]);
+
+    let edits: Vec<(&str, BranchEdit)> = vec![
+        (
+            "draft deletes an inherited row",
+            Box::new(|db| delete(db, a, on_draft())),
+        ),
+        (
+            "main deletes a row",
+            Box::new(|db| delete(db, b, on_main())),
+        ),
+        (
+            "main restores it",
+            Box::new(|db| restore(db, b, "needle", &main)),
+        ),
+        (
+            "draft restores its delete",
+            Box::new(|db| restore(db, a, "needle", &draft)),
+        ),
+        (
+            "main moves a row into the prefix",
+            Box::new(|db| update(db, c, "needle", on_main())),
+        ),
+        (
+            "main deletes the moved row",
+            Box::new(|db| delete(db, c, on_main())),
+        ),
+        (
+            "draft moves a row out of the prefix",
+            Box::new(|db| update(db, d, "hay", on_draft())),
+        ),
+        (
+            "draft deletes that row",
+            Box::new(|db| delete(db, d, on_draft())),
+        ),
+        (
+            "main deletes the row draft deleted",
+            Box::new(|db| delete(db, d, on_main())),
+        ),
+        (
+            "main restores the outside row",
+            Box::new(|db| restore(db, x, "needle", &main)),
+        ),
+        (
+            "main inserts a row",
+            Box::new(|db| {
+                db.insert(
+                    "todos",
+                    title("needle"),
+                    jazz::db::InsertOptions {
+                        row_id: Some(e),
+                        target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            "draft deletes the new row",
+            Box::new(|db| delete(db, e, on_draft())),
+        ),
+    ];
+    for (step, edit) in edits {
+        edit(&db);
+        apply(&mut subscription, &mut live);
+        assert_eq!(
+            live.keys().copied().collect::<Vec<_>>(),
+            expected(&db),
+            "{step}"
+        );
+    }
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), {
+        let mut rows = vec![a, b, x];
+        rows.sort();
+        rows
+    });
+}

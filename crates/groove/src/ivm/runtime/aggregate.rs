@@ -355,7 +355,7 @@ fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
-        Value::U64(value) => Ok(*value as f64),
+        Value::U64(value) | Value::U48(value) => Ok(*value as f64),
         Value::I32(value) => Ok(f64::from(*value)),
         Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
