@@ -1141,7 +1141,7 @@ fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
                 .cells(cells(branch_title.clone())),
         )
         .unwrap();
-    let versions = futures::executor::block_on(node.query_versions_for_tx(tx_id)).unwrap();
+    let versions = futures::executor::block_on(node.stored_versions_for_tx_for_test(tx_id)).unwrap();
     let branched = versions
         .iter()
         .find(|version| version.branch_key().is_canonical() && *version.branch_key() != BranchKey::default())
@@ -2099,9 +2099,9 @@ fn concurrent_branch_inserts_do_not_bypass_read_or_update_policy() {
         if expected == Fate::Accepted {
             // Linear history: Core folds the later write over the current row;
             // no DAG merge version with both writes as parents is minted.
-            assert!(!core.query_versions_for_tx(right_tx).unwrap().is_empty());
+            assert!(!core.stored_versions_for_tx_for_test(right_tx).unwrap().is_empty());
         } else {
-            assert!(core.query_versions_for_tx(right_tx).unwrap().is_empty());
+            assert!(core.stored_versions_for_tx_for_test(right_tx).unwrap().is_empty());
         }
     }
 }

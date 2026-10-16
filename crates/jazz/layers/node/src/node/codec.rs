@@ -194,10 +194,29 @@ const TX_TOUCHED_ROWS_LIST_IDX: usize = 2;
 /// per row plus about 20 bytes per `(table, branch)` group, and it is read
 /// only when the transaction's versions are listed, which reads every listed
 /// row anyway.
+///
+/// The list is released (deleted) once the transaction settles, when
+/// [`releases_touched_rows`] holds and every listed row is on the default
+/// branch. From then on the transaction's versions are read only by exact
+/// `(table, row, tx)` point reads from a caller that already knows the row;
+/// listing them fails with [`Error::TransactionVersionsReleased`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
 
 impl TouchedRows {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether every listed row is on the default branch, where an exact
+    /// point read needs only the table, row and transaction.
+    pub(super) fn is_default_branch_only(&self) -> bool {
+        let default_branch = BranchKey::default().canonical_bytes();
+        self.0
+            .keys()
+            .all(|(_, branch_key)| *branch_key == default_branch)
+    }
+
     pub(super) fn insert(&mut self, table: PhysicalTableId, branch_key: Vec<u8>, row: RowUuid) {
         self.0.entry((table, branch_key)).or_default().insert(row);
     }
@@ -2246,7 +2265,47 @@ pub(super) struct StoredTransaction {
     pub(super) is_partial: bool,
 }
 
+/// Whether a transaction with this status no longer needs its
+/// `jazz_tx_touched_rows` list: a complete mergeable transaction that is
+/// accepted at a seq. Nothing re-sequences, rejects or completes it any more,
+/// so nothing enumerates its versions. An exclusive transaction keeps its list
+/// for complete exclusive payloads, and a view-scoped one keeps it so later
+/// fragments can extend and settle the rows it already holds.
+pub(super) fn releases_touched_rows(
+    kind: TxKind,
+    fate: &Fate,
+    global_time: Option<GlobalTime>,
+    is_partial: bool,
+) -> bool {
+    kind == TxKind::Mergeable
+        && matches!(fate, Fate::Accepted)
+        && global_time.is_some()
+        && !is_partial
+}
+
+/// [`releases_touched_rows`] for a stored `jazz_transactions` record.
+pub(super) fn transaction_record_releases_touched_rows(
+    record: BorrowedRecord<'_>,
+) -> Result<bool, Error> {
+    let kind = tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
+    let is_partial = transaction_flags(record)? & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0;
+    let global_time = record
+        .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+        .map(GlobalTime);
+    Ok(releases_touched_rows(
+        kind,
+        &fate_from_encoded_fields(record)?,
+        global_time,
+        is_partial,
+    ))
+}
+
 impl StoredTransaction {
+    /// See [`releases_touched_rows`].
+    pub(super) fn releases_touched_rows(&self) -> bool {
+        releases_touched_rows(self.tx.kind, &self.fate, self.global_time, self.is_partial)
+    }
+
     /// Merge incoming status without undoing an already known outcome,
     /// global time, or durability. Used for both transaction ingestion
     /// and standalone fate updates.
@@ -3635,6 +3694,11 @@ impl TransactionRecordStatus {
     pub(super) fn view_scoped(mut self, is_partial: bool) -> Self {
         self.is_partial = is_partial;
         self
+    }
+
+    /// See [`releases_touched_rows`].
+    pub(super) fn releases_touched_rows(&self, kind: TxKind) -> bool {
+        releases_touched_rows(kind, &self.fate, self.global_time, self.is_partial)
     }
 
     /// Whether the transaction still waits for a seq or a rejection, and so

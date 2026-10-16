@@ -693,7 +693,9 @@ pub struct NodeState<S = BoxedStorage> {
     ahead_current_keys: AheadCurrentKeys,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
-    /// the transaction's `jazz_tx_touched_rows` list.
+    /// the transaction's `jazz_tx_touched_rows` list, or releases the list
+    /// when the transaction has settled. A transaction whose settled status
+    /// was staged has an entry here even when it wrote no rows.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
     /// Global times of transactions read from storage, which key their
     /// history records (`history_tx_seq`). Bounded by
@@ -3290,6 +3292,11 @@ pub enum Error {
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),
+    /// A settled transaction's versions were asked for as a list, but its
+    /// touched-rows list was released at settle. Its versions are read by
+    /// exact `(table, row, tx)` point reads only.
+    #[error("transaction versions are no longer listed: {0:?}")]
+    TransactionVersionsReleased(TxId),
     /// View update payload was internally inconsistent.
     #[error("malformed view update: {0}")]
     MalformedViewUpdate(&'static str),

@@ -269,7 +269,16 @@ where
             let incoming = versions.iter().enumerate()
                 .map(|(index, version)| (view_version_key_for_ingest(version), index))
                 .collect::<BTreeMap<_, _>>();
-            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+            // A released list belongs to a complete settled transaction: the
+            // incoming payload already covers every row it holds.
+            let stored_versions = match stored_tx.as_ref() {
+                Some(stored) => self
+                    .query_listed_versions_for_tx(tx.tx_id, stored)
+                    .await?
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            for stored in stored_versions {
                 update_current_indexes |= self
                     .ahead_current_keys
                     .contains_key(&self.ahead_overlay_key(&stored)?);
@@ -302,7 +311,7 @@ where
                 provenance: contribution_merge,
             }
         };
-        stage_transaction_record(
+        self.stage_tx_record(
             batch,
             write,
             tx_node_alias,

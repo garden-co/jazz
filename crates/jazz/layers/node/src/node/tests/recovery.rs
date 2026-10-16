@@ -622,7 +622,7 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
         "invalid provenance must never be stored"
     );
     assert!(
-        core.query_versions_for_tx(tx_id).unwrap().is_empty(),
+        core.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty(),
         "rejected input must not store any row versions"
     );
 }
@@ -816,7 +816,7 @@ fn mark_accepted_without_ahead_cleanup<S>(
     stored.fate = Fate::Accepted;
     stored.global_time = Some(global_time);
     stored.durability = DurabilityTier::Global;
-    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
     stage_transaction_record(
         &mut batch,
@@ -2572,7 +2572,7 @@ fn author_columns_store_dictionary_codes() {
             author
         );
         let [version] = reopened
-            .query_versions_for_tx(tx_id)
+            .stored_versions_for_tx_for_test(tx_id)
             .unwrap()
             .try_into()
             .unwrap();
