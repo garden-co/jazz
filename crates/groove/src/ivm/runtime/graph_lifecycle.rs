@@ -87,6 +87,12 @@ impl IvmRuntime {
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
         }
         for state in self.operator_states.values() {
+            if let Some(footprint) = state.grouped_footprint() {
+                stats.grouped_operator_state_count += 1;
+                stats.grouped_operator_state_groups += footprint.groups;
+                stats.grouped_operator_state_rows += footprint.rows;
+                stats.grouped_operator_state_encoded_bytes += footprint.encoded_bytes;
+            }
             let OperatorState::Recursive(recursive) = state else {
                 continue;
             };
@@ -107,6 +113,11 @@ impl IvmRuntime {
                 _ => None,
             })
             .sum()
+    }
+
+    /// Live subscriptions, without the walk `stats()` makes.
+    pub fn active_subscription_count(&self) -> usize {
+        self.multisink_subscriptions.len()
     }
 
     pub(super) fn cheap_stats(&self) -> RuntimeStats {

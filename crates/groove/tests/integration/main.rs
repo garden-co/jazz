@@ -29,6 +29,8 @@ mod lookup_join;
 mod multisink_subscription;
 #[path = "../operator_pipeline.rs"]
 mod operator_pipeline;
+#[path = "../operator_state_stats.rs"]
+mod operator_state_stats;
 #[path = "../plain_output_positions_unbounded.rs"]
 mod plain_output_positions_unbounded;
 #[path = "../plain_output_root_positions.rs"]
