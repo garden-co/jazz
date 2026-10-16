@@ -36,7 +36,7 @@ pub const AUXILIARY_CHANNEL: u16 = 63;
 pub const PROGRESS_CHANNEL: u16 = 62;
 
 /// Stable scheduling class. Its value is explicitly encoded as one byte.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ChannelClass {
     /// Catalogue, session state and connection lifecycle.
@@ -57,7 +57,7 @@ pub enum ChannelClass {
 
 /// Physical channel extent. `sequence` is contiguous within one generation;
 /// receivers must never skip bytes in a stateful compressed stream.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelFrame {
     /// Connection-direction slot.
     pub channel: u16,
@@ -77,7 +77,6 @@ pub struct ChannelFrame {
     /// Exact decoded size produced by this codec flush, checked before decode.
     pub decoded_len: u32,
     /// The bounded flushed compressed bytes.
-    #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -117,20 +116,21 @@ impl ChannelFrame {
         Ok(())
     }
 
-    /// Encode the explicitly ordered fields with the postcard-v1 codec.
+    /// Encode the explicitly ordered fields.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
-        postcard::to_allocvec(self).map_err(|error| error.to_string())
+        Ok(crate::codec::encode(self))
     }
 
-    /// Decode one exact postcard-v1 channel payload, rejecting trailing bytes.
+    /// Decode one exact channel payload, rejecting trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > CHANNEL_HEADER_BYTES + MAX_CHANNEL_FRAME_PAYLOAD {
             return Err("channel frame exceeds size limit".into());
         }
-        let (frame, remainder): (Self, _) =
-            postcard::take_from_bytes(bytes).map_err(|error| error.to_string())?;
-        if !remainder.is_empty() {
+        let mut offset = 0;
+        let frame = <Self as crate::codec::WireCodec>::get(bytes, &mut offset)
+            .map_err(|error| error.to_string())?;
+        if offset != bytes.len() {
             return Err("trailing bytes after channel frame".into());
         }
         frame.validate()?;
@@ -463,7 +463,7 @@ mod tests {
                 ..frame.clone()
             },
         ] {
-            let bytes = postcard::to_allocvec(&corrupt).unwrap();
+            let bytes = crate::codec::try_encode(&corrupt).unwrap();
             assert!(ChannelFrame::decode(&bytes).is_err());
         }
         let mut trailing = bytes;

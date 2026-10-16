@@ -6,7 +6,7 @@ pub(super) fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error
         .map_err(|_| Error::InvalidStoredValue("physical table variant tag exhausted"))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SchemaPhysicalMapping {
     /// Globally meaningful immutable identities authored by the catalogue
     /// authority. The remaining u64 ids in this mapping are local aliases.
@@ -14,34 +14,29 @@ pub(super) struct SchemaPhysicalMapping {
     pub(super) tables: BTreeMap<String, TablePhysicalMapping>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TablePhysicalMapping {
     pub(super) table_id: PhysicalTableId,
     pub(super) columns: BTreeMap<String, PhysicalColumnId>,
     /// The one durable hidden Groove row case for this Jazz layout.
-    #[serde(default)]
     pub(super) variant_cases: Vec<PhysicalVariantCase>,
     /// Per-physical-column semantic identities for compact scalar enum tags.
     /// This is durable catalogue state: local registry order is never inferred
     /// from receipt order.
-    #[serde(default)]
     pub(super) scalar_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
     /// The same durable identities for direct payload enums.  Payload layouts
     /// are resolved from the introducing schema; the opaque physical case tag
     /// never uses an authored ordinal or display name as identity.
-    #[serde(default)]
     pub(super) payload_enum_cases: BTreeMap<PhysicalColumnId, Vec<GlobalEnumCaseId>>,
     /// Recursive scalar enum occurrences below a direct user column.  The
     /// structural key is stable across array/nullable/tuple/record lowering;
     /// payload children are rooted under their parent case identity by the
     /// catalogue reconciler.
-    #[serde(default)]
     pub(super) nested_scalar_enum_cases:
         BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
     /// Recursive payload-enum occurrences have the same durable identity
     /// discipline as scalar occurrences.  Their children are rooted under
     /// the selected *global* parent case rather than an authored ordinal.
-    #[serde(default)]
     pub(super) nested_payload_enum_cases:
         BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalEnumCaseId>>>,
 }

@@ -3026,7 +3026,7 @@ struct CatalogueOpenState {
     active_schema: ActiveSchema,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug)]
 struct StagedSchemaLineage {
     catalogue_seq: u64,
     publication: SchemaLineagePublication,
@@ -3034,13 +3034,13 @@ struct StagedSchemaLineage {
     mapping: SchemaPhysicalMapping,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct PendingSchemaLineage {
     catalogue_seq: u64,
     publication: SchemaLineagePublication,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SchemaLineageActivation {
     id: SchemaLineagePublicationId,
     catalogue_seq: u64,
@@ -3049,7 +3049,7 @@ struct SchemaLineageActivation {
 /// Durable completion receipt for an authority snapshot installed by an
 /// initially unconfigured dynamically catalogued node.  Its record is the atomic boundary:
 /// discovery never repairs a prefix that lacks this exact join.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 struct CatalogueBootstrapReady {
     genesis: SchemaVersionId,
     current_write_schema: CurrentWriteSchema,

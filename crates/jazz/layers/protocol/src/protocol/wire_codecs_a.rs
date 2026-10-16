@@ -159,7 +159,7 @@ crate::wire_struct! {
 
 /// A row as its `JVRR` v3 envelope, written as one length-prefixed byte
 /// string (postcard spelled it with `serialize_bytes`).
-struct WireRow;
+pub(super) struct WireRow;
 
 impl Wire<OwnedRecord> for WireRow {
     fn put(&self, buf: &mut Vec<u8>, record: &OwnedRecord) {
@@ -223,19 +223,22 @@ mod tests {
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
-    /// Encodes `value` with the hand codec and with postcard, each in its own
-    /// message descriptor scope, and requires identical bytes and an exact
-    /// hand decode back to `value`.
-    fn assert_matches_postcard<T>(value: &T)
+    /// Encodes `value` in its own message descriptor scope and requires an
+    /// exact decode back to `value` that re-encodes to the same bytes. Byte
+    /// identity with the postcard layout is pinned by the frozen fixtures.
+    fn assert_round_trips<T>(value: &T)
     where
-        T: WireCodec + serde::Serialize + PartialEq + std::fmt::Debug,
+        T: WireCodec + PartialEq + std::fmt::Debug,
     {
-        let expected = with_message_descriptor_table(|| postcard::to_allocvec(value).unwrap());
-        let actual = with_message_descriptor_table(|| encode(value));
+        let bytes = with_message_descriptor_table(|| encode(value));
         assert_eq!(take_encode_error(), None);
-        assert_eq!(actual, expected, "{value:?}");
-        let decoded = with_message_descriptor_table(|| decode_exact::<T>(&expected)).unwrap();
+        let decoded = with_message_descriptor_table(|| decode_exact::<T>(&bytes)).unwrap();
         assert_eq!(&decoded, value);
+        assert_eq!(
+            with_message_descriptor_table(|| encode(&decoded)),
+            bytes,
+            "{value:?}"
+        );
     }
 
     fn author(byte: u8) -> AuthorSubject {
@@ -403,7 +406,7 @@ mod tests {
         PolicyBindingKey::from_canonical_parts(author(4), claims())
     }
 
-    /// The frozen wire message fixtures, decoded by postcard.
+    /// The frozen wire message fixtures (written by the postcard codec).
     fn fixture_messages() -> Vec<(String, Vec<u8>, SyncMessage)> {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../fixtures/wire_message_frames_v6.json"
@@ -416,7 +419,7 @@ mod tests {
             .map(|fixture| {
                 let payload = hex::decode(fixture["payload_hex"].as_str().unwrap()).unwrap();
                 let message = with_message_descriptor_table(|| {
-                    postcard::from_bytes::<SyncMessage>(&payload).unwrap()
+                    decode_exact::<SyncMessage>(&payload).unwrap()
                 });
                 (
                     fixture["name"].as_str().unwrap().to_owned(),
@@ -428,9 +431,9 @@ mod tests {
     }
 
     /// Every frozen wire message fixture encodes to its pinned payload bytes
-    /// and decodes back from them, exactly as postcard does.
+    /// and decodes back from them.
     #[test]
-    fn wire_message_fixtures_match_postcard() {
+    fn wire_message_fixtures_encode_to_their_pinned_bytes() {
         let fixtures = fixture_messages();
         assert!(fixtures.len() >= 20);
         for (name, payload, message) in fixtures {
@@ -444,9 +447,9 @@ mod tests {
     }
 
     /// Every live `SyncMessage` variant, and every variant of the enums it
-    /// carries from this part, matches postcard byte for byte.
+    /// carries from this part, round-trips exactly.
     #[test]
-    fn every_sync_message_variant_matches_postcard() {
+    fn every_sync_message_variant_round_trips() {
         let fixtures = fixture_messages();
         let value_ref = fixtures
             .iter()
@@ -642,37 +645,37 @@ mod tests {
         // Variants whose payloads other parts own come from the fixtures.
         messages.extend(fixtures.into_iter().map(|(_, _, message)| message));
         for message in &messages {
-            assert_matches_postcard(message);
+            assert_round_trips(message);
         }
     }
 
-    /// Key and carrier types that also travel outside a `SyncMessage` match
-    /// postcard on their own.
+    /// Key and carrier types that also travel outside a `SyncMessage`
+    /// round-trip on their own.
     #[test]
-    fn standalone_types_match_postcard() {
+    fn standalone_types_round_trip() {
         let binding_view = BindingViewKey::new(
             subscription().shape_id,
             subscription().binding_id,
             Default::default(),
         );
-        assert_matches_postcard(&RowVersionRef::new(
+        assert_round_trips(&RowVersionRef::new(
             "todos",
             RowUuid::from_bytes([1; 16]),
             tx_id(u64::MAX),
         ));
-        assert_matches_postcard(&binding_view);
-        assert_matches_postcard(&AuthorityResultKey::unscoped(binding_view));
-        assert_matches_postcard(&AuthorityResultKey::policy_scoped(
+        assert_round_trips(&binding_view);
+        assert_round_trips(&AuthorityResultKey::unscoped(binding_view));
+        assert_round_trips(&AuthorityResultKey::policy_scoped(
             binding_view,
             policy_binding(),
         ));
-        assert_matches_postcard(&CoverageKey {
+        assert_round_trips(&CoverageKey {
             shape_id: binding_view.shape_id,
             binding_id: binding_view.binding_id,
             opts: Default::default(),
             policy_binding: Some(policy_binding()),
         });
-        assert_matches_postcard(&PolicyBindingKey::from_canonical_parts(
+        assert_round_trips(&PolicyBindingKey::from_canonical_parts(
             author(1),
             BTreeMap::new(),
         ));
@@ -685,19 +688,18 @@ mod tests {
             ),
             (AuthorizationScopeOperation::Delete, None),
         ] {
-            assert_matches_postcard(&AuthorizationOperationKey {
+            assert_round_trips(&AuthorizationOperationKey {
                 operation,
                 table: "todos".to_owned(),
                 row,
                 candidate_digest: [3; 32],
             });
         }
-        assert_matches_postcard(&RowBase::default());
-        assert_matches_postcard(&PeerPayloadInventory::default());
-        assert_matches_postcard(&bundle(VersionBundleScope::ViewScoped, Fate::Accepted));
+        assert_round_trips(&RowBase::default());
+        assert_round_trips(&PeerPayloadInventory::default());
+        assert_round_trips(&bundle(VersionBundleScope::ViewScoped, Fate::Accepted));
         // Outside a message scope every row defines its descriptor inline.
         let records = versions();
-        assert_eq!(encode(&records), postcard::to_allocvec(&records).unwrap());
         assert_eq!(
             decode_exact::<Vec<VersionRecord>>(&encode(&records)).unwrap(),
             records
@@ -717,7 +719,6 @@ mod tests {
                         context: "SyncMessage"
                     }
                 );
-                assert!(postcard::from_bytes::<SyncMessage>(&payload).is_err());
             }
         }
     }
@@ -732,7 +733,7 @@ mod tests {
             expected_hash: [2; 32],
             remaining_hops: 3,
         };
-        assert_matches_postcard(&ChunkRequestBatch {
+        assert_round_trips(&ChunkRequestBatch {
             requests: vec![entry; MAX_CHUNK_REQUEST_BATCH_ENTRIES],
         });
 
@@ -745,7 +746,6 @@ mod tests {
                     context: "chunk request batch exceeds cardinality limit"
                 }
             );
-            assert!(postcard::from_bytes::<ChunkRequestBatch>(&over).is_err());
         }
     }
 }

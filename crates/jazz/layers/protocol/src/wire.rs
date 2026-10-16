@@ -19,9 +19,6 @@ use crate::protocol::{SyncMessage, with_message_descriptor_table};
 use crate::protocol_limits::{
     MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
 };
-#[allow(unused_imports)]
-use postcard::to_allocvec;
-use serde::{Deserialize, Serialize};
 
 /// Current Jazz wire protocol version.
 ///
@@ -57,7 +54,7 @@ pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 pub type WireFeatures = u64;
 
 /// One transport frame exchanged between Jazz runtimes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WireFrame {
     /// Capability and version negotiation frame.
     Hello(WireHello),
@@ -70,7 +67,7 @@ pub enum WireFrame {
 }
 
 /// Which independently bounded transport resource this grant releases.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireCreditKind {
     /// Bytes removed from a physical frame queue.
     Frames,
@@ -84,7 +81,7 @@ pub enum WireCreditKind {
 }
 
 /// Uncompressed connection-scoped receiver buffer credit; never authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireChannelCredit {
     /// Admitted protocol version.
     pub protocol_version: u16,
@@ -103,7 +100,7 @@ pub struct WireChannelCredit {
 }
 
 /// Authenticated metadata around one independently compressed channel extent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireChannelEnvelope {
     /// Admitted wire protocol version.
     pub protocol_version: u16,
@@ -116,8 +113,7 @@ pub struct WireChannelEnvelope {
 }
 
 /// Link role advertised during handshake.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WirePeerRole {
     /// End-user or local application runtime.
     Client,
@@ -128,7 +124,7 @@ pub enum WirePeerRole {
 }
 
 /// Handshake payload used to negotiate a common wire version and feature set.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireHello {
     /// Lowest protocol version this peer can speak.
     pub min_protocol_version: u16,
@@ -141,7 +137,6 @@ pub struct WireHello {
     /// Authority endpoint bound by the authenticated handshake when the
     /// authorization-scope view feature is offered.  Semantic sync frames
     /// never self-assert this identity.
-    #[serde(default)]
     pub authority: Option<WireAuthorityEndpoint>,
 }
 
@@ -149,7 +144,7 @@ pub struct WireHello {
 ///
 /// The session/admission layer allocates this nonce before constructing the
 /// eventual sync connection; receipts use it to reject reconnect replay.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WireAuthorityEndpoint {
     /// Stable authority node identity authenticated by the transport.
     pub node: NodeUuid,
@@ -239,7 +234,7 @@ impl WireCompression {
 }
 
 /// Session metadata carried by message frames after handshake/admission.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WireSession {
     /// Binding/server assigned resumable session id.
     pub session_id: String,
@@ -409,8 +404,7 @@ impl WireInboundContext {
 }
 
 /// Structured wire error code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireErrorCode {
     /// Peers do not share a supported protocol version.
     UnsupportedProtocolVersion,
@@ -429,8 +423,7 @@ pub enum WireErrorCode {
 }
 
 /// Retry guidance for bindings and transports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireRetry {
     /// Retrying the same operation cannot succeed.
     Never,
@@ -443,7 +436,7 @@ pub enum WireRetry {
 }
 
 /// Structured protocol/session error frame.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WireError {
     /// Machine-readable error code.
     pub code: WireErrorCode,
@@ -967,7 +960,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use groove::schema::ColumnType;
-    use serde_json::json;
 
     use super::*;
     use crate::ids::SchemaVersionId;
@@ -1007,9 +999,9 @@ mod tests {
         };
         let hex =
             |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
-        let without = postcard::to_allocvec(&read(None)).unwrap();
+        let without = crate::codec::try_encode(&read(None)).unwrap();
         let result = AggregateReadResult(vec![0x01, 0xab, 0xcd]);
-        let with = postcard::to_allocvec(&read(Some(result.clone()))).unwrap();
+        let with = crate::codec::try_encode(&read(Some(result.clone()))).unwrap();
         assert_eq!(hex(&without), PREDICATE_READ_WITHOUT_RESULT_HEX);
         assert_eq!(hex(&with), PREDICATE_READ_WITH_RESULT_HEX);
         assert_eq!(&without[..without.len() - 1], &with[..without.len() - 1]);
@@ -1031,35 +1023,18 @@ mod tests {
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]
     fn wire_v5_peer_role_tags() {
-        for (role, tag, name) in [
-            (WirePeerRole::Client, 0, "client"),
-            (WirePeerRole::Core, 1, "core"),
-            (WirePeerRole::Relay, 2, "relay"),
+        for (role, tag) in [
+            (WirePeerRole::Client, 0),
+            (WirePeerRole::Core, 1),
+            (WirePeerRole::Relay, 2),
         ] {
-            assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
-            assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
-            assert_eq!(serde_json::to_value(role).unwrap(), name);
+            assert_eq!(crate::codec::try_encode(&role).unwrap(), vec![tag]);
+            assert_eq!(
+                crate::codec::decode_exact::<WirePeerRole>(&[tag]).unwrap(),
+                role
+            );
         }
-        assert!(postcard::from_bytes::<WirePeerRole>(&[3]).is_err());
-        assert!(serde_json::from_str::<WirePeerRole>(r#""unknown""#).is_err());
-    }
-
-    #[test]
-    fn hello_json_shape_is_stable() {
-        let frame = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
-
-        assert_eq!(
-            serde_json::to_value(frame).unwrap(),
-            json!({
-                "Hello": {
-                    "min_protocol_version": WIRE_PROTOCOL_VERSION,
-                    "max_protocol_version": WIRE_PROTOCOL_VERSION,
-                    "features": 0,
-                    "role": "client",
-                    "authority": null
-                }
-            })
-        );
+        assert!(crate::codec::decode_exact::<WirePeerRole>(&[3]).is_err());
     }
 
     #[test]
@@ -1104,10 +1079,6 @@ mod tests {
         let mut frame_bytes = encode_frame(&frame).expect("frame encodes");
         frame_bytes.push(0);
         assert!(
-            postcard::from_bytes::<WireFrame>(&frame_bytes).is_ok(),
-            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
-        );
-        assert!(
             decode_frame(&frame_bytes).is_err(),
             "a physical frame is exactly one postcard value"
         );
@@ -1115,10 +1086,6 @@ mod tests {
         let canonical_frame = encode_frame(&frame).expect("frame encodes");
         assert_eq!(canonical_frame[0], 1, "WireFrame::Error is tag 1");
         let nonminimal_frame = [vec![0x81, 0], canonical_frame[1..].to_vec()].concat();
-        assert!(
-            postcard::from_bytes::<WireFrame>(&nonminimal_frame).is_ok(),
-            "planted sensitivity: postcard accepts the overlong 02 -> 82 00 tag"
-        );
         assert!(
             decode_frame(&nonminimal_frame).is_err(),
             "the frozen frame codec admits only canonical varints"
@@ -1133,10 +1100,6 @@ mod tests {
         let mut payload = encode_sync_message(&message).expect("message encodes");
         payload.push(0);
         assert!(
-            postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
-            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
-        );
-        assert!(
             decode_sync_message(&payload).is_err(),
             "a logical payload is exactly one postcard value"
         );
@@ -1144,10 +1107,6 @@ mod tests {
         let canonical_payload = encode_sync_message(&message).expect("message encodes");
         assert_eq!(canonical_payload[0], 4, "FateUpdate is tag 4");
         let nonminimal_payload = [vec![0x84, 0], canonical_payload[1..].to_vec()].concat();
-        assert!(
-            postcard::from_bytes::<SyncMessage>(&nonminimal_payload).is_ok(),
-            "planted sensitivity: postcard accepts the overlong SyncMessage tag"
-        );
         assert!(
             decode_sync_message(&nonminimal_payload).is_err(),
             "the frozen semantic codec admits only canonical varints"
@@ -1171,8 +1130,9 @@ mod tests {
 
         // The outer count is rejected while it is still only a postcard
         // varint; no attacker-declared Vec<Vec<u8>> has been allocated.
-        let count_flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
-            .expect("encode count flood below physical byte cap");
+        let count_flood =
+            crate::codec::try_encode(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+                .expect("encode count flood below physical byte cap");
         assert!(
             decode_websocket_frame_batch(&count_flood).is_err(),
             "count flood rejects before element decoding"
@@ -1199,7 +1159,7 @@ mod tests {
 
         let mut oversized_frame = vec![0x01];
         oversized_frame.extend(
-            postcard::to_allocvec(&(MAX_WIRE_FRAME_BYTES + 1))
+            crate::codec::try_encode(&(MAX_WIRE_FRAME_BYTES + 1))
                 .expect("encode oversized frame length"),
         );
         assert!(
@@ -1476,20 +1436,22 @@ mod tests {
 
     #[test]
     fn chunk_request_locator_decode_requires_exactly_256_bits() {
-        #[derive(serde::Serialize)]
         struct RawChunkRequestBatch {
             requests: Vec<RawChunkRequestEntry>,
         }
-        #[derive(serde::Serialize)]
         struct RawChunkRequestEntry {
             request_id: u64,
             locator: Vec<u8>,
             expected_hash: [u8; 32],
             remaining_hops: u8,
         }
+        crate::wire_struct! { for RawChunkRequestBatch { requests } }
+        crate::wire_struct! {
+            for RawChunkRequestEntry { request_id, locator, expected_hash, remaining_hops }
+        }
 
         for length in [31, 32, 33] {
-            let encoded = postcard::to_allocvec(&RawChunkRequestBatch {
+            let encoded = crate::codec::try_encode(&RawChunkRequestBatch {
                 requests: vec![RawChunkRequestEntry {
                     request_id: 1,
                     locator: vec![0x11; length],
@@ -1499,7 +1461,7 @@ mod tests {
             })
             .unwrap();
             assert_eq!(
-                postcard::from_bytes::<ChunkRequestBatch>(&encoded).is_ok(),
+                crate::codec::decode_exact::<ChunkRequestBatch>(&encoded).is_ok(),
                 length == groove::large_values::LOCATOR_BYTES,
                 "locator length {length} must {}decode",
                 if length == groove::large_values::LOCATOR_BYTES {
@@ -1512,48 +1474,23 @@ mod tests {
     }
 
     #[test]
-    fn shared_view_update_payload_preserves_postcard_shape() {
-        #[allow(dead_code)]
-        #[derive(serde::Serialize)]
-        enum FlatSyncMessage {
-            V0,
-            V1,
-            V2,
-            V3,
-            V4,
-            V5,
-            V6,
-            V7,
-            V8,
-            V9,
-            V10,
-            V11,
-            V12,
-            ViewUpdate {
-                subscription: SubscriptionKey,
-                settled_through: GlobalTime,
-                version_carriers: Vec<VersionCarrier>,
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory,
-                supporting_rows: crate::protocol::SupportingRowsUpdate,
-            },
-        }
-
+    fn shared_view_update_payload_keeps_the_former_struct_variant_bytes() {
         let SyncMessage::ViewUpdate(payload) = view_update_with_carriers(Vec::new()) else {
             unreachable!()
         };
-        let flat = FlatSyncMessage::ViewUpdate {
-            subscription: payload.subscription,
-            settled_through: payload.settled_through,
-            version_carriers: payload.version_carriers.clone(),
-            peer_payload_inventory: payload.peer_payload_inventory.clone(),
-            supporting_rows: payload.supporting_rows.clone(),
-        };
-        let current = SyncMessage::ViewUpdate(payload);
-
+        // The former struct variant: its tag, then its fields in order.
+        let flat = with_message_descriptor_table(|| {
+            let mut flat = vec![13u8];
+            payload.subscription.put(&mut flat);
+            payload.settled_through.put(&mut flat);
+            payload.version_carriers.put(&mut flat);
+            payload.peer_payload_inventory.put(&mut flat);
+            payload.supporting_rows.put(&mut flat);
+            flat
+        });
         assert_eq!(
-            encode_sync_message(&current).unwrap(),
-            postcard::to_allocvec(&flat).unwrap(),
-            "a newtype struct is postcard-transparent relative to the former struct variant"
+            encode_sync_message(&SyncMessage::ViewUpdate(payload)).unwrap(),
+            flat
         );
     }
 
@@ -1650,7 +1587,7 @@ mod tests {
             // postcard directly to construct the malformed bytes so this
             // exercises receive-side validation rather than merely proving
             // the guarded sender rejects its own invalid value.
-            let encoded = with_message_descriptor_table(|| to_allocvec(&message))
+            let encoded = with_message_descriptor_table(|| crate::codec::try_encode(&message))
                 .expect("serialize malformed fixture bytes");
             assert!(
                 decode_sync_message(&encoded).is_err(),
@@ -1704,7 +1641,9 @@ mod tests {
         // Deliberately bypass `encode_sync_message`: this helper is used only
         // for receiver-boundary tests of malformed data which a remote peer
         // can serialize without our sender-side guard.
-        decode_sync_message(&with_message_descriptor_table(|| to_allocvec(&message)).unwrap())
+        decode_sync_message(
+            &with_message_descriptor_table(|| crate::codec::try_encode(&message)).unwrap(),
+        )
     }
 
     fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
@@ -1804,7 +1743,7 @@ mod tests {
         assert_eq!(definitions, 1);
         // Without a message scope every row defines its descriptor inline,
         // which is the previous per-row layout's size.
-        let per_row = to_allocvec(&message).unwrap();
+        let per_row = crate::codec::try_encode(&message).unwrap();
         assert!(
             encoded.len() + 999 * descriptor.len() <= per_row.len(),
             "table {} bytes vs per-row {} bytes ({} byte descriptor)",
@@ -2149,28 +2088,26 @@ mod tests {
         }
     }
 
-    /// `decode_postcard_exact` compares while serializing instead of
-    /// allocating a re-encode (#3376). Pin that it accepts exactly what the
-    /// old decode-then-`to_allocvec` equality accepted, across truncations,
-    /// insertions, substitutions, overlong varints and deletions of every
-    /// payload variant and of canonical maps and sets. This is a white-box
-    /// differential test because the equivalence is a property of one
-    /// internal function that no public path can enumerate.
+    /// The hand-written decoders accept exactly the canonical encodings: a
+    /// value decodes from a whole input only if re-encoding it gives that
+    /// input back. Pin this across truncations, insertions, substitutions,
+    /// overlong varints and deletions of every payload variant and of
+    /// canonical maps and sets.
     #[test]
-    fn canonical_postcard_check_matches_allocating_re_encode() {
-        fn allocating_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
-            match postcard::take_from_bytes::<T>(bytes) {
-                Ok((value, rest)) => {
-                    rest.is_empty()
-                        && postcard::to_allocvec(&value).is_ok_and(|encoded| encoded == bytes)
+    fn exact_decode_accepts_only_canonical_encodings() {
+        fn allocating_exact<T: WireCodec>(bytes: &[u8]) -> bool {
+            match crate::codec::decode_prefix::<T>(bytes) {
+                Ok((value, used)) => {
+                    used == bytes.len()
+                        && crate::codec::try_encode(&value).is_ok_and(|encoded| encoded == bytes)
                 }
                 Err(_) => false,
             }
         }
-        fn streaming_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
-            decode_postcard_exact::<T>(bytes).is_ok()
+        fn streaming_exact<T: WireCodec>(bytes: &[u8]) -> bool {
+            crate::codec::decode_exact::<T>(bytes).is_ok()
         }
-        fn mutations_agree<T: serde::de::DeserializeOwned + Serialize>(canonical: &[u8]) {
+        fn mutations_agree<T: WireCodec>(canonical: &[u8]) {
             let check = |bytes: &[u8]| {
                 assert_eq!(
                     allocating_exact::<T>(bytes),
@@ -2210,13 +2147,15 @@ mod tests {
         }
         type Map = std::collections::BTreeMap<u32, String>;
         let map: Map = [(1, "a".to_owned()), (2, "b".to_owned())].into();
-        mutations_agree::<Map>(&postcard::to_allocvec(&map).unwrap());
+        mutations_agree::<Map>(&crate::codec::try_encode(&map).unwrap());
         let duplicate_key = [vec![2u8], vec![1, 1, b'a'], vec![1, 1, b'b']].concat();
         let unsorted_keys = [vec![2u8], vec![2, 1, b'b'], vec![1, 1, b'a']].concat();
         assert!(!streaming_exact::<Map>(&duplicate_key));
         assert!(!streaming_exact::<Map>(&unsorted_keys));
         let set: std::collections::BTreeSet<u64> = [1, 300, 70_000].into();
-        mutations_agree::<std::collections::BTreeSet<u64>>(&postcard::to_allocvec(&set).unwrap());
+        mutations_agree::<std::collections::BTreeSet<u64>>(
+            &crate::codec::try_encode(&set).unwrap(),
+        );
     }
 
     #[test]
@@ -2292,18 +2231,20 @@ mod tests {
         };
         let snapshot_bytes = [vec![0], vec![0x51; 16], vec![0]].concat();
         let delta_bytes = [vec![1], vec![0x51; 16], vec![0x52; 16], vec![0, 0]].concat();
-        assert_eq!(postcard::to_allocvec(&snapshot).unwrap(), snapshot_bytes);
-        assert_eq!(postcard::to_allocvec(&delta).unwrap(), delta_bytes);
+        assert_eq!(crate::codec::try_encode(&snapshot).unwrap(), snapshot_bytes);
+        assert_eq!(crate::codec::try_encode(&delta).unwrap(), delta_bytes);
         assert_eq!(
-            postcard::from_bytes::<SupportingRowsUpdate>(&snapshot_bytes).unwrap(),
+            crate::codec::decode_exact::<SupportingRowsUpdate>(&snapshot_bytes).unwrap(),
             snapshot
         );
         assert_eq!(
-            postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes).unwrap(),
+            crate::codec::decode_exact::<SupportingRowsUpdate>(&delta_bytes).unwrap(),
             delta
         );
         for end in 0..delta_bytes.len() {
-            assert!(postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes[..end]).is_err());
+            assert!(
+                crate::codec::decode_exact::<SupportingRowsUpdate>(&delta_bytes[..end]).is_err()
+            );
         }
         let old = WireHello {
             min_protocol_version: 1,
@@ -2461,7 +2402,7 @@ mod tests {
 
         let next = WIRE_PROTOCOL_VERSION + 1;
         for (min, max) in [(next, next), (WIRE_PROTOCOL_VERSION, next), (1, 1)] {
-            let mut foreign = postcard::to_allocvec(&(0u32, min, max)).unwrap();
+            let mut foreign = crate::codec::try_encode(&(0u32, min, max)).unwrap();
             foreign.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
             assert!(
                 decode_frame(&foreign).is_err(),

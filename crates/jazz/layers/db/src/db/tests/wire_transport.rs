@@ -155,7 +155,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
         catalogue_seq: 1,
         publication: Box::new(publication),
     };
-    assert!(postcard::to_allocvec(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
+    assert!(crate::codec::try_encode(&message).unwrap().len() > MAX_WIRE_FRAME_BYTES);
 
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);

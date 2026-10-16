@@ -386,6 +386,14 @@ pub fn encode<T: WireCodec>(value: &T) -> Vec<u8> {
     buf
 }
 
+/// Encode a value whose codec may record an error (see
+/// [`record_encode_error`]), returning that error instead of partial bytes.
+pub fn try_encode<T: WireCodec>(value: &T) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::new();
+    value.put(&mut buf);
+    take_encode_error().map_or(Ok(buf), Err)
+}
+
 /// Decode one value from the start of `bytes`, returning it and the number
 /// of bytes it used. Trailing bytes are left to the caller.
 pub fn decode_prefix<T: WireCodec>(bytes: &[u8]) -> Result<(T, usize), CodecError> {

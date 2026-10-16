@@ -342,21 +342,17 @@ mod tests {
         TableSchemaBuilder,
     };
     use crate::query::RelationExpr;
-    use serde::{Serialize, de::DeserializeOwned};
 
-    /// The hand codec writes postcard's bytes and reads them back to what
-    /// postcard reads (a row member's legacy `occurrence_id` field is lossy
-    /// in both).
+    /// The value decodes exactly from its encoding, and the decoded value
+    /// encodes to the same bytes. (A row member's legacy `occurrence_id`
+    /// field is not on the wire, so decoded values compare by bytes.)
     fn same<T>(value: &T)
     where
-        T: WireCodec + Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+        T: WireCodec + std::fmt::Debug,
     {
-        let bytes = postcard::to_allocvec(value).unwrap();
-        assert_eq!(encode(value), bytes, "{value:?}");
-        assert_eq!(
-            decode_exact::<T>(&bytes).unwrap(),
-            postcard::from_bytes::<T>(&bytes).unwrap()
-        );
+        let bytes = crate::codec::try_encode(value).unwrap();
+        let decoded = decode_exact::<T>(&bytes).unwrap();
+        assert_eq!(encode(&decoded), bytes, "{value:?}");
     }
 
     fn uuid(byte: u8) -> uuid::Uuid {
@@ -637,7 +633,7 @@ mod tests {
 
     /// Result members, their layers and sources.
     #[test]
-    fn result_members_match_postcard() {
+    fn result_members_round_trip() {
         for member in members() {
             same(&member);
         }
@@ -645,8 +641,7 @@ mod tests {
             same(&source);
         }
         let token = SyntheticReplacementToken::from_encoded_record(vec![1, 2]);
-        let bytes = postcard::to_allocvec(&token).unwrap();
-        assert_eq!(encode(&token), bytes);
+        let bytes = encode(&token);
         assert_eq!(
             decode_exact::<SyntheticReplacementToken>(&bytes).unwrap(),
             token
@@ -657,7 +652,7 @@ mod tests {
 
     /// Supporting rows keep the interning string decode.
     #[test]
-    fn supporting_rows_match_postcard() {
+    fn supporting_rows_round_trip() {
         for name in ["", "todos", "résumé/倉庫"] {
             for populated in [false, true] {
                 let row = SupportingRow {
@@ -677,12 +672,11 @@ mod tests {
         });
         bad[18] = 0xff;
         assert!(decode_exact::<SupportingRow>(&bad).is_err());
-        assert!(postcard::from_bytes::<SupportingRow>(&bad).is_err());
     }
 
     /// Every program-fact variant and its payload entries.
     #[test]
-    fn program_facts_match_postcard() {
+    fn program_facts_round_trip() {
         let member = members().remove(1);
         let source = ProgramSourceId {
             table: intern("todos"),
@@ -819,7 +813,7 @@ mod tests {
 
     /// Catalogue payloads: schema versions, lenses, publications and acks.
     #[test]
-    fn catalogue_payloads_match_postcard() {
+    fn catalogue_payloads_round_trip() {
         let schema = schema_version();
         same(&schema);
         same(&lens());
@@ -911,7 +905,6 @@ mod tests {
         trailing.push(0);
         let mut wire = Vec::new();
         crate::codec::put_bytes(&mut wire, &trailing);
-        assert!(postcard::from_bytes::<MigrationLens>(&wire).is_err());
         assert!(decode_exact::<MigrationLens>(&wire).is_err());
 
         let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];

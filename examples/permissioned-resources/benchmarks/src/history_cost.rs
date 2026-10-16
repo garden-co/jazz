@@ -22,9 +22,9 @@ fn read(path: &Path) -> Vec<VersionBundle> {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|v| postcard::from_bytes(&hex(&v["wire_hex"])).unwrap())
+                    .map(|v| jazz::codec::decode_exact(&hex(&v["wire_hex"])).unwrap())
                     .collect(),
-                scope: serde_json::from_value(b["scope"].clone()).unwrap(),
+                scope: crate::version_bundle_scope_from_name(b["scope"].as_str().unwrap()),
                 fate: serde_json::from_value(b["fate"].clone()).unwrap(),
                 global_time: serde_json::from_value(b["global_time"].clone()).unwrap(),
                 durability: serde_json::from_value(b["durability"].clone()).unwrap(),

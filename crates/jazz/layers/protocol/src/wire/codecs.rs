@@ -137,28 +137,23 @@ crate::wire_struct! {
 
 #[cfg(test)]
 mod tests {
-    //! Differential tests against postcard, the layout these codecs must
-    //! reproduce byte for byte. They are white-box because the contract is
-    //! the byte format itself, before any public entry point switches over.
-
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
+    //! Codec tests pinned to the frozen fixtures (written by the previous
+    //! postcard codec). They are white-box because the contract is the byte
+    //! format itself.
 
     use super::*;
     use crate::codec::{WireCodec, decode_exact, encode};
     use crate::ids::{AuthorSubject, NodeUuid};
     use crate::wire::{
-        WIRE_FRAME_ARTIFACT_CORPUS, decode_postcard_exact, decode_websocket_frame_batch,
-        encode_websocket_frame_batch,
+        WIRE_FRAME_ARTIFACT_CORPUS, decode_websocket_frame_batch, encode_websocket_frame_batch,
     };
 
     #[track_caller]
     fn same<T>(value: T)
     where
-        T: WireCodec + Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+        T: WireCodec + PartialEq + std::fmt::Debug,
     {
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        assert_eq!(encode(&value), bytes, "{value:?}");
+        let bytes = encode(&value);
         assert_eq!(decode_exact::<T>(&bytes).unwrap(), value);
     }
 
@@ -304,10 +299,9 @@ mod tests {
         frames
     }
 
-    /// Every variant of every frame type encodes to postcard's bytes and
-    /// decodes back from them.
+    /// Every variant of every frame type decodes back from its encoding.
     #[test]
-    fn frame_codecs_match_postcard_for_every_variant() {
+    fn frame_codecs_round_trip_every_variant() {
         for frame in frames() {
             same(frame);
         }
@@ -319,22 +313,15 @@ mod tests {
         }
     }
 
-    /// Both decoders reach the same verdict and the same value on `bytes`, and
-    /// an accepted frame re-encodes to `bytes`.
+    /// A frame the decoder accepts is canonical: it re-encodes to `bytes`.
     #[track_caller]
-    fn decoders_agree(bytes: &[u8]) {
-        let ours = decode_exact::<WireFrame>(bytes);
-        let theirs = decode_postcard_exact::<WireFrame>(bytes);
-        match (&ours, &theirs) {
-            (Ok(ours), Ok(theirs)) => {
-                assert_eq!(ours, theirs, "{}", hex::encode(bytes));
-                assert_eq!(encode(ours), bytes);
+    fn decodes_canonically(bytes: &[u8]) -> bool {
+        match decode_exact::<WireFrame>(bytes) {
+            Ok(frame) => {
+                assert_eq!(encode(&frame), bytes, "{}", hex::encode(bytes));
+                true
             }
-            (Err(_), Err(_)) => {}
-            _ => panic!(
-                "decoders disagree on {}: ours {ours:?}, postcard {theirs:?}",
-                hex::encode(bytes)
-            ),
+            Err(_) => false,
         }
     }
 
@@ -392,28 +379,27 @@ mod tests {
         frames
     }
 
-    /// Every frame of the frozen fixtures, current and retired, gets the same
-    /// verdict and value from both decoders, and so does every truncation
-    /// and single-byte corruption of it.
+    /// Every frame of the frozen fixtures, current and retired, and every
+    /// truncation and single-byte corruption of it, decodes only to a value
+    /// that re-encodes to the same bytes.
     #[test]
-    fn fixture_frames_decode_like_postcard() {
+    fn fixture_frames_decode_canonically() {
         let frames = fixture_frames();
         assert!(frames.len() > 20, "{}", frames.len());
         let mut accepted = 0;
         for frame in &frames {
-            accepted += usize::from(decode_postcard_exact::<WireFrame>(frame).is_ok());
-            decoders_agree(frame);
+            accepted += usize::from(decodes_canonically(frame));
             for end in 0..frame.len() {
-                decoders_agree(&frame[..end]);
+                decodes_canonically(&frame[..end]);
             }
             let mut padded = frame.clone();
             padded.push(0);
-            decoders_agree(&padded);
+            assert!(!decodes_canonically(&padded));
             for at in 0..frame.len() {
                 for byte in [0, 1, 2, 0x7f, 0x80, 0xff, frame[at] ^ 1] {
                     let mut mutated = frame.clone();
                     mutated[at] = byte;
-                    decoders_agree(&mutated);
+                    decodes_canonically(&mutated);
                 }
             }
         }

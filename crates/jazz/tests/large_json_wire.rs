@@ -85,7 +85,7 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
         SchemaVersionId::from_bytes([0x22; 16]),
         OwnedRecord::new(legacy_raw, legacy_descriptor),
     );
-    let corpus = serde_json::json!({ "inline": hex(&postcard::to_allocvec(&inline).unwrap()), "indirect": hex(&postcard::to_allocvec(&indirect).unwrap()), "legacy_inline": hex(&postcard::to_allocvec(&legacy).unwrap()) });
+    let corpus = serde_json::json!({ "inline": hex(&jazz::codec::try_encode(&inline).unwrap()), "indirect": hex(&jazz::codec::try_encode(&indirect).unwrap()), "legacy_inline": hex(&jazz::codec::try_encode(&legacy).unwrap()) });
     if std::env::var_os("JAZZ_UPDATE_WIRE_FIXTURES").is_some() {
         std::fs::write(
             concat!(
@@ -103,7 +103,7 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
     for (name, value) in [("inline", inline_value), ("indirect", indirect_value)] {
         let bytes = unhex(expected[name].as_str().unwrap());
         assert!(bytes.windows(5).any(|bytes| bytes == b"JVRR\x03"));
-        let decoded: VersionRecord = postcard::from_bytes(&bytes).unwrap();
+        let decoded: VersionRecord = jazz::codec::decode_exact(&bytes).unwrap();
         assert_eq!(
             decoded.record().descriptor(),
             &table.wire_record_descriptor()
@@ -112,10 +112,10 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
             decoded.record().borrowed().get("_app_payload").unwrap(),
             Value::Nullable(Some(Box::new(value)))
         );
-        assert_eq!(postcard::to_allocvec(&decoded).unwrap(), bytes);
+        assert_eq!(jazz::codec::try_encode(&decoded).unwrap(), bytes);
     }
     let legacy: VersionRecord =
-        postcard::from_bytes(&unhex(expected["legacy_inline"].as_str().unwrap())).unwrap();
+        jazz::codec::decode_exact(&unhex(expected["legacy_inline"].as_str().unwrap())).unwrap();
     assert_ne!(
         legacy.record().descriptor(),
         &table.wire_record_descriptor(),

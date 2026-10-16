@@ -6829,7 +6829,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let snapshot = node.borrow().catalogue_snapshot()?;
-    let catalogue_fingerprint = *blake3::hash(&crate::codec::encode(&snapshot)).as_bytes();
+    let Ok(encoded) = crate::codec::try_encode(&snapshot) else {
+        // An unencodable snapshot is never fingerprinted; sending it reports
+        // the encode error through the transport.
+        return transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error);
+    };
+    let catalogue_fingerprint = *blake3::hash(&encoded).as_bytes();
     if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
         transport
             .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
