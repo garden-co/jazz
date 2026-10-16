@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 - `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical native author records and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
-- `INV-DATA-27`: History, global-current and ahead-current rows MUST store `created_at` and `updated_at` as Unix milliseconds in a Groove U64-stored-as-U48 column (exactly 6 bytes, `INV-STORAGE-39`), exposed as `U64` above storage; a value above `2^48 - 1` MUST be refused with a typed error, never truncated.
+- `INV-DATA-27`: History, global-current and ahead-current rows MUST store `created_at` and `updated_at` as Unix milliseconds in a native Groove `U48` column (exactly 6 bytes, `INV-STORAGE-37`); Jazz MUST widen them to `U64` only at its own egress (wire and JS bindings), and a value above `2^48 - 1` MUST be refused with a typed error, never truncated.
 - `INV-DATA-28`: History MUST hold only superseded accepted images and pending (`seq = 0`) records: a row's latest accepted image MUST be stored only in its global-current record, which carries the image's `base_seq` and `base_pending` with history's encoding. An accepted write that supersedes the row's current image MUST first move that image into history at the image's own seq, base included, then overwrite current. The row at seq `S` MUST be read from current when `S` is at or above the row's current seq and from history otherwise; both are point reads.
 
 ## Details
@@ -331,10 +331,10 @@ global-current record and ahead-overlay record stores all four provenance
 fields. `created_at` and `updated_at` are public Unix milliseconds in all three
 (history no longer stores a packed HLC there; the in-memory `TxTime` it
 rebuilds has logical counter zero, as wire provenance always had). Each is a
-Groove U64-stored-as-U48 column (Groove SPEC 2, "U64 columns stored in 6
-bytes", `INV-STORAGE-39`): 6 bytes on disk, a `U64` to every read, query,
-policy and the wire, and a write above `2^48 - 1` is refused rather than
-truncated. The packed HLC's 46 physical bits always fit (`INV-DATA-27`).
+native Groove `U48` column (Groove SPEC 2, `INV-STORAGE-37`): 6 bytes on disk
+and a logical `U48` to every node read, query and policy. Jazz widens it to
+`U64` only at its own egress (the wire and the JS bindings), and a write above
+`2^48 - 1` is refused rather than truncated. The packed HLC's 46 physical bits always fit (`INV-DATA-27`).
 An image takes `updated_by` from the write it applies, so it is the
 author of the row's latest applied write (SPEC 4 §4.6). `created_by` and
 `updated_by` are interned columns (Groove SPEC 2, "Interned columns and

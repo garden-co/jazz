@@ -6272,11 +6272,11 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
     );
     assert!(matches!(
         terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$createdAt").as_slice(),
-        [Value::U64(_)]
+        [Value::U48(_)]
     ));
     assert!(matches!(
         terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
-        [Value::U64(_)]
+        [Value::U48(_)]
     ));
 }
 
@@ -6306,7 +6306,7 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
             .find(|(record, weight)| *weight > 0 && record.get_uuid(0).unwrap() == id.0)
             .unwrap()
             .0;
-        assert_eq!(record.get_u64(created_at).unwrap(), 1_234);
+        assert_eq!(record.get_u48(created_at).unwrap(), 1_234);
     }
 
     let query = db
@@ -6316,8 +6316,8 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
     let prepared = db.prepare_query(&query).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
     let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
-    assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
-    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("$createdAt"), Some(Value::U48(1_234)));
+    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U48(1_234)));
     assert_eq!(row.raw_field("user_done"), None);
 }
 
@@ -6354,8 +6354,8 @@ fn session_policy_read_retains_selected_provenance() {
         .unwrap();
     let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
     assert_eq!(row_ids(&rows), vec![id]);
-    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U64(1_234)));
-    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U48(1_234)));
+    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U48(1_234)));
     let batches = row_batches(&rows).expect("policy-read rows encode for the native binding");
     for name in ["$createdAt", "$updatedAt"] {
         assert!(

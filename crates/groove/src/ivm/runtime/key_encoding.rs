@@ -283,6 +283,11 @@ pub(super) fn record_field_literal_ordering(
         (ValueType::U48, LiteralValue::U48(expected)) => {
             Ok(ordering(&record.get_u48(field_idx)?, expected))
         }
+        // A U48 column (a provenance stamp) compares with an integer literal by
+        // value: public queries and policies type it as a 64-bit timestamp.
+        (ValueType::U48, LiteralValue::U64(expected)) => {
+            Ok(ordering(&record.get_u48(field_idx)?, expected))
+        }
         (ValueType::I32, LiteralValue::I32(expected)) => {
             Ok(ordering(&record.get_i32(field_idx)?, expected))
         }
@@ -328,6 +333,7 @@ fn nullable_record_field_literal_ordering(
     Ok(match (inner, expected) {
         (ValueType::U64, LiteralValue::U64(e)) => nullable_ordering(r.get_nullable_u64(i)?, e),
         (ValueType::U48, LiteralValue::U48(e)) => nullable_ordering(r.get_nullable_u48(i)?, e),
+        (ValueType::U48, LiteralValue::U64(e)) => nullable_ordering(r.get_nullable_u48(i)?, e),
         (ValueType::I64, LiteralValue::I64(e)) => nullable_ordering(r.get_nullable_i64(i)?, e),
         (ValueType::I32, LiteralValue::I32(e)) => nullable_ordering(r.get_nullable_i32(i)?, e),
         (ValueType::F64, LiteralValue::F64(e)) => {

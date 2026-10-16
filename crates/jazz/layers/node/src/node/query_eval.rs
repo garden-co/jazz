@@ -5142,7 +5142,7 @@ fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::Co
         return Some(ty);
     }
     match column {
-        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
+        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U48),
         _ => None,
     }
 }

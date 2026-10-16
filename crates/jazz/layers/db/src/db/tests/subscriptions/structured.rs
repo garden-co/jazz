@@ -1671,12 +1671,15 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     );
     assert_eq!(
         added[0].row.raw_field("$createdAt"),
-        Some(Value::U64(4_321))
+        Some(Value::U48(4_321))
     );
     let binding_rows = [added[0].row.clone()];
     let batches = crate::binding_codec::row_batches(&binding_rows)
         .expect("terminal update encodes for the native binding");
-    let (descriptor, _) = binding_rows[0].encoded_record();
+    // The binding sees stored `U48` provenance widened to `U64`.
+    let descriptor = crate::binding_codec::published_record(&binding_rows[0])
+        .expect("published record")
+        .descriptor;
     assert_eq!(
         descriptor.bind(&batches[0].rows[0].raw).get("$createdAt"),
         Ok(Value::U64(4_321))

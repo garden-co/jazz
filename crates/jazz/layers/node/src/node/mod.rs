@@ -1799,6 +1799,17 @@ pub struct RelationSnapshot {
     pub edges: Vec<RelationEdge>,
 }
 
+/// A provenance timestamp of a row: Unix milliseconds, a `U48` as stored and
+/// queried. A row built from egress-shaped values may carry it widened to `U64`.
+fn provenance_ms(record: &records::BorrowedRecord<'_>, index: usize) -> Result<u64, Error> {
+    match record.get_idx(index)? {
+        Value::U48(value) | Value::U64(value) => Ok(value),
+        _ => Err(Error::InvalidStoredValue(
+            "provenance timestamp must be u48",
+        )),
+    }
+}
+
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
@@ -2116,7 +2127,8 @@ impl CurrentRow {
             "$createdBy" | "$updatedBy" => RowAuthor::from_record(record.get_record(index)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .to_value(),
-            "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
+            // Stored and queried as `U48`; widened here, at egress.
+            "$createdAt" | "$updatedAt" => Value::U64(provenance_ms(&record, index)?),
             _ => unreachable!("provenance_field_index accepts only provenance columns"),
         }))
     }
@@ -2142,11 +2154,11 @@ impl CurrentRow {
             created_by: RowAuthor::from_record(borrowed.get_record(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
-            created_at: borrowed.get_u64(created_at_idx)?,
+            created_at: provenance_ms(&borrowed, created_at_idx)?,
             updated_by: RowAuthor::from_record(borrowed.get_record(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
-            updated_at: borrowed.get_u64(updated_at_idx)?,
+            updated_at: provenance_ms(&borrowed, updated_at_idx)?,
         }))
     }
 
@@ -2236,22 +2248,22 @@ impl CurrentRow {
         if let Some(provenance) = self.provenance()? {
             descriptor_fields.extend([
                 records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
-                records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                records::DescriptorField::new("$createdAt", records::ValueType::U48),
                 records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
-                records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+                records::DescriptorField::new("$updatedAt", records::ValueType::U48),
             ]);
             values.push(
                 RowAuthor::from_persisted_subject(provenance.created_by)
                     .map_err(|_| Error::UnadmittedWriteAuthor)?
                     .to_value(),
             );
-            values.push(Value::U64(provenance.created_at));
+            values.push(Value::U48(provenance.created_at));
             values.push(
                 RowAuthor::from_persisted_subject(provenance.updated_by)
                     .map_err(|_| Error::UnadmittedWriteAuthor)?
                     .to_value(),
             );
-            values.push(Value::U64(provenance.updated_at));
+            values.push(Value::U48(provenance.updated_at));
             binding_fields.extend(
                 ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
                     .into_iter()

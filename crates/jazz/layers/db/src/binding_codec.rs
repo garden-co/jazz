@@ -250,11 +250,72 @@ pub struct PublishedRecord<'a> {
 #[doc(hidden)]
 pub fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcard::Error> {
     let (descriptor, raw) = row.encoded_record();
+    let fields = row.publication_fields().iter().collect();
+    if let Some((descriptor, raw)) = widen_u48_fields(descriptor, raw) {
+        return Ok(PublishedRecord {
+            descriptor,
+            raw: Cow::Owned(raw),
+            fields,
+        });
+    }
     Ok(PublishedRecord {
         descriptor: *descriptor,
         raw: Cow::Borrowed(raw),
-        fields: row.publication_fields().iter().collect(),
+        fields,
     })
+}
+
+/// The host binding knows no `U48`: provenance timestamps (`$createdAt`,
+/// `$updatedAt`) are stored and queried as `U48` milliseconds and widen to
+/// `U64` here, at egress. `None` when the record has no `U48` field.
+fn widen_u48_fields(
+    descriptor: &groove::records::RecordDescriptor,
+    raw: &[u8],
+) -> Option<(groove::records::RecordDescriptor, Vec<u8>)> {
+    use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
+    fn widened(value_type: &ValueType) -> Option<ValueType> {
+        match value_type {
+            ValueType::U48 => Some(ValueType::U64),
+            ValueType::Nullable(inner) if **inner == ValueType::U48 => {
+                Some(ValueType::Nullable(Box::new(ValueType::U64)))
+            }
+            _ => None,
+        }
+    }
+    if !descriptor
+        .fields()
+        .iter()
+        .any(|field| widened(&field.value_type).is_some())
+    {
+        return None;
+    }
+    let wide = RecordDescriptor::new_with_fields(descriptor.fields().iter().map(|field| {
+        let mut field = field.clone();
+        if let Some(value_type) = widened(&field.value_type) {
+            field.value_type = value_type;
+        }
+        field
+    }));
+    let record = BorrowedRecord::new(raw, descriptor);
+    let values = (0..descriptor.fields().len())
+        .map(|index| {
+            Ok(match record.get_idx(index)? {
+                Value::U48(value) => Value::U64(value),
+                Value::Nullable(Some(inner)) if matches!(*inner, Value::U48(_)) => {
+                    let Value::U48(value) = *inner else {
+                        unreachable!("matched a U48 payload")
+                    };
+                    Value::Nullable(Some(Box::new(Value::U64(value))))
+                }
+                value => value,
+            })
+        })
+        .collect::<Result<Vec<_>, groove::records::Error>>()
+        .expect("a stored current row decodes field by field");
+    let raw = wide
+        .create(&values)
+        .expect("widening a U48 field keeps the record encodable");
+    Some((wide, raw))
 }
 
 /// Group only adjacent rows with equal table and tagged descriptor.

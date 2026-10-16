@@ -1388,11 +1388,12 @@ pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
 
 /// Storage type of the `created_at` / `updated_at` provenance columns of the
 /// history, global-current and ahead-current tables: Unix milliseconds kept in
-/// a fixed 6-byte slot (SPEC 2, "Provenance timestamps"). Reads and writes see
-/// a `U64`; Groove refuses a value above `2^48 - 1` instead of truncating it.
-/// The wire keeps 8-byte milliseconds.
+/// a fixed 6-byte slot (SPEC 2, "Provenance timestamps"). The column is a native
+/// Groove `U48`; Groove refuses a value above `2^48 - 1` instead of truncating
+/// it. Jazz widens it to `U64` only at egress, so the wire keeps 8-byte
+/// milliseconds.
 fn provenance_ms_column() -> GrooveColumnType {
-    GrooveColumnType::u64_stored_as_u48()
+    GrooveColumnType::U48
 }
 
 fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {

@@ -955,10 +955,10 @@ where
                         input.get_idx(*source)?
                     }
                     PhysicalWriteField::CreatedAtMillis => {
-                        Value::U64(version.created_at().physical_ms())
+                        Value::U48(version.created_at().physical_ms())
                     }
                     PhysicalWriteField::UpdatedAtMillis => {
-                        Value::U64(version.updated_at().physical_ms())
+                        Value::U48(version.updated_at().physical_ms())
                     }
                     PhysicalWriteField::UpdatedBy => row_author_value(version.updated_by())?,
                     PhysicalWriteField::GlobalTime => {
