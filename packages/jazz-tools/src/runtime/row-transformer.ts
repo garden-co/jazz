@@ -12,6 +12,7 @@ import {
 } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import { dependencyContext, type ColumnTransform } from "./column-transforms.js";
 
 export type { WasmValue };
 
@@ -128,13 +129,14 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<string, Readonly<Record<string, { from(value: unknown): unknown }>> | undefined>
+  Record<string, Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>> | undefined>
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, { from(value: unknown): unknown }>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>>,
   excludedColumns: readonly string[] = [],
+  stored: Readonly<Record<string, unknown>> = { ...row },
 ): Record<string, unknown> {
   if (!transforms) return row;
   for (const column in transforms) {
@@ -145,7 +147,8 @@ export function applyColumnTransforms(
     ) {
       continue;
     }
-    row[column] = transforms[column]!.from(row[column]);
+    const transform = transforms[column]!;
+    row[column] = transform.from(row[column], dependencyContext(transform, stored));
   }
   return row;
 }

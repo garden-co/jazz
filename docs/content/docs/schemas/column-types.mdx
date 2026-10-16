@@ -60,3 +60,41 @@ await db.all(app.tasks.where({ priority: { gte: 8 } }));
 ```
 
 Transforms are TypeScript-client behavior. They do not change the generated SQL schema, migrations, permissions, indexes, or values stored on disk.
+
+### Depending on other columns
+
+Declare `dependsOn` when a conversion needs other columns in the same row:
+
+```ts
+const products = s.table(
+  {
+    price: s.float().transform({
+      dependsOn: ["denomination"],
+      from(value, context: Readonly<{ denomination: string }>) {
+        return context.denomination === "cents" ? value / 100 : value;
+      },
+      to(value: number, context: Readonly<{ denomination: string }>) {
+        return context.denomination === "cents" ? value * 100 : value;
+      },
+    }),
+    denomination: s.string().default("cents"),
+  },
+  {},
+);
+```
+
+`from` receives decoded **stored** dependency values, before their column transforms run. `to` receives **app-facing** dependency values. If the write supplies a dependency, that value takes precedence over the existing value. Explicit context annotations are checked against the completed table; without annotations, dependency values have type `unknown`. Both callbacks must be synchronous and must not mutate their inputs.
+
+Jazz fetches missing dependencies automatically. Reads, included rows, relationship hops and subscriptions fetch the stored context they need even when you select only `price`. Internally fetched fields do not appear in the result. A partial text, JSON or byte selection still returns the requested slice, while a dependent transform receives the complete dependency value.
+
+Updates and upserts fetch only the missing dependency columns in the mutation's session, branch and transaction view. Insert, restore and the creation branch of upsert can use schema defaults; an explicit `null` is preserved. Fetched dependencies are context only and are never written back. Lookup and conversion failures reject the write handle or transaction. Transaction updates retain their existing calling style, including unawaited updates inside a transaction callback.
+
+On a serving host, an empty user-scoped lookup may mean the row is hidden by permissions. Jazz rejects that upsert rather than assuming the row is absent and using creation defaults. Supply the transform's dependencies explicitly when creating a row through that scope.
+
+Changing only `denomination` leaves the stored `price` untouched. Subsequent reads and subscription updates reinterpret it using the new denomination. To preserve the app-facing price while changing denomination, supply both fields in the same write.
+
+Dependencies can name same-table columns and `id`. Unknown names, self-dependencies and dependency cycles are rejected. Dependencies are client metadata and do not affect the structural schema hash. Filtering, sorting, permissions and indexes continue to use stored values. Automatic lookup preserves the existing mergeable or exclusive transaction semantics; a mergeable write gains no read-conflict guarantee.
+
+Explicit transactions retain the native runtime's read restrictions. For example, if a transaction cannot read a branch view, a missing dependency in that view rejects the transaction rather than falling back to another branch. Standalone mutations can use the ordinary scoped branch-read path before staging their write.
+
+A combined write cannot convert `price` if its new dependency value is supplied only as a stream or partial edit. Supply a whole-value replacement for that dependency instead. Streaming or partially editing a dependency on its own is allowed, and subsequent reads recompute the dependent value.

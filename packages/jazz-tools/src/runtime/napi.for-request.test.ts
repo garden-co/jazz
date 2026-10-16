@@ -221,6 +221,74 @@ async function createConcurrentTestEnv() {
 // ---------------------------------------------------------------------------
 
 describe("forRequest auth and policy", () => {
+  it("uses request-visible transform dependencies and rejects uncertain upsert absence", async () => {
+    const appId = randomUUID();
+    const backendSecret = "dependent-transform-backend";
+    const adminSecret = "dependent-transform-admin";
+    const app = s.defineApp({
+      products: s.table(
+        {
+          owner_id: s.uuid(),
+          unit: s.string().default("cents"),
+          price: s.float().transform({
+            dependsOn: ["unit"],
+            from: (value, context: Readonly<{ unit: string }>) =>
+              context.unit === "cents" ? value / 100 : value,
+            to: (value: number, context: Readonly<{ unit: string }>) =>
+              context.unit === "cents" ? value * 100 : value,
+          }),
+        },
+        {},
+      ),
+    });
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.products.allowRead.where({ owner_id: session.user.account });
+      policy.products.allowInsert.where({});
+      policy.products.allowUpdate.where({});
+    });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+    onTestFinished(() => server.stop());
+    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      backendSecret,
+      jwtPublicKey: externalJwtPublicKey,
+      env: "test",
+      tier: "local",
+    });
+    onTestFinished(() => context.shutdown());
+    const alice = await createExternalIdentity("alice", server, appId);
+    const bob = await createExternalIdentity("bob", server, appId);
+    const backend = context.asBackend();
+    const hidden = await backend
+      .insert(app.products, { owner_id: bob.user, unit: "dollars", price: 1 })
+      .wait({ tier: "edge" });
+    const visible = await backend
+      .insert(app.products, { owner_id: alice.user, unit: "dollars", price: 1 })
+      .wait({ tier: "edge" });
+    const scoped = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    await expect(scoped.one(app.products.where({ id: hidden.id }))).resolves.toBeNull();
+    await expect(
+      scoped.upsert(app.products, hidden.id, { price: 2 }).wait({ tier: "local" }),
+    ).rejects.toThrow(/cannot establish|unavailable/);
+    await scoped.update(app.products, visible.id, { price: 2 }).wait({ tier: "edge" });
+    await expect(backend.one(app.products.where({ id: hidden.id }))).resolves.toMatchObject({
+      price: 1,
+      unit: "dollars",
+    });
+    await expect(backend.one(app.products.where({ id: visible.id }))).resolves.toMatchObject({
+      price: 2,
+      unit: "dollars",
+    });
+  });
+
   /**
    * Alice inserts her own row; then tries to insert with a foreign owner_id.
    * Backend Db sees the row regardless of ownership.
