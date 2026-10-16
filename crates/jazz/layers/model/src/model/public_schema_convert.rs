@@ -1647,6 +1647,9 @@ fn validate_exists_rel_policy_join_conditions(
         PolicyExpr::Not(expr) => {
             validate_exists_rel_policy_join_conditions(table, &format!("{path}.Not"), expr)
         }
+        PolicyExpr::Exists { condition, .. } => {
+            validate_exists_rel_policy_join_conditions(table, &format!("{path}.Exists"), condition)
+        }
         _ => Ok(()),
     }
 }
@@ -1888,6 +1891,15 @@ fn append_exists_rel_policy_clause(
         }
     }
     if let Some(pending) = lowered.pending_reachable.take() {
+        // The walk's rows are keyed by a column of the protected row, which
+        // stands in as the access table here; any other filter on the walk's
+        // rows would be evaluated against the protected row instead.
+        if !remaining_filters.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "Filters on the rows a scalar Gather reaches are not supported in policies yet",
+            ));
+        }
         lowered.reachable.push(crate::query::ReachableVia {
             access_table: table.as_str().to_owned(),
             access_row_column: "id".to_owned(),
@@ -1930,11 +1942,7 @@ fn append_exists_rel_policy_clause(
         // so `member.workspace = outer.workspace` constrains the root block's
         // workspace without publishing any proof carrier.
         for nested in &mut lowered.joins {
-            if nested
-                .nested_joins
-                .iter()
-                .any(|child| !child.correlated_filters.is_empty())
-            {
+            if nested.nested_joins.iter().any(join_has_outer_correlations) {
                 return Err(err(
                     policy_path(table, path),
                     "core schema ExistsRel does not yet support outer correlations beyond one nested join",
@@ -2169,10 +2177,11 @@ fn lower_exists_rel(
                     "Gather on the right side of a join is not supported in policies yet",
                 ));
             }
-            let Some(on) = on.first() else {
+            // Only one equality becomes the join key; a second would be dropped.
+            let [on] = on.as_slice() else {
                 return Err(err(
                     policy_path(table, path),
-                    "core schema ExistsRel joins require a column equality",
+                    "core schema ExistsRel joins require exactly one column equality",
                 ));
             };
             let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;

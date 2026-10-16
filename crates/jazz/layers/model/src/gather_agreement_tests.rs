@@ -797,3 +797,115 @@ fn scalar_gather_keyed_twice_is_rejected() {
         "{error}"
     );
 }
+
+/// A scalar gather keyed on a column of the protected row has no access table
+/// of its own, so a filter meant for the reached team, such as "the team is
+/// enabled", would be evaluated against the protected row instead.
+#[test]
+fn filters_on_scalar_gather_rows_are_rejected() {
+    let error = access_policy_error(filter(
+        gather(scalar_parent_step()),
+        RelationPredicate::And(vec![
+            equals(
+                "teams",
+                "id",
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped("team")),
+            ),
+            equals(
+                "teams",
+                "enabled",
+                RelationValueRef::literal(crate::model::public_schema::Value::Boolean(true)),
+            ),
+        ]),
+    ));
+    assert!(
+        error.contains("Filters on the rows a scalar Gather reaches"),
+        "{error}"
+    );
+}
+
+/// Access rows joined to their team on two equalities; only one can become
+/// the join key.
+fn access_joined_on_two_columns() -> RelationExpr {
+    filter(
+        RelationExpr::Join {
+            left: Box::new(scan("doc_access", Some("access"))),
+            right: Box::new(scan("teams", Some("t"))),
+            on: vec![
+                RelationJoinCondition {
+                    left: column("access", "team"),
+                    right: column("t", "id"),
+                },
+                RelationJoinCondition {
+                    left: column("access", "team"),
+                    right: column("t", "parent"),
+                },
+            ],
+            join_kind: RelationJoinKind::Inner,
+        },
+        outer_doc(),
+    )
+}
+
+/// The second equality is rejected wherever the relation sits, including
+/// inside a legacy `Exists` condition.
+#[test]
+fn joins_on_more_than_one_equality_are_rejected() {
+    let direct = access_policy_error(access_joined_on_two_columns());
+    let nested = match docs_read_policy(PolicyExpr::Exists {
+        table: "doc_access".to_owned(),
+        condition: Box::new(PolicyExpr::ExistsRel {
+            rel: access_joined_on_two_columns(),
+        }),
+    }) {
+        Ok(policy) => panic!("the policy must not compile, got {policy:?}"),
+        Err(error) => error,
+    };
+    for error in [direct, nested] {
+        assert!(error.contains("exactly one column equality"), "{error}");
+    }
+}
+
+/// A correlation more than one join below the correlated root would be bound
+/// to its parent join's row rather than the protected row.
+#[test]
+fn correlations_deeper_than_one_nested_join_are_rejected() {
+    let hop = |input: RelationExpr, from: (&str, &str), to: &str| RelationExpr::Join {
+        left: Box::new(input),
+        right: Box::new(scan("teams", Some(to))),
+        on: vec![RelationJoinCondition {
+            left: column(from.0, from.1),
+            right: column(to, "id"),
+        }],
+        join_kind: RelationJoinKind::Inner,
+    };
+    let chain = |correlated: &str| {
+        let joins = hop(
+            hop(
+                hop(scan("doc_access", Some("access")), ("access", "team"), "t"),
+                ("t", "parent"),
+                "u",
+            ),
+            ("u", "parent"),
+            "v",
+        );
+        filter(
+            joins,
+            RelationPredicate::And(vec![
+                outer_doc(),
+                equals(
+                    correlated,
+                    "owner_id",
+                    RelationValueRef::OuterColumn(RelationColumnRef::unscoped("workspace")),
+                ),
+            ]),
+        )
+    };
+    for correlated in ["u", "v"] {
+        let error = access_policy_error(chain(correlated));
+        assert!(
+            error.contains("beyond one nested join"),
+            "{correlated}: {error}"
+        );
+    }
+}
