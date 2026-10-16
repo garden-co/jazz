@@ -69,7 +69,10 @@ No client secret is involved, and the device code is never printed.
 
 `~/.config/jazz/credentials.json` (or `$XDG_CONFIG_HOME/jazz`, `%APPDATA%\jazz`,
 or `$JAZZ_CONFIG_DIR`) is written with an atomic rename, file mode `0600`,
-directory mode `0700`. Format, version 1:
+directory mode `0700` (an existing directory is tightened to `0700`). Every
+read-modify-write holds `credentials.lock` in the same directory, created with
+`O_EXCL`; a lock older than 60 seconds is treated as left by a dead process.
+Format, version 1:
 
 ```json
 {
@@ -88,15 +91,20 @@ directory mode `0700`. Format, version 1:
 }
 ```
 
-Profiles are keyed by dashboard origin. Any other `version` is rejected with an
-instruction to log in again, rather than guessed at. No admin or backend
+Profiles are keyed by dashboard origin. Any other `version`, or a file that is
+not valid JSON, is rejected with an instruction to delete it and log in again,
+rather than guessed at. The error never quotes the file's contents. No admin or backend
 secret is ever written here.
 
 The access token is refreshed when it is within 30 seconds of expiry, and once
-more if the API answers 401. Refresh tokens rotate. If a refresh fails because
-a concurrent `jazz-tools` process already rotated the token, the CLI uses the
-token that process stored. If WorkOS rejects the refresh token, the profile is
-deleted and the user is told to log in again.
+more if the API answers 401. Refresh tokens rotate and are single-use, so a
+refresh runs entirely under the credentials lock: the CLI re-reads the profile
+under the lock and, if a concurrent `jazz-tools` process already rotated the
+token, uses the one it stored instead of presenting the consumed token. If
+WorkOS rejects the refresh token, the profile (still the one just rejected,
+since the lock is held) is deleted and the user is told to log in again. The
+WorkOS API URL that refresh tokens are sent to must use HTTPS, like the
+dashboard URL.
 
 `JAZZ_CLOUD_TOKEN` overrides the stored login with a bearer the caller already
 holds. It is never refreshed.
@@ -105,8 +113,11 @@ The refresh token is the long-lived part of the login. It lasts as long as the
 WorkOS session is allowed to (configured in WorkOS). A leaked credentials file
 is equivalent to a leaked dashboard session: it can do what the user can do in
 the dashboard, but not act as the app's root on the sync server. `logout`
-deletes it locally. Server-side session revocation is still done in WorkOS or
-by signing out everywhere.
+first calls `POST /api/v1/logout`, which revokes the WorkOS session (and with
+it the refresh token), then deletes the profile locally. If the dashboard is
+unreachable the local profile is still deleted and the output says the session
+was not ended server-side. Access tokens already issued stay valid until they
+expire, because `/api/v1` verifies them locally.
 
 ## CLI API (`/api/v1` on the dashboard)
 
@@ -129,19 +140,20 @@ Every route except `cli/config` and `regions` requires
   `rate_limited`, `upstream_unavailable` and `internal`. Token material is
   never echoed.
 
-| Method       | Path                                 | Notes                                                                 |
-| ------------ | ------------------------------------ | --------------------------------------------------------------------- |
-| GET          | `/api/v1/cli/config`                 | public; `{ apiVersion, workos: { clientId, apiBaseUrl } }`            |
-| GET          | `/api/v1/regions`                    | public; core regions for `apps create`                                |
-| GET          | `/api/v1/me`                         | user and teams                                                        |
-| GET          | `/api/v1/teams`                      | teams with role and app count                                         |
-| GET / POST   | `/api/v1/teams/:teamId/apps`         | list; create (admin) returns secrets once                             |
-| POST         | `/api/v1/teams/:teamId/apps/claim`   | `{ appId, adminSecret, name }` (admin)                                |
-| GET / DELETE | `/api/v1/apps/:appId`                | details without secrets; delete needs `{ confirmName }` (admin)       |
-| GET / PATCH  | `/api/v1/apps/:appId/auth`           | partial update; merged result must pass the dashboard's rules (admin) |
-| POST         | `/api/v1/apps/:appId/secrets/rotate` | returns new secrets once (admin)                                      |
-| GET          | `/api/v1/apps/:appId/status`         | tenant manager now also accepts `{ teamId }` for status               |
-| GET / POST   | `/api/v1/apps/:appId/upgrade`        | apply requires `acknowledgeClientUpgrade: true` (admin)               |
+| Method       | Path                                 | Notes                                                                                                    |
+| ------------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| GET          | `/api/v1/cli/config`                 | public; `{ apiVersion, workos: { clientId, apiBaseUrl } }`                                               |
+| GET          | `/api/v1/regions`                    | public; core regions for `apps create`                                                                   |
+| GET          | `/api/v1/me`                         | user and teams                                                                                           |
+| POST         | `/api/v1/logout`                     | revokes the bearer's WorkOS session; `{ revoked }`                                                       |
+| GET          | `/api/v1/teams`                      | teams with role and app count                                                                            |
+| GET / POST   | `/api/v1/teams/:teamId/apps`         | list; create (admin) returns secrets once                                                                |
+| POST         | `/api/v1/teams/:teamId/apps/claim`   | `{ appId, adminSecret, name }` (admin)                                                                   |
+| GET / DELETE | `/api/v1/apps/:appId`                | details without secrets; delete needs `{ confirmName }` (admin)                                          |
+| GET / PATCH  | `/api/v1/apps/:appId/auth`           | partial update; merged result must pass the dashboard's rules (admin); 409 if the app changed mid-update |
+| POST         | `/api/v1/apps/:appId/secrets/rotate` | returns new secrets once (admin)                                                                         |
+| GET          | `/api/v1/apps/:appId/status`         | tenant manager now also accepts `{ teamId }` for status                                                  |
+| GET / POST   | `/api/v1/apps/:appId/upgrade`        | apply requires `acknowledgeClientUpgrade: true` (admin)                                                  |
 
 The existing admin-secret routes under `/api/apps/*` are unchanged.
 

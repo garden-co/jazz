@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +31,11 @@ class FakeCloud {
   pollResponses: Array<{ status: number; body: unknown }> = [];
   refreshStatus = 200;
   refreshCount = 0;
+  /** Refresh tokens are single-use, as at WorkOS. */
+  consumedRefreshTokens = new Set<string>();
+  refreshDelayMs = 0;
+  workosApiBaseUrl = "";
+  revokedSessions = 0;
   validTokens = new Set<string>();
   teams = [{ teamId: "org_a", name: "Team A", role: "admin", isAdmin: true, appCount: 1 }];
   apiResponses = new Map<string, { status: number; body: unknown }>();
@@ -55,7 +60,10 @@ class FakeCloud {
       if (path === "/api/v1/cli/config") {
         return send(200, {
           apiVersion: 1,
-          workos: { clientId: "client_x", apiBaseUrl: `${this.url}/workos` },
+          workos: {
+            clientId: "client_x",
+            apiBaseUrl: this.workosApiBaseUrl || `${this.url}/workos`,
+          },
         });
       }
       if (path === "/workos/user_management/authorize/device") {
@@ -72,8 +80,12 @@ class FakeCloud {
         const form = new URLSearchParams(body);
         if (form.get("grant_type") === "refresh_token") {
           this.refreshCount += 1;
-          if (this.refreshStatus !== 200)
-            return send(this.refreshStatus, { error: "invalid_grant" });
+          const presented = form.get("refresh_token") ?? "";
+          const reused = this.consumedRefreshTokens.has(presented);
+          this.consumedRefreshTokens.add(presented);
+          if (this.refreshDelayMs) await new Promise((r) => setTimeout(r, this.refreshDelayMs));
+          if (this.refreshStatus !== 200 || reused)
+            return send(reused ? 400 : this.refreshStatus, { error: "invalid_grant" });
           return send(200, {
             access_token: this.issueAccessToken(),
             refresh_token: `refresh-${this.refreshCount + 1}`,
@@ -101,6 +113,10 @@ class FakeCloud {
           return send(200, { user: { id: "user_1", email: "ada@example.com" }, teams: this.teams });
         }
         if (key === "GET /api/v1/teams") return send(200, { teams: this.teams });
+        if (key === "POST /api/v1/logout") {
+          this.revokedSessions += 1;
+          return send(200, { revoked: true });
+        }
         return send(404, { error: "not_found", message: `No fake for ${key}` });
       }
       send(404, { error: "not_found" });
@@ -256,6 +272,14 @@ describe("jazz-tools login", () => {
     await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
   });
 
+  it("refuses a non-HTTPS WorkOS API URL from the dashboard", async () => {
+    cloud.workosApiBaseUrl = "http://workos.example";
+    const run = io();
+    expect(await runCloudCommand(["login", "--json", "--no-browser"], run.io)).toBe(1);
+    expect(run.stdout()).toContain("WorkOS API URL must use HTTPS");
+    expect(cloud.requests.some((request) => request.path.includes("authorize/device"))).toBe(false);
+  });
+
   it("refuses non-HTTPS cloud URLs other than localhost", async () => {
     const run = io();
     expect(
@@ -317,13 +341,57 @@ describe("session handling", () => {
     expect(me!.headers.authorization).toBe(`Bearer ${token}`);
   });
 
-  it("logout removes the stored session", async () => {
+  it("logout ends the session on the server and removes it locally", async () => {
     await storeLogin(cloud.issueAccessToken());
     const run = io();
     expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
-    expect(run.json()).toEqual({ loggedOut: true, cloudUrl: cloud.url });
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: true, cloudUrl: cloud.url });
+    expect(cloud.revokedSessions).toBe(1);
     await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
   });
+
+  it("logout still forgets the session when the server cannot end it", async () => {
+    await storeLogin(cloud.issueAccessToken());
+    cloud.apiResponses.set("POST /api/v1/logout", { status: 404, body: { error: "not_found" } });
+    const run = io();
+    expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: false, cloudUrl: cloud.url });
+    await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("parallel commands with an expired token refresh once and stay logged in", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshDelayMs = 50;
+    const runs = [io(), io(), io()];
+    const codes = await Promise.all(
+      runs.map((run) => runCloudCommand(["whoami", "--json"], run.io)),
+    );
+    expect(codes).toEqual([0, 0, 0]);
+    expect(cloud.refreshCount).toBe(1);
+    expect((await storedProfile()).refreshToken).toBe("refresh-2");
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("does not echo a corrupt credentials file", async () => {
+    await writeFile(join(configDir, "credentials.json"), '{"refreshToken": "tok_secret_fragment', {
+      mode: 0o600,
+    });
+    const run = io();
+    expect(await runCloudCommand(["whoami", "--json"], run.io)).toBe(1);
+    expect(run.stdout()).toContain("Unreadable credentials file");
+    expect(run.stdout()).not.toContain("tok_secret_fragment");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "tightens an existing config directory to owner-only on write",
+    async () => {
+      await mkdir(configDir, { recursive: true });
+      await chmod(configDir, 0o755);
+      await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+      expect(await runCloudCommand(["whoami", "--json"], io().io)).toBe(0);
+      expect((await stat(configDir)).mode & 0o777).toBe(0o700);
+    },
+  );
 });
 
 describe("jazz-tools apps", () => {
