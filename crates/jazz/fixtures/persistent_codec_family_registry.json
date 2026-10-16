@@ -792,7 +792,7 @@
       ]
     },
     {
-      "id": "jazz.node-storage.v1",
+      "id": "jazz.node-storage.v2",
       "boundary": "durable-storage",
       "profile": "jazz-node-root",
       "spec": {

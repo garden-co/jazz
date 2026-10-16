@@ -2719,6 +2719,31 @@ impl VersionRow {
         value.map(authored_column_ids_from_value).transpose()
     }
 
+    /// The cells a union row carries beyond its schema's own columns
+    /// (SPEC 10 §10.3, "Union row cases"), by physical column, in their
+    /// physical spelling and nullable as stored. Empty for a row in its
+    /// schema's authored layout. They are the trailing fields after the
+    /// history layout's last field.
+    pub(super) fn union_extra_cells(&self) -> Result<Vec<(PhysicalColumnId, Value)>, Error> {
+        let descriptor = self.record.descriptor();
+        let Some(last) = descriptor.field_index(crate::schema::BASE_PENDING_FIELD) else {
+            return Ok(Vec::new());
+        };
+        let borrowed = self.record.borrowed();
+        (last + 1..descriptor.fields().len())
+            .map(|index| {
+                let column = descriptor.fields()[index]
+                    .name
+                    .as_deref()
+                    .and_then(physical_column_id_for_user_field)
+                    .ok_or(Error::InvalidStoredValue(
+                        "union extra field is not a physical column",
+                    ))?;
+                Ok((column, borrowed.get_idx(index)?))
+            })
+            .collect()
+    }
+
     /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
     /// empty on a settled image.
     pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
@@ -4262,6 +4287,12 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
+    values.extend(
+        version
+            .union_extra_cells()?
+            .into_iter()
+            .map(|(_, value)| value),
+    );
     Ok(values)
 }
 

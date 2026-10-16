@@ -612,7 +612,7 @@ where
         let authored_table = self.table_in_schema_ref(version.table(), authored_schema)?;
         let mut cells = self.materialized_cells_for_version(authored_table, version)?;
         let Some(projected_table) =
-            self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+            self.translate_version_cells(authored_schema, read_schema, version, &mut cells)?
         else {
             return Ok(None);
         };
