@@ -8,6 +8,7 @@
 
 pub mod channel_credit;
 pub mod channels;
+mod codecs;
 pub mod stream_backend;
 
 use crate::codec::{CodecError, WireCodec};

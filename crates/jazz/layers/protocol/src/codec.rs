@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::protocol_limits::PolicyExpressionLimitError;
 
 mod bridge_model_tx;
+mod bridge_wire;
 mod model_tx;
 
 /// Encoding and decoding errors.
