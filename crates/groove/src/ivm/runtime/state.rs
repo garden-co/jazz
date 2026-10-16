@@ -36,6 +36,8 @@ pub struct RuntimeStats {
     pub hydration_memo_distinct_computed_nodes: usize,
     pub arrangement_rows: usize,
     pub arrangement_encoded_bytes: usize,
+    /// Arrangements read from storage by key instead of held.
+    pub stored_arrangement_count: usize,
     pub recursive_state_count: usize,
     pub recursive_accumulated_rows: usize,
     pub recursive_accumulated_encoded_bytes: usize,
