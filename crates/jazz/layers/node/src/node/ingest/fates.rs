@@ -59,7 +59,7 @@ where
 
         if already_accepted
             && stored.tx.kind == TxKind::Mergeable
-            && !stored.view_scoped_cardinality
+            && !stored.is_partial
             && stored.global_time.is_some()
             && stored.global_time == previous_global_time
             && stored.durability == previous_durability
@@ -98,7 +98,7 @@ where
                 stored.global_time,
                 stored.durability,
             )
-            .view_scoped(stored.view_scoped_cardinality),
+            .view_scoped(stored.is_partial),
         )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
@@ -111,12 +111,25 @@ where
             if matches!(stored.fate, Fate::Accepted) {
                 // Every pending record of an accepted write moves to its
                 // seq, also when the row's image here did not change.
+                // A post-image may be laid out in another schema version than
+                // the write, naming a renamed table differently: match rows
+                // by physical table.
+                let updated_rows = global_current_updates
+                    .iter()
+                    .map(|update| {
+                        Ok((
+                            self.physical_table_id_for_version(update)?,
+                            update.branch_key(),
+                            update.row_uuid(),
+                        ))
+                    })
+                    .collect::<Result<BTreeSet<_>, Error>>()?;
                 for version in &tx_versions {
-                    let updated = global_current_updates.iter().any(|update| {
-                        update.table() == version.table()
-                            && update.branch_key() == version.branch_key()
-                            && update.row_uuid() == version.row_uuid()
-                    });
+                    let updated = updated_rows.contains(&(
+                        self.physical_table_id_for_version(version)?,
+                        version.branch_key(),
+                        version.row_uuid(),
+                    ));
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
                         self.write_history_post_image(&mut batch, &at_seq)?;

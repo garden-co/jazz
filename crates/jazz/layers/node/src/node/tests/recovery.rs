@@ -341,20 +341,20 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
             "text_members",
             records::ValueType::String,
             v("one"),
-            &[2, 2, b'o', b'n', b'e'][..],
+            &[0, 0, b'o', b'n', b'e'][..],
         ),
         (
             "u64_members",
             records::ValueType::U64,
             Value::U64(0x0102_0304_0506_0708),
-            &[2, 8, 7, 6, 5, 4, 3, 2, 1][..],
+            &[0, 8, 7, 6, 5, 4, 3, 2, 1][..],
         ),
         (
             "uuid_members",
             records::ValueType::Uuid,
             Value::Uuid(uuid::Uuid::from_bytes([0x5a; 16])),
             &[
-                2, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                0, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
                 0x5a, 0x5a, 0x5a,
             ][..],
         ),
@@ -436,7 +436,7 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
     let (counter_id, counter_payload) = &payloads[0];
     assert_eq!(
         counter_payload,
-        &[counter_id.to_le_bytes().as_slice(), &[2]].concat(),
+        &[counter_id.to_le_bytes().as_slice(), &[0]].concat(),
         "counter payload is its physical column ID followed by an exact empty identity"
     );
 }
@@ -2267,36 +2267,29 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         assert!(core.transaction_record(tx_id).is_none());
 
         // Valid record framing does not make an incomplete rejected fate valid.
-        let groove::records::ValueType::Nullable(rejection) =
-            crate::schema::transaction_rejection_storage_type()
-        else {
-            unreachable!("the rejection column is nullable")
-        };
-        let groove::records::ValueType::Record(rejection) = *rejection else {
-            unreachable!("the rejection column is a record")
-        };
-        for reason in [None, Some(4u8)] {
+        for reason in [
+            None,
+            Some(Value::Enum(groove::records::EnumValue::create(
+                4,
+                groove::records::RecordDescriptor::default(),
+                &[],
+            ).unwrap())),
+        ] {
             let mut invalid_state = values.clone();
             invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
                 Value::String("rejected".to_owned());
-            // No reason, or a cascade without its root.
             invalid_state[TransactionRowRecord::FIELD_REJECTION_IDX] =
-                Value::Nullable(reason.map(|tag| {
-                    Box::new(Value::Record(OwnedRecord::new(
-                        rejection
-                            .create(&[
-                                Value::EnumTag(tag),
-                                Value::Nullable(None),
-                                Value::Nullable(None),
-                            ])
-                            .unwrap(),
-                        (*rejection).clone(),
-                    )))
-                }));
+                Value::Nullable(reason.clone().map(Box::new));
             let mut batch = core.database.open_batch();
             batch.update("jazz_transactions", invalid_state);
-            let applied =
-                crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+            let applied = crate::local_executor::block_on(core.database.apply_batch(batch));
+            if reason.is_some() {
+                // A cascade without its root is now rejected by the payload
+                // schema before it can become a stored transaction.
+                assert!(applied.is_err());
+                continue;
+            }
+            let applied = applied.unwrap();
             let persisted = crate::local_executor::block_on(applied.persist());
             core.database.finish_persistence(persisted).unwrap();
             for pending in [false, true] {

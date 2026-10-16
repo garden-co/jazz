@@ -11,22 +11,6 @@ pub(super) struct ClosureLowering {
     pub(super) result_members: BTreeMap<SourceId, GraphBuilder>,
 }
 
-impl ClosureLowering {
-    /// The exact source relations whose rows are allowed to cross an
-    /// authority-program boundary.  This is deliberately derived from the
-    /// same closure that establishes public root membership: a source graph
-    /// alone only applies source-local policy and can miss residual/reachable
-    /// constraints owned by the complete program.
-    pub(super) fn covered_source_members(
-        &self,
-        root_source: SourceId,
-    ) -> BTreeMap<SourceId, GraphBuilder> {
-        let mut members = self.result_members.clone();
-        union_member(&mut members, root_source, self.visible_root.clone());
-        members
-    }
-}
-
 pub(super) fn lower_closure_membership(
     root_graph: GraphBuilder,
     request: &LoweringContext<'_>,

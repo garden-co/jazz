@@ -405,9 +405,16 @@ where
         else {
             return Ok(None);
         };
-        let synthesized = signs_idx..history_descriptor.fields().len();
+        // A union row's extra cells follow the merge fields in history and
+        // `authored_columns` in current (SPEC 10 §10.3, "Union row cases").
+        let synthesized_end = history_descriptor
+            .field_index(crate::schema::BASE_PENDING_FIELD)
+            .map_or(history_descriptor.fields().len(), |last| last + 1);
+        let synthesized = signs_idx..synthesized_end;
         let source_of = |index: usize| {
-            if index >= global_time_idx {
+            if index >= synthesized_end {
+                index + 1 - synthesized.len()
+            } else if index >= global_time_idx {
                 index + 1
             } else {
                 index
@@ -1168,7 +1175,7 @@ where
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            view_scoped_cardinality: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
+            is_partial: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 

@@ -144,25 +144,25 @@ Core sequences keeps it.
 
 ### Durable codec profile
 
-Every persistent Jazz root supplies one closed epoch-one codec profile when it
-opens its ordered-KV adapter. It contains Groove's mandatory base codecs:
-generic ordered-KV, V1 large-value descriptor/immutable-node envelopes, and
-the ordered-chunk-storage install-receipt wrapper; plus the Jazz-owned byte
-families for branch keys; catalogue schemas, mappings, lineages, bootstrap
-receipts, lenses, activations, and write pointers; and persisted
-result-member, result-row-source, and program-fact keys. The profile is sorted, pinned by the adapter manifest,
-and checked before any ordinary record is decoded or mutated. Groove carries
-these identifiers as opaque metadata: it does not import or interpret Jazz
-schemas. A missing, duplicate, substituted, or future ID therefore fails open
-admission rather than leaving a `Bytes` field to a codec-specific fallback.
+Each persistent Jazz root declares one complete Jazz storage format:
+`jazz.node-storage.v2` for clients, relays and Core; `jazz.catalogue-storage.v1`
+for the independent server catalogue; `jazz.account-storage.v1` for the account
+journal. All compose Groove's mandatory base codecs; node roots additionally
+require `groove.durable-index.v2`. Auxiliary roots do not inherit node formats.
 
-This inventory names encoding families, not user tables or individual values.
-Ordinary scalar/record representation remains Groove's one typed record codec;
-a distinct durable root composes this base with its own root-local codec family
-before opening. Adding a new Jazz-owned durable byte family requires a new
-storage epoch, golden fixtures, and an explicit decoder/migration decision.
+The manifest requires an exact inventory match before any ordinary record is
+decoded or mutated. Groove treats Jazz identifiers as opaque metadata. Each
+individual encoding still has a named byte contract, golden fixtures, and
+rejection/reopen receipts in the encoding registry, but no separate persisted
+Jazz marker. A change incompatible with a released root layout versions that
+root's marker; changes within this unreleased storage-breaking batch are
+consolidated into the same v1 contract. There is no physical epoch change.
+Earlier per-family profiles are refused without migration. Some of these
+encodings also change wire bytes; the wire version bump for them ships with
+the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
-`server-catalogue-entry.v1` is an existing member of this profile. Its outer
+`jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
+`jazz.catalogue-storage.v1`. Its outer
 `JCAT` entry and all catalogue payload outer version bytes remain v1. Within
 the existing nested relation-tree grammar, a public `UNION ALL` is the
 explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in
@@ -459,47 +459,52 @@ columns has an empty conflict analysis. The flag and the walk are exposed by
 the node (`NodeState::write_conflict`); no public read API or TypeScript
 surface carries them yet.
 
-**Across schema versions.** Cells are matched by physical column id, so a
-lens rename keeps its cell, and every authored cell applies whatever layout
-the current image is stored under. The post-image takes the incoming
-write's layout: its cells the write did not author take the current image's
-value where the current layout carries the same physical column with the
-same type, and the writer's snapshot value otherwise. A cell only the
-current image's layout carries is not part of a post-image in the incoming
-layout (readers under the other schema version see it through the lens
-path). Merge-column ops cannot apply across layouts this way, so Core rejects a
-write that authors a merge column under a schema version other than the one
-the row's current image is stored under, with a `MalformedCommit` reason
-saying this is not supported yet ([#3899](https://github.com/garden-co/jazz/issues/3899)).
-A cross-layout write that leaves a merge column alone still carries the
-writer's snapshot of it as an absolute value, which may predate ops Core has
-accepted since; in the post-image each merge column it did not author takes
-the row's settled value from the current image instead
-(`INV-HIST-10`). That value carries over when the current image's schema has
-a column of the same name, type and merge strategy that the lens path between
-the two versions leaves alone; a column the current image's schema lacks, and
-that no lens op renames or copies into, takes the lens default, since no op
-can have touched it under that layout. For any other mapping (a renamed or
-copied merge column, or one whose type or strategy changed) Core rejects the
-write with the same not-supported-yet `MalformedCommit` reason rather than
-guess. Core also refuses, with the same reason, a cross-layout write whose
-schema would not carry a merge column of the current image: one the write's
-table lacks, or has under another type or strategy, or that the lens path
-renames, copies, adds or drops. Its image would replace the row without that
-column, and the next write under the image's schema would rebuild it from the
-lens default, silently losing every op Core had accepted on it (v2 adds a
-counter `likes`; a v1 write over a v2 image with `likes = 5` would leave a
-later v2 write reading `likes = 0`). The refusal holds whatever the stored
-value, including one equal to the lens default, and also when the write's own
-table has no merge column at all. It applies on every path that mints a seq:
-a foreign commit unit and Core's own mergeable or exclusive commit.
+**Across schema versions.** Core merges every write into the row one
+physical column at a time, whatever schema version it was authored under
+([#3899](https://github.com/garden-co/jazz/issues/3899)). The post-image is
+laid out in the row's **union layout** (ch. 10 §10.3, "Union row cases"): the
+columns of the schema version that maps the table and ranks last in the
+catalogue order every node shares, followed
+by every other column of the table's lineage that no lens path derives from
+one of those (a column a newer schema dropped, or one a sibling schema
+added). For each column of that layout:
+
+- when the write authored the column it is carried on from (the same
+  physical column, or one the lens path renames or transforms into it), a
+  plain column takes the write's value and a merge column applies the write's
+  op to the row's value;
+- otherwise the column keeps the row's value. A column the current image
+  does not hold yet (its schema came after the image was written) takes the
+  value a reader of that column would derive through the lens path: the
+  carried-on or copied cell, or the lens default.
+
+A copy (`CopyColumn`) is a column of its own: a write of the source column
+does not change the copy. `_deletion` and the identity and provenance rules
+are unchanged. Counter range checks read the row's value of the counter's
+physical column, so they hold across schema versions too.
+
+Examples. v1 `todos {title, done}`; v2 adds `dueDate`. alice (v2) inserts
+`{a, false, 10-01}`; bob (v1) writes `done = true`. The post-image is
+`{a, true, 10-01}`: a v2 reader keeps alice's `dueDate`, a v1 reader sees
+`{a, true}` ([#3562](https://github.com/garden-co/jazz/issues/3562)). If v2
+instead also drops `legacy`, and bob writes `legacy = "x"` and `done = true`,
+the post-image holds v2's columns with `done = true` and `dueDate` kept, plus
+`legacy = "x"` as a union column; a v1 reader sees `legacy = "x"`, and a
+later v2 write keeps it ([#3838](https://github.com/garden-co/jazz/issues/3838)).
+A v1 write without the `likes` counter v2 added leaves `likes` at its
+accepted value, and a v2 counter op applies over a row a v1 write created
+(`INV-HIST-10`).
+
+Core refuses a write with a `MalformedCommit` reason saying it is not
+supported yet only when a cell it would carry into another physical column
+is an enum value with no case in that column's enum.
 
 **Only Core derives post-images.** A `FateUpdate` carries the fate and seq,
 not Core's post-image; Core's post-image reaches other nodes in view updates
 for the rows they subscribe to. An originator that receives the accepted fate
 of its own write may settle it locally by applying its patch over the image it
-holds (authored plain cells overwrite, merge ops apply; across layouts the
-write replaces the row, keeping carried merge cells), but that image is only a
+holds with the same per-column merge (authored plain cells overwrite, merge
+ops apply, every other column keeps its value), but that image is only a
 prediction of Core's, and it replaces it with the authority's post-image at
 the same seq when that arrives; only a newer seq keeps a stored row. The
 originator never validates bases, and makes no prediction (keeping its stored
@@ -508,9 +513,9 @@ image, and failing nothing) when
 - it already holds Core's image at a later seq: Core applies writes in seq
   order, so that image already counts the write, and applying it again would
   apply its merge ops twice and move the row back to an older seq;
-- the prediction cannot be made over its stale image: a merge column's
-  settled value cannot be carried across schema versions (above), or a
-  counter op leaves its type's range over the stale value. Core accepted the
+- the prediction cannot be made over its stale image: a cell cannot be
+  carried into another column (above), or a counter op leaves its type's
+  range over the stale value. Core accepted the
   write over its own image, so this is the local image's staleness, not a
   reason to fail the fate (which would wedge fate ingest).
 

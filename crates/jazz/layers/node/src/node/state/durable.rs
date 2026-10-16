@@ -551,25 +551,6 @@ where
         Ok(())
     }
 
-    /// Retired scope stores are disposable caches, never native data. Keep their
-    /// registered store identities so historical roots open, but interpret no
-    /// JPFK/JSIR payload, policy key, cursor or generation during recovery.
-    async fn discard_legacy_subscription_scopes(&self) -> Result<(), Error> {
-        for name in [KNOWN_STATE_FACTS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
-            let store = self.database.direct_record_store(name)?;
-            let deletes = store
-                .prefix_entries(&[])
-                .await?
-                .into_iter()
-                .map(|entry| DirectRecordStoreWrite::Delete { key: entry.key })
-                .collect::<Vec<_>>();
-            if !deletes.is_empty() {
-                store.write_many(&deletes).await?;
-            }
-        }
-        Ok(())
-    }
-
     #[doc(hidden)]
     pub async fn close(&mut self) -> Result<(), Error> {
         self.database.flush().await?;
@@ -857,6 +838,21 @@ where
     #[cfg(any(test, feature = "testing"))]
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats()
+    }
+
+    /// Test/bench-only switch: read arrangements of stored tables from
+    /// storage by key for queries compiled from now on
+    /// (`Database::set_stored_arrangements_enabled`).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_stored_arrangements_enabled_for_test(&mut self, enabled: bool) {
+        self.database.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Test/bench-only switch: bound this node's query cache
+    /// (`Database::set_cache_memory_budget`); `None` follows the process.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_query_cache_budget_for_test(&mut self, budget: Option<usize>) {
+        self.database.set_cache_memory_budget(budget);
     }
 
     /// Return accumulated storage-read metrics since the last reset.

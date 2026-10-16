@@ -208,6 +208,16 @@ fn version_bundle_record_key(
     )
 }
 
+/// Where a version sits in its transaction: its authored identity, or for
+/// Core's post-image of a write, the physical row it addresses. A post-image
+/// is laid out in the row's newest schema version, which need not be the one
+/// (or name the table as) the patch it replaces was authored in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BundleRecordKey {
+    Authored((String, BranchKey, RowUuid, SchemaVersionId, bool)),
+    PostImage(PhysicalTableId, BranchKey, RowUuid, bool),
+}
+
 fn content_row_members_for_bundle(
     members: &[ResultMemberEntry],
     context: &'static str,
@@ -337,6 +347,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn bundle_record_key(
+        &self,
+        version: &VersionRecord,
+        post_image: bool,
+    ) -> Result<BundleRecordKey, Error> {
+        if !post_image {
+            return Ok(BundleRecordKey::Authored(version_bundle_record_key(
+                version,
+            )));
+        }
+        Ok(BundleRecordKey::PostImage(
+            self.physical_table_id_for_schema(version.schema_version(), version.table())?,
+            version.branch_key().clone(),
+            version.row_uuid(),
+            version.deletion().is_some(),
+        ))
+    }
+
     /// Recover the deletion-register winner currently visible at the
     /// subscription tier for an optimized scalar root. Result membership tells
     /// us that the row is visible, but not whether that visibility is due to a
@@ -416,18 +444,6 @@ where
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
-            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
-            let mut stored_by_key = BTreeMap::new();
-            for stored_version in &stored_versions {
-                let version = self.version_record_from_row(stored_version)?;
-                stored_by_key.insert(version_bundle_record_key(&version), version);
-            }
-            let incoming_by_key = bundle
-                .versions
-                .iter()
-                .cloned()
-                .map(|version| (version_bundle_record_key(&version), version))
-                .collect::<BTreeMap<_, _>>();
             // An accepted, Core-sequenced bundle carries Core's post-images,
             // which replace a locally stored authored unit: this node's own
             // patch, or, on a client relay (a browser worker), the patch it
@@ -442,6 +458,22 @@ where
                     || (self.client_relay_scope().is_some()
                         && (stored.global_time.is_none()
                             || stored.global_time == bundle.global_time)));
+            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
+            let mut stored_by_key = BTreeMap::new();
+            for stored_version in &stored_versions {
+                let version = self.version_record_from_row(stored_version)?;
+                stored_by_key.insert(
+                    self.bundle_record_key(&version, carries_post_images)?,
+                    version,
+                );
+            }
+            let mut incoming_by_key = BTreeMap::new();
+            for version in &bundle.versions {
+                incoming_by_key.insert(
+                    self.bundle_record_key(version, carries_post_images)?,
+                    version.clone(),
+                );
+            }
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming
@@ -451,7 +483,7 @@ where
                 }
             }
             use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
-            match (stored.view_scoped_cardinality, bundle.scope) {
+            match (stored.is_partial, bundle.scope) {
                 (false, CompleteTransaction) => {
                     if stored.tx.n_total_writes != bundle.tx.n_total_writes
                         || stored_by_key.len() != incoming_by_key.len()
@@ -2643,9 +2675,7 @@ where
             // so a relay can serve it onward. Further authorized siblings from
             // that same view-scoped transaction must extend that projection;
             // fragments first learned outside such a reset remain history-only.
-            let extend_current_view = stored_tx
-                .as_ref()
-                .is_some_and(|stored| stored.view_scoped_cardinality);
+            let extend_current_view = stored_tx.as_ref().is_some_and(|stored| stored.is_partial);
             let mut known_keys = if stored_tx.is_some() {
                 self.query_versions_for_tx(tx_id)
                     .await?
@@ -2974,7 +3004,7 @@ where
         // view-scoped bundle. Its stored cardinality then describes that
         // fragment, so matching it to the selected versions does not prove
         // that the complete transaction is known.
-        let scope = if !stored_tx.view_scoped_cardinality
+        let scope = if !stored_tx.is_partial
             && usize::try_from(n_total_writes).ok() == Some(versions.len())
         {
             crate::protocol::VersionBundleScope::CompleteTransaction

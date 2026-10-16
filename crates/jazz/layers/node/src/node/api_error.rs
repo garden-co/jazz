@@ -8,6 +8,26 @@ pub struct Error {
     pub code: ErrorCode,
     /// Human-readable detail.
     pub message: String,
+    /// The codec-family difference behind an
+    /// [`ErrorCode::UnsupportedStorageCodecs`] refusal. Present exactly when
+    /// `code` is that code, so bindings can report it as structured fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_codecs: Option<StorageCodecMismatch>,
+}
+
+/// Which codec families an existing store and the opening build disagree on.
+///
+/// Codec IDs carry their format version (`name.vN`): `missing` names formats
+/// this build requires that the store lacks, and `unknown` names formats the
+/// store was written with that this build does not read.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct StorageCodecMismatch {
+    /// Storage epoch the refused root declares.
+    pub epoch: u16,
+    /// Codec families this build requires and the root lacks.
+    pub missing: Vec<String>,
+    /// Codec families the root declares and this build does not read.
+    pub unknown: Vec<String>,
 }
 
 impl std::fmt::Display for Error {
@@ -29,6 +49,7 @@ impl Error {
         Self {
             code,
             message: message.into(),
+            storage_codecs: None,
         }
     }
 }
@@ -54,6 +75,10 @@ pub enum ErrorCode {
     NotObserved,
     /// Historical read must be evaluated by a complete-history server.
     HistoricalReadRequiresServer,
+    /// An existing local store was written with a storage format this build
+    /// does not read. The store is left untouched; there is no migration, so
+    /// the application deletes the local store and resyncs from Core.
+    UnsupportedStorageCodecs,
 }
 
 impl ErrorCode {
@@ -75,19 +100,45 @@ impl ErrorCode {
             ErrorCode::Backpressure => "backpressure",
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
+            ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+        }
+    }
+}
+
+impl From<groove::storage::Error> for Error {
+    fn from(error: groove::storage::Error) -> Self {
+        let message = error.to_string();
+        match error {
+            groove::storage::Error::UnsupportedStorageCodecs {
+                epoch,
+                missing,
+                unknown,
+            } => Self {
+                code: ErrorCode::UnsupportedStorageCodecs,
+                message,
+                storage_codecs: Some(StorageCodecMismatch {
+                    epoch,
+                    missing,
+                    unknown,
+                }),
+            },
+            _ => Self::new(ErrorCode::Storage, message),
         }
     }
 }
 
 impl From<crate::node::Error> for Error {
     fn from(error: crate::node::Error) -> Self {
+        if let crate::node::Error::Storage(storage) = error {
+            return storage.into();
+        }
         let code = match &error {
             crate::node::Error::HistoricalReadRequiresServer => {
                 ErrorCode::HistoricalReadRequiresServer
             }
-            crate::node::Error::Storage(_)
-            | crate::node::Error::Groove(_)
-            | crate::node::Error::NodeAliasExhausted => ErrorCode::Storage,
+            crate::node::Error::Groove(_) | crate::node::Error::NodeAliasExhausted => {
+                ErrorCode::Storage
+            }
             crate::node::Error::Query(_) | crate::node::Error::UnsupportedExclusiveRead(_) => {
                 ErrorCode::Query
             }

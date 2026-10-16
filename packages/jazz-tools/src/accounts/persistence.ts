@@ -131,22 +131,21 @@ export async function prepareAccountManager(options: {
       isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
       retainSecret(secret) {
         stored.assignment = null;
-        if (adoptingSecret === secret) {
-          // Suppress only the one retention callback caused by adoption. Any
-          // re-entrant explicit selection must retain and persist normally.
-          adoptingSecret = undefined;
-          let index = stored.roots.indexOf(secret);
-          if (index < 0) index = stored.roots.push(secret) - 1;
-          stored.selected = index;
-          return;
-        }
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
         stored.selected = index;
-        return save();
+        // Suppress only the one retention callback caused by adoption. Any
+        // re-entrant explicit selection must retain and persist normally.
+        if (adoptingSecret !== secret) return save();
+        adoptingSecret = undefined;
       },
     }),
   });
+  const superseded = async (): Promise<never> => {
+    stored.selected = null;
+    await save();
+    throw new Error("Automatic local-first startup was superseded");
+  };
   automaticInitializers.set(manager, async () => {
     let changed = false;
     let previous = manager.getSnapshot();
@@ -184,13 +183,7 @@ export async function prepareAccountManager(options: {
           }),
         );
       await writes;
-      if (changed) {
-        const current = manager.getLoggedIn();
-        if (current) return current;
-        stored.selected = null;
-        await save();
-        throw new Error("Automatic local-first startup was superseded");
-      }
+      if (changed) return manager.getLoggedIn() ?? (await superseded());
       if (winner === undefined)
         throw new Error("Automatic local-first selection was not committed");
       // Adoption only hydrates the manager; suppress its one retention callback.
@@ -200,11 +193,7 @@ export async function prepareAccountManager(options: {
       } finally {
         if (adoptingSecret === winner) adoptingSecret = undefined;
       }
-      const current = manager.getLoggedIn();
-      if (current) return current;
-      stored.selected = null;
-      await save();
-      throw new Error("Automatic local-first startup was superseded");
+      return manager.getLoggedIn() ?? (await superseded());
     } finally {
       unsubscribe();
     }

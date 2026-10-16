@@ -47,6 +47,7 @@ export interface RetainedAccountAssignment {
 }
 
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const NIL_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000";
 
 /** @internal Validate a stored assignment; never trust persisted text as an identity proof. */
 export function isRetainedAccountAssignment(value: unknown): value is RetainedAccountAssignment {
@@ -55,7 +56,7 @@ export function isRetainedAccountAssignment(value: unknown): value is RetainedAc
   return (
     typeof account === "string" &&
     ACCOUNT_ID_PATTERN.test(account) &&
-    account !== "00000000-0000-0000-0000-000000000000" &&
+    account !== NIL_ACCOUNT_ID &&
     typeof issuer === "string" &&
     typeof subject === "string" &&
     isPortableAuthorComponent(issuer) &&
@@ -369,12 +370,9 @@ export function createAccountManagerWithRuntime(options: {
         const backendSecret = auth.backendSecret;
         const { nodeId } = await options.backend.admitBackend({ backendSecret });
         assertCurrent(started);
-        if (
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(nodeId) ||
-          nodeId === "00000000-0000-0000-0000-000000000000"
-        )
+        if (!ACCOUNT_ID_PATTERN.test(nodeId) || nodeId === NIL_ACCOUNT_ID)
           throw new AccountAuthError("invalid_backend_node");
-        const handle = new EnrolledAccount("00000000-0000-0000-0000-000000000000", {
+        const handle = new EnrolledAccount(NIL_ACCOUNT_ID, {
           issuer: "urn:jazz:system",
           subject: nodeId,
         }) as AccountHandle;

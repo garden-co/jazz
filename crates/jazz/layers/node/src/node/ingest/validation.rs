@@ -119,10 +119,11 @@ where
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
-        VersionRow::from_wire_with_schema_version(
+        let row = VersionRow::from_wire_with_schema_version(
             table, version, authored, tx_node_alias, schema_alias, tx_time, seq,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
-        )
+        )?;
+        self.with_wire_union_cells(row, version)
     }
 
     async fn ingest_transaction_and_versions_with_current_indexes(
@@ -133,12 +134,12 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
-        view_scoped_cardinality: bool,
+        is_partial: bool,
     ) -> Result<(), Error> {
         let batch = self.database.open_batch();
         self.ingest_transaction_and_versions_with_current_indexes_in_batch(
             batch, tx, versions, Vec::new(), fate, global_time, durability,
-            update_current_indexes, view_scoped_cardinality,
+            update_current_indexes, is_partial,
         ).await
     }
 
@@ -152,7 +153,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
-        view_scoped_cardinality: bool,
+        is_partial: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
         // Staging owns the decoded records and derived-index working set. Keep
@@ -166,7 +167,7 @@ where
             global_time,
             durability,
             update_current_indexes,
-            view_scoped_cardinality,
+            is_partial,
             None,
         ))
         .await?;
@@ -219,7 +220,7 @@ where
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
         update_current_indexes: bool,
-        view_scoped_cardinality: bool,
+        is_partial: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>, Option<RejectedTransaction>), Error> {
         // Provenance operation identities participate in merge deduplication.
@@ -263,7 +264,7 @@ where
         let settle_existing = stored_tx.as_ref().is_some_and(|stored| {
             matches!(fate, Fate::Rejected(_))
                 || global_time.is_some()
-                    && (stored.global_time != global_time || !view_scoped_cardinality)
+                    && (stored.global_time != global_time || !is_partial)
         });
         if settle_existing {
             let incoming = versions.iter().enumerate()
@@ -284,10 +285,10 @@ where
             }
         }
         let tx_already_known = stored_tx.is_some();
-        let preserve_authoritative_cardinality = view_scoped_cardinality
+        let preserve_authoritative_cardinality = is_partial
             && stored_tx
                 .as_ref()
-                .is_some_and(|stored| !stored.view_scoped_cardinality);
+                .is_some_and(|stored| !stored.is_partial);
         let storage_tx = if preserve_authoritative_cardinality {
             &stored_tx.as_ref().expect("checked above").tx
         } else {
@@ -308,7 +309,7 @@ where
             tx_node_alias,
             storage_tx,
             &TransactionRecordStatus::new(fate.clone(), global_time, durability)
-                .view_scoped(view_scoped_cardinality && !preserve_authoritative_cardinality),
+                .view_scoped(is_partial && !preserve_authoritative_cardinality),
         )?;
         if tx.tx_id.node != self.node_uuid {
             if matches!(fate, Fate::Pending) && global_time.is_none() {
@@ -350,6 +351,7 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
+            let stored = self.with_wire_union_cells(stored, &version)?;
             let mut stored = stored;
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if let Some(global_time) = global_time
@@ -459,7 +461,7 @@ where
                 fate: fate.clone(),
                 global_time,
                 durability,
-                view_scoped_cardinality: view_scoped_cardinality && !preserve_authoritative_cardinality,
+                is_partial: is_partial && !preserve_authoritative_cardinality,
             };
             self.remove_rejected_local_versions(tx.tx_id, &rejected_tx, batch).await?
         } else {

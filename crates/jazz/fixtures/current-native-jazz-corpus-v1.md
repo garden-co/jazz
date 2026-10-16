@@ -21,31 +21,23 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 33 entries in the linear row-history layout
-(`jazz.history-version-current.v4`, `groove.durable-index.v2`). The DAG-era
-families `jazz_deletion_history`, `jazz_global_changes`, `jazz_merge_heads`,
-`jazz_pending_edges` and the `*_register*` families no longer exist; per-tx
-touched rows live in `jazz_tx_touched_rows`.
-History records carry an empty `counter_signs` byte string after
-`authored_columns` (SPEC 4 §4.3), so the history bytes and every digest below
-were regenerated when that field was added.
-History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`
-and end with the merge fields `seq`, `base_seq` and `base_pending` (SPEC 4
-§4.6); no record carries column stamps any more. The
-corpus was regenerated again for that layout.
-Durability encoding v2 (`jazz.transaction-durability.v2`, Global stored as
-tag 2) joined the root's codec profile, so the manifest and every
-transaction's durability byte changed; the corpus was regenerated again with
-the same inputs.
+The logical pack has 33 entries in the current storage format. The active
+schema selection lives in `jazz_catalogue`; the redundant write-pointer table
+and retired scope-relay repair ledger are no longer registered.
+
+History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`.
+They include required `counter_signs`, `seq`, `base_seq`, and `base_pending`
+columns, with nullable base values where appropriate. The corpus also pins the
+unified catalogue encoding and kind-specific record descriptors.
 
 | Store                               | Entries |
 | ----------------------------------- | ------: |
 | `__groove_large_values`             |       3 |
 | `jazz_authority_policy_bindings`    |       1 |
 | `jazz_catalogue`                    |       8 |
-| `jazz_catalogue_pointer`            |       2 |
-| `jazz_known_state_facts`            |       0 |
+| `jazz_history_horizon`              |       0 |
 | `jazz_nodes`                        |       1 |
+| `jazz_pending_transactions`         |       0 |
 | `jazz_physical_1_ahead_current`     |       1 |
 | `jazz_physical_1_global_current`    |       1 |
 | `jazz_physical_1_history`           |       2 |
@@ -56,9 +48,9 @@ the same inputs.
 | `jazz_physical_2_rejected_versions` |       0 |
 | `jazz_rejected_transactions`        |       0 |
 | `jazz_schema_versions`              |       2 |
-| `jazz_settled_program_facts`        |       0 |
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
+| `jazz_tx_provenance`                |       2 |
 | `jazz_tx_touched_rows`              |       4 |
 
 The one `jazz_subscription_watermarks_v1` record names a catch-up revision that
@@ -70,7 +62,10 @@ Row metadata and transaction provenance use the non-null native author record
 `{ account: UUID, identity: { issuer: String, subject: String } }`. SYSTEM authors
 use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node
 UUID as subject. This stored attribution does not grant the internal SYSTEM
-permission capability. The author interner remains memory-only.
+permission capability. Stored author columns hold 4-byte codes into the
+node-local `authors` Groove dictionary (`groove.dictionary.v1`). The
+dictionary family is not one of the logical pack's stores; the physical
+SQLite and RocksDB images carry it.
 
 The RocksDB archive retains internal column family
 `__groove_storage_internal_v1` and profile marker `raw-v1`. ResultKey V1 has a
@@ -78,7 +73,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `fb64e19c3811a1fddfd419d6d1e573616af7f5bbab070614fff76ed7b3947367` |
-| SQLite payload      | `f234db40bd5f4397126a9061b74730b9e69ae3040387b1cc211dd925d0248379` |
-| gzip SQLite archive | `1037325abb4b9c2013f6d028710e8f4d0c68cf7f818e449e0be2a366c6ee8e70` |
-| RocksDB archive     | `2fe9b8e60728a1f1804821ab26349794ef8f1b2a5b85dc57c462bf155c677491` |
+| logical pack        | `99cfe4277e42a57246215d008a76a3725d9cebd81eace8f02ac218799a3d469d` |
+| SQLite payload      | `832d929fe13a749dc1f6650f8538eec1e9b1af189bcf014f732fbb6c91da2d34` |
+| gzip SQLite archive | `e3847e74eefd9f325b033cfc9bb6a981fc4c190a2a3ef228a4df679bcf7cd7b1` |
+| RocksDB archive     | `27de963daa109c9dbe32f060d744554a0d4b00b901797cfe33c3f590097e2d13` |

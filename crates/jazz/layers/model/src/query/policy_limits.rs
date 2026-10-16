@@ -39,3 +39,47 @@ impl std::fmt::Display for PolicyExpressionLimitError {
 }
 
 impl std::error::Error for PolicyExpressionLimitError {}
+
+/// Node count of one recursively decoded policy expression, checked against
+/// [`MAX_POLICY_EXPRESSION_DEPTH`] and [`MAX_POLICY_EXPRESSION_NODES`] while
+/// the untrusted encoding is read.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct PolicyExpressionBudget {
+    nodes: usize,
+}
+
+impl PolicyExpressionBudget {
+    /// Counts one node at `depth` (the root is depth 1).
+    pub fn enter(&mut self, depth: usize) -> Result<(), PolicyExpressionLimitError> {
+        if depth > MAX_POLICY_EXPRESSION_DEPTH {
+            return Err(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_DEPTH",
+                max: MAX_POLICY_EXPRESSION_DEPTH,
+                actual: depth,
+            });
+        }
+        if self.nodes >= MAX_POLICY_EXPRESSION_NODES {
+            return Err(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_NODES",
+                max: MAX_POLICY_EXPRESSION_NODES,
+                actual: self.nodes + 1,
+            });
+        }
+        self.nodes += 1;
+        Ok(())
+    }
+
+    /// Refuses a declared child count the remaining node budget cannot hold,
+    /// before any child is read or allocated.
+    pub fn reserve(&self, children: usize) -> Result<(), PolicyExpressionLimitError> {
+        if children > MAX_POLICY_EXPRESSION_NODES - self.nodes {
+            return Err(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_NODES",
+                max: MAX_POLICY_EXPRESSION_NODES,
+                actual: self.nodes.saturating_add(children),
+            });
+        }
+        Ok(())
+    }
+}

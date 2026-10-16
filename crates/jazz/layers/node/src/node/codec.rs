@@ -63,25 +63,6 @@ groove::impl_record_field_enum!(FateTag {
     FateTag::Rejected = 2,
 });
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RejectionReasonTag {
-    ClientClockTooFarAhead,
-    AuthorizationDenied,
-    ExclusiveConflict,
-    CausalityViolation,
-    Cascade,
-    MalformedCommit,
-}
-
-groove::impl_record_field_enum!(RejectionReasonTag {
-    RejectionReasonTag::ClientClockTooFarAhead = 0,
-    RejectionReasonTag::AuthorizationDenied = 1,
-    RejectionReasonTag::ExclusiveConflict = 2,
-    RejectionReasonTag::CausalityViolation = 3,
-    RejectionReasonTag::Cascade = 4,
-    RejectionReasonTag::MalformedCommit = 5,
-});
-
 groove::define_record! {
     pub(super) struct CurrentRowRecord {
         0 => row_uuid: RowUuid,
@@ -116,7 +97,7 @@ groove::define_record! {
         7 => global_time: Option<GlobalTime>,
         8 => durability: DurabilityTier,
         9 => user_metadata: Option<String>,
-        10 => rejection: Option<OwnedRecord>,
+        10 => rejection: Option<groove::records::EnumValue>,
         11 => permission_subject: Option<AuthorSubject>,
     }
 }
@@ -150,15 +131,6 @@ groove::define_record! {
     pub(super) struct BasePendingRecord {
         0 => time: TxTime,
         1 => node: NodeUuid,
-    }
-}
-
-groove::define_record! {
-    /// The rejection reason inside a rejected `jazz_transactions` record.
-    pub(super) struct TxRejectionRecord {
-        0 => reason: RejectionReasonTag,
-        1 => cascade_root: Option<Value>,
-        2 => detail: Option<String>,
     }
 }
 
@@ -536,12 +508,11 @@ impl records::RecordField for CatalogueRecordKind {
 // durable bytes depend on Rust field layout and accept trailing data in some
 // configurations.  Every payload below starts with its own permanent format
 // version and consumes exactly its input.
-use crate::protocol::{CATALOGUE_SCHEMA_V1, CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES};
+use crate::protocol::CATALOGUE_SCHEMA_VERSION;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
-const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
-const CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION: u8 = 2;
+const CATALOGUE_PUBLICATION_VERSION: u8 = 2;
 const CATALOGUE_STAGED_LINEAGE_VERSION: u8 = 1;
 const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
 // This is deliberately independent of the catalogue-record payload versions:
@@ -1058,16 +1029,11 @@ pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>,
 }
 
 pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
-    let version = match payload.first().copied() {
-        Some(version @ (CATALOGUE_SCHEMA_V1 | CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES)) => version,
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "invalid catalogue schema payload",
-            ));
-        }
-    };
-    let mut cursor =
-        CataloguePayloadCursor::new(payload, version, "invalid catalogue schema payload")?;
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_SCHEMA_VERSION,
+        "invalid catalogue schema payload",
+    )?;
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
@@ -1083,11 +1049,6 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     if schema.version_id() != id {
         return Err(Error::InvalidStoredValue(
             "catalogue schema content id mismatch",
-        ));
-    }
-    if crate::protocol::catalogue_schema_payload_version(&schema) != version {
-        return Err(Error::InvalidStoredValue(
-            "catalogue schema payload version does not match its composite indexes",
         ));
     }
     Ok(SchemaVersion { id, schema })
@@ -1189,12 +1150,7 @@ pub(super) fn decode_catalogue_lens(payload: &[u8]) -> Result<MigrationLens, Err
 
 fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Result<Vec<u8>, Error> {
     let schema = encode_catalogue_schema(&publication.schema)?;
-    let version = if publication.predecessors.len() == 1 {
-        CATALOGUE_PROTOCOL_PUBLICATION_VERSION
-    } else {
-        CATALOGUE_MULTI_PREDECESSOR_PUBLICATION_VERSION
-    };
-    let mut payload = vec![version];
+    let mut payload = vec![CATALOGUE_PUBLICATION_VERSION];
     payload.extend_from_slice(publication.id.0.as_bytes());
     put_len(
         &mut payload,
@@ -1211,13 +1167,11 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
     {
         return Err(Error::InvalidStoredValue("invalid schema predecessors"));
     }
-    if version == 2 {
-        put_len(
-            &mut payload,
-            predecessors.len(),
-            "catalogue predecessor count",
-        )?;
-    }
+    put_len(
+        &mut payload,
+        predecessors.len(),
+        "catalogue predecessor count",
+    )?;
     for predecessor in predecessors {
         let lens = encode_catalogue_lens(&predecessor.lens);
         put_len(
@@ -1263,15 +1217,11 @@ fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Resul
 
 fn decode_catalogue_publication(payload: &[u8]) -> Result<SchemaLineagePublication, Error> {
     const CONTEXT: &str = "invalid catalogue protocol publication";
-    let version = *payload.first().ok_or(Error::InvalidStoredValue(CONTEXT))?;
-    if version != 1 && version != 2 {
-        return Err(Error::InvalidStoredValue(CONTEXT));
-    }
-    let mut cursor = CataloguePayloadCursor::new(payload, version, CONTEXT)?;
+    let mut cursor = CataloguePayloadCursor::new(payload, CATALOGUE_PUBLICATION_VERSION, CONTEXT)?;
     let id = SchemaLineagePublicationId(cursor.uuid()?);
     let schema = decode_catalogue_schema(cursor.sized_bytes()?)?;
-    let count = if version == 1 { 1 } else { cursor.u32()? };
-    if count == 0 || (version == 2 && count == 1) {
+    let count = cursor.u32()?;
+    if count == 0 {
         return Err(Error::InvalidStoredValue(CONTEXT));
     }
     let mut predecessors = Vec::new();
@@ -1470,13 +1420,6 @@ impl<'a> CataloguePayloadCursor<'a> {
     }
 }
 
-groove::define_record! {
-    pub(super) struct CataloguePointerRowRecord {
-        0 => revision: u64,
-        1 => schema: SchemaVersionId,
-    }
-}
-
 #[cfg(test)]
 mod catalogue_payload_tests {
     use super::*;
@@ -1616,7 +1559,7 @@ mod catalogue_payload_tests {
 
     /// Internal byte corpus: public queries cannot pin recovery record encodings.
     #[test]
-    fn predecessor_publication_encodings_preserve_v1_and_pin_v2() {
+    fn predecessor_publications_use_one_counted_encoding() {
         let mut publication = staged_fixture().publication;
         let mut records = Vec::new();
         for count in [1, 2] {
@@ -1630,7 +1573,7 @@ mod catalogue_payload_tests {
                 .collect();
             publication.id = publication.content_id();
             let bytes = encode_catalogue_publication(&publication).unwrap();
-            assert_eq!(bytes[0], count as u8);
+            assert_eq!(bytes[0], CATALOGUE_PUBLICATION_VERSION);
             assert_eq!(decode_catalogue_publication(&bytes).unwrap(), publication);
             let mut reversed = publication.clone();
             reversed.predecessors.reverse();
@@ -1639,6 +1582,7 @@ mod catalogue_payload_tests {
                 bytes[..bytes.len() - 1].to_vec(),
                 [bytes.clone(), vec![0]].concat(),
                 [vec![3], bytes[1..].to_vec()].concat(),
+                [vec![1], bytes[1..].to_vec()].concat(),
             ] {
                 assert!(decode_catalogue_publication(&bad).is_err());
             }
@@ -1654,7 +1598,7 @@ mod catalogue_payload_tests {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/fixtures/catalogue-predecessors.hex"
+                    "/../../fixtures/catalogue-predecessors.hex"
                 ),
                 actual,
             )
@@ -1933,13 +1877,13 @@ mod catalogue_payload_tests {
     fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
         // Internal format receipt: publication content addressing consumes this
-        // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
+        // exact catalogue schema bytes rather than a serde SchemaVersion layout.
         assert_eq!(
             hex::encode(&encoded),
-            "0117e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
+            "0217e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
         );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
     }
@@ -1957,13 +1901,12 @@ mod catalogue_payload_tests {
     }
 
     #[test]
-    fn catalogue_schema_payload_uses_v2_envelope_for_composite_indexes() {
+    fn catalogue_schema_payload_uses_same_envelope_for_composite_indexes() {
         let schema = composite_index_schema(&[["updated", "owner"], ["owner", "updated"]]);
         let encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES);
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
-        // Internal format receipt: the CATS v2 envelope is byte-identical to
-        // v1 apart from its version, and the embedded public schema lists
+        // Internal format receipt: the shared catalogue schema encoding lists
         // composite indexes in canonical (UTF-8 lexicographic) order
         // regardless of declaration order. Bytes 1..17 are the schema id,
         // which includes composite indexes under the
@@ -1985,19 +1928,18 @@ mod catalogue_payload_tests {
         assert_eq!(decoded, schema);
         assert_eq!(encode_catalogue_schema(&decoded).unwrap(), encoded);
 
-        // A v1 label on a composite schema is not an alias: a reader that
-        // predates composite indexes must never be handed this schema as v1.
+        // The retired v1 envelope is rejected for every schema.
         let mut mislabelled = encoded.clone();
-        mislabelled[0] = CATALOGUE_SCHEMA_V1;
+        mislabelled[0] = 1;
         assert!(decode_catalogue_schema(&mislabelled).is_err());
     }
 
     #[test]
-    fn catalogue_schema_payload_rejects_v2_label_without_composite_indexes() {
+    fn catalogue_schema_payload_rejects_retired_and_unknown_versions() {
         let schema = SchemaVersion::new(JazzSchema::empty());
         let mut encoded = encode_catalogue_schema(&schema).unwrap();
-        assert_eq!(encoded[0], CATALOGUE_SCHEMA_V1);
-        encoded[0] = CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES;
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        encoded[0] = 1;
         assert!(decode_catalogue_schema(&encoded).is_err());
         encoded[0] = 3;
         assert!(decode_catalogue_schema(&encoded).is_err());
@@ -2058,10 +2000,8 @@ groove::define_record! {
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: RejectionReasonTag,
-        5 => cascade_root: Option<Value>,
-        6 => reason_detail: Option<String>,
-        7 => user_metadata: Option<String>,
+        4 => rejection_reason: groove::records::EnumValue,
+        5 => user_metadata: Option<String>,
     }
 }
 
@@ -2303,8 +2243,9 @@ pub(super) struct StoredTransaction {
     pub(super) fate: Fate,
     pub(super) global_time: Option<GlobalTime>,
     pub(super) durability: DurabilityTier,
-    /// True when `n_total_writes` is only the locally known view cardinality.
-    pub(super) view_scoped_cardinality: bool,
+    /// Learned from selected fragments rather than a complete transaction.
+    /// False does not imply that all of its rows remain cached after eviction.
+    pub(super) is_partial: bool,
 }
 
 impl StoredTransaction {
@@ -2782,17 +2723,35 @@ impl VersionRow {
         value.map(authored_column_ids_from_value).transpose()
     }
 
-    /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
-    /// empty on a settled image or a layout without the field.
-    pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
-        let Some(field) = self
-            .record
-            .descriptor()
-            .field_index(crate::schema::COUNTER_SIGNS_FIELD)
-        else {
+    /// The cells a union row carries beyond its schema's own columns
+    /// (SPEC 10 §10.3, "Union row cases"), by physical column, in their
+    /// physical spelling and nullable as stored. Empty for a row in its
+    /// schema's authored layout. They are the trailing fields after the
+    /// history layout's last field.
+    pub(super) fn union_extra_cells(&self) -> Result<Vec<(PhysicalColumnId, Value)>, Error> {
+        let descriptor = self.record.descriptor();
+        let Some(last) = descriptor.field_index(crate::schema::BASE_PENDING_FIELD) else {
             return Ok(Vec::new());
         };
-        match self.record.borrowed().get_idx(field)? {
+        let borrowed = self.record.borrowed();
+        (last + 1..descriptor.fields().len())
+            .map(|index| {
+                let column = descriptor.fields()[index]
+                    .name
+                    .as_deref()
+                    .and_then(physical_column_id_for_user_field)
+                    .ok_or(Error::InvalidStoredValue(
+                        "union extra field is not a physical column",
+                    ))?;
+                Ok((column, borrowed.get_idx(index)?))
+            })
+            .collect()
+    }
+
+    /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
+    /// empty on a settled image.
+    pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
+        match self.trailing_field(crate::schema::COUNTER_SIGNS_FIELD)? {
             Value::Bytes(bytes) => Ok(bytes),
             _ => Err(Error::InvalidStoredValue(
                 "counter_signs field must be bytes",
@@ -2800,58 +2759,51 @@ impl VersionRow {
         }
     }
 
-    fn trailing_field(&self, name: &str) -> Result<Option<Value>, Error> {
-        let Some(field) = self.record.descriptor().field_index(name) else {
-            return Ok(None);
-        };
-        Ok(Some(self.record.borrowed().get_idx(field)?))
+    fn trailing_field_index(&self, name: &str) -> Result<usize, Error> {
+        self.record
+            .descriptor()
+            .field_index(name)
+            .ok_or(Error::InvalidStoredValue("history merge field missing"))
+    }
+
+    fn trailing_field(&self, name: &str) -> Result<Value, Error> {
+        Ok(self
+            .record
+            .borrowed()
+            .get_idx(self.trailing_field_index(name)?)?)
     }
 
     /// The write's accepted seq; `0` while it has no accepted fate (SPEC 4
-    /// §4.6, "Durable layout"), and on a layout without the field.
+    /// §4.6, "Durable layout").
     pub(super) fn seq(&self) -> Result<GlobalTime, Error> {
         match self.trailing_field(crate::schema::SEQ_FIELD)? {
-            None => Ok(GlobalTime(0)),
-            Some(Value::U64(seq)) => Ok(GlobalTime(seq)),
-            Some(_) => Err(Error::InvalidStoredValue("history seq must be u64")),
+            Value::U64(seq) => Ok(GlobalTime(seq)),
+            _ => Err(Error::InvalidStoredValue("history seq must be u64")),
         }
     }
 
     /// The write's base (SPEC 4 §4.6, "Base of a write").
     pub(super) fn base(&self) -> Result<RowBase, Error> {
-        let seq = match self.trailing_field(crate::schema::BASE_SEQ_FIELD)? {
+        let seq = match nullable_value(self.trailing_field(crate::schema::BASE_SEQ_FIELD)?)? {
             None => None,
-            Some(value) => match nullable_value(value)? {
-                None => None,
-                Some(Value::U64(seq)) => Some(GlobalTime(seq)),
-                Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
-            },
+            Some(Value::U64(seq)) => Some(GlobalTime(seq)),
+            Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
         };
-        let pending = match self.trailing_field(crate::schema::BASE_PENDING_FIELD)? {
-            None => None,
-            Some(value) => nullable_value(value)?
-                .map(base_pending_from_value)
-                .transpose()?,
-        };
+        let pending = nullable_value(self.trailing_field(crate::schema::BASE_PENDING_FIELD)?)?
+            .map(base_pending_from_value)
+            .transpose()?;
         Ok(RowBase { seq, pending })
     }
 
-    /// This image with its trailing merge fields replaced. A layout without
-    /// the fields (none is written today) keeps its record.
+    /// This image with its required merge fields replaced.
     pub(super) fn with_merge_fields(&self, seq: GlobalTime, base: RowBase) -> Result<Self, Error> {
-        let descriptor = self.record.descriptor();
-        let Some(seq_idx) = descriptor.field_index(crate::schema::SEQ_FIELD) else {
-            return Ok(self.clone());
-        };
+        let seq_idx = self.trailing_field_index(crate::schema::SEQ_FIELD)?;
+        let base_seq_idx = self.trailing_field_index(crate::schema::BASE_SEQ_FIELD)?;
+        let base_pending_idx = self.trailing_field_index(crate::schema::BASE_PENDING_FIELD)?;
         let mut values = self.record.to_values()?;
         values[seq_idx] = Value::U64(seq.0);
-        let mut set = |name: &str, value: Value| {
-            if let Some(idx) = descriptor.field_index(name) {
-                values[idx] = value;
-            }
-        };
-        set(crate::schema::BASE_SEQ_FIELD, base_seq_value(base));
-        set(crate::schema::BASE_PENDING_FIELD, base_pending_value(base));
+        values[base_seq_idx] = base_seq_value(base);
+        values[base_pending_idx] = base_pending_value(base);
         self.with_record_values(values)
     }
 
@@ -3692,7 +3644,7 @@ pub(super) struct TransactionRecordStatus {
     pub(super) global_time: Option<GlobalTime>,
     pub(super) durability: DurabilityTier,
     /// True when `n_total_writes` is only the locally known view cardinality.
-    pub(super) view_scoped_cardinality: bool,
+    pub(super) is_partial: bool,
 }
 
 impl TransactionRecordStatus {
@@ -3705,12 +3657,12 @@ impl TransactionRecordStatus {
             fate,
             global_time,
             durability,
-            view_scoped_cardinality: false,
+            is_partial: false,
         }
     }
 
-    pub(super) fn view_scoped(mut self, view_scoped_cardinality: bool) -> Self {
-        self.view_scoped_cardinality = view_scoped_cardinality;
+    pub(super) fn view_scoped(mut self, is_partial: bool) -> Self {
+        self.is_partial = is_partial;
         self
     }
 
@@ -3792,7 +3744,7 @@ pub(super) fn transaction_record_values(
     status: &TransactionRecordStatus,
 ) -> Result<Vec<Value>, Error> {
     let mut flags = 0;
-    if status.view_scoped_cardinality {
+    if status.is_partial {
         flags |= TX_FLAG_VIEW_SCOPED_CARDINALITY;
     }
     if tx.contribution_merge.is_some() {
@@ -3827,10 +3779,10 @@ pub(super) fn transaction_record_values(
         ),
         Value::Nullable(
             match &status.fate {
-                Fate::Rejected(reason) => Some(rejection_record(reason)?),
+                Fate::Rejected(reason) => Some(reason.to_storage_value()?),
                 Fate::Pending | Fate::Accepted => None,
             }
-            .map(|record| Box::new(Value::Record(record))),
+            .map(Box::new),
         ),
         Value::Nullable(permission_subject.map(|id| Box::new(id.to_value()))),
     ])
@@ -3855,40 +3807,6 @@ pub(super) fn transaction_permission_subject(
         ));
     }
     Ok(Some(made_by))
-}
-
-fn rejection_record(reason: &RejectionReason) -> Result<OwnedRecord, Error> {
-    static DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
-        std::sync::LazyLock::new(|| {
-            let records::ValueType::Nullable(inner) =
-                crate::schema::transaction_rejection_storage_type()
-            else {
-                unreachable!("transaction rejection column is nullable")
-            };
-            let records::ValueType::Record(descriptor) = *inner else {
-                unreachable!("transaction rejection column is a record")
-            };
-            *descriptor
-        });
-    Ok(TxRejectionRecord::encode(
-        &DESCRIPTOR,
-        rejection_reason_tag_value(reason),
-        rejection_reason_cascade_root_for_reason(reason).map(tx_id_value),
-        rejection_reason_detail_for_reason(reason),
-    )?
-    .record()
-    .clone())
-}
-
-fn rejection_reason_tag_value(reason: &RejectionReason) -> RejectionReasonTag {
-    match reason {
-        RejectionReason::ClientClockTooFarAhead => RejectionReasonTag::ClientClockTooFarAhead,
-        RejectionReason::AuthorizationDenied => RejectionReasonTag::AuthorizationDenied,
-        RejectionReason::ExclusiveConflict => RejectionReasonTag::ExclusiveConflict,
-        RejectionReason::CausalityViolation => RejectionReasonTag::CausalityViolation,
-        RejectionReason::Cascade { .. } => RejectionReasonTag::Cascade,
-        RejectionReason::MalformedCommit(_) => RejectionReasonTag::MalformedCommit,
-    }
 }
 
 /// Values of the `jazz_pending_transactions` record of an unsettled
@@ -3944,15 +3862,7 @@ pub(super) fn rejected_transaction_values(
         RowAuthor::from_persisted_subject(tx.made_by)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .to_value(),
-        Value::String(rejection_reason_tag_for_reason(&reason)),
-        Value::Nullable(
-            rejection_reason_cascade_root_for_reason(&reason)
-                .map(|root| Box::new(tx_id_value(root))),
-        ),
-        Value::Nullable(
-            rejection_reason_detail_for_reason(&reason)
-                .map(|detail| Box::new(Value::String(detail))),
-        ),
+        reason.to_storage_value()?,
         Value::Nullable(
             tx.user_metadata_json
                 .clone()
@@ -4065,31 +3975,6 @@ pub(super) fn known_transaction_payload_matches_redacted_cardinality(
     let mut incoming = incoming.clone();
     incoming.n_total_writes = 0;
     known_transaction_payload_matches(&existing, &incoming)
-}
-
-pub(super) fn rejection_reason_tag_for_reason(reason: &RejectionReason) -> String {
-    match reason {
-        RejectionReason::ClientClockTooFarAhead => "client_clock_too_far_ahead".to_owned(),
-        RejectionReason::AuthorizationDenied => "authorization_denied".to_owned(),
-        RejectionReason::ExclusiveConflict => "exclusive_conflict".to_owned(),
-        RejectionReason::CausalityViolation => "causality_violation".to_owned(),
-        RejectionReason::Cascade { .. } => "cascade".to_owned(),
-        RejectionReason::MalformedCommit(_) => "malformed_commit".to_owned(),
-    }
-}
-
-pub(super) fn rejection_reason_cascade_root_for_reason(reason: &RejectionReason) -> Option<TxId> {
-    match reason {
-        RejectionReason::Cascade { root } => Some(*root),
-        _ => None,
-    }
-}
-
-pub(super) fn rejection_reason_detail_for_reason(reason: &RejectionReason) -> Option<String> {
-    match reason {
-        RejectionReason::MalformedCommit(reason) => Some(reason.clone()),
-        _ => None,
-    }
 }
 
 pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<VersionRecord> {
@@ -4401,6 +4286,12 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
+    values.extend(
+        version
+            .union_extra_cells()?
+            .into_iter()
+            .map(|(_, value)| value),
+    );
     Ok(values)
 }
 
@@ -4861,22 +4752,6 @@ pub(super) fn validate_canonical_version_parts(branch_key: &BranchKey) -> Result
     Ok(())
 }
 
-pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {
-    match value {
-        Value::Tuple(values) if values.len() == 2 => {
-            let mut values = values.into_iter();
-            let Value::U64(time) = values.next().expect("len checked") else {
-                return Err(Error::InvalidStoredValue("tx id time must be u64"));
-            };
-            let Value::Uuid(node) = values.next().expect("len checked") else {
-                return Err(Error::InvalidStoredValue("tx id node must be uuid"));
-            };
-            Ok(TxId::new(TxTime(time), NodeUuid(node)))
-        }
-        _ => Err(Error::InvalidStoredValue("tx id must be tuple(u64, uuid)")),
-    }
-}
-
 pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
     match value {
         0 => Ok(TxKind::Mergeable),
@@ -4888,19 +4763,25 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
 /// The fate of a stored `jazz_transactions` record. A rejected record carries
 /// exactly one rejection reason and any other record none.
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {
-    let rejection = <Option<OwnedRecord> as records::RecordField>::read(
-        &record,
-        TransactionRowRecord::FIELD_REJECTION_IDX,
-    )?;
+    let rejection = match record.get_idx(TransactionRowRecord::FIELD_REJECTION_IDX)? {
+        Value::Nullable(None) => None,
+        Value::Nullable(Some(reason)) => Some(*reason),
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "transaction rejection must be nullable",
+            ));
+        }
+    };
     match (
         record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
         rejection,
     ) {
         (0, None) => Ok(Fate::Pending),
         (1, None) => Ok(Fate::Accepted),
-        (2, Some(rejection)) => Ok(Fate::Rejected(rejection_reason_from_record(
-            rejection.borrowed(),
-        )?)),
+        (2, Some(rejection)) => Ok(Fate::Rejected(
+            RejectionReason::from_storage_value(rejection)
+                .map_err(|_| Error::InvalidStoredValue("invalid rejection reason"))?,
+        )),
         (2, None) => Err(Error::InvalidStoredValue(
             "rejected transaction missing reason",
         )),
@@ -4908,44 +4789,6 @@ pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fat
             "unrejected transaction carries a rejection reason",
         )),
         _ => Err(Error::InvalidStoredValue("unknown fate")),
-    }
-}
-
-fn rejection_reason_from_record(record: BorrowedRecord<'_>) -> Result<RejectionReason, Error> {
-    let cascade_root =
-        nullable_tx_id_value(record.get_idx(TxRejectionRecord::FIELD_CASCADE_ROOT_IDX)?)?;
-    let detail = record
-        .get_nullable_string(TxRejectionRecord::FIELD_DETAIL_IDX)?
-        .map(str::to_owned);
-    let reason = match record.get_enum(TxRejectionRecord::FIELD_REASON_IDX)? {
-        0 => RejectionReason::ClientClockTooFarAhead,
-        1 => RejectionReason::AuthorizationDenied,
-        2 => RejectionReason::ExclusiveConflict,
-        3 => RejectionReason::CausalityViolation,
-        4 => RejectionReason::Cascade {
-            root: cascade_root
-                .ok_or(Error::InvalidStoredValue("cascade rejection missing root"))?,
-        },
-        5 => RejectionReason::MalformedCommit(detail.clone().unwrap_or_default()),
-        _ => return Err(Error::InvalidStoredValue("unknown rejection reason")),
-    };
-    // One spelling per reason: the encoder writes a root only for a cascade
-    // and a detail only for a malformed commit.
-    if rejection_reason_cascade_root_for_reason(&reason) != cascade_root
-        || rejection_reason_detail_for_reason(&reason) != detail
-    {
-        return Err(Error::InvalidStoredValue(
-            "transaction rejection reason is not canonical",
-        ));
-    }
-    Ok(reason)
-}
-
-pub(super) fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, Error> {
-    match value {
-        Value::Nullable(None) => Ok(None),
-        Value::Nullable(Some(value)) => tx_id_from_value(*value).map(Some),
-        _ => Err(Error::InvalidStoredValue("tx id must be nullable tuple")),
     }
 }
 
@@ -4963,10 +4806,6 @@ pub(super) fn deletion_event_from_value(value: Value) -> Result<DeletionEvent, E
     }
 }
 
-pub(super) fn tx_id_value(tx_id: TxId) -> Value {
-    Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
-}
-
 pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
 }
@@ -4978,6 +4817,79 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    /// Alice's stored merge metadata may contain null bases, but never missing
+    /// columns. This internal test builds truncated descriptors because public
+    /// writers always produce the complete history layout.
+    #[test]
+    fn history_merge_fields_require_columns_and_preserve_null_bases() {
+        use crate::schema::{BASE_PENDING_FIELD, BASE_SEQ_FIELD, COUNTER_SIGNS_FIELD, SEQ_FIELD};
+        use records::{RecordDescriptor, ValueType};
+
+        let fields = [
+            (
+                COUNTER_SIGNS_FIELD,
+                ValueType::Bytes,
+                Value::Bytes(Vec::new()),
+            ),
+            (SEQ_FIELD, ValueType::U64, Value::U64(0)),
+            (
+                BASE_SEQ_FIELD,
+                ValueType::U64.nullable(),
+                Value::Nullable(None),
+            ),
+            (
+                BASE_PENDING_FIELD,
+                crate::schema::history_base_pending_storage_type(),
+                Value::Nullable(None),
+            ),
+        ];
+        let row = |missing: Option<&str>| {
+            let descriptor = RecordDescriptor::new(
+                fields
+                    .iter()
+                    .filter(|(name, _, _)| Some(*name) != missing)
+                    .map(|(name, ty, _)| (*name, ty.clone())),
+            );
+            let values = fields
+                .iter()
+                .filter(|(name, _, _)| Some(*name) != missing)
+                .map(|(_, _, value)| value.clone())
+                .collect::<Vec<_>>();
+            VersionRow {
+                table: groove::Intern::new("notes".to_owned()),
+                branch_key: BranchKey::default(),
+                record: OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+            }
+        };
+        let complete = row(None);
+        assert_eq!(complete.counter_signs().unwrap(), Vec::<u8>::new());
+        assert_eq!(complete.seq().unwrap(), GlobalTime(0));
+        assert_eq!(complete.base().unwrap(), RowBase::default());
+        let base = RowBase {
+            seq: Some(GlobalTime(7)),
+            pending: Some(TxId::new(TxTime(8), NodeUuid(uuid::Uuid::from_u128(9)))),
+        };
+        let updated = complete.with_merge_fields(GlobalTime(10), base).unwrap();
+        assert_eq!(updated.seq().unwrap(), GlobalTime(10));
+        assert_eq!(updated.base().unwrap(), base);
+        let cleared = updated
+            .with_merge_fields(GlobalTime(0), RowBase::default())
+            .unwrap();
+        assert_eq!(cleared.base().unwrap(), RowBase::default());
+        assert!(row(Some(COUNTER_SIGNS_FIELD)).counter_signs().is_err());
+        assert!(row(Some(SEQ_FIELD)).seq().is_err());
+        for missing in [BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
+            assert!(row(Some(missing)).base().is_err());
+        }
+        for missing in [SEQ_FIELD, BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
+            assert!(
+                row(Some(missing))
+                    .with_merge_fields(GlobalTime(10), base)
+                    .is_err()
+            );
+        }
+    }
 
     // Internal because application values cannot reveal descriptor construction
     // frequency or accidental reuse of a different physical enum registry.
@@ -5064,7 +4976,7 @@ mod authority_storage_codec_tests {
 }
 
 // Active-schema record v1: version byte, revision u64 LE,
-// CATS v1 payload length u32 LE,
+// catalogue schema payload length u32 LE,
 // then the existing canonical public-schema envelope. This stores the selected
 // permissions separately from structural catalogue entries; no serde layout
 // is part of this envelope's durable contract.
@@ -5184,7 +5096,7 @@ mod active_schema_tests {
         )
         .unwrap();
         let golden = vec![
-            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 1, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
+            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 2, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
             138, 61, 188, 160, 144, 152, 13, 0, 0, 0, 123, 34, 116, 97, 98, 108, 101, 115, 34, 58,
             123, 125, 125,
         ];
@@ -5316,7 +5228,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "0201000000000000010000000000030000000000000002000000000000000000012a00000046000000000104010000000000000101080808080808080808080808080808080000"
+            "0201000000000000010000000000030000000000000002000000000000000000012a0000004400000000010400000000000001010808080808080808080808080808080800"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5339,7 +5251,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "0201000000000000010000000001030000000000000000000000000000000000012d0000002e00000001027b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000275726e3a6a617a7a3a746573740230363036303630362d303630362d303630362d303630362d303630363036303630363036"
+            "0201000000000000010000000001030000000000000000000000000000000000012d0000002e00000001007b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000075726e3a6a617a7a3a746573740030363036303630362d303630362d303630362d303630362d303630363036303630363036"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(
@@ -5357,7 +5269,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "0201000000000000010000000005030000000000000000000000000000000000012d0000002e00000001027b7d0000"
+            "0201000000000000010000000005030000000000000000000000000000000000012d0000002e00000001007b7d0000"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(
@@ -5427,28 +5339,23 @@ mod transaction_record_tests {
         rejected_without_reason[TransactionRowRecord::FIELD_REJECTION_IDX] = Value::Nullable(None);
         assert!(fate_from_encoded_fields(record(&rejected_without_reason).borrowed()).is_err());
 
-        // A detail on a reason that has none is a second spelling.
-        let records::ValueType::Nullable(rejection) =
-            crate::schema::transaction_rejection_storage_type()
-        else {
-            unreachable!()
-        };
-        let records::ValueType::Record(rejection) = *rejection else {
-            unreachable!()
-        };
+        // A payload on a reason that has none is a second spelling, refused
+        // by the rejection enum's case schema before it can be stored.
         let mut noncanonical = rejected.clone();
         noncanonical[TransactionRowRecord::FIELD_REJECTION_IDX] =
-            Value::Nullable(Some(Box::new(Value::Record(OwnedRecord::new(
-                rejection
-                    .create(&[
-                        Value::EnumTag(1),
-                        Value::Nullable(None),
-                        Value::Nullable(Some(Box::new(Value::String("why".to_owned())))),
-                    ])
-                    .unwrap(),
-                (*rejection).clone(),
-            )))));
-        assert!(fate_from_encoded_fields(record(&noncanonical).borrowed()).is_err());
+            Value::Nullable(Some(Box::new(Value::Enum(
+                records::EnumValue::create(
+                    1,
+                    records::RecordDescriptor::new([("message", records::ValueType::String)]),
+                    &[Value::String("why".to_owned())],
+                )
+                .unwrap(),
+            ))));
+        assert!(
+            descriptor("jazz_transactions")
+                .create(&noncanonical)
+                .is_err()
+        );
     }
 }
 
