@@ -658,6 +658,12 @@ impl Database {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }
 
+    /// Read arrangements of stored tables by primary key from storage instead
+    /// of holding them, for arrangements compiled from now on. Off by default.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
     /// Enable or disable generic root positions (insert indices and moves in
     /// terminal deltas) for plain ordered outputs. On by default. A consumer
     /// that ignores those positions should turn them off: collecting them
