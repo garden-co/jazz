@@ -35,7 +35,8 @@ export const memoryCeilings: MemoryCeilingSet = {
     "1 GiB for the server (a hosted app's default memory limit) and 512 MiB of client growth over its idle baseline",
   method:
     "Real app users act through the app's deployed permission policies against that build's server binary, while the data grows by half each step until a side crosses its budget.",
-  harness: "dev/benchmarks/memory-ceiling",
+  // dev/benchmarks/memory-ceiling once #4029 is on main.
+  harness: null,
   byExample: {
     "big-label": [
       {
