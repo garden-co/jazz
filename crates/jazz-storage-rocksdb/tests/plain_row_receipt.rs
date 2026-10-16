@@ -32,7 +32,8 @@ fn schema() -> DatabaseSchema {
 fn epoch_1_codec_fixture_schema() -> DatabaseSchema {
     // Declaration order is deliberately variable-before-fixed. The frozen
     // stored bytes below prove that every durable backend shares Groove's
-    // physical fixed-first record layout without changing public row order.
+    // physical fixed-first record layout without changing public row order,
+    // and that the stored value leaves out the primary-key column `id`.
     DatabaseSchema::new([TableSchema::new(
         "records",
         [
@@ -283,16 +284,10 @@ async fn epoch_1_table_row_bytes_and_order_survive_a_fresh_rocksdb_open() {
             .await
             .unwrap(),
         vec![
-            (
-                vec![0x01, 0x00, 0x02],
-                vec![0x00, 0x02, 0x00, 0x00, 0x00, b'a'],
-            ),
-            (
-                vec![0x01, 0x12, 0x34],
-                vec![0x00, 0x34, 0x12, 0x01, 0x00, b'h', b'i'],
-            ),
+            (vec![0x01, 0x00, 0x02], vec![0x00, 0x00, 0x00, b'a'],),
+            (vec![0x01, 0x12, 0x34], vec![0x00, 0x01, 0x00, b'h', b'i'],),
         ],
-        "RocksDB must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",
+        "RocksDB must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes without the primary-key column",
     );
     storage.close().await.unwrap();
     drop(storage);

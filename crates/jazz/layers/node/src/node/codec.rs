@@ -5325,7 +5325,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "02010000000000000100000000000000000503000000000000000000000000000000000001310000003200000001007b7d0000"
+            "000503000000000000000000000000000000000001210000002200000001007b7d0000"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(
