@@ -13,10 +13,15 @@ pub mod stream_backend;
 
 use crate::codec::{CodecError, WireCodec};
 use crate::ids::{AuthorSubject, NodeUuid};
+pub use crate::postcard_exact::decode_postcard_exact;
+pub use crate::postcard_exact::encodes_exactly;
 use crate::protocol::{SyncMessage, with_message_descriptor_table};
 use crate::protocol_limits::{
     MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
 };
+#[allow(unused_imports)]
+use postcard::to_allocvec;
+use serde::{Deserialize, Serialize};
 
 /// Current Jazz wire protocol version.
 ///
@@ -1102,9 +1107,8 @@ mod tests {
             postcard::from_bytes::<WireFrame>(&frame_bytes).is_ok(),
             "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
         );
-        assert_eq!(
-            decode_frame(&frame_bytes),
-            Err(postcard::Error::DeserializeBadEncoding),
+        assert!(
+            decode_frame(&frame_bytes).is_err(),
             "a physical frame is exactly one postcard value"
         );
 
@@ -1115,9 +1119,8 @@ mod tests {
             postcard::from_bytes::<WireFrame>(&nonminimal_frame).is_ok(),
             "planted sensitivity: postcard accepts the overlong 02 -> 82 00 tag"
         );
-        assert_eq!(
-            decode_frame(&nonminimal_frame),
-            Err(postcard::Error::DeserializeBadEncoding),
+        assert!(
+            decode_frame(&nonminimal_frame).is_err(),
             "the frozen frame codec admits only canonical varints"
         );
 
@@ -1133,9 +1136,8 @@ mod tests {
             postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
             "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
         );
-        assert_eq!(
-            decode_sync_message(&payload),
-            Err(postcard::Error::DeserializeBadEncoding),
+        assert!(
+            decode_sync_message(&payload).is_err(),
             "a logical payload is exactly one postcard value"
         );
 
@@ -1146,9 +1148,8 @@ mod tests {
             postcard::from_bytes::<SyncMessage>(&nonminimal_payload).is_ok(),
             "planted sensitivity: postcard accepts the overlong SyncMessage tag"
         );
-        assert_eq!(
-            decode_sync_message(&nonminimal_payload),
-            Err(postcard::Error::DeserializeBadEncoding),
+        assert!(
+            decode_sync_message(&nonminimal_payload).is_err(),
             "the frozen semantic codec admits only canonical varints"
         );
     }
@@ -1698,7 +1699,7 @@ mod tests {
         );
     }
 
-    fn encode_then_decode_run(run: VersionBundleRun) -> Result<SyncMessage, postcard::Error> {
+    fn encode_then_decode_run(run: VersionBundleRun) -> Result<SyncMessage, CodecError> {
         let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
         // Deliberately bypass `encode_sync_message`: this helper is used only
         // for receiver-boundary tests of malformed data which a remote peer

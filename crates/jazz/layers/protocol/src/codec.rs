@@ -22,10 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol_limits::PolicyExpressionLimitError;
 
-mod bridge_model_query;
-mod bridge_model_tx;
-mod bridge_protocol_a;
-mod bridge_wire;
+mod bridge_leaves_tmp;
 mod model_query;
 mod model_tx;
 
@@ -364,24 +361,6 @@ pub trait WireCodec: Sized {
     fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError>;
 }
 
-thread_local! {
-    static ENCODE_ERROR: std::cell::RefCell<Option<CodecError>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Record a failure inside an infallible [`WireCodec::put`], keeping the
-/// first one; the encode entry point collects it with [`take_encode_error`].
-pub fn record_encode_error(err: CodecError) {
-    ENCODE_ERROR.with(|slot| {
-        slot.borrow_mut().get_or_insert(err);
-    });
-}
-
-/// Take (and clear) the first failure recorded since the last call.
-pub fn take_encode_error() -> Option<CodecError> {
-    ENCODE_ERROR.with(|slot| slot.borrow_mut().take())
-}
-
 /// The codec value for a type's own [`WireCodec`] encoding.
 #[derive(Clone, Copy)]
 pub struct Auto;
@@ -456,26 +435,6 @@ pub fn with_scratch<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
         SCRATCH.with(|scratch| scratch.set(buf));
     }
     result
-}
-
-thread_local! {
-    static ENCODE_ERROR: std::cell::Cell<Option<CodecError>> = const { std::cell::Cell::new(None) };
-}
-
-/// Record that a value could not be encoded. [`WireCodec::put`] cannot fail,
-/// so an encoder that can (a row whose descriptor does not encode) records
-/// its error here and writes nothing; the entry point that started the
-/// encode takes it with [`take_encode_error`]. The first error is kept.
-pub fn record_encode_error(error: CodecError) {
-    ENCODE_ERROR.with(|slot| {
-        let previous = slot.take();
-        slot.set(Some(previous.unwrap_or(error)));
-    });
-}
-
-/// Take the error recorded by [`record_encode_error`] since the last take.
-pub fn take_encode_error() -> Option<CodecError> {
-    ENCODE_ERROR.with(std::cell::Cell::take)
 }
 
 /// Encoded length of a value, measured in the scratch buffer.
@@ -1027,5 +986,22 @@ mod tests {
                 context: "Shape"
             })
         );
+    }
+}
+
+impl WireCodec for crate::query::RelationQuery {
+    fn put(&self, buf: &mut Vec<u8>) {
+        if let Err(message) = crate::query::relation_query_wire::encode_postcard_required(self, buf)
+        {
+            record_encode_error(CodecError::Encode { message });
+        }
+    }
+
+    fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError> {
+        let (value, used) =
+            crate::query::relation_query_wire::decode_postcard_required(&data[*offset..])
+                .map_err(|message| CodecError::DecodeError { message })?;
+        *offset += used;
+        Ok(value)
     }
 }

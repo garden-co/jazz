@@ -168,8 +168,7 @@ pub fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKe
         .as_ref()
         .map_or(coverage.binding_id, |policy| {
             let mut identity = crate::codec::encode(&coverage.binding_id);
-            policy.0.put(&mut identity);
-            policy.1.put(&mut identity);
+            policy.put(&mut identity);
             BindingId(uuid::Uuid::new_v5(
                 &COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE,
                 &identity,

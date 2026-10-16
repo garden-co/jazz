@@ -118,6 +118,24 @@ pub mod relation_query_wire {
         Ok((value, data.len() - rest.len()))
     }
 
+    /// Append the non-human-readable encoding of a required relation (as in
+    /// `ShapeBody::Relation`): exactly the bytes [`serialize_required`] gives
+    /// Postcard. On error nothing is appended.
+    pub fn encode_postcard_required(value: &RelationQuery, buf: &mut Vec<u8>) -> Result<(), String> {
+        let wire = relation_query_to_wire(value).map_err(|error| error.to_string())?;
+        buf.extend(postcard::to_allocvec(&wire).map_err(|error| error.to_string())?);
+        Ok(())
+    }
+
+    /// Decode a required relation written by [`encode_postcard_required`]
+    /// from the start of `data`, returning it and the number of bytes used.
+    pub fn decode_postcard_required(data: &[u8]) -> Result<(RelationQuery, usize), String> {
+        let (wire, rest) = postcard::take_from_bytes::<WireRelationQuery>(data)
+            .map_err(|error| error.to_string())?;
+        let value = relation_query_from_wire(wire).map_err(|error| error.to_string())?;
+        Ok((value, data.len() - rest.len()))
+    }
+
     #[doc(hidden)]
     pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
     where
