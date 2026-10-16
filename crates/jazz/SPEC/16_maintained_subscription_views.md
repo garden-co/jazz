@@ -159,9 +159,9 @@ The concrete v1 byte contracts are:
   persisted-descriptor bytes. Reference `k > 0` reuses entry `k - 1`, which
   an earlier `use` of the same message defined. The `union` bit is set only
   in the row's own `use` and only when union cells follow; then `count` is at
-  least 1, and the entries are in strictly ascending `(schema version,
-  table)` order, each a non-empty record of that schema's nullable
-  `_app_<column>` cells. An entry's own `use` has the bit clear. Every other
+  least 1, and the entries are in strictly ascending
+  `(schema version, table)` order, each a non-empty record of that schema's
+  nullable `_app_<column>` cells. An entry's own `use` has the bit clear. Every other
   row is `JVRR 0x03 use(row) row-bytes` with the bit clear, so it pays nothing
   for the union grammar. The row's canonical bytes consume the remainder.
   Each sync message starts with an empty table; the encoder defines a
@@ -177,6 +177,7 @@ The concrete v1 byte contracts are:
   this row blob, and authored-column set. The row blob is not a serde tuple of
   `RecordDescriptor` and bytes. Both unknown versions and the former incidental
   `OwnedRecord` representation are rejected.
+
 - Result descriptor blob: ASCII `JRPD`, byte `1`, role byte (`0` current,
   `1` aggregate), then one exact Groove persisted-descriptor tree. This is a
   runtime publication format, not a persisted-output family. Current descriptors start with
