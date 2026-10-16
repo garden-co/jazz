@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
@@ -4882,7 +4883,7 @@ function outputColumnsForTable(
   arraySubqueries: readonly QueryArraySubquery[],
   rootTerminal = true,
 ): ColumnDescriptor[] {
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
   const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
@@ -5202,7 +5203,8 @@ function coerceQueryPredicate(
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     if (columnType?.type === "Array") {
       return {
         op: "Any",
@@ -5230,7 +5232,8 @@ function coerceQueryPredicate(
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     return {
       ...filter,
       value:
@@ -5240,7 +5243,7 @@ function coerceQueryPredicate(
     };
   }
   if (filter.op === "EnumMatch") {
-    const columnType = schema[table]?.columns.find(
+    const columnType = resolveQueryTable(schema, table)?.columns.find(
       (entry) => entry.name === filter.column,
     )?.column_type;
     if (columnType?.type !== "EnumPayload") {
@@ -5525,7 +5528,8 @@ function coerceQueryLiteral(
     column === "id"
       ? ({ type: "Uuid" } as const)
       : (magicColumnType(column) ??
-        schema[table]?.columns.find((entry) => entry.name === column)?.column_type);
+        resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+          ?.column_type);
   if (columnType?.type === "Bytea" && value.type === "Array") {
     return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
@@ -5533,7 +5537,8 @@ function coerceQueryLiteral(
     const elementType =
       column === "id"
         ? { type: "Uuid" as const }
-        : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+            ?.column_type;
     const elementColumnType = elementType?.type === "Array" ? elementType.element : elementType;
     return {
       type: "Array",
@@ -6064,7 +6069,7 @@ function nativeRowFieldPlans(
   const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? resolveQueryTable(schema, batch.table)?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const projectedNames = projectedColumns
     ? new Set(projectedColumns.map((column) => column.name))
@@ -6121,7 +6126,9 @@ const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
 function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): RowState[] {
   return rows.map((row) => {
     if (!row.valuesByColumn) return row;
-    const schemaColumns = new Set((schema[row.table]?.columns ?? []).map((column) => column.name));
+    const schemaColumns = new Set(
+      (resolveQueryTable(schema, row.table)?.columns ?? []).map((column) => column.name),
+    );
     const valuesByColumn = new Map(row.valuesByColumn);
     const metadataValues = new Set<Value>();
     for (const field of RELATION_SNAPSHOT_METADATA_FIELDS) {
@@ -6231,7 +6238,13 @@ function decodeBytes(
     case "Integer":
       return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: view.getBigInt64(0, true) };
+      return {
+        type: "BigInt",
+        value:
+          nonNullableStorageType(storageType)?.tag === 3
+            ? view.getBigUint64(0, true)
+            : view.getBigInt64(0, true),
+      };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":

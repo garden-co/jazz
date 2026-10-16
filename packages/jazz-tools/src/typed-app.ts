@@ -1,3 +1,5 @@
+import type { TxId } from "./runtime/client.js";
+import { resolveQueryTable } from "./runtime/history-relation.js";
 import { assertRelationshipDeclaration } from "./relationships.js";
 import {
   columnTransformDependencies,
@@ -1475,7 +1477,7 @@ export class TypedTableQueryBuilder<
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
-    const tableSchema = this._schema[this._table];
+    const tableSchema = resolveQueryTable(this._schema, this._table);
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
       const declaredColumn = tableSchema?.columns.find((column) => column.name === key);
@@ -1588,12 +1590,40 @@ export interface Query<
   }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
 
+export type HistoryRow<TRow extends { id: string }> = TRow & {
+  $transactionId: TxId;
+  $seq: bigint;
+};
+
+/** Read-only query over locally retained accepted content versions.
+ * Start with one exact row ID;
+ * joins, additional filters, remote coverage and branched tables are not supported yet.
+ */
+export interface HistoryQuery<
+  TRow extends { id: string },
+  TSelection extends keyof HistoryRow<TRow> = keyof HistoryRow<TRow>,
+> extends QueryBuilder<Pick<HistoryRow<TRow>, TSelection | "id">> {
+  where(input: { id: string | { eq: string } }): HistoryQuery<TRow, TSelection>;
+  select<TColumn extends keyof HistoryRow<TRow> | "*">(
+    ...columns: [TColumn, ...TColumn[]]
+  ): HistoryQuery<
+    TRow,
+    "*" extends TColumn ? keyof HistoryRow<TRow> : Extract<TColumn, keyof HistoryRow<TRow>>
+  >;
+  orderBy(column: "$seq", direction?: "asc" | "desc"): HistoryQuery<TRow, TSelection>;
+  limit(count: number): HistoryQuery<TRow, TSelection>;
+  offset(count: number): HistoryQuery<TRow, TSelection>;
+}
+
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
   TTable,
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {}
+> {
+  /** Query locally retained accepted content versions of this table. */
+  readonly history: HistoryQuery<TableRowFromMeta<SchemaMeta<TTable, TSchema>>>;
+}
 
 export type QueryHandle<
   TTable extends string,
@@ -1970,11 +2000,23 @@ function createAppForTables(
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
-    tables[tableName] = new TypedTableQueryBuilder(
-      tableName,
-      wasmSchema,
-      columnTransformsByTable?.[tableName],
-      columnTransformsByTable,
+    tables[tableName] = Object.defineProperty(
+      new TypedTableQueryBuilder(
+        tableName,
+        wasmSchema,
+        columnTransformsByTable?.[tableName],
+        columnTransformsByTable,
+      ),
+      "history",
+      {
+        get: () =>
+          new TypedTableQueryBuilder(
+            `history.${tableName}`,
+            wasmSchema,
+            columnTransformsByTable?.[tableName],
+            columnTransformsByTable,
+          ),
+      },
     );
   }
 

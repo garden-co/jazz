@@ -33,10 +33,10 @@ adds a result; losing current read permission retracts the row's history.
 
 - Ordinary prepared queries over locally retained history on any node.
   Trusted local subscriptions use `Db::subscribe_for_identity` with
-  `ReadTier::LocalOnly`. Client-local evaluation and peer history delivery
-  remain unsupported until authority-covered history inputs are implemented.
-- Exact branch selection using existing branch bindings; no implicit union of
-  all branches or synthesized history of a composed branch view.
+  `ReadTier::LocalOnly`. Client-local reads expose locally retained accepted history without evaluating
+  policies. Peer history delivery remains deferred.
+- One exact `id` equality filter and ordering by `$seq`. Additional filters,
+  other orderings, and branched tables are rejected in this increment.
 - Accepted, settled content images. Pending authored patches are not exposed as
   complete historical images, and rejected transactions are excluded. Requests
   for pending/local-history semantics fail explicitly in this initial scope.
@@ -52,11 +52,11 @@ appear in this relation until accepted and settled, even if it is already
 visible in the ordinary current-row view.
 
 History completeness is not required. Queries return the locally retained,
-accepted content versions that pass current-row authorization. A partial node
+accepted content versions. Trusted serving reads apply current-row authorization. A partial node
 may return fewer versions, and an empty result does not prove the row has no
 history upstream. This increment does not fetch missing history automatically.
-Existing authorization requirements still apply: this does not enable raw
-history access through client-local reads without authorized history coverage.
+Client-local reads use the same policy-free local visibility as ordinary tables;
+they may query retained history without requesting upstream history coverage.
 
 ## Names and virtual catalogue entries
 
@@ -88,24 +88,31 @@ Keep `id` as the underlying logical row ID. History adds two non-null,
 read-only metadata columns, following the existing `$createdAt` / `$updatedBy`
 convention:
 
-| Column           | Rust type       | TypeScript type                | Meaning                                           |
-| ---------------- | --------------- | ------------------------------ | ------------------------------------------------- |
-| `$transactionId` | Existing `TxId` | Existing branded `TxId` string | Transaction that produced this version.           |
-| `$seq`           | `u64`           | `bigint`                       | Accepted sequence used to order settled versions. |
+| Column           | Rust type       | TypeScript type | Meaning                                           |
+| ---------------- | --------------- | --------------- | ------------------------------------------------- |
+| `$transactionId` | Existing `TxId` | `TxId` string   | Transaction that produced this version.           |
+| `$seq`           | `u64`           | `bigint`        | Accepted sequence used to order settled versions. |
 
 Within one table and exact branch, `(id, $transactionId)` identifies a content
 version; do not mint another version UUID. Internal keys retain table identity
 and branch scope.
 
-`$transactionId` supports equality filters using the existing portable
-transaction encoding: full time plus originating node UUID, never a node-local
-transaction-node alias. It identifies the version's transaction, independently
+`$transactionId` retains the portable transaction identity: full time plus
+originating node UUID, never a node-local transaction-node alias. TypeScript
+exposes the same branded `TxId` string returned by write handles. The shared
+NAPI/WASM row publication boundary derives it with
+`TransactionId::from_committed_tx`; core values and occurrence keys retain the
+full `(time, node)` identity. This changes only the host-facing value and its
+existing descriptor type, not persisted records or peer protocol encodings.
+Transaction equality filters remain outside the current exact-row-filter boundary. It identifies the version's transaction, independently
 of field-level `$updatedBy` provenance, which can name an earlier writer.
 
-`$seq` supports numeric filters and ordering. It denotes acceptance order, not
+`$seq` supports ordering; numeric filters remain outside the initial boundary. It denotes acceptance order, not
 wall-clock time; gaps are allowed. It does not replace transaction identity.
-Preserve the full `u64` range in TypeScript using `bigint`, without conversion
-through a JavaScript `number`.
+Preserve the full `u64` range in TypeScript using `bigint`. `$seq` is a packed
+`GlobalTime` (physical milliseconds plus an 18-bit logical counter), not a small
+incrementing integer; ordinary current values already exceed
+`Number.MAX_SAFE_INTEGER`, so converting to `number` would lose precision.
 
 Reserve these metadata names consistently with existing magic columns. Reject
 conflicting application declarations rather than shadowing them. Both fields
@@ -124,12 +131,12 @@ produces a typed error. Raw original-schema inspection is not part of this API.
 
 ## Authorization and content eligibility
 
-Use the underlying current table's read policies. Compute authorized current
+For trusted serving reads, use the underlying current table's read policies. Compute authorized current
 row identities under the caller's identity and branch binding, then semijoin
 history on that row coordinate. Do not evaluate today's policy directly against
 an old ownership field: an old owner value must not confer access today.
 
-This is the agreed authorization contract: evaluate current policies against
+For trusted serving reads, the authorization contract is: evaluate current policies against
 current row values, not separately against each historical image. For example,
 with an owner-only read policy, transferring a task from Alice to Bob gives Bob
 access to its retained eligible history, including versions owned by Alice.
@@ -137,7 +144,10 @@ Alice loses access unless another current policy grants it. A live history
 subscription must reflect that transfer by retracting Alice's results and
 making the eligible versions available to Bob.
 
-Apply authorization before user filtering and output. Deferring user joins does
+Client-local reads do not evaluate policies. They retain the current-row visibility
+gate (including deletion) without a policy proof.
+
+For trusted serving reads, apply authorization before user filtering and output. Deferring user joins does
 not remove the internal semijoin with authorized current row identities. Track policy dependencies in the normal maintained
 query graph so permission changes retract results. Policy proof sources remain
 the normal current sources; resolving a history relation must not recursively
@@ -213,8 +223,9 @@ session-scoped backend client (`for_session`) and its existing local query and
 subscription options. Both query results and deltas preserve version-aware
 `ResultKey`s, including when metadata is omitted from the projection. They use
 the same prepared relational program as reads, including on non-history-complete
-nodes. `Db::subscribe` uses client-local authorization and still rejects history; peer subscriptions are also rejected.
-Neither path may silently read unscoped history or claim complete coverage.
+nodes. `Db::subscribe` supports client-local retained history with
+`ReadTier::LocalOnly`, without evaluating read policies. Peer history subscriptions
+remain unsupported. Local reads do not claim complete history coverage.
 
 Maintain dependencies on the selected row's history and current policy proofs. Publish
 changes at normal transaction boundaries without exposing a partially updated
@@ -286,12 +297,30 @@ support does not claim to implement this coverage protocol.
    queries and subscriptions for equal projections, pagination, partial replicas,
    deletion/restoration and permission revocation/restoration.
    Authority-covered peer delivery remains deferred.
-5. **TypeScript surface.** Carry the same virtual names through query builders,
-   validation, adapters, WASM/NAPI/native codecs, and bindings. Infer history
-   application columns plus `$transactionId: TxId` and `$seq: bigint`, preserve
-   composite result identities in client collections, and reject mutations at type and runtime boundaries.
-   Describe results as locally available history until normal sync can prove
-   complete coverage.
+5. **TypeScript surface.** `app.tasks.history` produces an ordinary query
+   against `history.tasks`, retaining the original application schema for
+   admission. Query-only descriptor resolution adds the two metadata columns;
+   no virtual table is deployed or persisted. The read-only handle supports one
+   exact `id` filter, projection, `$seq` ordering, offset and limit. Application
+   columns retain their types/transforms; `$transactionId` is
+   `TxId` and `$seq` is `bigint`.
+   Existing occurrence keys preserve multiple versions in subscription collections.
+   Both `db.all` and `db.subscribe` read locally retained history using the
+   normal local read path. Clients do not evaluate policies; trusted backend/session
+   reads continue to apply current-row permissions.
+   Remote history reads are rejected until authority-covered history delivery
+   exists. Mutation targets are rejected at type and runtime boundaries.
+
+   ```ts
+   const history = app.tasks.history.where({ id: taskId }).orderBy("$seq", "desc").limit(20);
+   const versions = await db.all(history);
+   const stop = db.subscribe(history.select("title"), (rows) => {
+     // Multiple versions may have the same id and title.
+   });
+   ```
+
+   Results contain only locally retained accepted content versions, and may be
+   incomplete. An empty result is not proof of empty upstream history.
 
 ### Follow-up: fetch complete history when needed
 

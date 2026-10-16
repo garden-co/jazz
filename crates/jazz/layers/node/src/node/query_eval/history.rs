@@ -37,6 +37,9 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             return Err(unsupported("a history row id that is not a bound UUID"));
         };
         let row = RowUuid(*id);
+        // ClientLocal lowering supplies System, just as for ordinary local
+        // sources: retained data is not filtered by client-side policy checks.
+        // Trusted serving sources retain their PolicyFiltered identity.
         let identity = match &request.authorization {
             SourceAuthorizationRequest::System => AuthorSubject::SYSTEM,
             SourceAuthorizationRequest::PolicyFiltered {

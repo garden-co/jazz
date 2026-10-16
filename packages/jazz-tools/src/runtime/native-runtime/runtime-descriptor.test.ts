@@ -572,3 +572,31 @@ it("keeps a public metadata-shaped alias beside explicit hidden metadata and pub
   expect(named.has("$createdAt")).toBe(true);
   expect([...named.keys()]).toEqual(["schema_version", "$createdAt"]);
 });
+
+// Boundary test: public mutations cannot mint sequence values near u64::MAX.
+// Pin exact unsigned decoding here; query and mutation behavior is covered end to end.
+it("preserves unsigned history metadata above JavaScript and signed-i64 ranges", () => {
+  const schema = { notes: { columns: [] } } satisfies WasmSchema;
+  const maximum = (1n << 64n) - 1n;
+  const time = new Uint8Array(8);
+  new DataView(time.buffer).setBigUint64(0, maximum, true);
+  const node = uuidBytes("00000000-0000-0000-0000-0000000000ab");
+  const fields = [{ name: "$seq", valueType: { tag: 3 } }];
+  const [row] = rowsFromBatches(
+    [
+      {
+        table: "history.notes",
+        descriptor: fields.map((field) => ({ ...field, kind: "result-field" as const })),
+        rows: [
+          {
+            rowId: node,
+            deleted: false,
+            raw: createRecord(fields, [time]),
+          },
+        ],
+      },
+    ],
+    schema,
+  );
+  expect(row!.valuesByColumn?.get("$seq")).toEqual({ type: "BigInt", value: maximum });
+});

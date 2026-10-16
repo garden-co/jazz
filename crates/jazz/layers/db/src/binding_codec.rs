@@ -261,7 +261,44 @@ pub fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcar
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
-        let published = published_record(row)?;
+        let mut published = published_record(row)?;
+        // Native hosts expose the same committed transaction ID as write handles.
+        // The core query value and occurrence identity retain the full causal ID.
+        if row
+            .table()
+            .starts_with(crate::schema::history::HISTORY_PREFIX)
+            && let Some(index) = published.fields.iter().position(|field| {
+                matches!(
+                    field,
+                    CurrentRowPublicationField::ResultField { name, .. }
+                        if name == crate::schema::history::TRANSACTION_ID_COLUMN
+                )
+            })
+        {
+            use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
+            let mut values = BorrowedRecord::new(&published.raw, &published.descriptor)
+                .to_values()
+                .map_err(|_| postcard::Error::SerdeSerCustom)?;
+            let Value::Tuple(parts) = &values[index] else {
+                return Err(postcard::Error::SerdeSerCustom);
+            };
+            let [Value::U64(time), Value::Uuid(node)] = parts.as_slice() else {
+                return Err(postcard::Error::SerdeSerCustom);
+            };
+            let tx = crate::tx::TxId::new(crate::time::TxTime(*time), crate::ids::NodeUuid(*node));
+            values[index] = Value::String(
+                crate::model::transaction::TransactionId::from_committed_tx(tx).to_string(),
+            );
+            let mut fields = published.descriptor.fields().to_vec();
+            fields[index].value_type = ValueType::String;
+            published.descriptor = RecordDescriptor::new_with_fields(fields);
+            published.raw = Cow::Owned(
+                published
+                    .descriptor
+                    .create(&values)
+                    .map_err(|_| postcard::Error::SerdeSerCustom)?,
+            );
+        }
         let raw = published.raw;
         let binding_descriptor = published
             .descriptor

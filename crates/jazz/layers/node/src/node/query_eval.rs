@@ -1498,11 +1498,6 @@ where
             ) {
                 return Err(history::unsupported("structured history results"));
             }
-            if authorization_mode != QueryAuthorizationMode::TrustedServing {
-                return Err(history::unsupported(
-                    "client-local history without serving authorization",
-                ));
-            }
         }
         let policy = self.query_program_policy_context(identity);
         let requested_shape_id = shape.shape_id();
