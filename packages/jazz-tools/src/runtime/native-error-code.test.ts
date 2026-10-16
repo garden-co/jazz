@@ -113,10 +113,26 @@ function unpackPublishedAlpha54Root(): { dir: string; root: string } {
   return { dir, root: join(dir, "rocksdb-epoch-1") };
 }
 
+// Matches `alpha54_missing()` / `alpha54_unknown()` in
+// crates/jazz/tests/storage_format_refusal.rs.
 const ALPHA54_MISSING = [
   "groove.durable-index.v2",
-  "jazz.history-version-current.v4",
-  "jazz.transaction-durability.v2",
+  "groove.large-value.v2",
+  "groove.ordered-chunk-storage.v2",
+  "jazz.node-storage.v1",
+];
+const ALPHA54_UNKNOWN = [
+  "groove.large-value.v1",
+  "groove.ordered-chunk-storage.v1",
+  "jazz.branch-key.v1",
+  "jazz.catalogue.activation.v1",
+  "jazz.catalogue.bootstrap-ready.v1",
+  "jazz.catalogue.lens.v1",
+  "jazz.catalogue.lineage.v1",
+  "jazz.catalogue.physical-mapping.v1",
+  "jazz.catalogue.schema.v1",
+  "jazz.catalogue.write-pointer.v1",
+  "jazz.subscription-program-fact-key.v1",
 ];
 
 describe("storage-format refusal", () => {
@@ -133,7 +149,7 @@ describe("storage-format refusal", () => {
       expect(error).toBeInstanceOf(Error);
       expect(nativeCoreErrorCode(error)).toBe("unsupported_storage_codecs");
       expect(isUnsupportedStorageCodecsError(error)).toBe(true);
-      expect(error).toMatchObject({ epoch: 1, missing: ALPHA54_MISSING, unknown: [] });
+      expect(error).toMatchObject({ epoch: 1, missing: ALPHA54_MISSING, unknown: ALPHA54_UNKNOWN });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -166,7 +182,7 @@ describe("storage-format refusal", () => {
         name: "UnsupportedStorageCodecsError",
         code: "unsupported_storage_codecs",
         missing: ALPHA54_MISSING,
-        unknown: [],
+        unknown: ALPHA54_UNKNOWN,
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
