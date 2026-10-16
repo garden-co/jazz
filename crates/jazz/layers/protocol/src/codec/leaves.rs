@@ -177,7 +177,9 @@ impl WireCodec for RecordDescriptor {
     }
 
     fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError> {
-        Vec::<DescriptorField>::get(data, offset).map(RecordDescriptor::new_with_fields)
+        let fields = Vec::<DescriptorField>::get(data, offset)?;
+        RecordDescriptor::try_new_with_fields(fields)
+            .map_err(|message| CodecError::DecodeError { message })
     }
 }
 
@@ -596,6 +598,16 @@ mod tests {
 
     /// Large-value descriptors, chunks and node references match postcard,
     /// and a locator of the wrong length is rejected.
+    #[test]
+    fn invalid_descriptor_from_a_peer_is_a_decode_error_not_a_panic() {
+        let fields = vec![DescriptorField::new(
+            "bad",
+            ValueType::Tuple(vec![ValueType::String]),
+        )];
+        let bytes = crate::codec::encode(&fields);
+        assert!(crate::codec::decode_exact::<RecordDescriptor>(&bytes).is_err());
+    }
+
     #[test]
     fn large_value_leaves_match_postcard() {
         same_as_postcard(&large_value_ref(0));

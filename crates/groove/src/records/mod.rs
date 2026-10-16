@@ -165,6 +165,23 @@ impl RecordDescriptor {
         Self::from_logical_fields(fields.into_iter().collect())
     }
 
+    /// Like [`Self::new_with_fields`], but rejects fields an untrusted
+    /// decoder must not panic on: invalid value types or a fixed layout that
+    /// overflows `usize`.
+    pub fn try_new_with_fields(fields: Vec<DescriptorField>) -> Result<Self, String> {
+        let mut fixed_size = 0usize;
+        for field in &fields {
+            validate_schema_value_type(&field.value_type)
+                .map_err(|err| format!("invalid record field {:?}: {err}", field.name))?;
+            if let Some(width) = field.value_type.fixed_size() {
+                fixed_size = fixed_size
+                    .checked_add(width)
+                    .ok_or("record descriptor fixed layout exceeds usize")?;
+            }
+        }
+        Ok(Self::from_logical_fields(fields))
+    }
+
     pub fn fields(&self) -> &[DescriptorField] {
         &self.fields
     }

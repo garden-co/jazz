@@ -22,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol_limits::PolicyExpressionLimitError;
 
-mod bridge_leaves_tmp;
 mod model_query;
 mod model_tx;
 
