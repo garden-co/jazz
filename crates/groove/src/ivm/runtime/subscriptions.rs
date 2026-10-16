@@ -3829,6 +3829,13 @@ impl IvmRuntime {
         let mut terminals = terminals.into_iter().collect::<Vec<_>>();
         terminals.sort_by(|left, right| left.sink.cmp(&right.sink));
         let key: SharedShapeKey = (shape.clone(), terminals.clone());
+        // A shared shape whose last receiver was dropped is still listed
+        // until the next prune, and binding prunes before it hydrates.
+        // Prune first so that shape retires now rather than between this
+        // caller's prepare and bind, which would leave the caller holding
+        // a retired shape id.
+        self.prune_dropped_subscriptions_with_storage(storage)
+            .await?;
         if let Some(shape_id) = self.shared_prepared_shapes.get(&key).copied()
             && self
                 .prepared_shapes
@@ -4545,9 +4552,10 @@ impl IvmRuntime {
     }
 
     /// Remove a caller-owned prepared shape after all of its bindings have
-    /// been unsubscribed. Binding-source entries are intentionally retained:
-    /// multiple prepared shapes may share the same source descriptor, while
-    /// their graph retainers are owned by this exact shape id.
+    /// been unsubscribed. Several prepared shapes may read one binding source,
+    /// while their graph retainers are owned by this exact shape id, so the
+    /// source's entry goes only with the last shape that reads it, and only
+    /// once no binding remains in it.
     pub fn retire_prepared_shape(
         &mut self,
         shape_id: PreparedShapeId,
@@ -4580,6 +4588,20 @@ impl IvmRuntime {
             );
         }
         self.collect_unretained_ephemeral_nodes();
+        if !self
+            .prepared_shapes
+            .values()
+            .any(|other| other.shape == shape.shape)
+        {
+            let key = BindingSourceKey::prepared(shape.shape);
+            if self
+                .binding_sources
+                .get(&key)
+                .is_some_and(|source| source.refcounts.is_empty())
+            {
+                self.binding_sources.remove(&key);
+            }
+        }
         Ok(())
     }
 
@@ -4707,7 +4729,7 @@ impl IvmRuntime {
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
-    pub(super) fn infer_builder_output_cached(
+    pub(crate) fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,

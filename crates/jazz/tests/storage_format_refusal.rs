@@ -16,8 +16,48 @@ use sha2::{Digest, Sha256};
 
 const DICTIONARY_V1: &str = "groove.dictionary.v1";
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
+const TRANSACTION_RECORD: &str = "jazz.transaction-record.v1";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
 const DURABILITY_V2: &str = "jazz.transaction-durability.v2";
+
+// Frozen pre-consolidation inventory, used only to construct rejected roots.
+const LEGACY_JAZZ_CODECS: &[&str] = &[
+    "jazz.branch-key.v1",
+    "jazz.catalogue.activation.v1",
+    "jazz.catalogue.bootstrap-ready.v1",
+    "jazz.catalogue.lens.v1",
+    "jazz.catalogue.lineage.v1",
+    "jazz.catalogue.physical-mapping.v1",
+    "jazz.catalogue.schema.v1",
+    "jazz.catalogue.write-pointer.v1",
+    "jazz.transaction-durability.v2",
+];
+fn legacy_base_profile() -> groove::storage::StorageCodecProfile {
+    groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs(LEGACY_JAZZ_CODECS.iter().copied())
+        .unwrap()
+}
+
+fn assert_legacy_profile_refused(
+    result: Result<(), StorageError>,
+    old: &groove::storage::StorageCodecProfile,
+) {
+    let mut expected_missing = vec!["jazz.node-storage.v1"];
+    if !old.codec_ids().any(|id| id == DURABLE_INDEX_V2) {
+        expected_missing.insert(0, DURABLE_INDEX_V2);
+    }
+    if !old.codec_ids().any(|id| id == DICTIONARY_V1) {
+        expected_missing.insert(0, DICTIONARY_V1);
+    }
+    let expected_unknown = old
+        .codec_ids()
+        .filter(|id| id.starts_with("jazz."))
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(result, Err(StorageError::UnsupportedStorageCodecs { missing, unknown, .. })
+        if missing == expected_missing && unknown == expected_unknown)
+    );
+}
 
 fn notes_schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -94,11 +134,27 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
                 vec![
                     DICTIONARY_V1.to_owned(),
                     DURABLE_INDEX_V2.to_owned(),
-                    ROW_HISTORY.to_owned(),
-                    DURABILITY_V2.to_owned(),
+                    "groove.large-value.v2".to_owned(),
+                    "groove.ordered-chunk-storage.v2".to_owned(),
+                    "jazz.node-storage.v1".to_owned(),
                 ],
                 "{store}"
             );
+            let mut expected_unknown = expected_unknown.to_vec();
+            expected_unknown.extend([
+                "groove.large-value.v1",
+                "groove.ordered-chunk-storage.v1",
+                "jazz.branch-key.v1",
+                "jazz.catalogue.activation.v1",
+                "jazz.catalogue.bootstrap-ready.v1",
+                "jazz.catalogue.lens.v1",
+                "jazz.catalogue.lineage.v1",
+                "jazz.catalogue.physical-mapping.v1",
+                "jazz.catalogue.schema.v1",
+                "jazz.catalogue.write-pointer.v1",
+                "jazz.subscription-program-fact-key.v1",
+            ]);
+            expected_unknown.sort();
             assert_eq!(unknown, expected_unknown, "{store}");
         }
         Err(other) => panic!("{store}: expected a typed format refusal, got {other}"),
@@ -108,7 +164,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 
 /// A published alpha.54 client root (DAG layout) is refused at open with the
 /// typed `UnsupportedStorageCodecs` error naming the dictionary,
-/// durable-index, row-history and compact-durability families it lacks, instead of opening and failing later with a record decode error.
+/// durable-index and node-storage families it lacks, instead of opening and failing later with a record decode error.
 ///
 /// Actors: `alice` upgrades her native app from alpha.54 over the same
 /// data directory.
@@ -117,8 +173,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                               missing [groove.dictionary.v1,
 ///                                                        groove.durable-index.v2,
-///                                                        jazz.history-version-current.v4,
-///                                                        jazz.transaction-durability.v2]
+///                                                        jazz.node-storage.v1]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
@@ -214,9 +269,8 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 
 /// A root with the current row-history family but written before the compact
 /// durable-index layout (no `groove.durable-index.v2`) is refused
-/// at manifest admission, naming the index family and the interned-column
-/// dictionary family that came after it, and the SQLite file is left
-/// byte-for-byte unchanged.
+/// at manifest admission, naming the missing node profile and obsolete families, and the SQLite file
+/// is left byte-for-byte unchanged.
 ///
 /// Actors: `dave` upgrades a client whose store holds name-prefixed index
 /// entries.
@@ -224,7 +278,8 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 /// ```text
 /// dave's pre-index-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                              missing [groove.dictionary.v1,
-///                                                       groove.durable-index.v2]
+///                                                       groove.durable-index.v2,
+///                                                       jazz.node-storage.v1]
 /// ```
 #[test]
 fn linear_history_root_without_the_durable_index_family_is_refused() {
@@ -232,9 +287,8 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
     let path = directory.path().join("root.sqlite");
     let families = notes_schema().column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let pre_index_v2_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-        .expect("base profile")
-        .with_additional_codecs([ROW_HISTORY])
+    let pre_index_v2_profile = legacy_base_profile()
+        .with_additional_codecs([ROW_HISTORY, TRANSACTION_RECORD])
         .expect("pre-index-v2 node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
@@ -246,29 +300,14 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
         .expect("pre-index-v2 profile root"),
     );
     let before = std::fs::read(&path).unwrap();
-    match open_sqlite(&path) {
-        Err(StorageError::UnsupportedStorageCodecs {
-            epoch: 1,
-            missing,
-            unknown,
-        }) => {
-            assert_eq!(
-                missing,
-                vec![DICTIONARY_V1.to_owned(), DURABLE_INDEX_V2.to_owned()]
-            );
-            assert!(unknown.is_empty());
-        }
-        Err(other) => panic!("expected a typed format refusal, got {other}"),
-        Ok(()) => panic!("a root without the durable-index family must not open"),
-    }
+    assert_legacy_profile_refused(open_sqlite(&path), &pre_index_v2_profile);
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }
 
 /// A linear-history root written before the compact durability encoding (no
 /// `jazz.transaction-durability.v2`) is refused at manifest admission, naming
-/// the durability family and the interned-column dictionary family that came
-/// after it, before any transaction's durability tag is read, and the SQLite
-/// file is left byte-for-byte unchanged.
+/// the missing node profile and obsolete families, before any transaction's durability tag is
+/// read, and the SQLite file is left byte-for-byte unchanged.
 ///
 /// Actors: `erin` upgrades a client whose store holds linear history with the
 /// earlier durability tags (Global = 3).
@@ -276,7 +315,7 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                                  missing [groove.dictionary.v1,
-///                                                           jazz.transaction-durability.v2]
+///                                                           jazz.node-storage.v1]
 /// ```
 #[test]
 fn linear_history_root_without_the_durability_v2_family_is_refused() {
@@ -286,12 +325,14 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let pre_durability_v2_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
         .with_additional_codecs(
-            jazz::storage_codec_profile::JAZZ_EPOCH_1_STORAGE_CODECS
+            LEGACY_JAZZ_CODECS
                 .iter()
                 .copied()
                 .filter(|codec| *codec != DURABILITY_V2),
         )
-        .and_then(|profile| profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY]))
+        .and_then(|profile| {
+            profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY, TRANSACTION_RECORD])
+        })
         .expect("pre-durability-v2 node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
@@ -303,22 +344,33 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
         .expect("pre-durability-v2 profile root"),
     );
     let before = std::fs::read(&path).unwrap();
-    match open_sqlite(&path) {
-        Err(StorageError::UnsupportedStorageCodecs {
-            epoch: 1,
-            missing,
-            unknown,
-        }) => {
-            assert_eq!(
-                missing,
-                vec![DICTIONARY_V1.to_owned(), DURABILITY_V2.to_owned()]
-            );
-            assert!(unknown.is_empty());
-        }
-        Err(other) => panic!("expected a typed format refusal, got {other}"),
-        Ok(()) => panic!("a root without the durability-v2 family must not open"),
-    }
+    assert_legacy_profile_refused(open_sqlite(&path), &pre_durability_v2_profile);
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
+}
+
+/// Alice opens a database with the former nullable transaction marker. The
+/// adapter refuses its profile before touching records or changing the file.
+#[test]
+fn transaction_string_marker_root_is_refused_before_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let old = legacy_base_profile()
+        .with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY])
+        .unwrap();
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &old,
+        )
+        .unwrap(),
+    );
+    let before = std::fs::read(&path).unwrap();
+    assert_legacy_profile_refused(open_sqlite(&path), &old);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// A node root written before interned author columns (no
@@ -339,8 +391,8 @@ fn node_root_without_the_dictionary_family_is_refused() {
     let path = directory.path().join("root.sqlite");
     let families = notes_schema().column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let pre_dictionary_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-        .and_then(|profile| profile.with_additional_codecs([DURABLE_INDEX_V2, ROW_HISTORY]))
+    let pre_dictionary_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs([DURABLE_INDEX_V2, "jazz.node-storage.v1"])
         .expect("pre-dictionary node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(

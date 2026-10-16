@@ -2074,7 +2074,7 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
         .unwrap();
 
     let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
-    assert!(!stored_parent.view_scoped_cardinality);
+    assert!(!stored_parent.is_partial);
     assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }

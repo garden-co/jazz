@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
 - `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
 - `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
-- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian order-preserving member encoding.
+- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple members MUST use the big-endian order-preserving member encoding on encode, decode and structural validation alike, recursively through nested tuple and nullable members (a present nullable member's payload is itself a member), with `F64` members in the §2.8 ordered-index transform.
 - `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
 - `INV-STORAGE-38`: Durable index ids MUST be assigned per `(table, index, definition)` from a monotonic counter starting at 1, recorded in the `indices` registry (`\0groove-index-id\0` keys) no later than the storage-atomic write of the first entry that uses them, stable across reopen and index reordering, and never reused: a changed definition or a runtime (re)registration receives a fresh id, so entries of an earlier incarnation are never read. An `indices` family holding entries without the `groove-durable-index-v2` layout marker, or with another marker, MUST fail open with `InvalidStorageLayout`; node roots declare `groove.durable-index.v2` in their manifest.
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
@@ -161,11 +161,11 @@ or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
 IDs, and sorted decode-relevant adapter parameters. Groove contributes the
-mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v1`, and
-`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
-contain all three before an adapter may mutate. `groove.large-value.v1` covers
+mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v2`, and
+`groove.ordered-chunk-storage.v2`; every profile and decoded manifest MUST
+contain all three before an adapter may mutate. `groove.large-value.v2` covers
 the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
-envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+envelopes; `groove.ordered-chunk-storage.v2` covers that adapter's independent
 install-receipt wrapper. The caller composes this closed base with its own
 persistent codec profile before opening the adapter. The adapter treats
 higher-layer IDs as opaque and never learns their semantics. A Jazz root, for
@@ -583,13 +583,22 @@ rejection is the graph-validation rule in ch. 3.
 
 ### Canonical persisted descriptor values
 
-The existing v1 persisted descriptor contract is an ordinary Groove record with
-one field `nodes: Array<Record<Node>>`. In declaration order `Node` contains
-`tag: U8`, `name: Nullable<RawString>`, `registry_id: U64`, `children: U32`, and
-`strings: Array<RawString>`. Raw-string, array, nullable and record framing are
-exactly §2.7; there is no serializer-defined payload. The enclosing durable
-value/key contract selects this v1 grammar; it has no additional magic or version
-byte and must not be replaced in place with a different node layout.
+The persisted descriptor v2 contract is an ordinary Groove record with one
+field `nodes: Array<Enum<Node>>`. Each node's permanent tag selects its payload:
+
+| Node kind                          | Stored payload                                                     |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| Descriptor, tuple                  | `children: U32`                                                    |
+| Field                              | `name: Nullable<RawString>`                                        |
+| Scalar enum                        | `name: RawString`, `registry_id: U64`, `strings: Array<RawString>` |
+| Payload enum                       | `name: RawString`, `registry_id: U64`, `children: U32`             |
+| Enum case                          | `name: RawString`                                                  |
+| Primitive, array, nullable, record | Empty                                                              |
+
+Enum tags and payloads use the canonical Groove enum/record framing in §2.7.
+A field, array, nullable, record, or enum case has exactly one child; that count
+is implicit. Primitive and scalar-enum nodes have no child nodes. Names are
+required for enums and cases; only field names remain optional.
 
 Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
 
@@ -609,10 +618,9 @@ name and one type child. Tuple nodes declare their type-child count; Array and
 Nullable have one type child, Record one descriptor child. Payload enums retain
 their name, registry identity and ordered case children; each named case has one
 descriptor child. Scalar enums retain name, registry identity and ordered variant
-names in `strings`. Unused names are absent, unused registry/count fields are
-zero, and unused string arrays are empty. The reader rejects inconsistent
-metadata, trailing nodes/bytes, invalid types, and any tree whose canonical
-re-encoding differs.
+names in `strings`. Irrelevant metadata has no field in the selected payload.
+The reader rejects unknown tags, malformed payloads, trailing nodes/bytes,
+invalid types, and any tree whose canonical re-encoding differs.
 
 `encode_persisted_record_descriptor` and its matching reader implement this
 contract. They preserve exact durable field names and nested enum registry
@@ -885,9 +893,15 @@ The first variable value starts immediately after the fixed fields and offset
 table. The last variable value ends at the record's end, so its end offset is
 implicit. Multi-byte scalar fields and offsets are little-endian, measured from
 the record start (`INV-STORAGE-9`). Fixed-width tuple members use concatenated
-order-preserving member encodings: integer tuple members are big-endian, `Bool`
-is `0|1`, `Uuid` is raw bytes, enum values are their `u8` discriminants, and
-nested fixed-width tuple/nullable members recurse (`INV-STORAGE-9`).
+order-preserving member encodings: integer tuple members are big-endian (signed
+ones with the sign bit flipped), `F64` members use the §2.8 ordered-index
+transform big-endian (NaN invalid), `Bool` is `0|1`, `Uuid` is raw bytes, enum
+values are their `u8` discriminants, and nested fixed-width tuple/nullable
+members recurse: a present nullable member's payload is itself a tuple member,
+and a null one is flag `0` plus a zero-filled payload width. Decoding and
+structural validation use exactly this member grammar, so a tuple's structural
+validation admits precisely the bytes that decode and re-encode unchanged
+(`INV-STORAGE-9`).
 
 A record decoder MUST consume exactly the descriptor-defined record span: a
 truncated fixed field, offset table, or variable payload; an out-of-range or

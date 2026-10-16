@@ -48,6 +48,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.parking.newest_ingest_ms = self.parking.newest_ingest_ms.max(now_ms);
         // A session or relay transport may not select a durable policy
         // capability. Its authenticated context is evaluated separately; only
         // trusted local/backend paths retain an explicit permission subject.
@@ -429,7 +430,48 @@ where
         ).await
     }
 
+    /// One admission attempt of a unit at the authority: its decision,
+    /// and, when it is refused, the superseded-writes markers the refusal
+    /// leaves (see [`Self::record_superseded_by_refusal`]).
     pub(super) async fn ingest_commit_unit_once(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
+        let tx_id = tx.tx_id;
+        let predecessors = versions
+            .iter()
+            .filter_map(|version| {
+                version.base().pending.map(|pending| {
+                    (
+                        version.schema_version(),
+                        version.table().to_owned(),
+                        version.branch_key().clone(),
+                        version.row_uuid(),
+                        pending,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcome =
+            Box::pin(self.decide_commit_unit(tx, versions, now_ms, ingest_context)).await?;
+        if !predecessors.is_empty()
+            && outcome.value.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::FateUpdate { tx_id: id, fate: Fate::Rejected(_), .. }
+                        if *id == tx_id
+                )
+            })
+        {
+            self.record_superseded_by_refusal(tx_id, predecessors).await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn decide_commit_unit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
@@ -561,8 +603,6 @@ where
                 durability: None,
             }]));
         }
-        // The cheap identity checks run before the predecessor check below,
-        // so only an admitted writer is ever asked to retry.
         if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -577,16 +617,6 @@ where
         // looked up for it.
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
-        }
-        // A write chained on its writer's pending predecessor is decided only
-        // after that predecessor (SPEC 4 §4.6). Core does not hold it: it
-        // stores nothing and asks the writer to send it again, naming the
-        // predecessor it waits for (SPEC 8).
-        if let Some(awaiting) = self.commit_unit_awaited_predecessor(&tx, &versions).await? {
-            return Ok(PublicationOutcome::settled(vec![SyncMessage::RetryLater {
-                tx_id: tx.tx_id,
-                awaiting,
-            }]));
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,
@@ -671,7 +701,7 @@ where
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.view_scoped_cardinality
+                || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -718,7 +748,7 @@ where
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
-            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
+            if version_bundles.is_empty() && !existing.is_partial {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
                     .await?;
                 return Ok(());

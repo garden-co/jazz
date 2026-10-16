@@ -5,176 +5,109 @@
 //! across every layer from `Db` facade calls through protocol messages to groove
 //! storage keys.
 
-/// Globally stable node identity used on the wire.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct NodeUuid(pub uuid::Uuid);
+use crate::identity::principal_is_nonempty;
 
-impl NodeUuid {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+/// Declares a `Copy` identifier newtype with the shared derive set. The derive
+/// list (including serde) is part of the wire and storage contract.
+macro_rules! id_newtype {
+    ($(#[$meta:meta])* $name:ident($inner:ty)) => {
+        $(#[$meta])*
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+        )]
+        pub struct $name(pub $inner);
+    };
 }
 
-/// Node-local integer alias for compact storage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct NodeAlias(pub u64);
+/// Declares a UUID-backed identifier newtype with wire-order byte accessors.
+macro_rules! uuid_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        id_newtype!($(#[$meta])* $name(uuid::Uuid));
 
-/// Content-addressed schema version identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaVersionId(pub uuid::Uuid);
+        impl $name {
+            /// Construct from UUID bytes in wire order.
+            pub fn from_bytes(bytes: [u8; 16]) -> Self {
+                Self(uuid::Uuid::from_bytes(bytes))
+            }
 
-impl SchemaVersionId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
+            /// Return the UUID bytes in wire order.
+            pub fn to_bytes(self) -> Vec<u8> {
+                self.0.as_bytes().to_vec()
+            }
 
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+            /// Borrow the UUID bytes in wire order.
+            pub fn as_bytes(&self) -> &[u8; 16] {
+                self.0.as_bytes()
+            }
+        }
+    };
 }
 
-/// Node-local integer alias for compact schema-version storage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaVersionAlias(pub u64);
-
-/// Node-local identity for one shared physical table lineage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct PhysicalTableId(pub u64);
-
-/// Node-local identity for one physical column epoch.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct PhysicalColumnId(pub u64);
-
-/// Authority-allocated permanent identity for a physical table lineage.
-/// Unlike `PhysicalTableId`, this value crosses catalogue replicas and never
-/// serves as a compact local storage alias.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalTableId(pub uuid::Uuid);
-
-/// Authority-allocated permanent identity for one physical column epoch.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalColumnId(pub uuid::Uuid);
-
-/// Authority-allocated permanent identity for one enum variant occurrence.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalEnumVariantId(pub uuid::Uuid);
-
-/// Content-addressed migration-lens identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct MigrationLensId(pub uuid::Uuid);
-
-impl MigrationLensId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+uuid_id! {
+    /// Globally stable node identity used on the wire.
+    NodeUuid
 }
 
-/// Content-addressed atomic schema-lineage publication identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaLineagePublicationId(pub uuid::Uuid);
-
-impl SchemaLineagePublicationId {
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+id_newtype! {
+    /// Node-local integer alias for compact storage.
+    NodeAlias(u64)
 }
 
-/// Stable identity for a schema family across catalogue projections.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaFamilyId(pub uuid::Uuid);
-
-impl SchemaFamilyId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+uuid_id! {
+    /// Content-addressed schema version identity.
+    SchemaVersionId
 }
 
-/// Stable row identity shared by every historical version of a row.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct RowUuid(pub uuid::Uuid);
+id_newtype! {
+    /// Node-local integer alias for compact schema-version storage.
+    SchemaVersionAlias(u64)
+}
 
-impl RowUuid {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
+id_newtype! {
+    /// Node-local identity for one shared physical table lineage.
+    PhysicalTableId(u64)
+}
 
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
+id_newtype! {
+    /// Node-local identity for one physical column epoch.
+    PhysicalColumnId(u64)
+}
 
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+id_newtype! {
+    /// Authority-allocated permanent identity for a physical table lineage.
+    /// Unlike `PhysicalTableId`, this value crosses catalogue replicas and never
+    /// serves as a compact local storage alias.
+    GlobalPhysicalTableId(uuid::Uuid)
+}
+
+id_newtype! {
+    /// Authority-allocated permanent identity for one physical column epoch.
+    GlobalPhysicalColumnId(uuid::Uuid)
+}
+
+id_newtype! {
+    /// Authority-allocated permanent identity for one enum variant occurrence.
+    GlobalPhysicalEnumVariantId(uuid::Uuid)
+}
+
+uuid_id! {
+    /// Content-addressed migration-lens identity.
+    MigrationLensId
+}
+
+uuid_id! {
+    /// Content-addressed atomic schema-lineage publication identity.
+    SchemaLineagePublicationId
+}
+
+uuid_id! {
+    /// Stable identity for a schema family across catalogue projections.
+    SchemaFamilyId
+}
+
+uuid_id! {
+    /// Stable row identity shared by every historical version of a row.
+    RowUuid
 }
 
 /// Whole-structure interned author identity. The cached portable spelling is
@@ -333,7 +266,9 @@ pub enum AuthorSubjectError {
     InvalidSystemOrigin,
 }
 
-fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
+/// The `(issuer, subject)` principal record shared by row authors and the
+/// account registry.
+pub(crate) fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
     use crate::groove::records::{RecordDescriptor, ValueType};
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
@@ -529,17 +464,7 @@ impl RowAuthor {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
+            parse_system_origin(subject)?;
             return Ok(Self(RowAuthorKind::SystemAt(intern_author(
                 Some(account),
                 issuer,
@@ -827,17 +752,7 @@ impl AuthorSubject {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID.0 {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
+            parse_system_origin(subject)?;
             return Ok(Self::SystemAt(intern_author(
                 Some(crate::account_registry::AccountId(account)),
                 issuer,
@@ -873,25 +788,7 @@ impl AuthorSubject {
         if canonical == Self::SYSTEM_CANONICAL {
             return Ok(Self::SYSTEM);
         }
-        let parts: Vec<String> = serde_json::from_str(canonical)
-            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-        let (account, issuer, subject) = match parts.as_slice() {
-            [issuer, subject] => (None, issuer.clone(), subject.clone()),
-            [account, issuer, subject] => {
-                let uuid = uuid::Uuid::parse_str(account)
-                    .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-                (
-                    Some(crate::account_registry::AccountId(uuid)),
-                    issuer.clone(),
-                    subject.clone(),
-                )
-            }
-            _ => {
-                return Err(AuthorSubjectError::InvalidCanonical(
-                    "expected principal or account author".into(),
-                ));
-            }
-        };
+        let (account, issuer, subject) = parse_canonical_parts(canonical)?;
         if issuer == Self::SYSTEM_ISSUER {
             let Some(account) = account else {
                 return Err(AuthorSubjectError::ReservedIssuer(issuer));
@@ -899,18 +796,7 @@ impl AuthorSubject {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(&subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject.as_str()
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
-            let author = Self::system_at(node);
+            let author = Self::system_at(parse_system_origin(&subject)?);
             if author.canonical() != canonical {
                 return Err(AuthorSubjectError::NonCanonical);
             }
@@ -938,25 +824,7 @@ impl AuthorSubject {
     /// Jazz-reserved issuers are capabilities selected only by verified or
     /// in-process authority paths; serialized callers may never select them.
     pub fn from_untrusted_canonical(canonical: &str) -> Result<Self, AuthorSubjectError> {
-        let parts: Vec<String> = serde_json::from_str(canonical)
-            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-        let (account, issuer, subject) = match parts.as_slice() {
-            [issuer, subject] => (None, issuer.clone(), subject.clone()),
-            [account, issuer, subject] => {
-                let uuid = uuid::Uuid::parse_str(account)
-                    .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-                (
-                    Some(crate::account_registry::AccountId(uuid)),
-                    issuer.clone(),
-                    subject.clone(),
-                )
-            }
-            _ => {
-                return Err(AuthorSubjectError::InvalidCanonical(
-                    "expected principal or account author".into(),
-                ));
-            }
-        };
+        let (account, issuer, subject) = parse_canonical_parts(canonical)?;
         let principal = Self::authenticated(&issuer, &subject)?;
         if account.is_some_and(|account| account.is_system()) {
             return Err(AuthorSubjectError::ReservedAccount);
@@ -995,11 +863,45 @@ impl AuthorSubject {
     }
 }
 
-fn principal_is_nonempty(value: &str) -> bool {
-    value
-        .as_bytes()
-        .iter()
-        .any(|byte| !matches!(byte, b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' '))
+/// Parse a system author's subject as its originating node, accepting only the
+/// lowercase hyphenated UUID spelling.
+fn parse_system_origin(subject: &str) -> Result<NodeUuid, AuthorSubjectError> {
+    let node = uuid::Uuid::parse_str(subject)
+        .map(NodeUuid)
+        .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
+    if &*node
+        .0
+        .hyphenated()
+        .encode_lower(&mut uuid::Uuid::encode_buffer())
+        != subject
+    {
+        return Err(AuthorSubjectError::InvalidSystemOrigin);
+    }
+    Ok(node)
+}
+
+/// Split a portable canonical author into `(account, issuer, subject)` without
+/// validating the components.
+fn parse_canonical_parts(
+    canonical: &str,
+) -> Result<(Option<crate::account_registry::AccountId>, String, String), AuthorSubjectError> {
+    let parts: Vec<String> = serde_json::from_str(canonical)
+        .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
+    match parts.as_slice() {
+        [issuer, subject] => Ok((None, issuer.clone(), subject.clone())),
+        [account, issuer, subject] => {
+            let uuid = uuid::Uuid::parse_str(account)
+                .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
+            Ok((
+                Some(crate::account_registry::AccountId(uuid)),
+                issuer.clone(),
+                subject.clone(),
+            ))
+        }
+        _ => Err(AuthorSubjectError::InvalidCanonical(
+            "expected principal or account author".into(),
+        )),
+    }
 }
 
 impl PartialOrd for AuthorSubject {

@@ -33,6 +33,8 @@ use jazz_types::account_registry;
 use jazz_types::delivery_diagnostics;
 use jazz_types::{debug_env, ids, local_executor, object, time};
 
+/// Argument parsing shared by the NAPI and WASM bindings.
+pub mod binding_args;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
 /// Disabled-by-default counters used by the native cold-settle attribution bench.

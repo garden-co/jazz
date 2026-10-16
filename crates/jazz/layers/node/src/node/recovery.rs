@@ -299,7 +299,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 stored.global_time,
                 stored.durability,
             )
-            .view_scoped(stored.view_scoped_cardinality),
+            .view_scoped(stored.is_partial),
         )
         .unwrap();
         let applied = self.database.apply_batch(batch).await.unwrap();

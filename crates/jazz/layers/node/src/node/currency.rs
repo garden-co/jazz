@@ -1166,7 +1166,7 @@ where
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            view_scoped_cardinality: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
+            is_partial: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 

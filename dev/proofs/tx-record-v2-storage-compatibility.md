@@ -33,7 +33,7 @@ SPEC 2 §2.8 has the normative layout. In short:
 
 | table                       | key               | holds                                                                                                                                                                                                            | lifetime                                          |
 | --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` interned (4-byte code), fate, global_time, durability, user_metadata, one nullable rejection record, the permission subject when it is not the author | forever                                           |
+| `jazz_transactions`         | `(time, node_id)` | time, node_id, kind, flags `U8`, n_total_writes, `made_by` interned (4-byte code), fate, global_time, durability, user_metadata, the nullable kind-specific rejection enum, the permission subject when it is not the author | forever                                           |
 | `jazz_tx_provenance`        | `(time, node_id)` | the contribution provenance record                                                                                                                                                                               | forever, only when flag bit 1 is set              |
 | `jazz_pending_transactions` | `(time, node_id)` | the four read-evidence slots                                                                                                                                                                                     | until the batch that records a seq or a rejection |
 | `jazz_history_horizon`      | `id: U8 = 0`      | the seq at or below which history was truncated                                                                                                                                                                  | forever; this release requires 0                  |
@@ -79,7 +79,10 @@ never silently accepted.
 
 None. alpha.60 is a coordinated breaking release, so a store written by an
 earlier build is refused by the storage codec profile before any of these
-decoders runs, as for earlier layout changes. A store from this build that a
+decoders runs, as for earlier layout changes: the layout is covered by the
+node root's `jazz.node-storage.v1` marker (#4071), and interned authors add
+`groove.dictionary.v1` to the node profile, so a node root without it is
+refused with `UnsupportedStorageCodecs { missing: ["groove.dictionary.v1"] }`. A store from this build that a
 later release truncates is refused by this build with
 `TruncatedHistoryUnsupported` instead of being read as if its history were
 complete.

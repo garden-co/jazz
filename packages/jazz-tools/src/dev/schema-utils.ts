@@ -8,6 +8,7 @@ import type {
 } from "../drivers/types.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { parseUuidBytes } from "../runtime/hex.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
 
@@ -312,14 +313,8 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
 }
 
 function uuidBytes(value: string): Uint8Array {
-  const hex = value.replace(/-/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`Invalid UUID default value: ${value}`);
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`Invalid UUID default value: ${value}`);
   return bytes;
 }
 

@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use jazz::schema::JazzSchema;
 
 use jazz::tools::public_schema::{Schema, SchemaHash};
+use jazz::tools::schema_lens::Lens;
 use jazz::tools::schema_lens::runtime::compile_lens;
-use jazz::tools::schema_lens::{Lens, LensOp};
 
 #[cfg(test)]
 use super::catalogue::{ActiveSchemaSummary, CatalogueError};
@@ -218,24 +218,7 @@ async fn publish_runtime_lens(
     let source_schema = known_schema(state, supplied_schemas, lens.source_hash)?;
     let target_schema = known_schema(state, supplied_schemas, lens.target_hash)?;
     let runtime_lens = compile_lens(lens, &source_schema, &target_schema)?;
-    let new_tables = lens
-        .forward
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            LensOp::AddTable { table, .. } => Some(table.as_str().to_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let dropped_tables = lens
-        .forward
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            LensOp::RemoveTable { table, .. } => Some(table.as_str().to_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let (new_tables, dropped_tables) = lens.table_changes();
     let initial_schema = JazzSchema::new(&source_schema)
         .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
     let target_runtime = JazzSchema::new(&target_schema)
@@ -458,6 +441,7 @@ fn known_schema_if_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::tools::schema_lens::LensOp;
 
     // Internal bridge tests inspect both stored administrative state and runtime
     // state, including rejection before an administrative write.

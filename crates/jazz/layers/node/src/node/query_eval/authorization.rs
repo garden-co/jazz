@@ -354,19 +354,11 @@ where
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
-                .schema
-        }
-        .clone();
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+            .clone();
         // Access-path pushdown is an optimization, not part of the decision
         // boundary. Keep the target coordinate in the policy AST as well so
         // inline transaction overlays cannot authorize one row from another
@@ -376,44 +368,13 @@ where
             .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
         let policy_shape =
             policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &policy_schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy_context = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, &policy_schema)?;
+        let policy_context = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Read,
+        );
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -571,6 +532,65 @@ where
         result
     }
 
+    /// The policy context of an authorization subplan protecting `table`
+    /// for `identity`. System authority keeps its unrestricted context.
+    fn authorization_subplan_policy(
+        &self,
+        identity: AuthorSubject,
+        table: &str,
+        role: PolicyDecisionRole,
+    ) -> PolicyContext {
+        match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(table),
+                role,
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        }
+    }
+
+    /// Inline a policy query's reachable seeds and build its row-set input,
+    /// returning the bound shape and binding with it.
+    fn inline_policy_subplan_input(
+        &self,
+        policy_shape: &ValidatedQuery,
+        schema: &RuntimeSchema,
+    ) -> Result<(ValidatedQuery, Binding, RowSetProgramInput), Error> {
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            policy_shape,
+            &policy_binding,
+            schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let claim_params = binding_claim_params_for_shape(&input_shape, policy_shape.params());
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    policy_shape.params(),
+                    &claim_params,
+                ),
+                BTreeMap::new(),
+                claim_params,
+            ),
+            shape: input_shape,
+        };
+        Ok((policy_shape, binding, input))
+    }
+
     pub(super) fn query_program_policy_context(&self, identity: AuthorSubject) -> PolicyContext {
         if identity == AuthorSubject::SYSTEM {
             PolicyContext::System
@@ -602,44 +622,13 @@ where
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
         let policy_shape = policy.validate(&self.catalogue.schema)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            &self.catalogue.schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Write,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, &self.catalogue.schema)?;
+        let policy = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Write,
+        );
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
@@ -877,60 +866,18 @@ where
                 }
             }
         }
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?;
         let policy_shape = policy
             .clone()
             .validate_with_schema_version(policy_schema, policy_schema_version)?;
-        let policy_binding = policy_shape.bind(BTreeMap::new())?;
-        let policy_shape = bind_query_params_with_mode(
-            &policy_shape,
-            &policy_binding,
-            policy_schema,
-            ParamBindingMode::InlineAllReachableSeeds,
-        )?;
-        let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let (policy_shape, binding, input) =
+            self.inline_policy_subplan_input(&policy_shape, policy_schema)?;
         let root_source = root_source_id(policy_shape.query().table.as_str());
-        let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
-                &policy_shape,
-                &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-                ),
-                BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
-            ),
-            shape: input_shape,
-        };
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy =
+            self.authorization_subplan_policy(identity, policy_shape.query().table.as_str(), role);
         let request = QueryProgramRequest {
             authorization_mode: QueryAuthorizationMode::TrustedServing,
             reads: current_query_read_set(
@@ -1133,61 +1080,93 @@ where
             authorization_keys.clone(),
             authorization_keys,
         );
-        let (base, binding_route_fields) =
-            match binding_routes {
-                Some((binding, route_fields)) => (
-                    GraphBuilder::join(
-                        base,
-                        binding,
-                        std::iter::empty::<String>(),
-                        std::iter::empty::<String>(),
-                    )
-                    .project_fields(
-                        output_fields
-                            .iter()
-                            .cloned()
-                            .chain(route_fields.iter().map(|field| {
-                                ProjectField::renamed(right_field(field), field.clone())
-                            }))
-                            .collect::<Vec<_>>(),
-                    ),
-                    route_fields,
-                ),
-                None => (base, BTreeSet::new()),
-            };
         let mut join_keys = vec!["row_uuid".to_owned()];
         join_keys.extend(authorized.route_fields.iter().cloned());
-        if authorized.route_fields.is_empty() {
+        let Some((binding, binding_route_fields)) = binding_routes else {
             let mut fields = output_fields.to_vec();
             fields.extend(
-                binding_route_fields
+                authorized
+                    .route_fields
                     .iter()
-                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
             );
             return Ok(PolicyAuthorizationGraph {
                 graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
                     .project_fields(fields),
+                route_fields: BTreeSet::new(),
+                access_paths: BTreeMap::new(),
+            });
+        };
+        let with_binding = |graph: GraphBuilder, keys: Vec<String>, carried: &[String]| {
+            GraphBuilder::join(graph, binding.clone(), keys.clone(), keys).project_fields(
+                output_fields
+                    .iter()
+                    .map(|field| ProjectField {
+                        expression: groove::ivm::ProjectExpr::Field(
+                            groove::ivm::FieldRef::stored_name(left_field(&field.output_name)),
+                        ),
+                        output_name: field.output_name.clone(),
+                        output_identity: field.output_identity.clone(),
+                    })
+                    .chain(
+                        carried
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    )
+                    .chain(
+                        binding_route_fields
+                            .iter()
+                            .filter(|field| !carried.contains(*field))
+                            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+                    )
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if authorized.route_fields.is_empty() {
+            // The proof admits a row for every binding alike; pair it with
+            // each binding so the source carries the enclosing slots.
+            let authorized_rows =
+                GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
+                    .project_fields(output_fields.to_vec());
+            return Ok(PolicyAuthorizationGraph {
+                graph: with_binding(authorized_rows, Vec::new(), &[]),
                 route_fields: binding_route_fields,
                 access_paths: BTreeMap::new(),
             });
         }
-        let mut fields = output_fields.to_vec();
-        fields.extend(
-            authorized
-                .route_fields
-                .iter()
-                .map(|field| ProjectField::renamed(right_field(field), field.clone())),
-        );
-        fields.extend(
-            binding_route_fields
-                .iter()
-                .filter(|field| !authorized.route_fields.contains(*field))
-                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
-        );
+        // Take the policy's own routes from its proof first, then attach the
+        // enclosing binding's other slots only to bindings with those route
+        // values. Pairing every source row with every live binding before the
+        // proof would hold a copy of the whole source per binding in a graph
+        // that many bindings share.
+        let proof_routes = authorized.route_fields.iter().cloned().collect::<Vec<_>>();
+        let authorized_rows =
+            GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"]).project_fields(
+                output_fields
+                    .iter()
+                    .cloned()
+                    .chain(
+                        proof_routes
+                            .iter()
+                            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+                    )
+                    .collect::<Vec<_>>(),
+            );
+        let binding_keys = proof_routes
+            .iter()
+            .filter(|field| binding_route_fields.contains(*field))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut route_fields = binding_route_fields.clone();
+        route_fields.extend(proof_routes.iter().cloned());
+        let graph = if binding_route_fields.is_subset(&authorized.route_fields) {
+            authorized_rows
+        } else {
+            with_binding(authorized_rows, binding_keys, &proof_routes)
+        };
         Ok(PolicyAuthorizationGraph {
-            graph: GraphBuilder::join(base, authorized_graph, join_keys.clone(), join_keys)
-                .project_fields(fields),
-            route_fields: binding_route_fields,
+            graph,
+            route_fields,
             access_paths: BTreeMap::new(),
         })
     }
@@ -1227,20 +1206,12 @@ where
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "policy schema version is unknown",
+            ))?;
         let table = policy_schema
             .tables
             .iter()
@@ -1292,22 +1263,11 @@ where
         if let Some(source_shape) = binding_source_shape.clone() {
             retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(policy_shape.query().table.as_str()),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy = self.authorization_subplan_policy(
+            identity,
+            policy_shape.query().table.as_str(),
+            PolicyDecisionRole::Read,
+        );
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -1387,41 +1347,19 @@ where
         {
             return Ok(request.clone());
         }
-        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if policy_schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
+        let policy_schema = self
+            .catalogue
+            .schema_for_version(policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "policy schema version is unknown",
+            ))?;
         let table = policy_schema
             .tables
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let policy = match self.query_program_policy_context(identity) {
-            PolicyContext::Identity {
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            } => PolicyContext::AuthorizationSubplan {
-                protected_source: root_source_id(table_name),
-                role: PolicyDecisionRole::Read,
-                mode,
-                permission_subject,
-                claims,
-                attribution,
-            },
-            other => other,
-        };
+        let policy =
+            self.authorization_subplan_policy(identity, table_name, PolicyDecisionRole::Read);
         // System authority bypasses the table policy.  Its authorization
         // subplan must therefore describe all rows, not the policy's claim
         // predicates: those operands are invalid without an identity context
