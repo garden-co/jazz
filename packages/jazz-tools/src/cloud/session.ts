@@ -16,6 +16,12 @@ export const DEFAULT_CLOUD_URL = "https://v2.dashboard.jazz.tools";
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 /** Refresh this long before expiry so a request never starts with a dying token. */
 const REFRESH_MARGIN_SECONDS = 30;
+/**
+ * A refresh runs under the credentials lock, so it must finish well before
+ * the lock counts as stale; otherwise another process could break the lock and
+ * present the same single-use refresh token.
+ */
+const REFRESH_TIMEOUT_MS = 20_000;
 
 export class CloudAuthError extends Error {
   constructor(
@@ -24,6 +30,7 @@ export class CloudAuthError extends Error {
       | "login_denied"
       | "login_expired"
       | "session_expired"
+      | "refresh_failed"
       | "login_unavailable",
     message: string,
   ) {
@@ -47,6 +54,8 @@ export interface CloudSessionOptions {
   fetch?: typeof fetch;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Abort a token refresh after this long (default REFRESH_TIMEOUT_MS). */
+  refreshTimeoutMs?: number;
 }
 
 interface TokenResponse {
@@ -261,15 +270,32 @@ async function refreshProfile(
       return profile;
     }
     secureUrl(profile.workos.apiBaseUrl, "WorkOS API URL");
-    const { status, body } = await fetchJson(
-      fetchImpl,
-      `${profile.workos.apiBaseUrl}/user_management/authenticate`,
-      form({
-        grant_type: "refresh_token",
-        refresh_token: profile.refreshToken,
-        client_id: profile.workos.clientId,
-      }),
-    );
+    let response: Awaited<ReturnType<typeof fetchJson>>;
+    try {
+      response = await fetchJson(
+        fetchImpl,
+        `${profile.workos.apiBaseUrl}/user_management/authenticate`,
+        {
+          ...form({
+            grant_type: "refresh_token",
+            refresh_token: profile.refreshToken,
+            client_id: profile.workos.clientId,
+          }),
+          signal: AbortSignal.timeout(options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS),
+        },
+      );
+    } catch (error) {
+      // The token may or may not have been consumed; keep the profile so the
+      // next command can try again (it re-reads under the lock).
+      const timedOut = (error as Error)?.name === "TimeoutError";
+      throw new CloudAuthError(
+        "refresh_failed",
+        timedOut
+          ? "Refreshing the Jazz Cloud session timed out. Try again."
+          : "Could not reach WorkOS to refresh the Jazz Cloud session. Try again.",
+      );
+    }
+    const { status, body } = response;
     if (status !== 200) {
       // A rejected refresh token is dead for good: forget it so the next
       // command gives a clear "log in" message instead of retrying a revoked

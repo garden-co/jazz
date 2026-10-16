@@ -191,8 +191,10 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
 
       case "logout": {
         allowOnly(parsed, []);
-        const sessionRevoked = await revokeStoredSession(sessionOptions);
-        const removed = await deleteProfile(cloudUrl, io.env);
+        const hadSession = (await readProfile(cloudUrl, io.env)) !== undefined;
+        const sessionRevoked = hadSession && (await revokeStoredSession(sessionOptions));
+        // Revoking can itself find the session already dead and forget it.
+        const removed = (await deleteProfile(cloudUrl, io.env)) || hadSession;
         out(
           { loggedOut: removed, sessionRevoked, cloudUrl },
           removed
@@ -251,7 +253,6 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
  */
 async function revokeStoredSession(options: CloudSessionOptions): Promise<boolean> {
   const env = options.env ?? process.env;
-  if (!(await readProfile(options.cloudUrl, env))) return false;
   // Revoke the stored login's session, not one behind JAZZ_CLOUD_TOKEN.
   const { JAZZ_CLOUD_TOKEN: _ignored, ...storedOnly } = env;
   try {

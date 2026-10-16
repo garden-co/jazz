@@ -71,7 +71,11 @@ No client secret is involved, and the device code is never printed.
 or `$JAZZ_CONFIG_DIR`) is written with an atomic rename, file mode `0600`,
 directory mode `0700` (an existing directory is tightened to `0700`). Every
 read-modify-write holds `credentials.lock` in the same directory, created with
-`O_EXCL`; a lock older than 60 seconds is treated as left by a dead process.
+`O_EXCL` and holding the owner's pid and a per-acquisition nonce. A lock whose
+pid no longer exists, or that is older than 60 seconds, is broken by an atomic
+rename (a newer lock caught by mistake is linked back), and a process releases
+the lock only while it still holds its own nonce. The one network call made
+under the lock, token refresh, times out after 20 seconds.
 Format, version 1:
 
 ```json

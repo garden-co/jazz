@@ -10,7 +10,7 @@
 // (`credentials.lock`, created with O_EXCL) so parallel jazz-tools processes
 // cannot drop each other's profiles or race a refresh-token rotation.
 
-import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -108,8 +108,12 @@ async function writeCredentialsFile(path: string, file: CredentialsFile): Promis
   }
 }
 
-/** A lock older than this is from a process that died while holding it. */
-const STALE_LOCK_MS = 60_000;
+/**
+ * A lock older than this is from a process that hung or died while holding
+ * it. Holders keep well under it: the only network call made under the lock
+ * (token refresh) has a shorter timeout.
+ */
+export const STALE_LOCK_MS = 60_000;
 const LOCK_RETRY_MS = 25;
 
 export interface CredentialsLockOptions {
@@ -123,6 +127,58 @@ export interface LockedCredentials {
   read(cloudUrl: string): Promise<CloudProfile | undefined>;
   save(profile: CloudProfile): Promise<void>;
   delete(cloudUrl: string): Promise<boolean>;
+}
+
+/** `<pid> <nonce>`: the pid detects dead holders, the nonce identifies this acquisition. */
+function lockContent(nonce: string): string {
+  return `${process.pid} ${nonce}\n`;
+}
+
+async function readLock(
+  lockPath: string,
+): Promise<{ content: string; pid: number; mtimeMs: number } | undefined> {
+  try {
+    const [content, info] = await Promise.all([readFile(lockPath, "utf8"), stat(lockPath)]);
+    return { content, pid: Number.parseInt(content, 10), mtimeMs: info.mtimeMs };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function processIsGone(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    // EPERM means it exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Removes a lock judged abandoned, but only if it is still the exact lock that
+ * was judged: it is renamed away atomically (one breaker wins), and if the
+ * renamed file turns out to be a newer, live lock it is linked back.
+ */
+async function breakLock(lockPath: string, judged: string, nonce: string): Promise<void> {
+  const aside = `${lockPath}.${nonce}.stale`;
+  try {
+    await rename(lockPath, aside);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return; // someone else broke it
+    throw error;
+  }
+  try {
+    if ((await readFile(aside, "utf8")) !== judged) {
+      // Another waiter broke the stale lock and took a fresh one in between:
+      // put it back. link() never replaces an existing file.
+      await link(aside, lockPath).catch(() => {});
+    }
+  } finally {
+    await rm(aside, { force: true });
+  }
 }
 
 /**
@@ -140,19 +196,22 @@ export async function withCredentialsLock<T>(
   const sleep =
     options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const deadline = Date.now() + (options.timeoutMs ?? STALE_LOCK_MS);
+  const nonce = randomBytes(8).toString("hex");
+  const ours = lockContent(nonce);
   await ensurePrivateDir(dirname(path));
 
   for (;;) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${process.pid}\n`).finally(() => handle.close());
+      await handle.writeFile(ours).finally(() => handle.close());
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const held = await stat(lockPath).catch(() => undefined);
-    if (held && Date.now() - held.mtimeMs > STALE_LOCK_MS) {
-      await rm(lockPath, { force: true });
+    const held = await readLock(lockPath);
+    if (!held) continue;
+    if (processIsGone(held.pid) || Date.now() - held.mtimeMs > STALE_LOCK_MS) {
+      await breakLock(lockPath, held.content, nonce);
       continue;
     }
     if (Date.now() > deadline) {
@@ -183,7 +242,11 @@ export async function withCredentialsLock<T>(
       },
     });
   } finally {
-    await rm(lockPath, { force: true });
+    // Only release our own acquisition: if the lock was broken as stale and
+    // taken by another process, it is theirs now.
+    if ((await readLock(lockPath))?.content === ours) {
+      await rm(lockPath, { force: true });
+    }
   }
 }
 

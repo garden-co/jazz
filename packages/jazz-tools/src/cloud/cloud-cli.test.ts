@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { runCloudCommand, type CloudCommandIo } from "./commands.js";
+import { withCredentialsLock } from "./credentials.js";
+import { getAccessToken } from "./session.js";
 
 // The CLI runs against a real local HTTP server that plays both WorkOS (device
 // authorization + token endpoints) and the dashboard's /api/v1.
@@ -370,6 +372,60 @@ describe("session handling", () => {
     expect(cloud.refreshCount).toBe(1);
     expect((await storedProfile()).refreshToken).toBe("refresh-2");
     await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("breaks a lock left by a dead process without waiting for it to go stale", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    // A pid far above any real one: process.kill(pid, 0) reports ESRCH.
+    await writeFile(join(configDir, "credentials.lock"), "2147483646 deadbeef\n");
+    const started = Date.now();
+    expect(await runCloudCommand(["whoami", "--json"], io().io)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("waits for a live holder and gives up after the timeout", async () => {
+    await writeFile(join(configDir, "credentials.lock"), `${process.pid} livelock\n`);
+    const env = { JAZZ_CONFIG_DIR: configDir };
+    await expect(
+      withCredentialsLock(async () => "acquired", env, { timeoutMs: 100 }),
+    ).rejects.toThrow("Timed out waiting for another jazz-tools process");
+    expect(await readFile(join(configDir, "credentials.lock"), "utf8")).toBe(
+      `${process.pid} livelock\n`,
+    );
+  });
+
+  it("does not release a lock that another process took over", async () => {
+    const env = { JAZZ_CONFIG_DIR: configDir };
+    await withCredentialsLock(async () => {
+      // As if our lock had been broken as stale and re-taken by someone else.
+      await writeFile(join(configDir, "credentials.lock"), `${process.pid} someone-else\n`);
+    }, env);
+    expect(await readFile(join(configDir, "credentials.lock"), "utf8")).toBe(
+      `${process.pid} someone-else\n`,
+    );
+  });
+
+  it("gives up on a hanging refresh before the lock can go stale, keeping the login", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshDelayMs = 500;
+    await expect(
+      getAccessToken({
+        cloudUrl: cloud.url,
+        env: { JAZZ_CONFIG_DIR: configDir },
+        refreshTimeoutMs: 50,
+      }),
+    ).rejects.toMatchObject({ code: "refresh_failed" });
+    expect((await storedProfile()).refreshToken).toBe("refresh-1");
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("logout of an already revoked session still reports logged out", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshStatus = 400;
+    const run = io();
+    expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: false, cloudUrl: cloud.url });
   });
 
   it("does not echo a corrupt credentials file", async () => {
