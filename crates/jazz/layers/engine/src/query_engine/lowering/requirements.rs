@@ -75,7 +75,7 @@ pub(super) fn source_requirements(
             }) if fields.iter().any(|field| matches!(
                 field.as_str(),
                 "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy"
-            ))
+            ) || crate::ids::AuthorSubject::metadata_path(field).is_some())
         );
         if app_rows.public_terminal && projects_provenance {
             root_requirements.metadata.extend([
@@ -96,6 +96,7 @@ pub(super) fn source_requirements(
         if let PayloadProjection::Tree(tree) = &app_rows.projection {
             if let FieldProjection::Fields(fields) = &tree.fields {
                 for field in fields {
+                    add_required_app_field(root_requirements, field.clone());
                     let provenance = match field.as_str() {
                         "$createdAt" => Some(ProvenanceField::CreatedAt),
                         "$createdBy" => Some(ProvenanceField::CreatedBy),

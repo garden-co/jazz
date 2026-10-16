@@ -195,9 +195,18 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     output_identity: records::FieldIdentity::Name(column.name().to_owned()),
                 }
             }));
+            // History stores provenance as HLCs. Expose physical milliseconds,
+            // matching ordinary source provenance before predicates and ordering.
             fields.extend([
                 ProjectField::renamed("created_by", "$createdBy"),
-                ProjectField::renamed("created_at", "$createdAt"),
+                ProjectField {
+                    expression: groove::ivm::ProjectExpr::U64ShiftRight {
+                        source: groove::ivm::FieldRef::name("created_at"),
+                        bits: crate::time::HLC_COUNTER_BITS as u32,
+                    },
+                    output_name: "$createdAt".to_owned(),
+                    output_identity: records::FieldIdentity::Name("$createdAt".to_owned()),
+                },
                 ProjectField::renamed(
                     if stored_author {
                         "updated_by"
@@ -206,7 +215,14 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     },
                     "$updatedBy",
                 ),
-                ProjectField::renamed("updated_at", "$updatedAt"),
+                ProjectField {
+                    expression: groove::ivm::ProjectExpr::U64ShiftRight {
+                        source: groove::ivm::FieldRef::name("updated_at"),
+                        bits: crate::time::HLC_COUNTER_BITS as u32,
+                    },
+                    output_name: "$updatedAt".to_owned(),
+                    output_identity: records::FieldIdentity::Name("$updatedAt".to_owned()),
+                },
                 ProjectField::named("tx_time"),
                 ProjectField::named("tx_node_id"),
                 ProjectField::named("transaction_node"),
@@ -264,6 +280,12 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 },
             );
         }
+        let (graph, descriptor, metadata) = read_sources::with_requested_author_paths(
+            graph,
+            descriptor,
+            metadata,
+            &request.requirements,
+        )?;
         Ok(ResolvedSource {
             stored_column_ids: BTreeMap::new(),
             table_schema: table.into(),

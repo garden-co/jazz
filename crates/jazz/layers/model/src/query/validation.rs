@@ -487,14 +487,6 @@ fn validate_history_query(
     {
         return Err(unsupported("ordering by $transactionId"));
     }
-    if query.select.as_ref().is_some_and(|columns| {
-        columns.iter().any(|column| {
-            column.starts_with('$')
-                && !crate::schema::history::HistoryMetadataColumn::contains(column)
-        })
-    }) {
-        return Err(unsupported("current-row provenance columns"));
-    }
     // This is a query-local descriptor, never a writable catalogue table.
     let table = TableSchema::new(query.table.clone(), history.columns().iter().cloned());
     let mut schema = schema.clone();

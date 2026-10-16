@@ -1,3 +1,4 @@
+import { PROVENANCE_MAGIC_COLUMNS, type RowAuthor } from "../../src/magic-columns.js";
 import type { TxId } from "../../src/runtime/client.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
@@ -319,15 +320,126 @@ describe("TS Query API history (connected client)", () => {
     );
   });
 
-  it("rejects current-row provenance in history projections", async () => {
+  it("projects each version's own creation and update timestamps as Dates", async () => {
     const note = await insertNote();
-    // @ts-expect-error Current-row provenance is not history metadata.
-    const query = app.notes.history.where({ id: note.id }).select("$updatedAt");
-    await expect(db.all(query)).rejects.toMatchObject({
-      message:
-        "Query: unsupported relation query: Reading current-row provenance columns is not supported in history queries yet",
-      code: "query",
-    });
+    const query = app.notes.history
+      .where({ id: note.id })
+      .orderBy("$acceptedAt")
+      .select("title", "$createdAt", "$updatedAt");
+    const first = (await db.all(query))[0]!;
+    expectTypeOf(first.$createdAt).toEqualTypeOf<Date>();
+    expectTypeOf(first.$updatedAt).toEqualTypeOf<Date>();
+    expect(first.$createdAt).toBeInstanceOf(Date);
+    expect(first.$updatedAt).toBeInstanceOf(Date);
+    const updatedAt = first.$updatedAt.getTime() + 1000;
+    await db
+      .update(app.notes, note.id, { title: "second" }, { updatedAt })
+      .wait({ tier: "global" });
+    expect(await db.all(query)).toEqual([
+      first,
+      {
+        id: note.id,
+        title: "second",
+        $createdAt: first.$createdAt,
+        $updatedAt: new Date(updatedAt),
+      },
+    ]);
+  });
+
+  it("filters and orders versions by their authored timestamps", async () => {
+    const note = await insertNote();
+    const query = app.notes.history
+      .where({ id: note.id })
+      .select("title", "$createdAt", "$updatedAt");
+    const first = (await db.all(query))[0]!;
+    const earlier = first.$updatedAt.getTime() - 1000;
+    await db
+      .update(app.notes, note.id, { title: "backdated" }, { updatedAt: earlier })
+      .wait({ tier: "global" });
+    expect((await db.all(query.orderBy("$updatedAt"))).map((row) => row.title)).toEqual([
+      "backdated",
+      "first",
+    ]);
+    expect(
+      await db.all(
+        query.where({ $createdAt: first.$createdAt, $updatedAt: { gte: first.$updatedAt } }),
+      ),
+    ).toEqual([first]);
+  });
+
+  it("subscribes to projected historical timestamps without overwriting older versions", async () => {
+    const note = await insertNote();
+    const query = app.notes.history
+      .where({ id: note.id })
+      .orderBy("$updatedAt")
+      .select("$createdAt", "$updatedAt");
+    const first = (await db.all(query))[0]!;
+    const latest = watch(
+      query.where({ $createdAt: first.$createdAt, $updatedAt: { gte: first.$updatedAt } }),
+    );
+    await expect.poll(latest).toEqual([first]);
+    const updatedAt = first.$updatedAt.getTime() + 1000;
+    await db
+      .update(app.notes, note.id, { title: "second" }, { updatedAt })
+      .wait({ tier: "global" });
+    await expect
+      .poll(latest)
+      .toEqual([
+        first,
+        { id: note.id, $createdAt: first.$createdAt, $updatedAt: new Date(updatedAt) },
+      ]);
+  });
+
+  it("projects all provenance columns with the same values and types as ordinary rows", async () => {
+    const note = await insertNote();
+    const current = (
+      await db.all(app.notes.where({ id: note.id }).select(...PROVENANCE_MAGIC_COLUMNS))
+    )[0]!;
+    const query = app.notes.history.where({ id: note.id }).select(...PROVENANCE_MAGIC_COLUMNS);
+    const rows = await db.all(query);
+    expectTypeOf(rows[0]!.$createdBy).toEqualTypeOf<RowAuthor>();
+    expectTypeOf(rows[0]!.$updatedBy).toEqualTypeOf<RowAuthor>();
+    expectTypeOf(rows[0]!["$createdBy.identity"]).toEqualTypeOf<RowAuthor["identity"]>();
+    expectTypeOf(rows[0]!["$updatedBy.identity.subject"]).toEqualTypeOf<string>();
+    expect(rows).toEqual([current]);
+    await expect.poll(watch(query)).toEqual([current]);
+  });
+
+  it.each(
+    PROVENANCE_MAGIC_COLUMNS.filter((column) => column !== "$createdAt" && column !== "$updatedAt"),
+  )("filters historical provenance by %s", async (column) => {
+    const note = await insertNote();
+    const query = app.notes.history.where({ id: note.id }).select(column);
+    const rows = await db.all(query);
+    const value = rows[0]![column];
+    expect(value).toBeDefined();
+    expect(await db.all(query.where({ [column]: { eq: value } }))).toEqual(rows);
+    expect(await db.all(query.where({ [column]: { ne: value } }))).toEqual([]);
+  });
+
+  it("orders history by author subfields with a version tie-breaker", async () => {
+    const note = await insertNote();
+    await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
+    const query = app.notes.history
+      .where({ id: note.id })
+      .select("title", "$updatedBy.identity.subject")
+      .orderBy("$updatedBy.identity.subject")
+      .orderBy("$acceptedAt", "desc");
+    const rows = await db.all(query);
+    expect(rows.map((row) => row.title)).toEqual(["second", "first"]);
+    await expect.poll(watch(query)).toEqual(rows);
+  });
+
+  it("keeps provenance opt-in when selecting a wildcard", async () => {
+    const note = await insertNote();
+    const query = app.notes.history.where({ id: note.id });
+    const plain = (await db.all(query.select("*")))[0]!;
+    for (const column of PROVENANCE_MAGIC_COLUMNS) expect(plain).not.toHaveProperty(column);
+    const selected = (await db.all(query.select("*", "$createdBy")))[0]!;
+    expectTypeOf(selected.$createdBy).toEqualTypeOf<RowAuthor>();
+    const { $createdBy, ...content } = selected;
+    expect($createdBy).toBeDefined();
+    expect(content).toEqual(plain);
   });
 
   it("rejects relationship includes on history queries", async () => {

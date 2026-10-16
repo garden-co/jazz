@@ -709,6 +709,13 @@ pub(super) fn project_descriptor(
                         })
                         .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
                 ),
+                ProjectExpr::U64ShiftRight { source, bits } => {
+                    let index = resolve_field_ref(input, source)?;
+                    if input.fields()[index].value_type != ValueType::U64 || *bits >= 64 {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    }
+                    ValueType::U64
+                }
                 ProjectExpr::Required(source) => {
                     let index = resolve_field_ref(input, source)?;
                     let ValueType::Nullable(inner) = &input.fields()[index].value_type else {
@@ -1312,6 +1319,7 @@ pub(super) fn project_field_expr(
             }
         }
         ProjectExpr::Field(source)
+        | ProjectExpr::U64ShiftRight { source, .. }
         | ProjectExpr::Required(source)
         | ProjectExpr::RecordField { source, .. }
         | ProjectExpr::Nullable(source)
@@ -1383,6 +1391,14 @@ pub(super) fn project_field_value(
         ProjectExpr::Tuple(fields) => {
             Value::Tuple(fields.iter().map(resolved).collect::<Result<_, _>>()?)
         }
+        ProjectExpr::U64ShiftRight { source, bits } => match resolved(source)? {
+            Value::U64(value) => Value::U64(
+                value
+                    .checked_shr(*bits)
+                    .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+            ),
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        },
         ProjectExpr::Required(field) => match resolved(field)? {
             Value::Nullable(Some(value)) => *value,
             _ => return Err(IvmRuntimeError::RequiredProjectionValueMissing),
@@ -1770,6 +1786,7 @@ pub(super) fn raw_projection_fields(
                     prepared_constant_field(output_desc, output_idx, value.to_value())
                 }
                 ProjectExpr::Tuple(_)
+                | ProjectExpr::U64ShiftRight { .. }
                 | ProjectExpr::Required(_)
                 | ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }

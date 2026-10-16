@@ -2099,6 +2099,7 @@ fn arg_by_comparison_field_indices(
 fn projection_source_refs(expression: &ProjectExpr) -> &[FieldRef] {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::U64ShiftRight { source: field, .. }
         | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
@@ -2116,6 +2117,7 @@ fn projection_source_refs(expression: &ProjectExpr) -> &[FieldRef] {
 fn projection_source_refs_mut(expression: &mut ProjectExpr) -> &mut [FieldRef] {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::U64ShiftRight { source: field, .. }
         | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)

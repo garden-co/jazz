@@ -34,6 +34,9 @@ impl CurrentRowResultVisibility {
     pub fn current_row_metadata(name: &str) -> Self {
         match name {
             "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
+            name if crate::ids::AuthorSubject::metadata_path(name).is_some() => {
+                Self::PublicProvenance
+            }
             _ => Self::HiddenMetadata,
         }
     }

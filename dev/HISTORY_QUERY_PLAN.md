@@ -107,6 +107,13 @@ existing descriptor type, not persisted records or peer protocol encodings.
 User-provided `$transactionId` predicate literals and parameters are rejected. It identifies the version's transaction, independently
 of field-level `$updatedBy` provenance, which can name an earlier writer.
 
+History exposes all ordinary provenance magic columns: `$createdAt`, `$updatedAt`,
+`$createdBy`, `$updatedBy`, and their account/identity subfields. They describe each
+historical version, using the same projection, predicate, ordering, and TypeScript
+value conventions as ordinary rows. Default and wildcard projections omit provenance
+unless explicitly selected alongside the wildcard. Updating the current row does
+not overwrite older versions' provenance.
+
 `$acceptedAt` is the authority's acceptance HLC, not the authored transaction
 time. The core retains its full `u64` physical/logical value for query processing,
 including ordering and pagination. TypeScript Date predicates use whole-millisecond

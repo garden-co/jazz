@@ -2073,6 +2073,17 @@ fn lift_literal_filter_node(
                             );
                             Ok(projected)
                         }
+                        ProjectExpr::U64ShiftRight { source, bits } => {
+                            let mut projected = field.clone();
+                            projected.expression = ProjectExpr::U64ShiftRight {
+                                source: FieldRef::name(project_source_from_joined_filter_input(
+                                    &input_output,
+                                    source,
+                                )?),
+                                bits: *bits,
+                            };
+                            Ok(projected)
+                        }
                         ProjectExpr::Required(source) => {
                             let mut projected = field.clone();
                             projected.expression = ProjectExpr::Required(FieldRef::name(
@@ -2512,6 +2523,18 @@ fn project_fields_against_rewritten_input(
                             })
                             .collect::<Result<_, _>>()?,
                     );
+                    return Ok(projected);
+                }
+                ProjectExpr::U64ShiftRight { source, bits } => {
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::U64ShiftRight {
+                        source: FieldRef::name(rewritten_projection_source(
+                            &original_output,
+                            &rewritten_output,
+                            source,
+                        )?),
+                        bits: *bits,
+                    };
                     return Ok(projected);
                 }
                 ProjectExpr::Required(source) => {

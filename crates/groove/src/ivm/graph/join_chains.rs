@@ -236,6 +236,7 @@ fn provides(field: &ProjectField, name: &str) -> bool {
 fn project_expr_source(expression: &ProjectExpr) -> Option<&FieldRef> {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::U64ShiftRight { source: field, .. }
         | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)

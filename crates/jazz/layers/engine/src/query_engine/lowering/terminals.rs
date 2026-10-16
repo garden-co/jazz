@@ -3665,6 +3665,7 @@ fn content_version_witness_graph_from_visible_graph(
         }
         let key = match &mut field.expression {
             ProjectExpr::Field(key)
+            | ProjectExpr::U64ShiftRight { source: key, .. }
             | ProjectExpr::Required(key)
             | ProjectExpr::Nullable(key)
             | ProjectExpr::NullableFlat(key)

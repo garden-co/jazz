@@ -2106,9 +2106,25 @@ impl CurrentRow {
         })
     }
 
-    #[cfg(feature = "runtime")]
     #[doc(hidden)]
     pub fn provenance_value(&self, column: &str) -> Result<Option<Value>, Error> {
+        if let Some((root, path)) = AuthorSubject::metadata_path(column) {
+            if let Some(value) = self.raw_field(column) {
+                return Ok(Some(value));
+            }
+            let Some(mut value) = self.provenance_value(root)? else {
+                return Ok(None);
+            };
+            for member in path {
+                let Value::Record(record) = value else {
+                    return Err(Error::InvalidStoredValue(
+                        "provenance author must be a record",
+                    ));
+                };
+                value = record.get(member)?;
+            }
+            return Ok(Some(value));
+        }
         let Some(index) = self.provenance_field_index(column) else {
             return Ok(None);
         };
@@ -2248,11 +2264,7 @@ impl CurrentRow {
         }
         // Derived rows (for example aggregates) have no originating write.
         // Preserve that absence instead of inventing system provenance.
-        if !table
-            .name
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-            && let Some(provenance) = self.provenance()?
-        {
+        if let Some(provenance) = self.provenance()? {
             descriptor_fields.extend([
                 records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
                 records::DescriptorField::new("$createdAt", records::ValueType::U64),
@@ -2285,6 +2297,22 @@ impl CurrentRow {
                     }),
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
+        }
+        for column in columns {
+            if AuthorSubject::metadata_path(column).is_none() {
+                continue;
+            }
+            if let Some(value) = self.provenance_value(column)? {
+                descriptor_fields.push(records::DescriptorField::new(
+                    column.clone(),
+                    AuthorSubject::metadata_type(column)
+                        .expect("validated author path")
+                        .clone(),
+                ));
+                values.push(value);
+                binding_fields.push(CurrentRowBindingRole::LogicalField);
+                binding_field_names.push(None);
+            }
         }
         if !table
             .name

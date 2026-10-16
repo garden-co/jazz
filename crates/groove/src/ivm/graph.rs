@@ -1593,6 +1593,7 @@ impl ProjectField {
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
+            | ProjectExpr::U64ShiftRight { source, .. }
             | ProjectExpr::Required(source)
             | ProjectExpr::RecordField { source, .. }
             | ProjectExpr::Nullable(source)
@@ -1611,6 +1612,13 @@ impl ProjectField {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
+    /// Logical right shift of an unsigned scalar, preserving its U64 type.
+    /// Temporary support for converting history provenance HLCs to milliseconds.
+    /// Can probably be replaced with a more general operation in the future.
+    U64ShiftRight {
+        source: FieldRef,
+        bits: u32,
+    },
     /// Assemble a tuple from scalar source fields.
     Tuple(Vec<FieldRef>),
     /// Unwrap a required value, failing evaluation if it is absent.

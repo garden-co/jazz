@@ -3875,7 +3875,9 @@ impl PublicQueryDecoder {
                     "permission introspection column {column} requires unified policy lowering"
                 )));
             }
-            "$createdAt" | "$updatedAt" | "$createdBy" | "$updatedBy" => {
+            name if matches!(name, "$createdAt" | "$updatedAt")
+                || crate::ids::AuthorSubject::metadata_type(name).is_some() =>
+            {
                 // A collector may project just one magic column. Decode that
                 // typed field rather than demanding the other three as well.
                 let value = row
@@ -3888,8 +3890,7 @@ impl PublicQueryDecoder {
                 };
                 match value {
                     CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
-                    author @ CoreValue::Record(_) => core_to_public_value(author)?,
-                    _ => unreachable!("provenance_value returns typed timestamps or authors"),
+                    value => core_to_public_value(value)?,
                 }
             }
             _ => return Ok(None),

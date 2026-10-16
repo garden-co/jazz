@@ -4350,9 +4350,8 @@ pub(super) fn trace_capability_compile(
     );
 }
 
-/// Expose requested nested-author fields on policy preimages that retain
-/// complete author records, including head-over-current branch preimages.
-fn with_requested_author_paths(
+/// Expose requested nested-author fields on sources retaining complete author records.
+pub(super) fn with_requested_author_paths(
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
     mut metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,

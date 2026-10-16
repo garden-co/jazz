@@ -729,13 +729,11 @@ export type TableSelected<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
   TSelection extends TableSelectableColumn<TSchema, TTable> = BaseColumnName<TSchema, TTable>,
-> = Simplify<
-  ("*" extends TSelection
-    ? TableRow<TSchema, TTable>
-    : Pick<
-        TableRow<TSchema, TTable>,
-        Extract<TSelection | "id", keyof TableRow<TSchema, TTable>>
-      >) &
+> = SelectedRow<TableRow<TSchema, TTable>, TSelection>;
+
+/** Shared projection typing for ordinary and history rows. */
+type SelectedRow<TRow, TSelection> = Simplify<
+  ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -1065,15 +1063,7 @@ type BuilderInclude<TMeta extends AnyTableMeta> = {
 type SelectedFromMeta<
   TMeta extends AnyTableMeta,
   TSelection = DefaultTableSelection<TMeta>,
-> = Simplify<
-  ("*" extends SelectedColumnNames<TSelection>
-    ? TableRowFromMeta<TMeta>
-    : Pick<
-        TableRowFromMeta<TMeta>,
-        Extract<SelectedColumnNames<TSelection> | "id", keyof TableRowFromMeta<TMeta>>
-      >) &
-    Pick<ProvenanceMagicColumns, Extract<SelectedColumnNames<TSelection>, ProvenanceMagicColumn>>
->;
+> = SelectedRow<TableRowFromMeta<TMeta>, SelectedColumnNames<TSelection>>;
 
 type SelectedColumnNames<TSelection> =
   TSelection extends Record<string, LargeValuePage> ? keyof TSelection : TSelection;
@@ -1595,10 +1585,6 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
   $acceptedAt: Date;
 };
 
-type HistoryWhere<TWhere> = {
-  [K in keyof TWhere as K extends `$${string}` ? never : K]: TWhere[K];
-};
-
 /** Read-only query over locally retained accepted content versions.
  * Start with one exact row ID;
  * joins, transaction-ID predicates, remote coverage and branched tables are not supported yet.
@@ -1606,20 +1592,16 @@ type HistoryWhere<TWhere> = {
 export interface HistoryQuery<
   TRow extends { id: string },
   TWhere,
-  TSelection extends keyof HistoryRow<TRow> = keyof HistoryRow<TRow>,
-> extends QueryBuilder<Pick<HistoryRow<TRow>, TSelection | "id">> {
+  TSelection extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*" = keyof HistoryRow<TRow>,
+> extends QueryBuilder<SelectedRow<HistoryRow<TRow>, TSelection>> {
   where(
-    input: HistoryWhere<TWhere> & { $acceptedAt?: TimestampWhere<false> },
+    input: TWhere & { $acceptedAt?: TimestampWhere<false> },
   ): HistoryQuery<TRow, TWhere, TSelection>;
-  select<TColumn extends keyof HistoryRow<TRow> | "*">(
+  select<TColumn extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*">(
     ...columns: [TColumn, ...TColumn[]]
-  ): HistoryQuery<
-    TRow,
-    TWhere,
-    "*" extends TColumn ? keyof HistoryRow<TRow> : Extract<TColumn, keyof HistoryRow<TRow>>
-  >;
+  ): HistoryQuery<TRow, TWhere, TColumn>;
   orderBy(
-    column: keyof TRow | "$acceptedAt",
+    column: keyof TRow | "$acceptedAt" | ProvenanceMagicColumn,
     direction?: "asc" | "desc",
   ): HistoryQuery<TRow, TWhere, TSelection>;
   limit(count: number): HistoryQuery<TRow, TWhere, TSelection>;

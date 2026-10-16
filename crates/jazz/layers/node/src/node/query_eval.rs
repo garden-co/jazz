@@ -5131,23 +5131,29 @@ fn normalize_public_current_rows(
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
-    let columns = table
-        .columns
-        .iter()
-        // Normalize only columns retained by the terminal projection. Missing
-        // unselected metadata must not be recreated as application cells.
-        .filter(|column| {
-            query.aggregate.is_some()
-                || query.select.as_ref().is_none_or(|selected| {
-                    selected.contains(&column.name)
-                        || query
-                            .order_by
-                            .iter()
-                            .any(|order| order.column == column.name)
-                })
-        })
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
+    let columns =
+        table
+            .columns
+            .iter()
+            // Normalize only columns retained by the terminal projection. Missing
+            // unselected metadata must not be recreated as application cells.
+            .filter(|column| {
+                query.aggregate.is_some()
+                    || query.select.as_ref().is_none_or(|selected| {
+                        selected.contains(&column.name)
+                            || query
+                                .order_by
+                                .iter()
+                                .any(|order| order.column == column.name)
+                    })
+            })
+            .map(|column| column.name.clone())
+            .chain(
+                query.select.iter().flatten().filter_map(|column| {
+                    AuthorSubject::metadata_path(column).map(|_| column.clone())
+                }),
+            )
+            .collect::<Vec<_>>();
     for row in rows {
         *row = if let Some(aggregate) = &query.aggregate {
             // A grouped source and an aggregate result may share a public name.
