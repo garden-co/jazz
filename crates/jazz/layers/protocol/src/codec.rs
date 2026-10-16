@@ -24,6 +24,7 @@ use crate::protocol_limits::PolicyExpressionLimitError;
 
 mod bridge_model_query;
 mod bridge_model_tx;
+mod bridge_protocol_a;
 mod bridge_wire;
 mod model_query;
 mod model_tx;
@@ -361,6 +362,24 @@ pub trait WireCodec: Sized {
     fn put(&self, buf: &mut Vec<u8>);
     /// Read a value at `offset`, advancing it.
     fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError>;
+}
+
+thread_local! {
+    static ENCODE_ERROR: std::cell::RefCell<Option<CodecError>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record a failure inside an infallible [`WireCodec::put`], keeping the
+/// first one; the encode entry point collects it with [`take_encode_error`].
+pub fn record_encode_error(err: CodecError) {
+    ENCODE_ERROR.with(|slot| {
+        slot.borrow_mut().get_or_insert(err);
+    });
+}
+
+/// Take (and clear) the first failure recorded since the last call.
+pub fn take_encode_error() -> Option<CodecError> {
+    ENCODE_ERROR.with(|slot| slot.borrow_mut().take())
 }
 
 /// The codec value for a type's own [`WireCodec`] encoding.
