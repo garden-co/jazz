@@ -792,7 +792,7 @@ fn author(name: &str) -> Value {
 }
 
 /// Docs and notes whose `author` is interned: rows store a dictionary code.
-async fn open_interned(stored: bool) -> Database {
+async fn open_interned(stored: bool, budget: Option<usize>) -> Database {
     let author_type = ColumnType::Record(Box::new(RecordDescriptor::new([(
         "name",
         ColumnType::String,
@@ -815,6 +815,7 @@ async fn open_interned(stored: bool) -> Database {
     let storage = MemoryStorage::new(&schema.column_families()).unwrap();
     let mut db = Database::new(schema, storage).await.unwrap();
     db.set_stored_arrangements_enabled(stored);
+    db.set_cache_memory_budget(budget);
     apply(&mut db, |batch| {
         for (id, project) in [(1, 1), (2, 1), (3, 2)] {
             batch.insert("docs", doc(id, project, 0));
@@ -827,7 +828,8 @@ async fn open_interned(stored: bool) -> Database {
 }
 
 /// A stored source with an interned column is read from storage as codes;
-/// its probed rows must reach the join as values, as the held side's do.
+/// its probed rows must reach the join as values, under every budget, as
+/// the held side's do.
 #[futures_test::test]
 async fn stored_sources_resolve_interned_columns() {
     let notes = GraphBuilder::table("notes").project_fields([
@@ -843,11 +845,13 @@ async fn stored_sources_resolve_interned_columns() {
             Box::new(|batch| batch.insert("docs", doc(5, 3, 0))),
         ]
     };
-    let stored = open_interned(true).await;
-    let held = open_interned(false).await;
-    let count = check_agree(stored, held, graph.clone(), edits, false).await;
-    assert!(count > 0, "the notes source is stored");
-    let mut stored = open_interned(true).await;
+    for budget in BUDGETS {
+        let stored = open_interned(true, budget).await;
+        let held = open_interned(false, None).await;
+        let count = check_agree(stored, held, graph.clone(), edits, false, budget).await;
+        assert!(count > 0, "the notes source is stored, budget {budget:?}");
+    }
+    let mut stored = open_interned(true, Some(0)).await;
     let rows = snapshot(&mut stored, graph).await;
     assert!(rows.keys().any(|row| row.contains("alice")), "{rows:?}");
 }
