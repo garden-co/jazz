@@ -848,6 +848,13 @@ where
         self.database.set_stored_arrangements_enabled(enabled);
     }
 
+    /// Test/bench-only switch: bound this node's query cache
+    /// (`Database::set_cache_memory_budget`); `None` follows the process.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_query_cache_budget_for_test(&mut self, budget: Option<usize>) {
+        self.database.set_cache_memory_budget(budget);
+    }
+
     /// Return accumulated storage-read metrics since the last reset.
     pub fn storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.storage_read_metrics()
