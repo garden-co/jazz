@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { runCloudCommand, type CloudCommandIo } from "./commands.js";
+import { withCredentialsLock } from "./credentials.js";
+import { getAccessToken } from "./session.js";
 
 // The CLI runs against a real local HTTP server that plays both WorkOS (device
 // authorization + token endpoints) and the dashboard's /api/v1.
@@ -31,6 +33,11 @@ class FakeCloud {
   pollResponses: Array<{ status: number; body: unknown }> = [];
   refreshStatus = 200;
   refreshCount = 0;
+  /** Refresh tokens are single-use, as at WorkOS. */
+  consumedRefreshTokens = new Set<string>();
+  refreshDelayMs = 0;
+  workosApiBaseUrl = "";
+  revokedSessions = 0;
   validTokens = new Set<string>();
   teams = [{ teamId: "org_a", name: "Team A", role: "admin", isAdmin: true, appCount: 1 }];
   apiResponses = new Map<string, { status: number; body: unknown }>();
@@ -55,7 +62,10 @@ class FakeCloud {
       if (path === "/api/v1/cli/config") {
         return send(200, {
           apiVersion: 1,
-          workos: { clientId: "client_x", apiBaseUrl: `${this.url}/workos` },
+          workos: {
+            clientId: "client_x",
+            apiBaseUrl: this.workosApiBaseUrl || `${this.url}/workos`,
+          },
         });
       }
       if (path === "/workos/user_management/authorize/device") {
@@ -72,8 +82,12 @@ class FakeCloud {
         const form = new URLSearchParams(body);
         if (form.get("grant_type") === "refresh_token") {
           this.refreshCount += 1;
-          if (this.refreshStatus !== 200)
-            return send(this.refreshStatus, { error: "invalid_grant" });
+          const presented = form.get("refresh_token") ?? "";
+          const reused = this.consumedRefreshTokens.has(presented);
+          this.consumedRefreshTokens.add(presented);
+          if (this.refreshDelayMs) await new Promise((r) => setTimeout(r, this.refreshDelayMs));
+          if (this.refreshStatus !== 200 || reused)
+            return send(reused ? 400 : this.refreshStatus, { error: "invalid_grant" });
           return send(200, {
             access_token: this.issueAccessToken(),
             refresh_token: `refresh-${this.refreshCount + 1}`,
@@ -101,6 +115,10 @@ class FakeCloud {
           return send(200, { user: { id: "user_1", email: "ada@example.com" }, teams: this.teams });
         }
         if (key === "GET /api/v1/teams") return send(200, { teams: this.teams });
+        if (key === "POST /api/v1/logout") {
+          this.revokedSessions += 1;
+          return send(200, { revoked: true });
+        }
         return send(404, { error: "not_found", message: `No fake for ${key}` });
       }
       send(404, { error: "not_found" });
@@ -256,6 +274,14 @@ describe("jazz-tools login", () => {
     await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
   });
 
+  it("refuses a non-HTTPS WorkOS API URL from the dashboard", async () => {
+    cloud.workosApiBaseUrl = "http://workos.example";
+    const run = io();
+    expect(await runCloudCommand(["login", "--json", "--no-browser"], run.io)).toBe(1);
+    expect(run.stdout()).toContain("WorkOS API URL must use HTTPS");
+    expect(cloud.requests.some((request) => request.path.includes("authorize/device"))).toBe(false);
+  });
+
   it("refuses non-HTTPS cloud URLs other than localhost", async () => {
     const run = io();
     expect(
@@ -317,13 +343,111 @@ describe("session handling", () => {
     expect(me!.headers.authorization).toBe(`Bearer ${token}`);
   });
 
-  it("logout removes the stored session", async () => {
+  it("logout ends the session on the server and removes it locally", async () => {
     await storeLogin(cloud.issueAccessToken());
     const run = io();
     expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
-    expect(run.json()).toEqual({ loggedOut: true, cloudUrl: cloud.url });
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: true, cloudUrl: cloud.url });
+    expect(cloud.revokedSessions).toBe(1);
     await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
   });
+
+  it("logout still forgets the session when the server cannot end it", async () => {
+    await storeLogin(cloud.issueAccessToken());
+    cloud.apiResponses.set("POST /api/v1/logout", { status: 404, body: { error: "not_found" } });
+    const run = io();
+    expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: false, cloudUrl: cloud.url });
+    await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("parallel commands with an expired token refresh once and stay logged in", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshDelayMs = 50;
+    const runs = [io(), io(), io()];
+    const codes = await Promise.all(
+      runs.map((run) => runCloudCommand(["whoami", "--json"], run.io)),
+    );
+    expect(codes).toEqual([0, 0, 0]);
+    expect(cloud.refreshCount).toBe(1);
+    expect((await storedProfile()).refreshToken).toBe("refresh-2");
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("breaks a lock left by a dead process without waiting for it to go stale", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    // A pid far above any real one: process.kill(pid, 0) reports ESRCH.
+    await writeFile(join(configDir, "credentials.lock"), "2147483646 deadbeef\n");
+    const started = Date.now();
+    expect(await runCloudCommand(["whoami", "--json"], io().io)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("waits for a live holder and gives up after the timeout", async () => {
+    await writeFile(join(configDir, "credentials.lock"), `${process.pid} livelock\n`);
+    const env: NodeJS.ProcessEnv = { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir };
+    await expect(
+      withCredentialsLock(async () => "acquired", env, { timeoutMs: 100 }),
+    ).rejects.toThrow("Timed out waiting for another jazz-tools process");
+    expect(await readFile(join(configDir, "credentials.lock"), "utf8")).toBe(
+      `${process.pid} livelock\n`,
+    );
+  });
+
+  it("does not release a lock that another process took over", async () => {
+    const env: NodeJS.ProcessEnv = { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir };
+    await withCredentialsLock(async () => {
+      // As if our lock had been broken as stale and re-taken by someone else.
+      await writeFile(join(configDir, "credentials.lock"), `${process.pid} someone-else\n`);
+    }, env);
+    expect(await readFile(join(configDir, "credentials.lock"), "utf8")).toBe(
+      `${process.pid} someone-else\n`,
+    );
+  });
+
+  it("gives up on a hanging refresh before the lock can go stale, keeping the login", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshDelayMs = 500;
+    await expect(
+      getAccessToken({
+        cloudUrl: cloud.url,
+        env: { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir },
+        refreshTimeoutMs: 50,
+      }),
+    ).rejects.toMatchObject({ code: "refresh_failed" });
+    expect((await storedProfile()).refreshToken).toBe("refresh-1");
+    await expect(stat(join(configDir, "credentials.lock"))).rejects.toThrow();
+  });
+
+  it("logout of an already revoked session still reports logged out", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    cloud.refreshStatus = 400;
+    const run = io();
+    expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
+    expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: false, cloudUrl: cloud.url });
+  });
+
+  it("does not echo a corrupt credentials file", async () => {
+    await writeFile(join(configDir, "credentials.json"), '{"refreshToken": "tok_secret_fragment', {
+      mode: 0o600,
+    });
+    const run = io();
+    expect(await runCloudCommand(["whoami", "--json"], run.io)).toBe(1);
+    expect(run.stdout()).toContain("Unreadable credentials file");
+    expect(run.stdout()).not.toContain("tok_secret_fragment");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "tightens an existing config directory to owner-only on write",
+    async () => {
+      await mkdir(configDir, { recursive: true });
+      await chmod(configDir, 0o755);
+      await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+      expect(await runCloudCommand(["whoami", "--json"], io().io)).toBe(0);
+      expect((await stat(configDir)).mode & 0o777).toBe(0o700);
+    },
+  );
 });
 
 describe("jazz-tools apps", () => {
