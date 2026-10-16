@@ -58,11 +58,10 @@ test("every current Divan function in the owned suites has a metadata entry", ()
 test("denominators distinguish transaction count, batch rows, queries and load context", () => {
   assert.equal(getBenchmarkMetadata("stage_plan_add_task_1350")?.work.count, 1350);
   assert.equal(getBenchmarkMetadata("stage_plan_bulk_complete_1350")?.work.unit, "rows updated/s");
-  assert.equal(getBenchmarkMetadata("first_sync_27518_rocksdb")?.work.count, 27518);
   assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
   assert.match(
-    getBenchmarkMetadata("first_sync_27518_rocksdb")!.description,
-    /Member, not anonymous/,
+    getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")!.description,
+    /Member identity \(not anonymous\)/,
   );
   assert.equal(getBenchmarkMetadata("stage_plan_open_task_detail")?.work.count, 1);
   assert.equal(getBenchmarkMetadata("band_chat_new_message_rooms_open[100]")?.work.count, 1);
