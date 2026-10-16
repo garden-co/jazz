@@ -1069,10 +1069,9 @@ where
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
         let flags = transaction_flags(record)?;
-        let made_by =
-            RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                .as_author_subject();
+        let made_by = self.authors.subject(AuthorCode(
+            record.get_dictionary_code(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+        ))?;
         let permission_subject = transaction_permission_subject(record, made_by)?;
         let fate = fate_from_encoded_fields(record)?;
         let global_time = record

@@ -1,12 +1,20 @@
 //! Groove dictionaries: durable `u32` codes for column values that repeat.
 //!
-//! A column declared with [`ValueType::interned`] stores, in each row, the
+//! A column declared with [`ValueType::interned`] holds, in each row, the
 //! 4-byte code (`u32` LE) of its value in a named dictionary instead of the
-//! value itself. Groove owns the dictionary: it allocates codes while
-//! preparing a write, persists new entries in the same atomic storage write
-//! as the publication that first carries them, and resolves codes back to
-//! values on every read and in every IVM source, so callers above Groove's
-//! storage boundary only ever see logical values.
+//! value itself. The code is the column's value everywhere inside the node:
+//! stored rows, point reads, scans, IVM sources, operators and query results
+//! all carry it, under one descriptor whose field keeps the interned type.
+//! Nothing transcodes a whole row. Equality, joins and grouping between
+//! columns of one dictionary work on codes directly, because one value has
+//! exactly one code. An operator that needs the value itself (a comparison
+//! with a literal, a sub-field of a record value, an ordering) resolves the
+//! code through the in-memory dictionary on demand.
+//!
+//! Codes are node-local, so they never leave the node: a caller resolves
+//! them where rows leave it (the sync wire, a client API) with
+//! [`Dictionaries`], and interns values arriving from outside with
+//! [`Dictionaries::intern`] before it writes them.
 //!
 //! # Storage format (`groove.dictionary.v1`)
 //!
@@ -22,9 +30,10 @@
 //!
 //! The whole dictionary is loaded into memory on open, validated (every key
 //! is 4 bytes, codes are dense, every value is canonical, no value appears
-//! twice) and kept in a [`DictionaryRegistry`] shared by the database and its
-//! IVM runtime, across schema rebuilds. Encoding a value that has no code yet
-//! allocates the next code in memory, synchronously. The allocation is never
+//! twice) and kept in a [`DictionaryRegistry`] shared by the database, its
+//! IVM runtime and every [`Dictionaries`] handle, across schema rebuilds.
+//! Interning a value that has no code yet allocates the next code in memory,
+//! synchronously. The allocation is never
 //! undone: when the batch that caused it is dropped, the code stays reserved
 //! for that value and its entry is written by the next publication, so a code
 //! is never handed to two values. Every publication carries every entry not
@@ -84,6 +93,161 @@ pub enum DictionaryError {
 /// runtime share one registry, so a code handed out once is never handed out
 /// again for another value within this process.
 pub(crate) type SharedDictionaries = Rc<RefCell<DictionaryRegistry>>;
+
+/// A caller's handle on a database's dictionaries, from
+/// [`crate::db::Database::dictionaries`]. Cheap to clone; every clone sees
+/// the same registry as the database, so a code interned through it is the
+/// code the database stores and resolves.
+#[derive(Clone)]
+pub struct Dictionaries(SharedDictionaries);
+
+impl std::fmt::Debug for Dictionaries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Dictionaries").finish_non_exhaustive()
+    }
+}
+
+impl Dictionaries {
+    pub(crate) fn new(shared: SharedDictionaries) -> Self {
+        Self(shared)
+    }
+
+    /// Empty dictionaries for `schemas` that belong to no database: codes
+    /// they allocate are never stored. For codecs and tests that need codes
+    /// without opening a database.
+    pub fn detached<'a>(schemas: impl IntoIterator<Item = &'a DictionarySchema>) -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            DictionaryRegistry::declared(schemas),
+        )))
+    }
+
+    /// The canonical bytes of the value `code` stands for in `dictionary`.
+    pub fn resolve(&self, dictionary: &str, code: u32) -> Result<Arc<[u8]>, DictionaryError> {
+        self.0.borrow().decode_shared(dictionary, code)
+    }
+
+    /// The code of `value` (its canonical bytes) in `dictionary`, allocating
+    /// the next code when the value is new. A new entry becomes durable with
+    /// the next publication, before or together with any row that stores it.
+    pub fn intern(&self, dictionary: &str, value: &[u8]) -> Result<u32, DictionaryError> {
+        self.0.borrow_mut().encode(dictionary, value)
+    }
+
+    /// The code `value` already has in `dictionary`, without allocating one.
+    pub fn code(&self, dictionary: &str, value: &[u8]) -> Option<u32> {
+        self.0.borrow().code(dictionary, value)
+    }
+
+    /// The record bytes of `record` under `descriptor` with every interned
+    /// field resolved to its value, and the descriptor of the result (each
+    /// interned field replaced by its logical type). Egress uses this where a
+    /// row leaves the node. A descriptor without interned fields is returned
+    /// unchanged and its bytes are copied.
+    pub fn resolve_record(
+        &self,
+        descriptor: records::RecordDescriptor,
+        record: &[u8],
+    ) -> Result<(Vec<u8>, records::RecordDescriptor), DictionaryTranscodeError> {
+        let transcoder = match records::RecordTranscoder::new(descriptor) {
+            Ok(Some(transcoder)) => transcoder,
+            Ok(None) => return Ok((record.to_vec(), descriptor)),
+            // Query output can nest stored rows, so codes sit inside arrays,
+            // records or enums (a query's included rows). Resolve those value
+            // by value; the byte-copying transcoder handles only top level.
+            Err(records::Error::UnsupportedInternedPlacement { .. }) => {
+                let values = descriptor
+                    .fields()
+                    .iter()
+                    .zip(descriptor.bind(record).to_values()?)
+                    .map(|(field, value)| self.resolve_value(value, &field.value_type))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let logical = descriptor.logical();
+                return Ok((logical.create(&values)?, logical));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = transcode_to_logical(&transcoder, &self.0.borrow(), record)?;
+        Ok((bytes, transcoder.logical()))
+    }
+
+    /// `value`, of `value_type`, with every interned code at any depth
+    /// replaced by the value it stands for; the result has
+    /// `value_type.logical()`.
+    pub fn resolve_value(
+        &self,
+        value: records::Value,
+        value_type: &records::ValueType,
+    ) -> Result<records::Value, DictionaryTranscodeError> {
+        use records::{EnumValue, OwnedRecord, Value, ValueType};
+
+        if !value_type.contains_interned() {
+            return Ok(value);
+        }
+        if let Some((dictionary, logical)) = value_type.as_interned() {
+            let Value::U32(code) = value else {
+                return Err(records::Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }
+                .into());
+            };
+            let bytes = self.resolve(dictionary, code)?;
+            return Ok(records::decode_single_field_value(&bytes, logical)?);
+        }
+        let resolve_record = |record: OwnedRecord| {
+            let (raw, descriptor) = self.resolve_record(*record.descriptor(), record.raw())?;
+            Ok::<_, DictionaryTranscodeError>(OwnedRecord::new(raw, descriptor))
+        };
+        Ok(match (value, value_type) {
+            (Value::Nullable(None), ValueType::Nullable(_)) => Value::Nullable(None),
+            (Value::Nullable(Some(inner)), ValueType::Nullable(inner_type)) => {
+                Value::Nullable(Some(Box::new(self.resolve_value(*inner, inner_type)?)))
+            }
+            (Value::Array(items), ValueType::Array(item_type)) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| self.resolve_value(item, item_type))
+                    .collect::<Result<_, _>>()?,
+            ),
+            (Value::Tuple(members), ValueType::Tuple(member_types))
+                if members.len() == member_types.len() =>
+            {
+                Value::Tuple(
+                    members
+                        .into_iter()
+                        .zip(member_types)
+                        .map(|(member, member_type)| self.resolve_value(member, member_type))
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            (Value::Record(record), ValueType::Record(_)) => Value::Record(resolve_record(record)?),
+            (Value::Enum(value), ValueType::Enum(_)) => {
+                let tag = value.tag();
+                Value::Enum(EnumValue::new(tag, resolve_record(value.into_record())?))
+            }
+            _ => {
+                return Err(records::Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }
+                .into());
+            }
+        })
+    }
+
+    /// The record bytes of `record`, laid out by `descriptor`'s logical form
+    /// (see [`records::RecordDescriptor::logical`]), with every interned field
+    /// replaced by its code under `descriptor`, interning new values. Ingress
+    /// uses this where a row with full values arrives from outside the node.
+    pub fn intern_record(
+        &self,
+        descriptor: records::RecordDescriptor,
+        logical: &[u8],
+    ) -> Result<Vec<u8>, DictionaryTranscodeError> {
+        let Some(transcoder) = records::RecordTranscoder::new(descriptor)? else {
+            return Ok(logical.to_vec());
+        };
+        transcode_to_physical(&transcoder, &mut self.0.borrow_mut(), logical)
+    }
+}
 
 #[derive(Debug)]
 struct DictionaryState {
@@ -295,6 +459,36 @@ impl DictionaryRegistry {
             })
     }
 
+    /// [`Self::decode`] as a shared handle on the value bytes.
+    pub(crate) fn decode_shared(
+        &self,
+        dictionary: &str,
+        code: u32,
+    ) -> Result<Arc<[u8]>, DictionaryError> {
+        self.state(dictionary)?
+            .values
+            .get(code as usize)
+            .cloned()
+            .ok_or_else(|| DictionaryError::UnknownCode {
+                dictionary: dictionary.to_owned(),
+                code,
+            })
+    }
+
+    /// Check that `code` names an entry of `dictionary`. A written row may
+    /// only store codes the dictionary already holds.
+    pub(crate) fn check_code(&self, dictionary: &str, code: u32) -> Result<(), DictionaryError> {
+        let state = self.state(dictionary)?;
+        if (code as usize) < state.values.len() {
+            Ok(())
+        } else {
+            Err(DictionaryError::UnknownCode {
+                dictionary: dictionary.to_owned(),
+                code,
+            })
+        }
+    }
+
     /// The code `value` already has, without allocating one.
     pub fn code(&self, dictionary: &str, value: &[u8]) -> Option<u32> {
         self.dictionaries.get(dictionary)?.codes.get(value).copied()
@@ -450,6 +644,55 @@ mod tests {
                 dictionary: "names".to_owned(),
                 code: 0
             })
+        );
+    }
+
+    /// A code nested in an array of records (a query's included rows)
+    /// resolves value by value; the top-level transcoder refuses it.
+    #[test]
+    fn nested_codes_resolve_value_by_value() {
+        use crate::records::{OwnedRecord, RecordDescriptor, Value};
+
+        let dictionaries =
+            Dictionaries::detached(&[DictionarySchema::new("names", ValueType::String)]);
+        let ada = dictionaries.intern("names", &name("ada")).unwrap();
+        let child = RecordDescriptor::new([(
+            "author",
+            ValueType::interned("names", ValueType::String).nullable(),
+        )]);
+        let root = RecordDescriptor::new([(
+            "children",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        )]);
+        let child_record = |value| OwnedRecord::new(child.create(&[value]).unwrap(), child);
+        let record = root
+            .create(&[Value::Array(vec![
+                Value::Record(child_record(Value::Nullable(Some(Box::new(Value::U32(
+                    ada,
+                )))))),
+                Value::Record(child_record(Value::Nullable(None))),
+            ])])
+            .unwrap();
+
+        let (raw, logical) = dictionaries.resolve_record(root, &record).unwrap();
+        assert_eq!(logical, root.logical());
+        assert!(!logical.contains_interned());
+        let Value::Array(children) = logical.bind(&raw).get_idx(0).unwrap() else {
+            panic!("children stay an array");
+        };
+        let authors = children
+            .iter()
+            .map(|child| match child {
+                Value::Record(record) => record.borrowed().get_idx(0).unwrap(),
+                other => panic!("child is a record, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            authors,
+            [
+                Value::Nullable(Some(Box::new(Value::String("ada".to_owned())))),
+                Value::Nullable(None),
+            ]
         );
     }
 }

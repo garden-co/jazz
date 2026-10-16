@@ -822,14 +822,39 @@ the next publication. Opening loads each declared dictionary into memory and
 refuses (`DictionaryError::InvalidDictionary`) a key that is not 4 bytes, a
 gap in the codes, a value that is not canonical, and a repeated value.
 
-Interned columns are storage-only. `TableSchema::record_schema` and
-`record_schema_for_variant` return the **logical** descriptor (each interned
-field has its logical type); `storage_record_schema*` return the physical one.
-Every point, scan and index read, every old row of a write's delta, and every
-IVM table source resolves codes before a caller or operator sees the record,
-so queries, policies and the wire only ever see values. A descriptor carrying
-an interned type cannot be encoded as a persisted or wire descriptor
-(`records::Error::InternedTypeNotEncodable`).
+A code is the column's value inside the node. `TableSchema::record_schema`
+and `record_schema_for_variant` return the stored descriptor, interned types
+included, and there is no second logical descriptor: point, scan and index
+reads, the old rows of a write's delta, IVM table sources, arrangements and
+subscription outputs all carry codes, and a write must already carry codes.
+Committing a row whose code its dictionary does not hold is refused
+(`DictionaryError::UnknownCode`). `Database::dictionaries()` returns the
+node's `Dictionaries`: `intern` and `resolve` convert one value, and
+`intern_record` and `resolve_record` convert a whole record between its
+stored form and its resolved form (each interned field replaced by its
+logical type).
+
+Operators work on codes and resolve one only where they need the value:
+
+- Equality filters, `IsNull` and record-field projections (for example
+  `author.name`) read through the dictionary; a projection that keeps the
+  whole interned field keeps its code and its interned type.
+- Joins, semi-joins and anti-joins compare codes, so both keys must be
+  interned into the same dictionary. Joining an interned key with a plain
+  one, ordering by an interned field (`ArgMax`, `ArgMin`, `TopBy` order or
+  tie columns), and aggregates other than `Count` over one are refused
+  (`IvmRuntimeError::UnsupportedInternedOperand`): codes are allocated in
+  first-seen order, not value order.
+- A predicate that reads an interned field without the dictionaries fails
+  closed (`IvmRuntimeError::UnresolvedDictionaryCode`) rather than compare a
+  code with a value.
+
+Codes are node-local, so a row leaves the node resolved: egress calls
+`resolve_record` before a row reaches the wire or a client, and ingress
+interns incoming values with `intern` or `intern_record`. A persisted
+node-local descriptor may carry an interned type (`DESCRIPTOR_NODE_INTERNED`,
+the dictionary name and the logical type as its one child); the wire refuses
+one (`records::Error::InternedTypeNotEncodable`).
 
 Schema admission refuses (`InternedColumnError`) an interned column in a
 primary key, an index or a foreign key, in a direct record store, nested

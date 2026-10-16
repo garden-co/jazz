@@ -518,7 +518,7 @@
       "evidence": [
         {
           "path": "crates/groove/src/db/tests/dictionaries.rs",
-          "anchor": "fn a_reopened_database_decodes_rows_and_continues_allocation"
+          "anchor": "fn a_reopened_database_resolves_codes_and_continues_allocation"
         },
         {
           "path": "crates/groove/src/db/tests/dictionaries.rs",

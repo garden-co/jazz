@@ -317,6 +317,8 @@ fn hydrate_nested_payload_enum_cases(
 }
 
 mod aggregate_read_result;
+mod author_codes;
+use author_codes::AuthorCode;
 /// The local delta's rows, held in memory: overlay row key (physical table,
 /// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
 /// image it holds, plus how many rows each physical table holds under each
@@ -643,6 +645,8 @@ pub struct NodeState<S = BoxedStorage> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
+    /// The database's `authors` dictionary: author columns hold its codes.
+    pub(crate) authors: author_codes::AuthorCodes,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
     /// Shared with the owning `Node`: whether covered receiver installs hand
