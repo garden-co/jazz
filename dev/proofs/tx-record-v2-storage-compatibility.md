@@ -3,9 +3,16 @@
 Compatibility write-up for the alpha.60 transaction record change (#4012,
 #3768 and the tx metadata diet), required by the AGENTS.md "Durable encodings"
 rule. Target release: `2.0.0-alpha.60`, the coordinated breaking release that
-also carries linear history (#3281). The storage codec version bump and the
-fixture regeneration are done once for the whole release by the linear
-history change, not here.
+also carries linear history (#3281).
+
+This PR regenerates its own fixtures, with Anselm's OK, in a separate commit
+("Regenerate fixtures for tx record format (no version bump)"): the native
+storage corpus (logical pack, SQLite image and RocksDB archive, with their
+digests), the browser IndexedDB corpus, and the inline byte pins listed below.
+That commit bumps no version. The single storage version bump for alpha.60 is
+done by track F. Until then, refusal of roots written before this change rests
+on the `groove.dictionary.v1` entry in the node profile (see "Upgrade path"),
+not on a `jazz.node-storage` bump.
 
 ## Old form (linear history, #3281)
 
@@ -86,6 +93,52 @@ refused with `UnsupportedStorageCodecs { missing: ["groove.dictionary.v1"] }`. A
 later release truncates is refused by this build with
 `TruncatedHistoryUnsupported` instead of being read as if its history were
 complete.
+
+## Downgrade to alpha.59
+
+Opening a store written by this build with alpha.59 is refused before any
+mutation, but with an untyped error. alpha.59 predates the typed
+`UnsupportedStorageCodecs` refusal and admits an existing root only when its
+manifest equals the expected one exactly:
+
+- Native (RocksDB and SQLite): the adapters call `admit_existing` on the stored
+  manifest before they read or write anything else
+  (`v2.0.0-alpha.59:crates/jazz-storage-rocksdb/src/lib.rs:628`,
+  `v2.0.0-alpha.59:crates/jazz-storage-sqlite/src/lib.rs:443`).
+  `StorageEpochManifest::admit_existing`
+  (`v2.0.0-alpha.59:crates/groove/src/storage/manifest.rs:220-231`) requires
+  `found == self`, so a manifest naming `groove.dictionary.v1`,
+  `groove.durable-index.v2` or `jazz.node-storage.v1` fails with
+  `Invalid("storage manifest is inconsistent with this adapter")`.
+- Browser (IndexedDB): `assertStorageManifest` compares `requiredCodecIds`
+  element by element
+  (`v2.0.0-alpha.59:packages/jazz-tools/src/runtime/indexeddb-page-store.ts:959-984`)
+  and throws "Missing or invalid IndexedDB storage epoch manifest" before the
+  store claims its runtime owner.
+
+alpha.59 never decodes a tx-record v2 record or an author code, so it cannot
+misread one. The same was already true of main's roots before this change.
+No test runs an alpha.59 reader; the current Groove test
+`selected_codec_profile_rejects_omitted_extra_and_unknown_ids_at_admission`
+pins only the exact-match rule. A user who downgrades gets that opaque error
+and must restore an alpha.59 store or start from an empty one.
+
+## Authors dictionary residency
+
+The `authors` dictionary is append-only and has no GC. An entry is never
+removed, so it keeps:
+
+- authors whose rows were deleted;
+- authors that only appear on rejected transactions;
+- codes reserved by batches that were dropped before they applied.
+
+Open loads the whole dictionary into memory
+(`DictionaryRegistry::load`, `crates/groove/src/dictionary.rs:177`, called
+from `crates/groove/src/db/facade.rs:392`): a `Vec` of values plus a hash map
+from value to code, about 150 to 200 bytes per author. Memory and open time
+grow with the number of distinct authors the node has ever seen, not with the
+live data. That is acceptable for alpha.60. Lazy or paged residency and a GC
+or compaction story are follow-up work.
 
 ## Decisions a reader should know
 
