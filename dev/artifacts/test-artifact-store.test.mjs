@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
   existsSync,
   chmodSync,
@@ -367,28 +368,34 @@ test("a consumer pins its manifest-selected pair across pointer swaps and partia
         [
           "const fs=require('node:fs')",
           "const [pointer,first,second]=process.argv.slice(1)",
-          "for(let i=0;i<2000;i++) fs.writeFileSync(pointer, i%2 ? first : second)",
+          "process.on('message', () => process.exit(0))",
+          "function swap(){fs.writeFileSync(pointer,first);fs.writeFileSync(pointer,second);setImmediate(swap)}",
+          "swap();process.send('ready')",
         ].join(";"),
         pointer,
         JSON.stringify(first),
         JSON.stringify(second),
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
     );
-    let exited = false;
-    let observations = 0;
-    swapper.once("exit", (code) => {
-      assert.equal(code, 0);
-      exited = true;
-    });
-    do {
-      const selected = correctnessArtifactConsumerEnvironment(root);
-      assert.equal(selected.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
-      assert.equal(selected.JAZZ_CORRECTNESS_NAPI_BINDING, join(first.napiGeneration, "index.js"));
-      observations++;
-      await new Promise((resolvePromise) => setImmediate(resolvePromise));
-    } while (!exited);
-    assert.ok(observations > 1, "pointer swap did not overlap consumer preflight");
+    const closed = once(swapper, "close");
+    try {
+      await once(swapper, "message", { signal: AbortSignal.timeout(10000) });
+      for (let observation = 0; observation < 3; observation++) {
+        const selected = correctnessArtifactConsumerEnvironment(root);
+        assert.equal(selected.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
+        assert.equal(
+          selected.JAZZ_CORRECTNESS_NAPI_BINDING,
+          join(first.napiGeneration, "index.js"),
+        );
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+      }
+      swapper.send("stop");
+      assert.equal((await closed)[0], 0);
+    } finally {
+      swapper.kill("SIGKILL");
+      await closed;
+    }
 
     // A killed producer leaves only a private temporary manifest.  Existing
     // readers remain on the prior atomic receipt, never a half-written one.
