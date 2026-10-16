@@ -99,6 +99,28 @@ impl From<PolicyExpressionLimitError> for CodecError {
     }
 }
 
+mod bridge_protocol_b;
+
+thread_local! {
+    static ENCODE_ERROR: std::cell::RefCell<Option<CodecError>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record that a value could not be encoded. [`WireCodec::put`] cannot fail,
+/// so a failing encoder records its error here and the caller that owns the
+/// encode collects it with [`take_encode_error`]. The first error is kept.
+pub fn record_encode_error(error: CodecError) {
+    ENCODE_ERROR.with(|slot| {
+        slot.borrow_mut().get_or_insert(error);
+    });
+}
+
+/// Take the first error recorded by [`record_encode_error`] since the last
+/// call, clearing it.
+pub fn take_encode_error() -> Option<CodecError> {
+    ENCODE_ERROR.with(|slot| slot.borrow_mut().take())
+}
+
 /// Read one byte.
 pub fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, CodecError> {
     let Some(&value) = data.get(*offset) else {
