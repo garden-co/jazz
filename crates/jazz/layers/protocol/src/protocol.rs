@@ -969,6 +969,8 @@ impl RowBase {
 
 pub(crate) use version_record_wire_row::with_message_descriptor_table;
 
+mod wire_codecs_a;
+
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
