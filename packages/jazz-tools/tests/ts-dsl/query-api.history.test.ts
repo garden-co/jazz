@@ -68,14 +68,18 @@ describe("TS Query API history (connected client)", () => {
   }
 
   it("returns typed content and transaction metadata for an accepted version", async () => {
+    const startedAt = Date.now();
     const note = await insertNote();
     const rows = await db.all(app.notes.history.where({ id: note.id }));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: note.id, title: "first", done: false });
-    expectTypeOf(rows[0]!.$seq).toEqualTypeOf<bigint>();
+    expectTypeOf(rows[0]!.$acceptedAt).toEqualTypeOf<Date>();
     expectTypeOf(rows[0]!.$transactionId).toEqualTypeOf<TxId>();
-    expect(typeof rows[0]!.$seq).toBe("bigint");
-    expect(rows[0]!.$seq).toBeGreaterThan(0n);
+    expect(rows[0]!.$acceptedAt).toBeInstanceOf(Date);
+    expect(rows[0]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(startedAt);
+    expect(rows[0]!.$acceptedAt.getTime()).toBeLessThanOrEqual(Date.now());
+    const latest = watch(app.notes.history.where({ id: note.id }).select("$acceptedAt"));
+    await expect.poll(latest).toEqual([{ id: note.id, $acceptedAt: rows[0]!.$acceptedAt }]);
     expect(typeof rows[0]!.$transactionId).toBe("string");
   });
 
@@ -90,11 +94,11 @@ describe("TS Query API history (connected client)", () => {
     const note = await insertNote();
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
     const query = app.notes.history.where({ id: note.id });
-    const rows = await db.all(query.orderBy("$seq"));
+    const rows = await db.all(query.orderBy("$acceptedAt"));
     expect(rows.map((row) => row.title)).toEqual(["first", "second"]);
-    expect(rows[1]!.$seq).toBeGreaterThan(rows[0]!.$seq);
+    expect(rows[1]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(rows[0]!.$acceptedAt.getTime());
     expect(rows[1]!.$transactionId).not.toEqual(rows[0]!.$transactionId);
-    expect(await db.all(query.orderBy("$seq", "desc"))).toEqual([...rows].reverse());
+    expect(await db.all(query.orderBy("$acceptedAt", "desc"))).toEqual([...rows].reverse());
   });
 
   it("applies offset and limit to ordered versions", async () => {
@@ -103,7 +107,7 @@ describe("TS Query API history (connected client)", () => {
     await db.update(app.notes, note.id, { title: "third" }).wait({ tier: "global" });
     const page = app.notes.history
       .where({ id: note.id })
-      .orderBy("$seq")
+      .orderBy("$acceptedAt")
       .offset(1)
       .limit(1)
       .select("title");
@@ -137,7 +141,7 @@ describe("TS Query API history (connected client)", () => {
 
   it("restores old versions and adds the replacement content version", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).orderBy("$seq");
+    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
     const original = await db.all(query);
     await db.delete(app.notes, note.id).wait({ tier: "global" });
     const latest = watch(query);
@@ -154,7 +158,7 @@ describe("TS Query API history (connected client)", () => {
 
   it("does not re-evaluate read policies for locally retained history", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).orderBy("$seq");
+    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
     const latest = watch(query);
     await expect.poll(() => latest()?.length).toBe(1);
     // The deployed read policy denies done=true; writes remain allowed.

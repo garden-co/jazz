@@ -1592,7 +1592,7 @@ export interface Query<
 
 export type HistoryRow<TRow extends { id: string }> = TRow & {
   $transactionId: TxId;
-  $seq: bigint;
+  $acceptedAt: Date;
 };
 
 /** Read-only query over locally retained accepted content versions.
@@ -1610,7 +1610,7 @@ export interface HistoryQuery<
     TRow,
     "*" extends TColumn ? keyof HistoryRow<TRow> : Extract<TColumn, keyof HistoryRow<TRow>>
   >;
-  orderBy(column: "$seq", direction?: "asc" | "desc"): HistoryQuery<TRow, TSelection>;
+  orderBy(column: "$acceptedAt", direction?: "asc" | "desc"): HistoryQuery<TRow, TSelection>;
   limit(count: number): HistoryQuery<TRow, TSelection>;
   offset(count: number): HistoryQuery<TRow, TSelection>;
 }

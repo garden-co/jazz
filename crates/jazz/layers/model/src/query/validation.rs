@@ -453,8 +453,8 @@ fn validate_history_query(
             "anything other than one exact id equality filter",
         ));
     }
-    if query.order_by.iter().any(|order| order.column != "$seq") {
-        return Err(unsupported("ordering by columns other than $seq"));
+    if query.order_by.iter().any(|order| order.column != "$acceptedAt") {
+        return Err(unsupported("ordering by columns other than $acceptedAt"));
     }
     if query.select.as_ref().is_some_and(|columns| {
         columns.iter().any(|column| {

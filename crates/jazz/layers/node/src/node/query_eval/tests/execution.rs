@@ -1545,13 +1545,15 @@ fn history_query_collector_preserves_version_keys_and_windows() {
     for (query, indexes) in [
         (
             base.clone()
-                .order_by("$seq", OrderDirection::Asc)
+                .order_by("$acceptedAt", OrderDirection::Asc)
                 .offset(1)
                 .limit(1),
             vec![1],
         ),
         (
-            base.clone().order_by("$seq", OrderDirection::Desc).limit(2),
+            base.clone()
+                .order_by("$acceptedAt", OrderDirection::Desc)
+                .limit(2),
             vec![2, 1],
         ),
         (base.clone().offset(1).limit(1), vec![1]),

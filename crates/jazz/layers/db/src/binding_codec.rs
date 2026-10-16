@@ -262,42 +262,64 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
         let mut published = published_record(row)?;
-        // Native hosts expose the same committed transaction ID as write handles.
-        // The core query value and occurrence identity retain the full causal ID.
+        // Convert public history metadata only after query execution. Ordering
+        // and occurrence identity retain the full HLC inside the core.
         if row
             .table()
             .starts_with(crate::schema::history::HISTORY_PREFIX)
-            && let Some(index) = published.fields.iter().position(|field| {
-                matches!(
-                    field,
-                    CurrentRowPublicationField::ResultField { name, .. }
-                        if name == crate::schema::history::TRANSACTION_ID_COLUMN
-                )
-            })
         {
+            use crate::schema::history::{ACCEPTED_AT_COLUMN, TRANSACTION_ID_COLUMN};
             use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
-            let mut values = BorrowedRecord::new(&published.raw, &published.descriptor)
-                .to_values()
-                .map_err(|_| postcard::Error::SerdeSerCustom)?;
-            let Value::Tuple(parts) = &values[index] else {
-                return Err(postcard::Error::SerdeSerCustom);
-            };
-            let [Value::U64(time), Value::Uuid(node)] = parts.as_slice() else {
-                return Err(postcard::Error::SerdeSerCustom);
-            };
-            let tx = crate::tx::TxId::new(crate::time::TxTime(*time), crate::ids::NodeUuid(*node));
-            values[index] = Value::String(
-                crate::model::transaction::TransactionId::from_committed_tx(tx).to_string(),
-            );
-            let mut fields = published.descriptor.fields().to_vec();
-            fields[index].value_type = ValueType::String;
-            published.descriptor = RecordDescriptor::new_with_fields(fields);
-            published.raw = Cow::Owned(
-                published
-                    .descriptor
-                    .create(&values)
-                    .map_err(|_| postcard::Error::SerdeSerCustom)?,
-            );
+            let metadata = published
+                .fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| match field {
+                    CurrentRowPublicationField::ResultField { name, .. }
+                        if name == TRANSACTION_ID_COLUMN || name == ACCEPTED_AT_COLUMN =>
+                    {
+                        Some((index, name.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !metadata.is_empty() {
+                let mut values = BorrowedRecord::new(&published.raw, &published.descriptor)
+                    .to_values()
+                    .map_err(|_| postcard::Error::SerdeSerCustom)?;
+                let mut fields = published.descriptor.fields().to_vec();
+                for (index, name) in metadata {
+                    if name == ACCEPTED_AT_COLUMN {
+                        let Value::U64(hlc) = &values[index] else {
+                            return Err(postcard::Error::SerdeSerCustom);
+                        };
+                        values[index] = Value::U64(crate::time::GlobalTime(*hlc).physical_ms());
+                    } else {
+                        let Value::Tuple(parts) = &values[index] else {
+                            return Err(postcard::Error::SerdeSerCustom);
+                        };
+                        let [Value::U64(time), Value::Uuid(node)] = parts.as_slice() else {
+                            return Err(postcard::Error::SerdeSerCustom);
+                        };
+                        let tx = crate::tx::TxId::new(
+                            crate::time::TxTime(*time),
+                            crate::ids::NodeUuid(*node),
+                        );
+                        values[index] = Value::String(
+                            crate::model::transaction::TransactionId::from_committed_tx(tx)
+                                .to_string(),
+                        );
+                        fields[index].value_type = ValueType::String;
+                    }
+                }
+                published.descriptor = RecordDescriptor::new_with_fields(fields);
+                published.raw = Cow::Owned(
+                    published
+                        .descriptor
+                        .create(&values)
+                        .map_err(|_| postcard::Error::SerdeSerCustom)?,
+                );
+            }
         }
         let raw = published.raw;
         let binding_descriptor = published

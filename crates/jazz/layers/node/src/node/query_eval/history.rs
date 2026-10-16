@@ -185,7 +185,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                         groove::ivm::FieldRef::name("tx_time"),
                         groove::ivm::FieldRef::name("transaction_node"),
                     ]),
-                    HistoryMetadataColumn::Sequence => {
+                    HistoryMetadataColumn::AcceptedAt => {
                         groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::name("seq"))
                     }
                 };

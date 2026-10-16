@@ -3,7 +3,9 @@ use jazz_model::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBui
 use jazz_model::model::public_schema_convert::decode_public_schema_json;
 use jazz_model::query::{Query, QueryError};
 use jazz_model::schema::JazzSchema;
-use jazz_model::schema::history::{HistoryRelationSchema, SEQUENCE_COLUMN, TRANSACTION_ID_COLUMN};
+use jazz_model::schema::history::{
+    ACCEPTED_AT_COLUMN, HistoryRelationSchema, TRANSACTION_ID_COLUMN,
+};
 
 fn schema(tables: impl IntoIterator<Item = TableSchemaBuilder>) -> JazzSchema {
     let mut builder = SchemaBuilder::new();
@@ -35,7 +37,7 @@ fn history_descriptor_preserves_source_and_adds_non_null_metadata() {
         history.columns()[2].column_type(),
         &RuntimeType::Tuple(vec![RuntimeType::U64, RuntimeType::Uuid]),
     );
-    assert_eq!(history.columns()[3].name(), SEQUENCE_COLUMN);
+    assert_eq!(history.columns()[3].name(), ACCEPTED_AT_COLUMN);
     assert_eq!(history.columns()[3].column_type(), &RuntimeType::U64);
     assert_eq!(schema.runtime(), &before);
     assert_eq!(schema.tables().len(), 1);
@@ -95,7 +97,7 @@ fn schema_admission_reserves_history_table_names() {
 /// schema admission boundary already reserves every `$` magic-column name.
 #[test]
 fn schema_admission_reserves_history_metadata_names() {
-    for column in [TRANSACTION_ID_COLUMN, SEQUENCE_COLUMN] {
+    for column in [TRANSACTION_ID_COLUMN, ACCEPTED_AT_COLUMN] {
         let source = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("tasks").column(column, ColumnType::Text))
             .build();

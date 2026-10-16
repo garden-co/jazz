@@ -7,34 +7,34 @@ use super::{ColumnSchema, GrooveColumnType, TableSchema};
 pub const HISTORY_PREFIX: &str = "history.";
 /// Portable transaction identity of a settled content version.
 pub const TRANSACTION_ID_COLUMN: &str = "$transactionId";
-/// Accepted sequence of a settled content version.
-pub const SEQUENCE_COLUMN: &str = "$seq";
+/// Acceptance HLC of a settled content version.
+pub const ACCEPTED_AT_COLUMN: &str = "$acceptedAt";
 
 /// Metadata supplied for each accepted content version.
 #[derive(Clone, Copy, Debug)]
 pub enum HistoryMetadataColumn {
     /// Portable content transaction identity.
     TransactionId,
-    /// Accepted sequence number.
-    Sequence,
+    /// Acceptance HLC, retaining physical and logical components.
+    AcceptedAt,
 }
 
 impl HistoryMetadataColumn {
     /// Canonical metadata column order, shared by descriptors and row encoding.
-    pub const ALL: [Self; 2] = [Self::TransactionId, Self::Sequence];
+    pub const ALL: [Self; 2] = [Self::TransactionId, Self::AcceptedAt];
 
     /// Query-visible column name.
     pub fn name(self) -> &'static str {
         match self {
             Self::TransactionId => TRANSACTION_ID_COLUMN,
-            Self::Sequence => SEQUENCE_COLUMN,
+            Self::AcceptedAt => ACCEPTED_AT_COLUMN,
         }
     }
 
     fn schema(self) -> ColumnSchema {
         let ty = match self {
             Self::TransactionId => super::tx_id_column(),
-            Self::Sequence => GrooveColumnType::U64,
+            Self::AcceptedAt => GrooveColumnType::U64,
         };
         ColumnSchema::new(self.name(), ty)
     }

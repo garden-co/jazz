@@ -22,7 +22,7 @@ rather than reconstructing a point-in-time snapshot.
 SELECT h.id, h.$transactionId, h.status
 FROM history.tasks AS h
 WHERE h.id = :task_id
-ORDER BY h.$seq
+ORDER BY h.$acceptedAt
 ```
 
 This returns each eligible version of one task. Two versions with identical
@@ -35,7 +35,7 @@ adds a result; losing current read permission retracts the row's history.
   Trusted local subscriptions use `Db::subscribe_for_identity` with
   `ReadTier::LocalOnly`. Client-local reads expose locally retained accepted history without evaluating
   policies. Peer history delivery remains deferred.
-- One exact `id` equality filter and ordering by `$seq`. Additional filters,
+- One exact `id` equality filter and ordering by `$acceptedAt`. Additional filters,
   other orderings, and branched tables are rejected in this increment.
 - Accepted, settled content images. Pending authored patches are not exposed as
   complete historical images, and rejected transactions are excluded. Requests
@@ -88,10 +88,10 @@ Keep `id` as the underlying logical row ID. History adds two non-null,
 read-only metadata columns, following the existing `$createdAt` / `$updatedBy`
 convention:
 
-| Column           | Rust type       | TypeScript type | Meaning                                           |
-| ---------------- | --------------- | --------------- | ------------------------------------------------- |
-| `$transactionId` | Existing `TxId` | `TxId` string   | Transaction that produced this version.           |
-| `$seq`           | `u64`           | `bigint`        | Accepted sequence used to order settled versions. |
+| Column           | Rust type       | TypeScript type | Meaning                                                        |
+| ---------------- | --------------- | --------------- | -------------------------------------------------------------- |
+| `$transactionId` | Existing `TxId` | `TxId` string   | Transaction that produced this version.                        |
+| `$acceptedAt`    | `u64`           | `Date`          | Authority acceptance time; core ordering retains the full HLC. |
 
 Within one table and exact branch, `(id, $transactionId)` identifies a content
 version; do not mint another version UUID. Internal keys retain table identity
@@ -107,12 +107,17 @@ existing descriptor type, not persisted records or peer protocol encodings.
 Transaction equality filters remain outside the current exact-row-filter boundary. It identifies the version's transaction, independently
 of field-level `$updatedBy` provenance, which can name an earlier writer.
 
-`$seq` supports ordering; numeric filters remain outside the initial boundary. It denotes acceptance order, not
-wall-clock time; gaps are allowed. It does not replace transaction identity.
-Preserve the full `u64` range in TypeScript using `bigint`. `$seq` is a packed
-`GlobalTime` (physical milliseconds plus an 18-bit logical counter), not a small
-incrementing integer; ordinary current values already exceed
-`Number.MAX_SAFE_INTEGER`, so converting to `number` would lose precision.
+`$acceptedAt` is the authority's acceptance HLC, not the authored transaction
+time. The core retains its full `u64` physical/logical value for query processing,
+including ordering and pagination. Additional filters remain outside the initial
+exact-ID query boundary.
+
+At the shared NAPI/WASM output boundary, convert the HLC to physical Unix
+milliseconds. TypeScript exposes a `Date`, deliberately discarding the logical
+counter. Distinct versions can display the same date while retaining an exact
+query order and distinct occurrence keys. This is an output conversion only;
+physical storage fields and peer encodings keep their existing `seq` names and
+full HLC values.
 
 Reserve these metadata names consistently with existing magic columns. Reject
 conflicting application declarations rather than shadowing them. Both fields
@@ -287,7 +292,7 @@ support does not claim to implement this coverage protocol.
    facade validation. The normal write-ingress path drains local subscriptions
    even when the write was applied eagerly without a deferred publication receipt.
    The Rust client decodes virtual history columns using the shared history
-   descriptor. Its existing value carriers represent `$seq` as a `u64` in
+   descriptor. Its existing value carriers represent `$acceptedAt` as a `u64` in
    `Value::Timestamp` and `$transactionId` as a `Value::Row` containing the
    packed time (`Value::Timestamp`) and node UUID. These existing carriers preserve
    the exact unsigned values; the packed transaction time is not converted to
@@ -301,9 +306,9 @@ support does not claim to implement this coverage protocol.
    against `history.tasks`, retaining the original application schema for
    admission. Query-only descriptor resolution adds the two metadata columns;
    no virtual table is deployed or persisted. The read-only handle supports one
-   exact `id` filter, projection, `$seq` ordering, offset and limit. Application
+   exact `id` filter, projection, `$acceptedAt` ordering, offset and limit. Application
    columns retain their types/transforms; `$transactionId` is
-   `TxId` and `$seq` is `bigint`.
+   `TxId` and `$acceptedAt` is `Date`.
    Existing occurrence keys preserve multiple versions in subscription collections.
    Both `db.all` and `db.subscribe` read locally retained history using the
    normal local read path. Clients do not evaluate policies; trusted backend/session
@@ -312,7 +317,7 @@ support does not claim to implement this coverage protocol.
    exists. Mutation targets are rejected at type and runtime boundaries.
 
    ```ts
-   const history = app.tasks.history.where({ id: taskId }).orderBy("$seq", "desc").limit(20);
+   const history = app.tasks.history.where({ id: taskId }).orderBy("$acceptedAt", "desc").limit(20);
    const versions = await db.all(history);
    const stop = db.subscribe(history.select("title"), (rows) => {
      // Multiple versions may have the same id and title.
@@ -353,7 +358,7 @@ All results use one ResultKey encoding, with an optional root transaction:
 (position:u32be | label_length:u32be | label:utf8)* | has_transaction:u8 |
 [tx_time:u64be | tx_node:16]`.
 Current rows, joins, and unions set `has_transaction` to 0. History roots set it
-to 1 and carry the full packed HLC and originating-node UUID; `$seq` and
+to 1 and carry the full packed HLC and originating-node UUID; `$acceptedAt` and
 projected values do not participate. History joins and unions remain unsupported.
 The shared `result-key.json` fixture pins a history key including the full
 `u64` range; the binding golden fixture covers current rows and union results.

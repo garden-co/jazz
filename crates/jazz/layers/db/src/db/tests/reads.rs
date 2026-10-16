@@ -7859,7 +7859,7 @@ fn history_query_reads_versions_metadata_and_projection() {
     .unwrap();
     let query = Query::from("history.tasks")
         .filter(eq(col("id"), param("row")))
-        .order_by("$seq", OrderDirection::Asc);
+        .order_by("$acceptedAt", OrderDirection::Asc);
     let prepare = |query: &Query| {
         db.prepare_query_bound(
             query,
@@ -7893,7 +7893,7 @@ fn history_query_reads_versions_metadata_and_projection() {
     }
     let sequences = rows
         .iter()
-        .map(|version| match version.raw_field("$seq") {
+        .map(|version| match version.raw_field("$acceptedAt") {
             Some(Value::U64(seq)) => seq,
             other => panic!("expected sequence, got {other:?}"),
         })
@@ -7934,11 +7934,11 @@ fn history_query_reads_versions_metadata_and_projection() {
         2
     );
     assert!(projected_without_order.iter().all(|row| {
-        row.raw_field("$transactionId").is_none() && row.raw_field("$seq").is_none()
+        row.raw_field("$transactionId").is_none() && row.raw_field("$acceptedAt").is_none()
     }));
     let descending = Query::from("history.tasks")
         .filter(eq(col("id"), param("row")))
-        .order_by("$seq", OrderDirection::Desc)
+        .order_by("$acceptedAt", OrderDirection::Desc)
         .limit(2);
     let page = read(&descending);
     assert_eq!(

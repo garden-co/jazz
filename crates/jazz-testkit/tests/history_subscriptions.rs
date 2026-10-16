@@ -61,7 +61,7 @@ fn history(row: ObjectId) -> Query {
             col("id"),
             lit(jazz::groove::records::Value::Uuid(*row.uuid())),
         ))
-        .order_by("$seq", OrderDirection::Asc)
+        .order_by("$acceptedAt", OrderDirection::Asc)
 }
 
 /// Alice watches locally retained history on a backend client while Bob's
@@ -95,14 +95,14 @@ async fn history_subscription_tracks_locally_retained_versions() {
                 Some(&Value::Text("same".into()))
             );
             assert!(initial.added[0].row.get("$transactionId").is_none());
-            assert!(initial.added[0].row.get("$seq").is_none());
+            assert!(initial.added[0].row.get("$acceptedAt").is_none());
             let page = Query::from("history.tasks")
                 .filter(eq(
                     col("id"),
                     lit(jazz::groove::records::Value::Uuid(*row.uuid())),
                 ))
                 .select(["title"])
-                .order_by("$seq", OrderDirection::Desc)
+                .order_by("$acceptedAt", OrderDirection::Desc)
                 .limit(1);
             let mut page_stream = alice
                 .subscribe_with_read_tier(page, ReadTier::LocalOnly)
@@ -162,9 +162,11 @@ async fn history_subscription_tracks_locally_retained_versions() {
                         ],
                     })
                 );
-                assert!(matches!(result.get("$seq"), Some(Value::Timestamp(seq)) if *seq > 0));
+                assert!(
+                    matches!(result.get("$acceptedAt"), Some(Value::Timestamp(seq)) if *seq > 0)
+                );
             }
-            let metadata_query = history(row).select(["$transactionId", "$seq"]);
+            let metadata_query = history(row).select(["$transactionId", "$acceptedAt"]);
             let mut metadata_stream = alice
                 .subscribe_with_read_tier(metadata_query.clone(), ReadTier::LocalOnly)
                 .await
@@ -180,8 +182,11 @@ async fn history_subscription_tracks_locally_retained_versions() {
                     added.row.get("$transactionId"),
                     rows[index].get("$transactionId")
                 );
-                assert_eq!(added.row.get("$seq"), rows[index].get("$seq"));
-                assert_eq!(projected[index].get("$seq"), rows[index].get("$seq"));
+                assert_eq!(added.row.get("$acceptedAt"), rows[index].get("$acceptedAt"));
+                assert_eq!(
+                    projected[index].get("$acceptedAt"),
+                    rows[index].get("$acceptedAt")
+                );
             }
 
             settled(&bob, bob.delete("tasks", row).unwrap()).await;

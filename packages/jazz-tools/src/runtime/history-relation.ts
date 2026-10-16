@@ -10,7 +10,7 @@ const metadataColumns: ColumnDescriptor[] = [
     column_type: { type: "Text" },
     nullable: false,
   },
-  { name: "$seq", column_type: { type: "BigInt" }, nullable: false },
+  { name: "$acceptedAt", column_type: { type: "Timestamp" }, nullable: false },
 ];
 
 const cache = new WeakMap<WasmSchema, Map<string, WasmSchema[string]>>();
