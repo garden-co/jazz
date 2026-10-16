@@ -323,6 +323,9 @@ where
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
                     "catalogue snapshot requires a trusted upstream link",
                 )),
+                SyncMessage::ReadBarrier { .. } => Err(Error::UnsupportedSyncMessage(
+                    "read barriers are handled by the receiving link",
+                )),
                 SyncMessage::Subscribe(subscribe) => {
                     self.apply_subscribe(subscribe)?;
                     Ok(PublicationOutcome::settled(Vec::new()))

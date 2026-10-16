@@ -677,3 +677,64 @@ async fn source_blueprint_matching_agrees_with_splitting_and_rejects_other_famil
             .is_none()
     );
 }
+
+/// Alice's shared graph inputs retain each projection's exact contract, and a
+/// failed inference neither suppresses its error nor poisons later valid reads.
+#[futures_test::test]
+async fn scoped_descriptor_inference_preserves_outputs_and_errors() {
+    use groove::ivm::ProjectField;
+    use std::sync::Arc;
+
+    let mut db = database().await;
+    let source = Arc::new(GraphBuilder::values(descriptor(), [vec![Value::U64(11)]]).unwrap());
+    let first = GraphBuilder::Project {
+        input: Arc::clone(&source),
+        fields: vec![ProjectField::renamed("id", "alice_id")],
+    };
+    let second = GraphBuilder::Project {
+        input: Arc::clone(&source),
+        fields: vec![ProjectField::literal(
+            "label",
+            Value::String("alice".into()),
+        )],
+    };
+    let missing = GraphBuilder::Project {
+        input: Arc::clone(&source),
+        fields: vec![ProjectField::named("missing")],
+    };
+    let unbound = template();
+    {
+        let mut inference = db.graph_output_descriptors();
+        for graph in [&first, &second, &first, &second] {
+            assert_eq!(
+                inference.describe(graph).unwrap(),
+                db.graph_output_descriptor(graph).unwrap()
+            );
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                inference.describe(&missing),
+                Err(groove::db::Error::IvmRuntime(IvmRuntimeError::GraphFieldNotFound(field)))
+                    if field == "missing"
+            ));
+            assert!(matches!(
+                inference.describe(&unbound),
+                Err(groove::db::Error::IvmRuntime(
+                    IvmRuntimeError::UnsupportedOperator
+                ))
+            ));
+            assert_eq!(
+                inference.describe(&first).unwrap(),
+                db.graph_output_descriptor(&first).unwrap()
+            );
+        }
+    }
+    assert_eq!(
+        db.query_graph(first).await.unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(11)], 1)]
+    );
+    assert_eq!(
+        db.query_graph(second).await.unwrap().to_values().unwrap(),
+        vec![(vec![Value::String("alice".into())], 1)]
+    );
+}

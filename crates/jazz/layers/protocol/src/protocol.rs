@@ -210,6 +210,16 @@ pub enum SyncMessage {
     /// tag stays reserved and is never reused.
     #[doc(hidden)]
     Reserved29(ReservedWireMessage),
+    /// Read-your-writes barrier on the requests channel (SPEC 8 §8.2.1).
+    /// The receiver holds this and every later request from this link until
+    /// it has answered the first `writes_through` commit units this link sent
+    /// it, each with its first `FateUpdate`. Writes and requests travel on
+    /// independently credited channels, so without it a read can overtake an
+    /// earlier write from the same writer.
+    ReadBarrier {
+        /// Commit units the sender put on this link before this barrier.
+        writes_through: u64,
+    },
 }
 
 /// Maximum known rows in one current-availability request.
@@ -891,10 +901,12 @@ pub struct PeerPayloadInventory {
 /// One immutable row-version payload carried by a committed transaction.
 ///
 /// The outer message retains table, schema UUID, branch and authored-column
-/// identity. The row uses the explicit `JVRR` v2 envelope: persisted schema
-/// descriptor plus canonical record bytes, never runtime `OwnedRecord` serde.
-/// The receiver validates that descriptor against the declared schema before
-/// translating columns into its node-local physical catalogue.
+/// identity. The row uses the explicit `JVRR` v3 envelope: a reference into
+/// the enclosing message's descriptor table (defining the persisted schema
+/// descriptor inline on its first use) plus canonical record bytes, never
+/// runtime `OwnedRecord` serde. The receiver validates that descriptor against
+/// the declared schema before translating columns into its node-local
+/// physical catalogue.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct VersionRecord {
     table: groove::Intern<String>,
@@ -955,22 +967,37 @@ impl RowBase {
     }
 }
 
+pub(crate) use version_record_wire_row::with_message_descriptor_table;
+
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
     use super::*;
 
-    // Version 2 (wire protocol v6): the record no longer carries `parents`,
-    // gains the `_deletion` cell, and travels beside `base`. Version 1
-    // rows (the DAG-history layout) are rejected rather than reinterpreted.
-    const MAGIC: &[u8; 5] = b"JVRR\x02";
+    // Version 3 (alpha.60): the persisted descriptor is defined once per
+    // sync message and referenced by later rows (#3380). After the magic, a
+    // canonical unsigned LEB128 `reference` follows:
+    //
+    // - `0` defines the next descriptor-table entry inline: descriptor byte
+    //   length as little-endian `U32`, then exactly that many Groove
+    //   persisted-descriptor bytes;
+    // - `k > 0` reuses table entry `k - 1`, defined earlier in the message.
+    //
+    // Canonical row bytes consume the remainder. A row encoded outside a
+    // message (no table in scope) always defines its descriptor inline.
+    // Version 2 (every row repeats its descriptor) and version 1 (the DAG
+    // row with `parents`) are rejected rather than reinterpreted.
+    const MAGIC: &[u8; 5] = b"JVRR\x03";
+    /// Largest descriptor-table reference (`u32` table index plus one).
+    const MAX_REFERENCE: u64 = u32::MAX as u64 + 1;
 
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
     // untrusted receipt admission is separate from this representation codec.
     //
-    // Every row of a view update repeats its descriptor, so a miss costs a
-    // full descriptor encode or canonical decode per row. Retain enough
+    // A message defines each descriptor once in its table, and rows encoded
+    // outside a message define theirs inline, so a miss costs a full
+    // descriptor encode or canonical decode per definition. Retain enough
     // distinct descriptors (tables x schema versions x nested shapes) that a
     // multi-table stream does not evict itself; lookups are hashed so the
     // larger bound does not turn each hit into a linear scan.
@@ -1083,35 +1110,150 @@ mod version_record_wire_row {
         Ok(proof)
     }
 
+    /// Descriptors defined so far by the sync message being encoded, keyed by
+    /// their exact persisted bytes: two execution descriptors that differ only
+    /// in identities the grammar drops share one entry.
+    #[derive(Default)]
+    struct EncodeTable {
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u32>,
+    }
+
+    /// Descriptors defined so far by the sync message being decoded, in
+    /// definition order. `defined` rejects a second inline definition of the
+    /// same bytes, which the encoder never emits.
+    #[derive(Default)]
+    struct DecodeTable {
+        entries: Vec<RecordDescriptor>,
+        defined: rustc_hash::FxHashSet<std::sync::Arc<[u8]>>,
+    }
+
+    thread_local! {
+        static ENCODE_TABLE: std::cell::RefCell<Option<EncodeTable>> =
+            const { std::cell::RefCell::new(None) };
+        static DECODE_TABLE: std::cell::RefCell<Option<DecodeTable>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `f` with a fresh, empty descriptor table for one sync message.
+    ///
+    /// Every encode, size measurement and decode of one message must run in
+    /// exactly one such scope, so the encoder's first-use order and the
+    /// decoder's definition order are the same traversal. Scopes nest: the
+    /// previous tables are restored on exit, including on unwind.
+    pub(crate) fn with_message_descriptor_table<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore {
+            encode: Option<EncodeTable>,
+            decode: Option<DecodeTable>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ENCODE_TABLE.with(|table| *table.borrow_mut() = self.encode.take());
+                DECODE_TABLE.with(|table| *table.borrow_mut() = self.decode.take());
+            }
+        }
+        let _restore = Restore {
+            encode: ENCODE_TABLE.with(|table| table.replace(Some(EncodeTable::default()))),
+            decode: DECODE_TABLE.with(|table| table.replace(Some(DecodeTable::default()))),
+        };
+        f()
+    }
+
+    fn push_leb128(bytes: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                bytes.push(byte);
+                return;
+            }
+            bytes.push(byte | 0x80);
+        }
+    }
+
+    /// Read one canonical (shortest) unsigned LEB128 value no larger than
+    /// [`MAX_REFERENCE`], returning it and the remaining bytes.
+    fn take_leb128(bytes: &[u8]) -> Option<(u64, &[u8])> {
+        let mut value = 0u64;
+        for (index, &byte) in bytes.iter().enumerate().take(5) {
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                // A zero final continuation byte is an overlong spelling.
+                if index > 0 && byte == 0 {
+                    return None;
+                }
+                return (value <= MAX_REFERENCE).then(|| (value, &bytes[index + 1..]));
+            }
+        }
+        None
+    }
+
     pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
         let proof = descriptor_for_encode(record.descriptor())?;
         let descriptor = &proof.encoded;
+        let reference = ENCODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let table = table.as_mut()?;
+            if let Some(index) = table.by_encoded.get(descriptor) {
+                return Some(u64::from(*index) + 1);
+            }
+            let index = u32::try_from(table.by_encoded.len()).ok()?;
+            table.by_encoded.insert(descriptor.clone(), index);
+            None
+        });
+        if let Some(reference) = reference {
+            let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + record.raw().len());
+            bytes.extend_from_slice(MAGIC);
+            push_leb128(&mut bytes, reference);
+            bytes.extend_from_slice(record.raw());
+            return Ok(bytes);
+        }
         let length =
             u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
-        let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + descriptor.len() + record.raw().len());
+        let mut bytes =
+            Vec::with_capacity(MAGIC.len() + 1 + 4 + descriptor.len() + record.raw().len());
         bytes.extend_from_slice(MAGIC);
+        push_leb128(&mut bytes, 0);
         bytes.extend_from_slice(&length.to_le_bytes());
-        bytes.extend_from_slice(&descriptor);
+        bytes.extend_from_slice(descriptor);
         bytes.extend_from_slice(record.raw());
         Ok(bytes)
     }
 
     pub(super) fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
         let invalid = || groove::records::Error::NonCanonicalRecord;
-        if !bytes.starts_with(MAGIC) {
-            return Err(invalid());
+        let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
+        let (reference, body) = take_leb128(body).ok_or_else(invalid)?;
+        if reference > 0 {
+            let index = usize::try_from(reference - 1).map_err(|_| invalid())?;
+            let descriptor = DECODE_TABLE
+                .with(|table| table.borrow().as_ref()?.entries.get(index).copied())
+                .ok_or_else(invalid)?;
+            return Ok(OwnedRecord::new(body.to_vec(), descriptor));
         }
         let length = u32::from_le_bytes(
-            bytes
-                .get(5..9)
+            body.get(..4)
                 .ok_or_else(invalid)?
                 .try_into()
                 .map_err(|_| invalid())?,
         ) as usize;
-        let end = 9usize.checked_add(length).ok_or_else(invalid)?;
-        let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
-        let raw = bytes.get(end..).ok_or_else(invalid)?;
-        Ok(OwnedRecord::new(raw.to_vec(), descriptor))
+        let end = 4usize.checked_add(length).ok_or_else(invalid)?;
+        let proof = descriptor_for_decode(body.get(4..end).ok_or_else(invalid)?)?;
+        let defined = DECODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let Some(table) = table.as_mut() else {
+                return true;
+            };
+            if !table.defined.insert(proof.encoded.clone()) {
+                return false;
+            }
+            table.entries.push(proof.canonical);
+            true
+        });
+        if !defined {
+            return Err(invalid());
+        }
+        let raw = body.get(end..).ok_or_else(invalid)?;
+        Ok(OwnedRecord::new(raw.to_vec(), proof.canonical))
     }
 
     #[cfg(test)]
@@ -1168,8 +1310,12 @@ mod version_record_wire_row {
             for bytes in [
                 vec![],
                 b"JVRR\x01".to_vec(),
+                b"JVRR\x02".to_vec(),
                 b"JVRR\x03".to_vec(),
-                b"JVRR\x02\xff\xff\xff\xff".to_vec(),
+                b"JVRR\x04\x00".to_vec(),
+                b"JVRR\x03\x00\xff\xff\xff\xff".to_vec(),
+                // A table reference outside any message scope.
+                b"JVRR\x03\x01".to_vec(),
             ] {
                 let wire = postcard::to_allocvec(&bytes).unwrap();
                 assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
@@ -1187,6 +1333,71 @@ mod version_record_wire_row {
             assert!(serde_json::from_str::<WireRow>("[256]").is_err());
         }
 
+        /// Actors: a node replicating one of its global-current rows.
+        ///
+        /// A Jazz row whose stored form interns its author columns reaches
+        /// JVRR in its logical form: Groove reads it back with full
+        /// `RowAuthor` values under plain `RowAuthor` types, it round-trips
+        /// as plain values, and the stored descriptor itself refuses to
+        /// encode, so a dictionary code is never framed as a wire value.
+        /// White-box: the JVRR envelope is below every public API.
+        #[test]
+        fn rows_with_interned_author_columns_cross_jvrr_as_plain_values() {
+            let table = crate::schema::TableSchema::new(
+                "todos",
+                [crate::schema::ColumnSchema::new("title", ValueType::String)],
+            )
+            .global_current_storage_table();
+            let stored = table.storage_record_schema();
+            assert!(stored.contains_interned(), "author columns are interned");
+            assert!(matches!(
+                groove::records::encode_persisted_record_descriptor(&stored),
+                Err(groove::records::Error::InternedTypeNotEncodable { dictionary })
+                    if dictionary == crate::schema::AUTHORS_DICTIONARY
+            ));
+            let stored_row = OwnedRecord::new(Vec::new(), stored);
+            assert!(matches!(
+                encode(&stored_row),
+                Err(groove::records::Error::InternedTypeNotEncodable { .. })
+            ));
+
+            let logical = table.record_schema();
+            assert!(!logical.contains_interned());
+            let alice = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let bob = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xb2; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let values = logical
+                .fields()
+                .iter()
+                .map(|field| match field.name.as_deref() {
+                    Some("created_by") => alice.clone(),
+                    Some("updated_by") => bob.clone(),
+                    _ => match &field.value_type {
+                        ValueType::Bytes => Value::Bytes(vec![1]),
+                        ValueType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
+                        ValueType::U64 => Value::U64(9),
+                        ValueType::Nullable(_) => Value::Nullable(None),
+                        other => panic!("unexpected global-current field type {other:?}"),
+                    },
+                })
+                .collect::<Vec<_>>();
+            let row = OwnedRecord::new(logical.create(&values).unwrap(), logical);
+            let decoded = decode(&encode(&row).unwrap()).unwrap();
+            assert!(!decoded.descriptor().contains_interned());
+            let created_by = logical.field_index("created_by").unwrap();
+            let updated_by = logical.field_index("updated_by").unwrap();
+            assert_eq!(decoded.borrowed().get_idx(created_by).unwrap(), alice);
+            assert_eq!(decoded.borrowed().get_idx(updated_by).unwrap(), bob);
+            assert_eq!(decoded.raw(), row.raw());
+        }
+
         // These internal tests exercise the exact untrusted byte boundary and
         // proof reuse, which ordinary client queries cannot observe directly.
         #[test]
@@ -1195,10 +1406,10 @@ mod version_record_wire_row {
             let raw = descriptor.create(&[Value::U64(7)]).unwrap();
             let record = OwnedRecord::new(raw.clone(), descriptor);
             let encoded = encode(&record).unwrap();
-            let descriptor_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+            let descriptor_len = u32::from_le_bytes(encoded[6..10].try_into().unwrap()) as usize;
             let mut malformed_descriptor = encoded.clone();
-            malformed_descriptor.insert(9 + descriptor_len, 0);
-            malformed_descriptor[5..9]
+            malformed_descriptor.insert(10 + descriptor_len, 0);
+            malformed_descriptor[6..10]
                 .copy_from_slice(&((descriptor_len + 1) as u32).to_le_bytes());
             let mut malformed_row = encoded.clone();
             malformed_row.push(0);
@@ -1353,6 +1564,125 @@ mod version_record_wire_row {
             });
         }
 
+        fn u64_record(name: &str, value: u64) -> OwnedRecord {
+            let descriptor = RecordDescriptor::new([(name, ValueType::U64)]);
+            OwnedRecord::new(descriptor.create(&[Value::U64(value)]).unwrap(), descriptor)
+        }
+
+        // Pinned `JVRR` v3 bytes (#3380): inside one message scope the first
+        // row defines its descriptor and every later row with the same
+        // descriptor names it by table reference. A different descriptor
+        // defines the next entry. Outside a scope every row defines inline.
+        #[test]
+        fn message_descriptor_table_defines_once_and_references_after() {
+            let first = u64_record("value", 7);
+            let second = u64_record("value", 8);
+            let other = u64_record("other", 9);
+            let descriptor_bytes =
+                groove::records::encode_persisted_record_descriptor(first.descriptor()).unwrap();
+            let define = |record: &OwnedRecord, descriptor: &[u8]| {
+                [
+                    b"JVRR\x03\x00".as_slice(),
+                    &(descriptor.len() as u32).to_le_bytes(),
+                    descriptor,
+                    record.raw(),
+                ]
+                .concat()
+            };
+            let reference = |index: u8, record: &OwnedRecord| {
+                [b"JVRR\x03".as_slice(), &[index], record.raw()].concat()
+            };
+            let other_bytes =
+                groove::records::encode_persisted_record_descriptor(other.descriptor()).unwrap();
+
+            let rows = with_message_descriptor_table(|| {
+                [&first, &second, &other, &first, &other].map(|record| encode(record).unwrap())
+            });
+            assert_eq!(rows[0], define(&first, &descriptor_bytes));
+            assert_eq!(rows[1], reference(1, &second));
+            assert_eq!(rows[2], define(&other, &other_bytes));
+            assert_eq!(rows[3], reference(1, &first));
+            assert_eq!(rows[4], reference(2, &other));
+            assert_eq!(
+                rows[1],
+                [b"JVRR\x03\x01".as_slice(), &8u64.to_le_bytes()].concat()
+            );
+
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|row| decode(row).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                decoded,
+                [
+                    first.clone(),
+                    second.clone(),
+                    other.clone(),
+                    first.clone(),
+                    other
+                ]
+            );
+
+            // Outside a message, rows stand alone.
+            assert_eq!(encode(&second).unwrap(), define(&second, &descriptor_bytes));
+            assert!(decode(&rows[1]).is_err());
+        }
+
+        // The decoder admits exactly the encoder's spelling: a reference must
+        // name an entry already defined in this message, a descriptor is
+        // defined at most once, and references are shortest LEB128.
+        #[test]
+        fn message_descriptor_table_rejects_non_canonical_references() {
+            let record = u64_record("value", 7);
+            let defined = encode(&record).unwrap();
+            let decode_all = |rows: &[Vec<u8>]| {
+                with_message_descriptor_table(|| {
+                    rows.iter()
+                        .map(|row| decode(row))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            };
+            let with_reference =
+                |reference: &[u8]| [b"JVRR\x03".as_slice(), reference, record.raw()].concat();
+            assert!(decode_all(&[defined.clone(), with_reference(&[1])]).is_ok());
+            // Forward reference, unknown entry, duplicate definition.
+            assert!(decode_all(&[with_reference(&[1]), defined.clone()]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[2])]).is_err());
+            assert!(decode_all(&[defined.clone(), defined.clone()]).is_err());
+            // Overlong and out-of-range references.
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x81, 0x00])]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x80, 0x00])]).is_err());
+            assert!(
+                decode_all(&[
+                    defined.clone(),
+                    with_reference(&[0xff, 0xff, 0xff, 0xff, 0x7f])
+                ])
+                .is_err()
+            );
+            // Each message starts with an empty table, and nested scopes
+            // restore the outer table.
+            assert!(decode_all(&[defined.clone()]).is_ok());
+            assert!(decode_all(&[with_reference(&[1])]).is_err());
+            with_message_descriptor_table(|| {
+                decode(&defined).unwrap();
+                assert!(decode_all(&[with_reference(&[1])]).is_err());
+                decode(&with_reference(&[1])).unwrap();
+            });
+        }
+
+        #[test]
+        fn leb128_references_round_trip_at_boundaries() {
+            for value in [0, 1, 127, 128, 16383, 16384, MAX_REFERENCE] {
+                let mut bytes = Vec::new();
+                push_leb128(&mut bytes, value);
+                assert_eq!(take_leb128(&bytes), Some((value, &[][..])), "{value}");
+            }
+            let mut bytes = Vec::new();
+            push_leb128(&mut bytes, MAX_REFERENCE + 1);
+            assert_eq!(take_leb128(&bytes), None);
+        }
+
         #[test]
         fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
             let descriptor = RecordDescriptor::new([
@@ -1381,9 +1711,9 @@ mod version_record_wire_row {
             let encoded = encode(&original).unwrap();
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
-                "0bd8759c823b90c94c2d1064e50cb8f02277e2e0c4124dba46be00962dd25ce3"
+                "18d2325b449fa54152ec1f34c699ebdcfab7650b1ad9204087e3550ee979391d"
             );
-            assert_eq!(&encoded[..5], b"JVRR\x02");
+            assert_eq!(&encoded[..6], b"JVRR\x03\x00");
             assert_eq!(decode(&encoded).unwrap(), original);
 
             let mut fields = descriptor.fields().to_vec();
@@ -1408,8 +1738,9 @@ mod version_record_wire_row {
                 encoded,
                 "logical field identity remains authoritative"
             );
-            // Version 1 (the DAG row with `parents`) is retired; 3 is unknown.
-            for version in [1, 3] {
+            // Version 1 (the DAG row with `parents`) and version 2 (a
+            // descriptor in every row) are retired; 4 is unknown.
+            for version in [1, 2, 4] {
                 let mut other_version = encoded.clone();
                 other_version[4] = version;
                 assert!(decode(&other_version).is_err());
@@ -1418,9 +1749,9 @@ mod version_record_wire_row {
             trailing.push(0);
             assert_eq!(
                 decode(&trailing).unwrap().raw(),
-                &trailing[9 + u32::from_le_bytes(trailing[5..9].try_into().unwrap()) as usize..]
+                &trailing[10 + u32::from_le_bytes(trailing[6..10].try_into().unwrap()) as usize..]
             );
-            assert!(decode(&encoded[..8]).is_err());
+            assert!(decode(&encoded[..9]).is_err());
             assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
         }
     }
@@ -1444,7 +1775,7 @@ mod version_record_wire_row {
             type Value = OwnedRecord;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JVRR v2 row byte blob")
+                formatter.write_str("a JVRR v3 row byte blob")
             }
 
             fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {

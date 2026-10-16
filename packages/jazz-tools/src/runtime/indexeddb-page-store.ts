@@ -61,6 +61,10 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
+  // Interned author columns: the node-local `authors` Groove dictionary. A
+  // browser root written before them lacks this family and fails manifest
+  // admission instead of decoding full authors as dictionary codes.
+  "groove.dictionary.v1",
   "groove.durable-index.v2",
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",

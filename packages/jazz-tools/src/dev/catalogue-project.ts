@@ -254,11 +254,43 @@ class MigrationStorage {
   }
 
   async listSnapshots(): Promise<SnapshotEntry[]> {
-    return listSnapshotEntries(this.snapshotsDir);
+    const dir = this.snapshotsDir;
+    if (!(await pathExists(dir))) {
+      return [];
+    }
+
+    // Snapshots determine both the logical timestamp and the implicit baseline.
+    // Do not let either decision follow a redirected committed snapshot path.
+    await assertNoSymlinkComponents(dir);
+    const files = await readdir(dir);
+    return (await Promise.all(files.map((fileName) => readSnapshotEntry(dir, fileName)))).filter(
+      (entry): entry is SnapshotEntry => entry !== null,
+    );
   }
 
   async resolveSnapshot(hash: string, label: string): Promise<SnapshotEntry | null> {
-    return resolveSnapshotEntry(this.snapshotsDir, hash, label);
+    const entries = await this.listSnapshots();
+    if (entries.length === 0) {
+      return null;
+    }
+
+    const normalized = normalizeSchemaHashInput(hash, label);
+    if (normalized.length === 64) {
+      return entries.find((entry) => entry.hash === normalized) ?? null;
+    }
+
+    const matches = entries.filter((entry) => entry.hash.startsWith(normalized));
+    if (matches.length === 0) {
+      return null;
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `${label} prefix ${normalized} is ambiguous: ${matches
+          .map((entry) => shortSchemaHash(entry.hash))
+          .join(", ")}`,
+      );
+    }
+    return matches[0]!;
   }
 
   async writeSnapshot(fileName: string, schema: WasmSchema): Promise<string> {
@@ -303,26 +335,6 @@ async function readSnapshotEntry(dir: string, fileName: string): Promise<Snapsho
   };
 }
 
-async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
-  if (!(await pathExists(dir))) {
-    return [];
-  }
-
-  // Snapshots determine both the logical timestamp and the implicit baseline.
-  // Do not let either decision follow a redirected committed snapshot path.
-  await assertNoSymlinkComponents(dir);
-  const files = await readdir(dir);
-  return (await Promise.all(files.map((fileName) => readSnapshotEntry(dir, fileName)))).filter(
-    (entry): entry is SnapshotEntry => entry !== null,
-  );
-}
-
-async function listSnapshotEntriesForMigrations(
-  storage: MigrationStorage,
-): Promise<SnapshotEntry[]> {
-  return storage.listSnapshots();
-}
-
 function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
   return `${timestamp}-${shortSchemaHash(hash)}.json`;
 }
@@ -359,7 +371,7 @@ async function nextCommittedSnapshotTimestamp(
   now: Date = new Date(),
 ): Promise<string> {
   const current = createTimestamp(now);
-  const latest = (await listSnapshotEntriesForMigrations(storage))
+  const latest = (await storage.listSnapshots())
     .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
     .map((entry) => /^([0-9]{8}T[0-9]{6})-/.exec(entry.fileName)?.[1])
     .filter((timestamp): timestamp is string => timestamp !== undefined)
@@ -382,20 +394,8 @@ function createSnapshotTimestampFromPublishedAt(
   return createTimestamp(new Date(publishedAt));
 }
 
-async function writeSnapshotSchemaForMigrations(
-  storage: MigrationStorage,
-  fileName: string,
-  schema: WasmSchema,
-): Promise<string> {
-  return storage.writeSnapshot(fileName, schema);
-}
-
-function defaultMigrationsDir(schemaDir: string): string {
-  return join(schemaDir, "migrations");
-}
-
 function resolvedMigrationsDir(schemaDir: string, migrationsDir?: string): string {
-  return migrationsDir ?? defaultMigrationsDir(schemaDir);
+  return migrationsDir ?? join(schemaDir, "migrations");
 }
 
 async function listLocalSnapshotEntries(
@@ -405,17 +405,6 @@ async function listLocalSnapshotEntries(
   const storage = new MigrationStorage(resolvedMigrationsDir(schemaDir, migrationsDir));
   await storage.initialize();
   return storage.listSnapshots();
-}
-
-async function resolveLocalSnapshotEntry(
-  schemaDir: string,
-  migrationsDir: string | undefined,
-  hash: string,
-  label: string,
-): Promise<SnapshotEntry | null> {
-  const storage = new MigrationStorage(resolvedMigrationsDir(schemaDir, migrationsDir));
-  await storage.initialize();
-  return storage.resolveSnapshot(hash, label);
 }
 
 async function writeSnapshotSchema(
@@ -506,7 +495,7 @@ function isCommittedSnapshotFileName(fileName: string): boolean {
 async function loadLatestCommittedSnapshot(
   storage: MigrationStorage,
 ): Promise<ResolvedSchemaInput | null> {
-  const entries = await listSnapshotEntriesForMigrations(storage);
+  const entries = await storage.listSnapshots();
   const latest = entries
     .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
     .sort((left, right) => left.fileName.localeCompare(right.fileName))
@@ -811,7 +800,7 @@ async function committedSnapshotPublication(
   schema: ResolvedSchemaInput,
   timestamp: string,
 ): Promise<MigrationPublicationFile | null> {
-  const entries = await listSnapshotEntriesForMigrations(storage);
+  const entries = await storage.listSnapshots();
   if (
     entries.some(
       (entry) => entry.hash === schema.hash && isCommittedSnapshotFileName(entry.fileName),
@@ -841,7 +830,7 @@ async function resolveHistoricalSchemaForCreateMigration(
   serverUrl: string | undefined,
   adminSecret: string | undefined,
 ): Promise<ResolvedSchemaInput> {
-  const local = await resolveLocalHistoricalSchema(storage, hash, label);
+  const local = await storage.resolveSnapshot(hash, label);
   if (local) {
     return { hash: local.hash, schema: local.schema };
   }
@@ -1262,51 +1251,6 @@ function unwrapMigrationExport(value: unknown): unknown {
   return current;
 }
 
-async function resolveSnapshotEntry(
-  dir: string,
-  hash: string,
-  label: string,
-): Promise<SnapshotEntry | null> {
-  const entries = await listSnapshotEntries(dir);
-  if (entries.length === 0) {
-    return null;
-  }
-
-  const normalized = normalizeSchemaHashInput(hash, label);
-  if (normalized.length === 64) {
-    return entries.find((entry) => entry.hash === normalized) ?? null;
-  }
-
-  const matches = entries.filter((entry) => entry.hash.startsWith(normalized));
-  if (matches.length === 0) {
-    return null;
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `${label} prefix ${normalized} is ambiguous: ${matches
-        .map((entry) => shortSchemaHash(entry.hash))
-        .join(", ")}`,
-    );
-  }
-  return matches[0]!;
-}
-
-async function resolveLocalHistoricalSchema(
-  storage: MigrationStorage,
-  hash: string,
-  label: string,
-): Promise<ResolvedSchemaInput | null> {
-  const localEntry = await storage.resolveSnapshot(hash, label);
-  if (!localEntry) {
-    return null;
-  }
-
-  return {
-    hash: localEntry.hash,
-    schema: localEntry.schema,
-  };
-}
-
 async function resolveRemoteHistoricalSchema(
   storage: MigrationStorage,
   hash: string,
@@ -1331,8 +1275,7 @@ async function resolveRemoteHistoricalSchema(
       adminSecret,
       schemaHash: resolvedHash,
     });
-    await writeSnapshotSchemaForMigrations(
-      storage,
+    await storage.writeSnapshot(
       snapshotFilename(
         resolvedHash,
         createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),

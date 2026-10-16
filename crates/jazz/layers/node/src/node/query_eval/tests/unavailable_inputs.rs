@@ -1304,19 +1304,14 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
     let global_time = node.allocate_global_time_for_test();
     let version = node.query_versions_for_tx(accepted).unwrap().remove(0);
     let mut batch = node.database.open_batch();
-    batch.update(
-        "jazz_transactions",
-        transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            Fate::Accepted,
-            Some(global_time),
-            DurabilityTier::Global,
-            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stage_transaction_record(
+        &mut batch,
+        TransactionRecordWrite::Update,
+        stored.node_alias,
+        &stored.tx,
+        &TransactionRecordStatus::new(Fate::Accepted, Some(global_time), DurabilityTier::Global),
+    )
+    .unwrap();
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();

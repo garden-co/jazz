@@ -139,11 +139,20 @@ that role rather than being replaced by local numeric catalogue aliases.
 
 The concrete v1 byte contracts are:
 
-- Immutable-version row blob: ASCII `JVRR`, byte `2` (wire protocol v6; the
-  version-1 blob carried `parents` and is rejected), descriptor byte length as
-  little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
-  canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length (canonical Postcard unsigned varint followed by exactly that
+- Immutable-version row blob: ASCII `JVRR`, byte `3` (alpha.60; version 2
+  repeated the descriptor in every row and version 1 carried `parents`; both
+  are rejected), then a descriptor `reference` as a canonical (shortest)
+  unsigned LEB128 no larger than 2^32. Reference `0` defines the next entry of
+  the enclosing sync message's descriptor table inline: descriptor byte length
+  as little-endian `U32`, then exactly that many Groove persisted-descriptor
+  bytes. Reference `k > 0` reuses entry `k - 1`, which an earlier row of the
+  same message defined. Canonical row bytes consume the remainder. Each sync
+  message starts with an empty table; the encoder defines a descriptor at its
+  first use in serialization order and references it afterwards, so a
+  receiver rejects a reference to an undefined entry and a second definition
+  of the same descriptor bytes. A row encoded outside a sync message always
+  defines its descriptor inline. The enclosing sync message owns the blob
+  length (canonical Postcard unsigned varint followed by exactly that
   many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
   in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of

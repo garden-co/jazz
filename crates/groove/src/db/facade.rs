@@ -386,8 +386,16 @@ impl Database {
         // Durable index ids must be known before schema indexes compile. This
         // also refuses an `indices` family written by an earlier index layout.
         let index_ids = crate::ivm::runtime::IndexIdRegistry::load(storage.as_ref()).await?;
-        let ivm_runtime =
-            IvmRuntime::new_with_index_ids(schema, Rc::new(std::cell::RefCell::new(index_ids)))?;
+        // Interned columns decode synchronously, so every dictionary is
+        // resident and validated before the first read or write.
+        let dictionaries =
+            crate::dictionary::DictionaryRegistry::load(storage.as_ref(), &schema.dictionaries)
+                .await?;
+        let ivm_runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::new(std::cell::RefCell::new(index_ids)),
+            Rc::new(std::cell::RefCell::new(dictionaries)),
+        )?;
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
                 crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
@@ -583,8 +591,17 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let mut runtime =
-            IvmRuntime::new_with_index_ids(schema, Rc::clone(self.ivm_runtime.index_ids()))?;
+        // Dictionaries are loaded only at open: a rebuild may keep using
+        // them, but cannot declare one the open did not load.
+        self.ivm_runtime
+            .dictionaries()
+            .borrow()
+            .check_declares(&schema.dictionaries)?;
+        let mut runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::clone(self.ivm_runtime.index_ids()),
+            Rc::clone(self.ivm_runtime.dictionaries()),
+        )?;
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );

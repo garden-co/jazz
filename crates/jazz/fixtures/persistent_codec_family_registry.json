@@ -381,7 +381,7 @@
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-          "anchor": "fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author"
+          "anchor": "fn history_images_always_store_updated_by"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",
@@ -398,15 +398,15 @@
       ]
     },
     {
-      "id": "jazz.exclusive-read-evidence.v1",
+      "id": "jazz.exclusive-read-evidence.v2",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
-        "anchor": "Positions 5 through 8 hold exclusive read evidence"
+        "anchor": "The pending record's four evidence slots hold exclusive read evidence"
       },
       "semantic_fixture": {
         "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
-        "anchor": "fn exclusive_read_evidence_v1_bytes_are_pinned"
+        "anchor": "fn exclusive_read_evidence_v2_bytes_are_pinned"
       },
       "rejection_receipt": {
         "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
@@ -428,6 +428,109 @@
         {
           "path": "dev/proofs/exclusive-read-evidence-storage-compatibility.md",
           "anchor": "## Mixed versions"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Wire"
+        }
+      ]
+    },
+    {
+      "id": "jazz.tx-record.v2",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "**Transaction record (`jazz.tx-record.v2`).**"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "fn accepted_transaction_record_bytes_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "fn malformed_transaction_records_are_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn author_columns_store_dictionary_codes"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn reopen_refuses_a_store_with_truncated_history"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/branch_views.rs",
+          "anchor": "fn transaction_record_size_is_independent_of_branch_write_count"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Upgrade path"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/sync/receiver_batches.rs",
+          "anchor": "fn is_partial_survives_reopen_and_upgrades_to_complete_payload"
+        }
+      ]
+    },
+    {
+      "id": "jazz.aggregate-read-result.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "`jazz.aggregate-read-result.v1`"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/aggregate_read_result.rs",
+        "anchor": "fn aggregate_read_result_v1_bytes_are_pinned_and_canonical"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/aggregate_read_result.rs",
+        "anchor": "fn aggregate_read_result_v1_rejects_malformed_bytes"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/query_eval/tests/exclusive_aggregates.rs",
+          "anchor": "fn exclusive_count_commit_payload_is_independent_of_the_counted_rows"
+        },
+        {
+          "path": "dev/proofs/tx-record-v2-storage-compatibility.md",
+          "anchor": "## Wire"
+        }
+      ]
+    },
+    {
+      "id": "groove.dictionary.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Interned columns and dictionaries"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/db/tests/dictionaries.rs",
+        "anchor": "fn dictionary_v1_entry_and_row_bytes_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/db/tests/dictionaries.rs",
+        "anchor": "fn a_corrupt_dictionary_is_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/db/tests/dictionaries.rs",
+          "anchor": "fn a_reopened_database_decodes_rows_and_continues_allocation"
+        },
+        {
+          "path": "crates/groove/src/db/tests/dictionaries.rs",
+          "anchor": "fn a_new_entry_rides_the_publication_s_single_storage_write"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
+          "anchor": "fn author_columns_store_dictionary_codes"
+        },
+        {
+          "path": "crates/jazz/tests/storage_format_refusal.rs",
+          "anchor": "fn node_root_without_the_dictionary_family_is_refused"
         }
       ]
     },
@@ -685,32 +788,6 @@
         {
           "path": "crates/jazz/tests/storage_format_refusal.rs",
           "anchor": "fn linear_history_root_without_the_durability_v2_family_is_refused"
-        }
-      ]
-    },
-    {
-      "id": "jazz.transaction-record.v1",
-      "boundary": "durable-storage",
-      "spec": {
-        "path": "crates/jazz/SPEC/2_data_model_identity.md",
-        "anchor": "**Transaction audit record.**"
-      },
-      "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/codec.rs",
-        "anchor": "fn transaction_partial_flag_has_canonical_boolean_bytes"
-      },
-      "rejection_receipt": {
-        "path": "crates/jazz/tests/storage_format_refusal.rs",
-        "anchor": "fn transaction_string_marker_root_is_refused_before_mutation"
-      },
-      "evidence": [
-        {
-          "path": "crates/jazz/layers/node/src/node/tests/sync/receiver_batches.rs",
-          "anchor": "fn is_partial_survives_reopen_and_upgrades_to_complete_payload"
-        },
-        {
-          "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
-          "anchor": "fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
         }
       ]
     },

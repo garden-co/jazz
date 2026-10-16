@@ -1,6 +1,6 @@
 import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
-import { toError } from "../runtime/util.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 /** A stable provider session identifier, never a JWT. Pending means initial hydration. */
 export interface AuthProviderState {
@@ -55,7 +55,7 @@ export function connectAuthProvider<Client>(
   let failure: Error | undefined;
   /** The retained account an in-flight admission is revalidating in place. */
   let revalidating: object | undefined;
-  const listeners = new Set<() => void>();
+  const listeners = createListeners();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
@@ -91,7 +91,7 @@ export function connectAuthProvider<Client>(
     )
       return;
     snapshot = { key: desired.key, ready, isPending, error };
-    for (const listener of [...listeners]) listener();
+    listeners.notify();
   }
   function reconcile(): Promise<void> {
     if (disposed || desired.isPending || desired.error || signOut) {
@@ -164,12 +164,7 @@ export function connectAuthProvider<Client>(
   const unsubscribe = session.subscribe(publish);
   const connection: AuthProviderConnection = {
     getSnapshot: () => snapshot,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     update(next) {
       if (disposed) return;
       if (desired.key !== next.key || !!desired.isPending !== !!next.isPending) {
