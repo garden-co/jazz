@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import dotenv from "dotenv";
@@ -13,6 +14,31 @@ const PRIVILEGED_KEYS: Record<string, true> = {
   ADMIN_SECRET: true,
   JAZZ_ADMIN_SECRET: true,
 };
+
+test("the browser test server uses an available port independently of development", async () => {
+  const previous = process.env.WEB_PORT;
+  delete process.env.WEB_PORT;
+  try {
+    const { default: config } = await import("../playwright.config.ts");
+    const url = new URL(config.use!.baseURL!);
+    const port = Number(url.port);
+    assert.ok(Number.isInteger(port) && port > 0 && port !== 3000);
+    const webServer = config.webServer;
+    assert.ok(webServer && !Array.isArray(webServer));
+    assert.equal(webServer.url, url.origin);
+    assert.ok(webServer.command.endsWith(`--port ${port}`));
+    const server = createServer();
+    await new Promise<void>((resolve, reject) =>
+      server.once("error", reject).listen(port, "127.0.0.1", resolve),
+    );
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.WEB_PORT;
+    else process.env.WEB_PORT = previous;
+  }
+});
 
 function trackedExampleFiles(): { root: string; files: string[] } {
   const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
