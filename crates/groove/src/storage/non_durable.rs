@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::{KeyValue, OwnedWriteOperation, ScanBounds, ScanDirection, prefix_successor};
-use crate::ivm::runtime::{SharedIndexIds, split_durable_index_key};
+use crate::ivm::runtime::{SharedIndexIds, leading_key_part_len, split_durable_index_key};
 
 /// The logical family that holds every schema index.
 const INDICES_CF: &str = "indices";
@@ -86,7 +86,9 @@ struct State {
     index_ids: Option<SharedIndexIds>,
     /// Logical family (a table, or `indices`) -> key -> value.
     families: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
-    partitions: BTreeMap<(String, Vec<u8>), PartitionUse>,
+    /// Table -> partition key -> use. Nested so a read looks a partition up
+    /// by borrowed `&str` and `&[u8]` without allocating.
+    partitions: BTreeMap<String, BTreeMap<Vec<u8>, PartitionUse>>,
     /// This class's part of `PROCESS_RESIDENT`.
     resident: usize,
 }
@@ -102,11 +104,6 @@ impl Drop for NonDurableClass {
         let resident = self.state.get_mut().resident;
         PROCESS_RESIDENT.fetch_sub(resident, Ordering::Relaxed);
     }
-}
-
-/// Where a key of the class lives: its table and partition.
-struct Owner {
-    table: String,
 }
 
 impl NonDurableClass {
@@ -129,30 +126,32 @@ impl NonDurableClass {
     }
 
     /// The table that owns a key or key prefix of `cf` when it belongs to
-    /// this class.
-    fn owner(state: &State, cf: &str, key: &[u8]) -> Option<Owner> {
-        if state.tables.is_empty() {
+    /// this class, borrowed from `tables`.
+    fn owner<'a>(
+        tables: &'a BTreeSet<String>,
+        index_ids: Option<&SharedIndexIds>,
+        cf: &str,
+        key: &[u8],
+    ) -> Option<&'a str> {
+        if tables.is_empty() {
             return None;
         }
-        if state.tables.contains(cf) {
-            return Some(Owner {
-                table: cf.to_owned(),
-            });
+        if let Some(table) = tables.get(cf) {
+            return Some(table);
         }
         if cf != INDICES_CF {
             return None;
         }
         let (id, _) = split_durable_index_key(key)?;
-        let index_ids = state.index_ids.as_ref()?.borrow();
+        let index_ids = index_ids?.borrow();
         let (table, _) = index_ids.names(id)?;
-        state.tables.contains(table).then(|| Owner {
-            table: table.to_owned(),
-        })
+        tables.get(table).map(String::as_str)
     }
 
     /// Whether `cf` keys starting with `key` belong to this class.
     pub(crate) fn owns(&self, cf: &str, key: &[u8]) -> bool {
-        Self::owner(&self.state.borrow(), cf, key).is_some()
+        let state = self.state.borrow();
+        Self::owner(&state.tables, state.index_ids.as_ref(), cf, key).is_some()
     }
 
     /// Whether `bounds` of `cf` read this class. A range belongs to it when
@@ -168,30 +167,42 @@ impl NonDurableClass {
     /// The partition key of a full or partial key: its leading key part,
     /// after the index id for an index entry. `None` when `key` is too short
     /// to hold a whole leading part.
-    fn partition_of(cf: &str, key: &[u8]) -> Option<Vec<u8>> {
+    fn partition_of<'k>(cf: &str, key: &'k [u8]) -> Option<&'k [u8]> {
         let rest = if cf == INDICES_CF {
             split_durable_index_key(key)?.1
         } else {
             key
         };
         let len = leading_key_part_len(rest)?;
-        Some(rest[..len].to_vec())
+        Some(&rest[..len])
     }
 
-    fn touch(state: &mut State, cf: &str, owner: &Owner, key: &[u8], tick: u64) {
+    fn touch(state: &mut State, cf: &str, key: &[u8], bounds_start: Option<&[u8]>, tick: u64) {
+        let State {
+            tables,
+            index_ids,
+            partitions,
+            ..
+        } = state;
+        let Some(table) = Self::owner(tables, index_ids.as_ref(), cf, key)
+            .or_else(|| Self::owner(tables, index_ids.as_ref(), cf, bounds_start?))
+        else {
+            return;
+        };
+        let Some(table_partitions) = partitions.get_mut(table) else {
+            return;
+        };
         match Self::partition_of(cf, key) {
             Some(partition) => {
-                if let Some(entry) = state.partitions.get_mut(&(owner.table.clone(), partition)) {
+                if let Some(entry) = table_partitions.get_mut(partition) {
                     entry.last_touched = tick;
                 }
             }
             None => {
                 // A read wider than one partition touches every partition of
                 // the table.
-                for ((table, _), entry) in state.partitions.iter_mut() {
-                    if *table == owner.table {
-                        entry.last_touched = tick;
-                    }
+                for entry in table_partitions.values_mut() {
+                    entry.last_touched = tick;
                 }
             }
         }
@@ -199,8 +210,7 @@ impl NonDurableClass {
 
     pub(crate) fn get(&self, cf: &str, key: &[u8]) -> Option<Vec<u8>> {
         let mut state = self.state.borrow_mut();
-        let owner = Self::owner(&state, cf, key)?;
-        Self::touch(&mut state, cf, &owner, key, residency_tick());
+        Self::touch(&mut state, cf, key, None, residency_tick());
         state
             .families
             .get(cf)
@@ -216,15 +226,14 @@ impl NonDurableClass {
         max_items: Option<usize>,
     ) -> Vec<KeyValue> {
         let mut state = self.state.borrow_mut();
-        let touched = match bounds {
-            ScanBounds::Prefix(prefix) => prefix.clone(),
-            ScanBounds::Range { start, end } => common_prefix(start, end),
-        };
-        if let Some(owner) = Self::owner(&state, cf, &touched).or_else(|| match bounds {
-            ScanBounds::Range { start, .. } => Self::owner(&state, cf, start),
-            ScanBounds::Prefix(_) => None,
-        }) {
-            Self::touch(&mut state, cf, &owner, &touched, residency_tick());
+        match bounds {
+            ScanBounds::Prefix(prefix) => {
+                Self::touch(&mut state, cf, prefix, None, residency_tick());
+            }
+            ScanBounds::Range { start, end } => {
+                let common = &start[..common_prefix_len(start, end)];
+                Self::touch(&mut state, cf, common, Some(start), residency_tick());
+            }
         }
         let Some(family) = state.families.get(cf) else {
             return Vec::new();
@@ -258,7 +267,8 @@ impl NonDurableClass {
     /// Install or remove one key. The caller has checked [`Self::owns`].
     pub(crate) fn write(&self, cf: &str, key: &[u8], value: Option<&[u8]>) {
         let mut state = self.state.borrow_mut();
-        let Some(owner) = Self::owner(&state, cf, key) else {
+        let state = &mut *state;
+        let Some(table) = Self::owner(&state.tables, state.index_ids.as_ref(), cf, key) else {
             return;
         };
         let family = state.families.entry(cf.to_owned()).or_default();
@@ -272,19 +282,33 @@ impl NonDurableClass {
         let removed = previous.map_or(0, |previous| key.len() + previous.len());
         let added = value.map_or(0, |value| key.len() + value.len());
         let partition = Self::partition_of(cf, key).unwrap_or_default();
-        let entry_key = (owner.table, partition);
         let tick = residency_tick();
-        let entry = state
+        if !state.partitions.contains_key(table) {
+            state.partitions.insert(table.to_owned(), BTreeMap::new());
+        }
+        let table_partitions = state
             .partitions
-            .entry(entry_key.clone())
-            .or_insert(PartitionUse {
-                bytes: 0,
-                last_touched: tick,
-            });
+            .get_mut(table)
+            .expect("table partitions were just ensured");
+        if !table_partitions.contains_key(partition) {
+            table_partitions.insert(
+                partition.to_vec(),
+                PartitionUse {
+                    bytes: 0,
+                    last_touched: tick,
+                },
+            );
+        }
+        let entry = table_partitions
+            .get_mut(partition)
+            .expect("partition was just ensured");
         entry.bytes = entry.bytes + added - removed;
         entry.last_touched = tick;
         if entry.bytes == 0 {
-            state.partitions.remove(&entry_key);
+            table_partitions.remove(partition);
+            if table_partitions.is_empty() {
+                state.partitions.remove(table);
+            }
         }
         if added >= removed {
             state.resident += added - removed;
@@ -324,77 +348,31 @@ impl NonDurableClass {
             partitions: state
                 .partitions
                 .iter()
-                .map(|((table, partition), entry)| NonDurablePartition {
-                    table: table.clone(),
-                    partition: partition.clone(),
-                    bytes: entry.bytes,
-                    last_touched: entry.last_touched,
+                .flat_map(|(table, partitions)| {
+                    partitions
+                        .iter()
+                        .map(move |(partition, entry)| NonDurablePartition {
+                            table: table.clone(),
+                            partition: partition.clone(),
+                            bytes: entry.bytes,
+                            last_touched: entry.last_touched,
+                        })
                 })
                 .collect(),
         }
     }
 }
 
-fn common_prefix(left: &[u8], right: &[u8]) -> Vec<u8> {
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
     left.iter()
         .zip(right)
         .take_while(|(left, right)| left == right)
-        .map(|(byte, _)| *byte)
-        .collect()
-}
-
-/// Length of the leading type-tagged key part of `key` (the encoding shared
-/// by primary keys and index keys), or `None` when `key` does not hold a
-/// whole one.
-fn leading_key_part_len(key: &[u8]) -> Option<usize> {
-    let (&tag, rest) = key.split_first()?;
-    let payload = match tag {
-        // u8 / enum tag, bool
-        0 | 5 => 1,
-        // u16
-        1 => 2,
-        // u32, i32
-        2 | 14 => 4,
-        // u64, i64, f64
-        3 | 4 | 13 => 8,
-        // u48
-        16 => 6,
-        // uuid
-        10 => 16,
-        // null
-        8 => 0,
-        // non-null nullable: the wrapped part follows
-        9 => return leading_key_part_len(rest).map(|len| 1 + len),
-        // string, bytes: escaped bytes ending in `00 00`
-        6 | 7 => {
-            let mut position = 0;
-            loop {
-                match (rest.get(position)?, rest.get(position + 1)?) {
-                    (0, 0) => return Some(1 + position + 2),
-                    (0, _) => position += 2,
-                    _ => position += 1,
-                }
-            }
-        }
-        // Tuples have no end marker; such a table is one partition.
-        _ => return None,
-    };
-    (rest.len() >= payload).then_some(1 + payload)
+        .count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn leading_part_of_an_escaped_bytes_key_ends_at_its_terminator() {
-        // Bytes [1, 0, 2] escape to [1, 0, ff, 2, 0, 0].
-        let key = [7, 1, 0, 0xff, 2, 0, 0, 10, 9, 9];
-        assert_eq!(leading_key_part_len(&key), Some(7));
-        assert_eq!(leading_key_part_len(&key[..5]), None);
-        assert_eq!(leading_key_part_len(&[3, 0, 0, 0, 0, 0, 0, 0, 1]), Some(9));
-        assert_eq!(leading_key_part_len(&[9, 2, 0, 0, 0, 1]), Some(6));
-    }
 
     #[test]
     fn writes_account_exact_bytes_per_partition_and_process() {

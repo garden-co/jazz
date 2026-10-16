@@ -860,6 +860,93 @@ impl StorageCursor for MappedStorageCursor<'_> {
     }
 }
 
+/// Merges a streaming durable scan with the in-memory rows of the same
+/// bounds, both already in scan order, without materializing the durable
+/// side: each batch holds at most one durable batch plus the in-memory rows
+/// that sort before its end.
+struct MergedStorageCursor<'a> {
+    /// `None` once exhausted.
+    durable: Option<StorageScan<'a>>,
+    /// The unread rest of the current durable batch.
+    pending: VecDeque<KeyValue>,
+    in_memory: std::iter::Peekable<std::vec::IntoIter<KeyValue>>,
+    direction: ScanDirection,
+    remaining: usize,
+}
+
+impl<'a> MergedStorageCursor<'a> {
+    fn new(
+        durable: StorageScan<'a>,
+        in_memory: Vec<KeyValue>,
+        direction: ScanDirection,
+        max_items: Option<usize>,
+    ) -> Self {
+        Self {
+            durable: Some(durable),
+            pending: VecDeque::new(),
+            in_memory: in_memory.into_iter().peekable(),
+            direction,
+            remaining: max_items.unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Whether in-memory `memory` comes before durable `durable` in scan
+    /// order. The classes own disjoint keys, so ties do not occur.
+    fn memory_first(direction: ScanDirection, memory: &[u8], durable: &[u8]) -> bool {
+        match direction {
+            ScanDirection::Forward => memory <= durable,
+            ScanDirection::Reverse => memory >= durable,
+        }
+    }
+}
+
+impl StorageCursor for MergedStorageCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            loop {
+                if self.remaining == 0 {
+                    return Ok(None);
+                }
+                if self.pending.is_empty()
+                    && let Some(durable) = self.durable.as_mut()
+                {
+                    match durable.next_batch().await? {
+                        Some(batch) => self.pending = batch.into(),
+                        None => self.durable = None,
+                    }
+                }
+                let direction = self.direction;
+                let mut batch = Vec::new();
+                while self.remaining > 0 {
+                    let from_memory = match (self.in_memory.peek(), self.pending.front()) {
+                        (Some(memory), Some(durable)) => {
+                            Self::memory_first(direction, &memory.0, &durable.0)
+                        }
+                        (None, Some(_)) => false,
+                        // Only the in-memory side is left once durable is done;
+                        // otherwise refill durable before deciding.
+                        (Some(_), None) if self.durable.is_none() => true,
+                        (Some(_), None) | (None, None) => break,
+                    };
+                    let next = if from_memory {
+                        self.in_memory.next()
+                    } else {
+                        self.pending.pop_front()
+                    };
+                    batch.push(next.expect("peeked side holds a row"));
+                    self.remaining -= 1;
+                }
+                if !batch.is_empty() {
+                    return Ok(Some(batch));
+                }
+                if self.durable.is_none() && self.pending.is_empty() {
+                    return Ok(None);
+                }
+            }
+        })
+    }
+}
+
 fn is_jazz_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
@@ -1258,14 +1345,9 @@ impl OrderedKvStorage for LayoutStorage {
             if in_memory.is_empty() {
                 return Ok(durable);
             }
-            let mut merged = collect_scan(durable).await?;
-            merged.extend(in_memory);
-            merged.sort_by(|left, right| match direction {
-                ScanDirection::Forward => left.0.cmp(&right.0),
-                ScanDirection::Reverse => right.0.cmp(&left.0),
-            });
-            merged.truncate(max_items.unwrap_or(usize::MAX));
-            Ok(Box::new(ReadyStorageCursor::new(merged)) as StorageScan<'_>)
+            Ok(Box::new(MergedStorageCursor::new(
+                durable, in_memory, direction, max_items,
+            )) as StorageScan<'_>)
         })
     }
 
@@ -5240,5 +5322,143 @@ mod tests {
 
         let stored = store.get(key).await.unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
+    }
+}
+
+#[cfg(test)]
+mod merged_scan_tests {
+    use super::*;
+    use crate::ivm::runtime::index_ids::{IndexIdRegistry, durable_index_key_prefix};
+    use crate::schema::IndexSchema;
+
+    const INDICES_CF_NAME: &str = "indices";
+
+    fn index_key(id: u32, value: u8) -> Vec<u8> {
+        let mut key = durable_index_key_prefix(id);
+        key.extend([0, value]);
+        key
+    }
+
+    /// A whole-family `indices` scan over indexes 1..=4, where 1 and 3
+    /// belong to a non-durable table, merges both classes in key order and
+    /// stops at `max_items` in either direction.
+    #[futures_test::test]
+    async fn merged_wide_scan_streams_the_first_n_rows_in_key_order() {
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&["default", INDICES_CF_NAME]).expect("memory storage opens"),
+            StorageLayout::Identity,
+        )
+        .await
+        .expect("identity layout opens");
+        let mut registry = IndexIdRegistry::default();
+        let mut ids = Vec::new();
+        for (table, index) in [("nd", "a"), ("d", "b"), ("nd", "c"), ("d", "e")] {
+            ids.push(registry.resolve(table, &IndexSchema::new(index, ["x"])));
+        }
+        assert_eq!(ids, [1, 2, 3, 4]);
+        storage.attach_non_durable_index_ids(Rc::new(RefCell::new(registry)));
+        storage.declare_non_durable_table("nd");
+
+        let mut all = Vec::new();
+        for id in ids {
+            for value in 1..=3 {
+                let key = index_key(id, value);
+                storage
+                    .set(INDICES_CF_NAME.to_owned(), key.clone(), vec![id as u8])
+                    .await
+                    .unwrap();
+                all.push(key);
+            }
+        }
+        all.sort();
+        let in_memory = storage.non_durable.scan(
+            INDICES_CF_NAME,
+            &ScanBounds::Prefix(Vec::new()),
+            ScanDirection::Forward,
+            None,
+        );
+        assert_eq!(in_memory.len(), 6, "ids 1 and 3 stay in memory");
+
+        let keys = |rows: Vec<KeyValue>| rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        for limit in [0, 1, 4, 7, 12, 20] {
+            let forward = collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix(INDICES_CF_NAME.to_owned(), Vec::new())
+                            .with_max_items(limit),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            let expected = all.iter().take(limit).cloned().collect::<Vec<_>>();
+            assert_eq!(keys(forward), expected, "forward, {limit} items");
+
+            let reverse = collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix(INDICES_CF_NAME.to_owned(), Vec::new())
+                            .with_max_items(limit)
+                            .reversed(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            let expected = all.iter().rev().take(limit).cloned().collect::<Vec<_>>();
+            assert_eq!(keys(reverse), expected, "reverse, {limit} items");
+        }
+    }
+
+    /// Yields one row per batch, with an empty batch between rows.
+    struct TrickleCursor {
+        rows: VecDeque<KeyValue>,
+        empty_next: bool,
+    }
+
+    impl StorageCursor for TrickleCursor {
+        fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+            Box::pin(async move {
+                self.empty_next = !self.empty_next;
+                if !self.empty_next {
+                    return Ok(Some(Vec::new()));
+                }
+                Ok(self.rows.pop_front().map(|row| vec![row]))
+            })
+        }
+    }
+
+    #[futures_test::test]
+    async fn merge_cursor_interleaves_small_durable_batches() {
+        let row = |key: u8| (vec![key], vec![key]);
+        for direction in [ScanDirection::Forward, ScanDirection::Reverse] {
+            let mut durable = vec![row(2), row(3), row(6), row(9)];
+            let mut memory = vec![row(1), row(4), row(5), row(7), row(10)];
+            if direction == ScanDirection::Reverse {
+                durable.reverse();
+                memory.reverse();
+            }
+            let mut expected = durable.iter().chain(&memory).cloned().collect::<Vec<_>>();
+            expected.sort();
+            if direction == ScanDirection::Reverse {
+                expected.reverse();
+            }
+            for limit in 0..=expected.len() + 1 {
+                let cursor = MergedStorageCursor::new(
+                    Box::new(TrickleCursor {
+                        rows: durable.clone().into(),
+                        empty_next: false,
+                    }),
+                    memory.clone(),
+                    direction,
+                    Some(limit),
+                );
+                let merged = collect_scan(Box::new(cursor)).await.unwrap();
+                let want = expected.iter().take(limit).cloned().collect::<Vec<_>>();
+                assert_eq!(merged, want, "{direction:?}, {limit} items");
+            }
+        }
     }
 }
