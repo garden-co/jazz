@@ -299,6 +299,9 @@ impl IvmRuntime {
             .indices
             .push(index.clone());
         let table_schema = self.schema.tables[table_position].clone();
+        // A runtime (re)creation always backfills under a fresh durable id:
+        // entries a dropped incarnation left behind are never read.
+        self.index_ids.borrow_mut().retire(table, &index.name);
         if table_schema.has_variants() {
             let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
             self.define_variant_projection_target(
@@ -326,14 +329,19 @@ impl IvmRuntime {
         let snapshot = self
             .hydration_snapshot(input, storage, HydrationMode::Ordinary)
             .await?;
-        apply_persist_delta(
+        // The new index's id registration becomes durable in the same atomic
+        // write as its backfilled entries, never after them.
+        let registrations = self.index_ids.borrow().pending();
+        persist::apply_persist_delta_with(
             storage,
             &persist_op.storage,
             &persist_op.key_fields,
             persist_op.unique,
             &snapshot,
+            registrations.operations().to_vec(),
         )
         .await?;
+        self.index_ids.borrow_mut().mark_persisted(&registrations);
         Ok(())
     }
 

@@ -88,6 +88,940 @@ fn multi_index_documents_schema() -> JazzSchema {
     )
 }
 
+fn indexed_branch_todos_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["title"]),
+            )
+            .allow_all(),
+    )
+}
+
+/// Alice reads her draft branch over main with an indexed equality. Each
+/// content layer of the stack `[draft@local, draft@origin, main@local,
+/// main@origin]` reads only its `title` index prefix: no content source scans
+/// a whole branch key, and main's settled rows outside the prefix are never
+/// read as content. Main is still masked exactly: by the draft's presence (a
+/// draft edit that left the prefix hides its main row) and, within main, by
+/// main's whole presence in its local delta (a pending edit that left the
+/// prefix hides its settled image; one that entered it is found by the
+/// local index). An unindexed read of the same
+/// view is the control: it scans both branch keys.
+///
+/// The deletion registers and the draft's presence are not index-bounded
+/// (a draft row can be deleted by its main image anywhere in main), so they
+/// are looked up by the content candidates' row ids
+/// (`indexed_branch_view_registers_are_read_by_candidate_row_ids`): no
+/// layer reads main whole, and the storage counters say so against the
+/// unindexed control, which reads all of main.
+///
+/// White-box because the read path's source and storage counters are not
+/// public.
+///
+/// ```text
+/// main (settled):  overridden=needle  inherited=needle  moved_out=needle
+///                  moved_in=hay  hay x 40
+/// main (pending):  moved_out -> hay   moved_in -> needle
+/// draft (pending): overridden -> hidden
+/// alice ──title = needle, draft over main──► {inherited, moved_in}
+/// ```
+#[test]
+fn indexed_branch_view_reads_each_content_layer_under_the_index_prefix() {
+    let schema = indexed_branch_todos_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .expect("open history-complete authority");
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let (overridden, inherited, moved_out, moved_in) = (row(1), row(2), row(3), row(4));
+    let title =
+        |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
+    let settled = [
+        (overridden, "needle"),
+        (inherited, "needle"),
+        (moved_out, "needle"),
+        (moved_in, "hay"),
+    ]
+    .into_iter()
+    .chain((0x10..0x38).map(|byte| (row(byte), "hay")));
+    for (row_id, value) in settled {
+        let write = block_on(db.insert(
+            "todos",
+            title(value),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    for (row_id, value) in [(moved_out, "hay"), (moved_in, "needle")] {
+        block_on(db.update(
+            "todos",
+            row_id,
+            title(value),
+            crate::db::UpdateOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: main.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("pending main edit");
+    }
+    block_on(db.update(
+        "todos",
+        overridden,
+        title("hidden"),
+        crate::db::UpdateOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("pending draft edit");
+
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main.clone())));
+    let needle = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+        .expect("prepare indexed query");
+    // Warm the plan so the measured read is the row read alone.
+    block_on(db.all(&needle, view.clone())).expect("warm indexed read");
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut rows = row_ids(&block_on(db.all(&needle, view.clone())).expect("indexed read"));
+    rows.sort();
+    assert_eq!(rows, vec![inherited, moved_in]);
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_full_scans, 0,
+        "no content layer of the indexed branch view may scan a whole branch key"
+    );
+    // Draft and main each read local and origin under the prefix; each
+    // local delta masks its origin by its whole presence, not an index probe.
+    assert_eq!(metrics.source_index_probes, 4, "{metrics:?}");
+    // Both deletion registers and the draft's presence are looked up by
+    // the candidates' row ids: none reads a branch key whole.
+    assert_eq!(metrics.source_branch_register_full_scans, 0, "{metrics:?}");
+    // Settled rows read: main's prefix hits and the register lookups by
+    // candidate id, 6 against the control's whole main (44).
+    assert_eq!(storage.global_current_rows.reads, 6, "{storage:?}");
+
+    let all = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare full query");
+    block_on(db.all(&all, view.clone())).expect("warm unindexed read");
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let rows = block_on(db.all(&all, view)).expect("unindexed read");
+    assert_eq!(rows.len(), 44);
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_full_scans, 2,
+        "without an index both branch keys are read whole"
+    );
+    assert_eq!(metrics.source_branch_register_full_scans, 2, "{metrics:?}");
+    assert_eq!(storage.global_current_rows.reads, 44, "{storage:?}");
+}
+
+/// Bob reads alice's draft over main with an indexed root filter, a join to
+/// a shared (not branch-scoped) table filtered by its own index, and a read
+/// policy whose `EXISTS` proof reads that shared table. A branch view turns
+/// on secondary indexes for this one-shot read, so the shared join source and
+/// the policy subplan can take the one-shot index shapes (candidate filter,
+/// source limit) here for the first time, while the branch layers ignore both
+/// and stay masked before their predicates. The unindexed read of the same
+/// view is the control. White-box because the read path's source counters
+/// are not public.
+///
+/// ```text
+/// labels (shared): a(visible=yes)  b(visible=no)
+/// main (settled):  overridden=needle/a  inherited=needle/a  closed=needle/b
+///                  orphan=needle/ghost  hay x 20 = hay/a
+/// draft (pending): overridden -> hidden/a
+/// bob ──title = needle ⋈ labels(visible = yes), draft over main──► {inherited}
+/// ```
+#[test]
+fn branch_view_join_and_policy_subplan_match_the_unindexed_control() {
+    let labelled = public_exists("labels", [public_outer_eq("name", "label")]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("labels")
+                    .column("name", PublicColumnType::Text)
+                    .column("visible", PublicColumnType::Text)
+                    .index_only(["name"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .column("label", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["title"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(labelled)
+                            .with_insert(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .expect("open history-complete authority");
+    let bob = AuthorSubject::for_test_bytes([0xda; 16]);
+    let text = |value: &str| Value::String(value.to_owned());
+    for (id, name, visible) in [(row(0x60), "a", "yes"), (row(0x61), "b", "no")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "labels",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("name".to_owned(), text(name)),
+                ("visible".to_owned(), text(visible)),
+            ]),
+        )
+        .expect("seed label");
+    }
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let (overridden, inherited, closed, orphan) = (row(1), row(2), row(3), row(4));
+    let cells = |title: &str, label: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), text(title)),
+            ("label".to_owned(), text(label)),
+        ])
+    };
+    let settled = [
+        (overridden, "needle", "a"),
+        (inherited, "needle", "a"),
+        (closed, "needle", "b"),
+        (orphan, "needle", "ghost"),
+    ]
+    .into_iter()
+    .chain((0x10..0x24).map(|byte| (row(byte), "hay", "a")));
+    for (row_id, title, label) in settled {
+        let write = block_on(db.insert(
+            "todos",
+            cells(title, label),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    block_on(db.update(
+        "todos",
+        overridden,
+        cells("hidden", "a"),
+        crate::db::UpdateOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::current(main.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("pending draft edit");
+
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main)));
+    let join = |query: Query| {
+        query.join_via_column("labels", "name", "label", [eq(col("visible"), lit("yes"))])
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).expect("prepare joined query");
+        // Warm the plan and the policy proof so the measured read is the
+        // row read alone.
+        block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("warm joined read");
+        db.node.node.borrow_mut().reset_query_engine_read_metrics();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, view.clone(), bob)).expect("joined read"),
+        );
+        rows.sort();
+        let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+        (rows, metrics)
+    };
+
+    let needle = || Query::from("todos").filter(eq(col("title"), lit("needle")));
+    let hay = || (0x10..0x24).map(row);
+    let sorted = |mut rows: Vec<RowUuid>| {
+        rows.sort();
+        rows
+    };
+
+    // The policy subplan under an indexed branch view. The proof is
+    // specialized from the outer `todos` source and shares its deduplicated
+    // physical branch layers, so they are counted once, for the outer read:
+    // draft and main each read local and origin under the prefix (each local
+    // delta masks its origin by its whole presence); both deletion registers and
+    // the draft's presence are looked up by the candidates' row ids.
+    // The specialized proof is compiled for this read, and its `labels`
+    // source, correlated only through the outer row, reads whole. The
+    // control reads both branch keys and both registers whole, no presence.
+    let (indexed, metrics) = read(&needle());
+    let (control, control_metrics) = read(&Query::from("todos"));
+    assert_eq!(
+        indexed,
+        sorted(vec![inherited, closed]),
+        "the head masks overridden; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted(
+            [overridden, inherited, closed]
+                .into_iter()
+                .chain(hay())
+                .collect()
+        ),
+        "the unindexed control agrees once its non-needle rows are set aside"
+    );
+    assert_eq!(
+        (
+            metrics.policy_authorization_graphs,
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (1, 4, 1, 0),
+        "{metrics:?}"
+    );
+    assert_eq!(
+        (
+            control_metrics.source_index_probes,
+            control_metrics.source_full_scans,
+            control_metrics.source_branch_register_full_scans,
+        ),
+        (0, 2, 2),
+        "{control_metrics:?}"
+    );
+
+    // The joined read: the access-path selector takes no index through a
+    // join, so the branch view's one-shot index switch changes nothing for
+    // it and it resolves exactly like its unindexed control. Every layer
+    // reads whole: draft and main of `todos`, and the shared `labels`, whose
+    // branch view is its one shared key (content plus deletion register).
+    let (indexed, metrics) = read(&join(needle()));
+    let (control, control_metrics) = read(&join(Query::from("todos")));
+    assert_eq!(
+        indexed,
+        vec![inherited],
+        "the head masks overridden; the join drops closed; the policy drops orphan"
+    );
+    assert_eq!(
+        control,
+        sorted([overridden, inherited].into_iter().chain(hay()).collect())
+    );
+    assert_eq!(metrics, control_metrics);
+    assert_eq!(
+        (
+            metrics.source_index_probes,
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 3, 3),
+        "{metrics:?}"
+    );
+}
+
+/// A by-id read of alice's draft over main bounds every layer of both stacks,
+/// content and deletion registers alike, to the row's key: storage reads do
+/// not grow with main's other rows. White-box because storage-read
+/// attribution is not public.
+///
+/// ```text
+/// main (settled): target + hay x 40
+/// alice ──id = target, draft over main──► {target}   (O(1) current rows read)
+/// ```
+#[test]
+fn by_id_branch_view_read_is_bounded_by_the_row_key() {
+    let schema = indexed_branch_todos_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd8; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd8))),
+    }))
+    .expect("open history-complete authority");
+    let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+    let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+    let target = row(1);
+    for byte in 1..0x2a {
+        let write = block_on(db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("hay".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(byte)),
+                target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed main row");
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .expect("settle main row");
+    }
+    let view = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(draft, Some(BranchViewBase::current(main)));
+    let by_id = db
+        .prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(target.0)))))
+        .expect("prepare by-id query");
+    // Warm the plan so the measured read is the row read alone.
+    assert_eq!(
+        row_ids(&block_on(db.all(&by_id, view.clone())).expect("warm read")),
+        vec![target]
+    );
+    db.reset_storage_read_metrics_for_test();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    assert_eq!(
+        row_ids(&block_on(db.all(&by_id, view)).expect("by-id read")),
+        vec![target]
+    );
+    let storage = db.take_storage_read_metrics_for_test();
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        (
+            metrics.source_full_scans,
+            metrics.source_branch_register_full_scans,
+        ),
+        (0, 0),
+        "{metrics:?}"
+    );
+    assert!(
+        storage.global_current_rows.reads <= 4,
+        "a by-id branch-view read must not read main's other rows: {storage:?}"
+    );
+}
+
+/// Alice reads `title = needle` on her draft over main, where main also
+/// holds settled rows outside the prefix, half of them deleted. Content reads
+/// only the index prefix, and every deletion-register layer of both branches,
+/// like the draft's presence that masks main, is read by the row ids of the
+/// content candidates (a keyed lookup), so the read's storage work is the
+/// same with 20 or 60 such rows (read whole, the registers cost one read per
+/// row of main: 28 against 68 reads). White-box because storage-read
+/// attribution is not public.
+///
+/// ```text
+/// main (settled): a=needle  b=needle  hay x n  (every other hay row deleted)
+/// draft (pending): a deleted
+/// alice ──title = needle, draft over main──► {b}   (reads independent of n)
+/// ```
+#[test]
+fn indexed_branch_view_registers_are_read_by_candidate_row_ids() {
+    let read = |hay: u8| {
+        let schema = indexed_branch_todos_schema();
+        let db = block_on(Db::open_history_complete(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xd9; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+        }))
+        .expect("open history-complete authority");
+        let main = BranchSelector::new([("branch_id", Value::Uuid(row(0xe0).0))]);
+        let draft = BranchSelector::new([("branch_id", Value::Uuid(row(0xe1).0))]);
+        let on_main = || crate::db::WriteTarget::BranchView {
+            head: main.clone(),
+            base: None,
+        };
+        let (a, b) = (row(1), row(2));
+        let rows = [(a, "needle"), (b, "needle")]
+            .into_iter()
+            .chain((0..hay).map(|n| (row(0x10 + n), "hay")));
+        for (row_id, value) in rows {
+            let write = block_on(db.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(value.to_owned()))]),
+                crate::db::InsertOptions {
+                    row_id: Some(row_id),
+                    target: crate::db::ExactWriteTarget::Branch(main.clone()),
+                    ..Default::default()
+                },
+            ))
+            .expect("seed main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main row");
+        }
+        for n in (0..hay).step_by(2) {
+            let write = block_on(db.delete(
+                "todos",
+                row(0x10 + n),
+                crate::db::DeleteOptions {
+                    target: on_main(),
+                    ..Default::default()
+                },
+            ))
+            .expect("delete main row");
+            db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                .expect("settle main delete");
+        }
+        block_on(db.delete(
+            "todos",
+            a,
+            crate::db::DeleteOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: draft.clone(),
+                    base: Some(BranchViewBase::current(main.clone())),
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("pending draft delete");
+        let view = ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(draft, Some(BranchViewBase::current(main)));
+        let needle = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+            .expect("prepare indexed query");
+        // Warm the plan so the measured read is the row read alone.
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view.clone())).expect("warm read")),
+            vec![b]
+        );
+        db.reset_storage_read_metrics_for_test();
+        assert_eq!(
+            row_ids(&block_on(db.all(&needle, view)).expect("indexed read")),
+            vec![b]
+        );
+        db.take_storage_read_metrics_for_test()
+    };
+    let small = read(20);
+    let large = read(60);
+    assert_eq!(
+        (
+            small.global_current_rows.reads,
+            small.ahead_current_rows.reads
+        ),
+        (
+            large.global_current_rows.reads,
+            large.ahead_current_rows.reads
+        ),
+        "main's rows outside the prefix must not be read: {small:?} vs {large:?}"
+    );
+    assert!(
+        small.global_current_rows.reads <= 8,
+        "only the candidates' rows are read: {small:?}"
+    );
+}
+
+fn indexed_todos_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["title"]),
+            )
+            .allow_all(),
+    )
+}
+
+/// An authority whose writes stay pending until the test settles them.
+fn open_settling_authority(node: u8, schema: &JazzSchema) -> Db {
+    block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
+    }))
+    .expect("open history-complete authority")
+}
+
+fn title_cells(title: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
+}
+
+/// Insert `row_id` with `title` and settle it into origin.
+fn insert_settled(db: &Db, row_id: RowUuid, title: &str) {
+    let write = block_on(db.insert(
+        "todos",
+        title_cells(title),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+    db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+        .expect("settle row");
+}
+
+/// Write a pending edit of `row_id`'s title; it stays in the local delta.
+fn update_pending(db: &Db, row_id: RowUuid, title: &str) -> TxId {
+    block_on(db.update("todos", row_id, title_cells(title), Default::default()))
+        .expect("pending edit")
+        .mergeable_tx_id()
+}
+
+/// Alice reads `title = needle` at `Local` while she holds pending edits,
+/// some of them on rows outside the prefix. Origin is read under the index
+/// prefix, and the local delta masks origin's candidates by its presence,
+/// read whichever way reads fewer rows: whole (its pending rows) when it is
+/// smaller than origin's candidates, else looked up by those candidates. So
+/// the read never visits origin's rows outside the prefix, never probes the
+/// delta once per candidate when the delta is the smaller side (the #4022
+/// `pages_live` regression), and never reads every pending row when the
+/// candidates are fewer (the #4022 local-only regressions: a node whose
+/// delta is the whole table). A pending edit that moved a candidate out of
+/// the prefix still hides it either way; one that moved a row in is found
+/// by the delta's own index.
+///
+/// White-box because storage-read attribution and the read path's source
+/// counters are not public.
+///
+/// ```text
+/// origin:  a=needle  b=needle  out=needle  in=hay  needle x m  hay x n
+/// local:   out -> hay   in -> needle   k hay rows -> straw
+/// alice ──title = needle, Local──► {a, b, in, needle x m}
+///          origin reads independent of n and k;
+///          delta reads independent of n, of m once m + 3 > k + 2,
+///          and of k once k + 2 > m + 3
+/// ```
+#[test]
+fn indexed_local_read_masks_origin_by_the_cheaper_pending_presence() {
+    let read = |hay: u8, needles: u8, pending_hay: u8| {
+        let schema = indexed_todos_schema();
+        let db = open_settling_authority(0xda, &schema);
+        let (a, b, moved_out, moved_in) = (row(1), row(2), row(3), row(4));
+        for (row_id, title) in [
+            (a, "needle"),
+            (b, "needle"),
+            (moved_out, "needle"),
+            (moved_in, "hay"),
+        ] {
+            insert_settled(&db, row_id, title);
+        }
+        for n in 0..hay {
+            insert_settled(&db, row(0x10 + n), "hay");
+        }
+        let extra_needles = (0..needles).map(|n| row(0x80 + n)).collect::<Vec<_>>();
+        for &row_id in &extra_needles {
+            insert_settled(&db, row_id, "needle");
+        }
+        update_pending(&db, moved_out, "hay");
+        update_pending(&db, moved_in, "needle");
+        for n in 0..pending_hay {
+            update_pending(&db, row(0x10 + n), "straw");
+        }
+        let local = ReadOpts {
+            tier: crate::db::ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        let needle = db
+            .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+            .expect("prepare indexed query");
+        let sorted = |mut rows: Vec<RowUuid>| {
+            rows.sort();
+            rows
+        };
+        let expected = sorted([a, b, moved_in].into_iter().chain(extra_needles).collect());
+        // Warm the plan so the measured read is the row read alone.
+        assert_eq!(
+            sorted(row_ids(
+                &block_on(db.all(&needle, local.clone())).expect("warm read")
+            )),
+            expected
+        );
+        db.reset_storage_read_metrics_for_test();
+        db.node.node.borrow_mut().reset_query_engine_read_metrics();
+        assert_eq!(
+            sorted(row_ids(
+                &block_on(db.all(&needle, local)).expect("indexed read")
+            )),
+            expected
+        );
+        let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+        assert_eq!(metrics.source_full_scans, 0, "{metrics:?}");
+        assert_eq!(
+            metrics.source_index_probes, 2,
+            "origin and the local delta each probe the index once: {metrics:?}"
+        );
+        db.take_storage_read_metrics_for_test()
+    };
+    // Three candidates (a, b, out) and four pending rows: the delta is
+    // looked up by the candidates.
+    let base = read(20, 0, 2);
+    let more_hay = read(60, 0, 2);
+    assert_eq!(
+        (base.global_current_rows, base.ahead_current_rows),
+        (more_hay.global_current_rows, more_hay.ahead_current_rows),
+        "origin's rows outside the prefix may not be read: {base:?} vs {more_hay:?}"
+    );
+    // Many more pending rows than candidates: the delta is still looked up
+    // by the three candidates, so its reads do not grow with it.
+    let more_pending = read(60, 0, 20);
+    let most_pending = read(60, 0, 40);
+    assert_eq!(
+        (base.global_current_rows, base.ahead_current_rows),
+        (
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {base:?} vs {more_pending:?}"
+    );
+    assert_eq!(
+        (
+            more_pending.global_current_rows,
+            more_pending.ahead_current_rows
+        ),
+        (
+            most_pending.global_current_rows,
+            most_pending.ahead_current_rows
+        ),
+        "unrelated pending rows may not cost reads: {more_pending:?} vs {most_pending:?}"
+    );
+    // Many more candidates than pending rows: the delta is read whole, so
+    // its reads do not grow with origin's candidates.
+    let more_candidates = read(20, 40, 2);
+    let most_candidates = read(20, 80, 2);
+    assert_eq!(
+        more_candidates.ahead_current_rows, most_candidates.ahead_current_rows,
+        "origin's candidates may not cost reads of the delta: \
+         {more_candidates:?} vs {most_candidates:?}"
+    );
+    assert!(
+        more_candidates.ahead_current_rows.reads <= base.ahead_current_rows.reads + 4,
+        "the whole delta is its four pending rows: {base:?} vs {more_candidates:?}"
+    );
+}
+
+/// Alice keeps a `title = needle` subscription open at `Local` while her
+/// pending edits appear over rows origin already holds under the index
+/// prefix and then settle. The local delta masks origin by its maintained
+/// presence, so every step is one exact delta: a pending edit leaving the
+/// prefix removes the origin candidate, one entering adds the row, and
+/// settling an edit changes nothing the subscriber sees. White-
+/// box only for settling (`finalize_local_mergeable_commit_for_test`); the
+/// assertions are on the public subscription stream.
+///
+/// ```text
+/// origin: a=needle  b=needle  c=hay
+/// alice subscribes ──► {a, b}
+/// pending a -> hay      ──► -a
+/// pending c -> needle   ──► +c
+/// settle both           ──► (nothing)
+/// pending a -> needle   ──► +a ; settle ──► (nothing)
+/// ```
+#[test]
+fn indexed_local_subscription_follows_pending_rows_over_origin_candidates() {
+    let schema = indexed_todos_schema();
+    let db = open_settling_authority(0xdb, &schema);
+    let (a, b, c) = (row(1), row(2), row(3));
+    insert_settled(&db, a, "needle");
+    insert_settled(&db, b, "needle");
+    insert_settled(&db, c, "hay");
+    for n in 0..8 {
+        insert_settled(&db, row(0x10 + n), "hay");
+    }
+    let local = ReadOpts {
+        tier: crate::db::ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let query = Query::from("todos").filter(eq(col("title"), lit("needle")));
+    let mut subscription = prepared_subscribe(&db, &query, local.clone()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    let mut ids = row_ids(&initial.rows);
+    ids.sort();
+    assert_eq!(ids, vec![a, b]);
+    let removed_ids =
+        |removed: &[RemovedRow]| removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>();
+    let one_shot = |db: &Db| {
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let mut ids = row_ids(&block_on(db.all(&prepared, local.clone())).expect("read"));
+        ids.sort();
+        ids
+    };
+
+    let a_out = update_pending(&db, a, "hay");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty() && updated.is_empty());
+    assert_eq!(
+        removed_ids(&removed),
+        vec![a],
+        "a's pending edit left the prefix"
+    );
+
+    let c_in = update_pending(&db, c, "needle");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&added),
+        vec![c],
+        "c's pending edit entered the prefix"
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    assert_eq!(one_shot(&db), vec![b, c]);
+
+    db.finalize_local_mergeable_commit_for_test(a_out)
+        .expect("settle a");
+    db.finalize_local_mergeable_commit_for_test(c_in)
+        .expect("settle c");
+    block_on(db.tick()).unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        let (added, updated, removed) = delta_rows(event);
+        assert!(
+            added.is_empty() && updated.is_empty() && removed.is_empty(),
+            "settling moves rows from the local delta into origin unchanged: \
+             {added:?} {updated:?} {removed:?}"
+        );
+    }
+    assert_eq!(one_shot(&db), vec![b, c]);
+
+    let a_back = update_pending(&db, a, "needle");
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&added),
+        vec![a],
+        "a re-entered the prefix while pending"
+    );
+    assert!(updated.is_empty() && removed.is_empty());
+    db.finalize_local_mergeable_commit_for_test(a_back)
+        .expect("settle a again");
+    block_on(db.tick()).unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        let (added, updated, removed) = delta_rows(event);
+        assert!(
+            added.is_empty() && updated.is_empty() && removed.is_empty(),
+            "{added:?} {updated:?} {removed:?}"
+        );
+    }
+    assert_eq!(one_shot(&db), vec![a, b, c]);
+}
+
+/// Alice's pending edit of a settled indexed row and its settlement write
+/// only the local delta, origin and the history: no copy of origin's image
+/// is stored beside the delta (the retired `ahead_shadow` table cost one
+/// row and one entry per index on commit, and their deletes on settle).
+/// The commit of an edit over a settled row therefore writes exactly what
+/// the commit of a fresh pending insert writes, and settling either deletes
+/// only the delta row and its index entry beside origin's own writes.
+/// White-box because storage-write attribution is not public.
+///
+/// ```text
+/// origin: a=hay
+/// alice ──pending insert b──► writes W
+/// alice ──pending edit a over origin──► writes W too (nothing for a mask)
+/// ```
+#[test]
+fn pending_edit_over_origin_writes_no_mask_rows() {
+    let schema = indexed_todos_schema();
+    let db = open_settling_authority(0xdc, &schema);
+    let (a, b) = (row(1), row(2));
+    insert_settled(&db, a, "hay");
+    let last_writes = |db: &Db| {
+        db.node
+            .node
+            .borrow()
+            .last_commit_metrics()
+            .expect("a committed batch")
+            .storage_writes
+    };
+
+    let insert = block_on(db.insert(
+        "todos",
+        title_cells("needle"),
+        crate::db::InsertOptions {
+            row_id: Some(b),
+            ..Default::default()
+        },
+    ))
+    .expect("pending insert");
+    let fresh = last_writes(&db);
+    let edit = update_pending(&db, a, "needle");
+    let over_origin = last_writes(&db);
+    // Both write the delta row and its index entries; the retired mask
+    // wrote two more for the edit (origin's image and its `title` entry).
+    assert_eq!(
+        over_origin.other.count, fresh.other.count,
+        "a pending edit over origin writes its delta row and index entries only: \
+         {over_origin:?} vs {fresh:?}"
+    );
+    assert_eq!(
+        (
+            over_origin.global_current_rows.count,
+            over_origin.global_current_indexes.count
+        ),
+        (0, 0),
+        "a pending edit leaves origin alone: {over_origin:?}"
+    );
+
+    db.finalize_local_mergeable_commit_for_test(insert.mergeable_tx_id())
+        .expect("settle insert");
+    let fresh = last_writes(&db);
+    db.finalize_local_mergeable_commit_for_test(edit)
+        .expect("settle edit");
+    let over_origin = last_writes(&db);
+    // Outside origin's row, its `title` entry, the history and the
+    // transaction log, settling writes only: the delta row and its `title`
+    // entry deleted, and origin's `by_seq` entry inserted (fresh row) or
+    // moved (edit). The retired mask cost one more delete for the fresh row
+    // and two (its row and `title` entry) for the edit.
+    assert_eq!(
+        (fresh.other.count, over_origin.other.count),
+        (3, 4),
+        "settling deletes the delta row and nothing beside it: \
+         {fresh:?} vs {over_origin:?}"
+    );
+}
+
 /// A maintained equality source is both an indexed hydration source and a
 /// live IVM source. In particular, a row changing either indexed equality must
 /// enter/leave exactly once rather than remaining filtered by the prefix that
@@ -5471,6 +6405,76 @@ fn subscription_opening_retains_selected_created_at_in_native_carrier() {
     block_on(subscription.close()).unwrap();
 }
 
+/// History rows carry merge fields (`seq`, `base_seq`, `base_pending`,
+/// SPEC 4 §4.6) that current rows do not. Every public read
+/// path publishes the current layout, without them.
+#[test]
+fn row_reads_never_publish_history_merge_fields() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7c);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("merged", false),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(4_321),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.update(
+        "todos",
+        id,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+
+    let history_only = [
+        crate::schema::SEQ_FIELD,
+        crate::schema::BASE_SEQ_FIELD,
+        crate::schema::BASE_PENDING_FIELD,
+        crate::schema::COUNTER_SIGNS_FIELD,
+    ];
+    let assert_current_layout = |rows: &[CurrentRow], path: &str| {
+        assert!(!rows.is_empty(), "{path} returns the row");
+        for batch in row_batches(rows).expect("rows encode for the native binding") {
+            for field in &batch.descriptor {
+                let name = match field.name {
+                    RowDescriptorFieldName::StoredColumn { output_name, .. } => output_name,
+                    RowDescriptorFieldName::ResultField { name }
+                    | RowDescriptorFieldName::HiddenMetadata { name } => name,
+                };
+                assert!(
+                    !history_only.contains(&name),
+                    "{path} publishes history field {name}"
+                );
+            }
+        }
+    };
+
+    let current = block_on(db.local_current_row("todos", id))
+        .unwrap()
+        .expect("row is locally current");
+    assert_current_layout(std::slice::from_ref(&current), "local current row");
+
+    let query = db.table("todos");
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    assert_current_layout(&rows, "query");
+
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening subscription delta");
+    };
+    let rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
+    assert_current_layout(&rows, "subscription");
+    block_on(subscription.close()).unwrap();
+}
+
 #[test]
 fn db_at_reads_historical_cut_and_partial_requires_server() {
     let schema = schema();
@@ -5509,6 +6513,43 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
     assert_eq!(err.message, "historical read requires server evaluation");
 }
 
+/// Alice can use a UUID needle for array membership; a text needle is rejected
+/// before execution with both types. This public DB test checks user-visible
+/// query preparation.
+#[test]
+fn typed_uuid_array_contains_reports_expected_and_actual_types() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items").column(
+            "tags",
+            PublicColumnType::Array {
+                element: Box::new(PublicColumnType::Uuid),
+            },
+        ),
+    ));
+    let db = open_db(0xd8, AuthorSubject::SYSTEM, &schema);
+    let tag = uuid::Uuid::from_bytes([0x31; 16]);
+    db.insert(
+        "items",
+        BTreeMap::from([("tags".to_owned(), Value::Array(vec![Value::Uuid(tag)]))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("items").filter(contains(col("tags"), lit(Value::Uuid(tag))));
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![row(1)]);
+
+    let mismatched = Query::from("items").filter(contains(col("tags"), lit("not-a-uuid")));
+    let error = db.prepare_query(&mismatched).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("Uuid") && error.message.contains("String"),
+        "diagnostic must identify expected UUID member and actual String needle: {}",
+        error.message
+    );
+}
 #[test]
 fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let schema = issue_schema();
@@ -6600,4 +7641,174 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
 
 fn db_facade_row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
+}
+
+/// A strict (Global) one-shot through the serialized read boundary that the
+/// WASM and NAPI bindings call reconciles the rows the client already holds
+/// (INV-SYNC-48): a row deleted at Core leaves the client's local store, while
+/// a row that merely stopped being readable stays cached (INV-SYNC-14).
+///
+/// Internal because the test needs deterministic owner turns and an
+/// authenticated in-memory link to a Core that mints current-row receipts;
+/// the assertions use only the public `Db` read APIs.
+///
+/// ```text
+/// bob ──insert doomed, kept (owner = alice)──► core
+/// alice ──Global one-shot──► core            (alice now holds both rows)
+/// bob ──delete doomed──► core ; core ──kept.owner = bob
+/// alice ──Global one-shot──► []               (probes the omitted held rows)
+/// alice local store: doomed gone, kept still cached
+/// ```
+#[test]
+fn strict_serialized_one_shot_drops_deleted_held_row_but_keeps_unreadable_one() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let core = open_core(0xc7, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let alice_db = open_db(0xd7, alice, &schema);
+    let bob_db = open_db(0xe7, bob, &schema);
+    alice_db.set_test_provider_claims(alice, test_provider_claims(alice));
+    bob_db.set_test_provider_claims(bob, test_provider_claims(bob));
+    let connect = |db: &Db, identity: AuthorSubject, node: u8| {
+        let (up, down) = duplex_with_admitted_session_context(
+            identity,
+            NodeUuid::from_bytes([node; 16]),
+            1,
+            NodeUuid::from_bytes([0xc7; 16]),
+            1,
+        );
+        let upstream = block_on(db.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, identity);
+        (upstream, subscriber)
+    };
+    let _alice_link = connect(&alice_db, alice, 0xd7);
+    let _bob_link = connect(&bob_db, bob, 0xe7);
+    let turn = || {
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+        core.tick().unwrap();
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+    };
+    let core_ids = || {
+        core.read(&Query::from("todos"))
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>()
+    };
+    let strict_one_shot = || -> BTreeSet<RowUuid> {
+        let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = alice_db.all_serialized_query(
+            &bytes,
+            global_subscribe_opts(),
+            None,
+            None,
+            None,
+            true,
+            || false,
+            |attachment| alice_db.detach_query(attachment),
+        );
+        let mut read = pin!(read);
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..200 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.expect("strict one-shot") {
+                    SerializedReadResult::Rows(rows) => {
+                        rows.iter().map(CurrentRow::row_uuid).collect()
+                    }
+                    SerializedReadResult::Relation(_) => panic!("todos is a row query"),
+                };
+            }
+            turn();
+        }
+        panic!("strict one-shot never settled");
+    };
+    let alice_local_ids = || {
+        row_ids(&prepared_all(
+            &alice_db,
+            &Query::from("todos"),
+            ReadOpts {
+                tier: crate::db::ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    };
+    for _ in 0..4 {
+        turn();
+    }
+
+    let doomed = row(0x71);
+    let kept = row(0x72);
+    for (id, title) in [(doomed, "doomed"), (kept, "kept")] {
+        block_on(bob_db.insert(
+            "todos",
+            cells(title, false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .expect("bob inserts a todo owned by alice");
+    }
+    for _ in 0..50 {
+        if core_ids() == BTreeSet::from([doomed, kept]) {
+            break;
+        }
+        turn();
+    }
+    assert_eq!(core_ids(), BTreeSet::from([doomed, kept]));
+    assert_eq!(
+        strict_one_shot(),
+        BTreeSet::from([doomed, kept]),
+        "alice reads both of her todos at Global"
+    );
+    assert_eq!(alice_local_ids(), BTreeSet::from([doomed, kept]));
+
+    block_on(bob_db.delete("todos", doomed, DeleteOptions::default()))
+        .expect("bob deletes one todo");
+    for _ in 0..50 {
+        if core_ids() == BTreeSet::from([kept]) {
+            break;
+        }
+        turn();
+    }
+    assert_eq!(
+        core_ids(),
+        BTreeSet::from([kept]),
+        "Core admits the deletion"
+    );
+    core.update("todos", kept, cells("kept", false, bob))
+        .expect("Core reassigns the other todo to bob");
+    turn();
+
+    assert_eq!(
+        strict_one_shot(),
+        BTreeSet::new(),
+        "alice can read neither todo at Global any more"
+    );
+    assert_eq!(
+        alice_local_ids(),
+        BTreeSet::from([kept]),
+        "the deletion reaches alice's local store; the unreadable row stays cached"
+    );
 }

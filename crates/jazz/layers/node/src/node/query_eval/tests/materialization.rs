@@ -116,7 +116,7 @@ fn authoritative_reset_version_uses_non_base_partition_descriptor() {
         .get(&tx_id.node)
         .expect("local node alias");
     let version = node
-        .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+        .query_version_by_alias("todos", todo, tx_id.time, alias)
         .unwrap()
         .expect("non-base partition version");
     assert_eq!(version.tx_time(), tx_id.time);
@@ -161,7 +161,7 @@ fn relation_edge_target_uses_non_base_partition_descriptor() {
         Some(Value::String("partition-title".to_owned()))
     );
     let version = node
-        .query_version_by_alias("todos", todo, VersionLayer::Content, tx_id.time, alias)
+        .query_version_by_alias("todos", todo, tx_id.time, alias)
         .unwrap()
         .expect("non-base partition version");
     assert_eq!(version.tx_time(), tx_id.time);
