@@ -634,12 +634,8 @@ where
             ))?;
         let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
         let mut cells = self.materialized_cells_for_version(source_table, version)?;
-        let projected_table = self.translate_cells(
-            source_schema,
-            read_schema_version,
-            version.table(),
-            &mut cells,
-        )?;
+        let projected_table =
+            self.translate_version_cells(source_schema, read_schema_version, version, &mut cells)?;
         Ok((projected_table.as_deref() == Some(table)).then_some(cells))
     }
 
@@ -711,6 +707,69 @@ where
         }
 
         Ok(None)
+    }
+
+    /// `translate_cells` for the cells of a stored `version` authored in
+    /// `source`: a union row's stored extras (`union_stored_extras`) then
+    /// replace what the lens derives for the target columns they hold, as
+    /// content projections read them (SPEC 10 §10.3, "Union row cases").
+    pub(super) fn translate_version_cells(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        version: &VersionRow,
+        cells: &mut BTreeMap<String, Value>,
+    ) -> Result<Option<String>, Error> {
+        let projected = self.translate_cells(source, target, version.table(), cells)?;
+        if source == target {
+            return Ok(projected);
+        }
+        let Some(target_table) = projected.as_deref() else {
+            return Ok(projected);
+        };
+        let extra_cells = version.union_extra_cells()?;
+        if extra_cells.is_empty() {
+            return Ok(projected);
+        }
+        let stored = self.union_stored_extras(source, version.table())?;
+        let target_columns = self
+            .catalogue
+            .physical_mappings
+            .get(&target)
+            .and_then(|mapping| mapping.tables.get(target_table))
+            .ok_or(Error::InvalidStoredValue(
+                "union read target mapping missing",
+            ))?
+            .columns
+            .clone();
+        let column_names = self
+            .table_in_schema_ref(target_table, target)?
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        for (index, name) in column_names.into_iter().enumerate() {
+            let Some(id) = target_columns.get(&name) else {
+                continue;
+            };
+            if !stored.contains(id) {
+                continue;
+            }
+            let Some((_, value)) = extra_cells.iter().find(|(extra, _)| extra == id) else {
+                continue;
+            };
+            let authored =
+                self.physical_cell_to_authored(target, target_table, index, value.clone())?;
+            match crate::node::codec::nullable_value(authored)? {
+                Some(value) => {
+                    cells.insert(name, value);
+                }
+                None => {
+                    cells.remove(&name);
+                }
+            }
+        }
+        Ok(projected)
     }
 }
 

@@ -257,7 +257,7 @@ fn registry_verifier_rejects_a_planted_known_profile_omission() {
     let mut registry = registry();
     registry
         .families
-        .retain(|family| family.id != "jazz.node-storage.v1");
+        .retain(|family| family.id != "jazz.node-storage.v2");
     let error = validate_registry(&registry).expect_err("a missing profile family must fail CI");
     assert!(
         error.contains("jazz-node-root profile registry drifted"),

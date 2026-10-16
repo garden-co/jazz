@@ -54,13 +54,13 @@ const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "753ff4465d1f170e43ceef33abcdc1729e4ef418bf1e117eb9a08fb4b77b2df5";
+    "e3847e74eefd9f325b033cfc9bb6a981fc4c190a2a3ef228a4df679bcf7cd7b1";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "300ed7bdc0359fd1006aaef11dd1f94fb2585daf62e3c3419c48e8296a999c16";
+    "832d929fe13a749dc1f6650f8538eec1e9b1af189bcf014f732fbb6c91da2d34";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "99bdcf8010c8a16726aab6f367c7eed4b3e94785823a2ee5e7adde0dbd7cc76f";
+    "27de963daa109c9dbe32f060d744554a0d4b00b901797cfe33c3f590097e2d13";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -1400,7 +1400,7 @@ where
         }) => {
             assert!(missing.is_empty(), "{missing:?}");
             assert!(
-                unknown.iter().any(|codec| codec == "jazz.node-storage.v1")
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v2")
                     && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
                 "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
             );
@@ -2357,7 +2357,7 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                       missing [groove.dictionary.v1,
 ///                                                groove.durable-index.v2,
-///                                                jazz.node-storage.v1]
+///                                                jazz.node-storage.v2]
 /// ```
 #[test]
 fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
@@ -2431,7 +2431,7 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                     "groove.durable-index.v2".to_owned(),
                     "groove.large-value.v2".to_owned(),
                     "groove.ordered-chunk-storage.v2".to_owned(),
-                    "jazz.node-storage.v1".to_owned(),
+                    "jazz.node-storage.v2".to_owned(),
                 ],
                 "{store}"
             );

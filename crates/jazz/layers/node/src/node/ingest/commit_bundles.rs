@@ -1019,6 +1019,7 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
+                let stored = self.with_wire_union_cells(stored, version)?;
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
