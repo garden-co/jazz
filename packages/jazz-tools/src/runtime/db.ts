@@ -1005,22 +1005,23 @@ function prepareTransformRead<T>(
     let visibleTransforms: ColumnTransformMap | undefined;
     let dependencies: Set<string> | undefined;
     let hidden: string[] | undefined;
-    for (const column in transforms) {
-      if (!Object.hasOwn(transforms, column) || (!selectAll && !select.includes(column))) continue;
-      (visibleTransforms ??= {})[column] = transforms[column]!;
-      for (const dependency of transforms[column]!.dependsOn ?? []) {
-        (dependencies ??= new Set()).add(dependency);
-        if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
-          if (physical === select) physical = [...select];
-          physical.push(dependency);
-          (hidden ??= []).push(dependency);
-        }
-        if (Object.hasOwn(partial, dependency)) {
-          if (partial === partialSelect) partial = { ...partialSelect };
-          delete partial[dependency];
+    if (transforms)
+      for (const column of selectAll ? Object.keys(transforms) : select) {
+        if (!Object.hasOwn(transforms, column)) continue;
+        (visibleTransforms ??= {})[column] = transforms[column]!;
+        for (const dependency of transforms[column]!.dependsOn ?? []) {
+          (dependencies ??= new Set()).add(dependency);
+          if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
+            if (physical === select) physical = [...select];
+            physical.push(dependency);
+            (hidden ??= []).push(dependency);
+          }
+          if (Object.hasOwn(partial, dependency)) {
+            if (partial === partialSelect) partial = { ...partialSelect };
+            delete partial[dependency];
+          }
         }
       }
-    }
     let preparedIncludes = includes;
     const finishIncludes: Array<
       [string, (row: Record<string, unknown>) => Record<string, unknown>]
@@ -1135,7 +1136,7 @@ function transformOutputColumns(
     return row;
   }
 
-  return applyColumnTransforms({ ...(row as Record<string, unknown>) }, source._columnTransforms);
+  return applyColumnTransforms(row as Record<string, unknown>, source._columnTransforms);
 }
 
 function transformInputColumns(

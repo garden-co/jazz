@@ -75,7 +75,7 @@ export function testDependentTransforms(create: () => Promise<Db>) {
       await expect(tx.one(app.products.where({ id: product.id }))).resolves.toMatchObject({
         price: 2,
       });
-      await tx.commit().wait({ tier: "local" });
+      await tx.commit().wait();
       await pending.wait({ tier: "local" });
       await expect(db.one(app.baskets.where({ id: basket.value.id }))).resolves.toEqual({
         id: basket.value.id,
