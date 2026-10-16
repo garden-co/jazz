@@ -16,6 +16,7 @@ async function availablePort(): Promise<number> {
 }
 
 const WEB_PORT = Number(process.env.WEB_PORT ?? (await availablePort()));
+process.env.WEB_PORT ??= String(WEB_PORT);
 const testAppId = randomUUID();
 // Keep each test server independent of ambient credentials. An explicitly empty
 // backend secret is invalid; this fresh credential stays in the server process.
