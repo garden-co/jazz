@@ -893,6 +893,22 @@ fn descriptor_codec_take<'a>(
     Ok(node)
 }
 
+/// The child count of `node`, checked against the nodes left after `cursor`.
+/// Every child consumes at least one node, so a larger count is truncated
+/// input. Checking before reserving keeps an untrusted count from sizing an
+/// allocation.
+fn descriptor_codec_children(
+    node: &DescriptorCodecNode,
+    nodes: &[DescriptorCodecNode],
+    cursor: usize,
+) -> Result<usize, Error> {
+    let children = usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?;
+    if children > nodes.len().saturating_sub(cursor) {
+        return Err(Error::UnexpectedEof);
+    }
+    Ok(children)
+}
+
 fn descriptor_codec_metadata_empty(node: &DescriptorCodecNode) -> Result<(), Error> {
     if node.name.is_none()
         && node.identity_name.is_none()
@@ -935,8 +951,7 @@ fn descriptor_codec_decode_descriptor(
     {
         return Err(Error::NonCanonicalRecord);
     }
-    let mut fields =
-        Vec::with_capacity(usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?);
+    let mut fields = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
     for _ in 0..node.children {
         let field = descriptor_codec_take(nodes, cursor)?;
         if field.tag != DESCRIPTOR_NODE_FIELD
@@ -1026,9 +1041,7 @@ fn descriptor_codec_decode_value_type(
             {
                 return Err(Error::NonCanonicalRecord);
             }
-            let mut members = Vec::with_capacity(
-                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
-            );
+            let mut members = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
             for _ in 0..node.children {
                 members.push(descriptor_codec_decode_value_type(nodes, cursor)?);
             }
@@ -1081,9 +1094,7 @@ fn descriptor_codec_decode_value_type(
             {
                 return Err(Error::NonCanonicalRecord);
             }
-            let mut cases = Vec::with_capacity(
-                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
-            );
+            let mut cases = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
             for _ in 0..node.children {
                 let case = descriptor_codec_take(nodes, cursor)?;
                 if case.tag != DESCRIPTOR_NODE_ENUM_CASE
@@ -2952,6 +2963,44 @@ fn checked_offset_slot(start: usize, index: usize) -> Result<usize, Error> {
 
 pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
+}
+
+#[cfg(test)]
+mod descriptor_codec_child_count_tests {
+    use super::*;
+
+    fn node(tag: u8, name: Option<&str>, children: u32) -> DescriptorCodecNode {
+        DescriptorCodecNode {
+            tag,
+            name: name.map(str::to_owned),
+            identity_name: None,
+            identity_slot: None,
+            registry_id: 0,
+            children,
+            strings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn child_counts_beyond_the_remaining_nodes_are_rejected_before_reserving() {
+        let descriptor = [node(DESCRIPTOR_NODE_DESCRIPTOR, None, u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_descriptor(&descriptor, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+
+        let tuple = [node(DESCRIPTOR_NODE_TUPLE, None, u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_value_type(&tuple, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+
+        let enumeration = [node(DESCRIPTOR_NODE_ENUM, Some("state"), u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_value_type(&enumeration, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+    }
 }
 
 #[cfg(test)]
