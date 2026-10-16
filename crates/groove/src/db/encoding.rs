@@ -249,21 +249,10 @@ impl Database {
         {
             return Ok(codec.clone());
         }
-        let storage = table
-            .storage_record_schema_for_variant(variant_tag)
-            .ok_or_else(|| Error::UnknownTableVariant {
-                table: table.name.clone(),
-                version: u64::from(variant_tag),
-            })?;
-        let codec = match records::RecordTranscoder::new(storage)? {
-            Some(transcoder) => StoredRecordCodec {
-                logical: transcoder.logical(),
-                transcoder: Some(Rc::new(transcoder)),
-            },
-            None => StoredRecordCodec {
-                logical: storage,
-                transcoder: None,
-            },
+        let (logical, transcoder) = stored_record_layout(table, variant_tag)?;
+        let codec = StoredRecordCodec {
+            logical,
+            transcoder: transcoder.map(Rc::new),
         };
         self.stored_record_descriptors
             .borrow_mut()
@@ -275,7 +264,8 @@ impl Database {
 
     /// Bind one stored row as its logical record. Every point, scan and index
     /// read of table rows comes through here, so interned columns are
-    /// resolved to their values before any caller sees the record.
+    /// resolved to their values, and primary-key columns restored from the
+    /// row's key, before any caller sees the record.
     pub(super) fn decode_stored_key_value<'a>(
         &self,
         table: &TableSchema,
@@ -288,6 +278,7 @@ impl Database {
             Some(transcoder) => crate::dictionary::transcode_to_logical(
                 transcoder,
                 &self.ivm_runtime.dictionaries().borrow(),
+                &decode_primary_key_values(table, &key)?,
                 payload,
             )?,
             None => payload.to_vec(),
@@ -297,6 +288,67 @@ impl Database {
             VariantRecord::new(variant_tag, OwnedRecord::new(payload, codec.logical)),
         ))
     }
+}
+
+/// The logical descriptor and stored-row transcoder of one table variant
+/// (see [`TableSchema::stored_record_layout`]), with Groove's errors for an
+/// unknown variant or one that lacks a primary-key column.
+pub(crate) fn stored_record_layout(
+    table: &TableSchema,
+    variant_tag: u32,
+) -> Result<(RecordDescriptor, Option<records::RecordTranscoder>), Error> {
+    match table.stored_record_layout(variant_tag) {
+        Some(layout) => Ok(layout?),
+        None if table
+            .physical_record_schema_for_variant(variant_tag)
+            .is_none() =>
+        {
+            Err(Error::UnknownTableVariant {
+                table: table.name.clone(),
+                version: u64::from(variant_tag),
+            })
+        }
+        None => Err(Error::SchemaVersionMissingPrimaryKey {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+            column: table
+                .primary_key
+                .iter()
+                .flat_map(|key| &key.columns)
+                .find(|column| {
+                    table
+                        .variant(variant_tag)
+                        .and_then(|variant| variant.payload_name_for_shared(&column.column))
+                        .is_none()
+                })
+                .map(|column| column.column.clone())
+                .unwrap_or_default(),
+        }),
+    }
+}
+
+/// Decode a row's encoded primary key into its parts, in key order. Stored
+/// rows leave these fields out; reads restore them from the key.
+pub(crate) fn decode_primary_key_values(
+    table: &TableSchema,
+    key: &[u8],
+) -> Result<Vec<Value>, Error> {
+    let Some(primary_key) = &table.primary_key else {
+        return Ok(Vec::new());
+    };
+    let mut remaining = key;
+    let values = primary_key
+        .columns
+        .iter()
+        .map(|column| decode_primary_key_part(&mut remaining, &column.key_type.column_type()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !remaining.is_empty() {
+        return Err(Error::InvalidDirectRecordStoreKey(format!(
+            "trailing bytes after the primary key of table {}",
+            table.name
+        )));
+    }
+    Ok(values)
 }
 
 /// Rebuild the full encoded primary key of one durable index entry.
@@ -916,4 +968,23 @@ pub(super) fn encode_index_prefix_part(
         }
         _ => encode_key_part(key, value).map_err(Error::IvmRuntime),
     }
+}
+
+/// The storage key and stored bytes of one row of a table without interned
+/// columns, as a write of `values` (declaration order, variant 0) leaves them.
+#[cfg(test)]
+pub(crate) fn stored_table_row(table: &TableSchema, values: &[Value]) -> (Vec<u8>, Vec<u8>) {
+    let descriptor = table.record_schema();
+    let record = descriptor.create(values).expect("values match the table");
+    let key = primary_key_bytes(table, 0, descriptor, &record).expect("the table has a key");
+    let (_, transcoder) = stored_record_layout(table, 0).expect("variant 0 is laid out");
+    let stored = match transcoder {
+        Some(transcoder) => transcoder
+            .to_physical::<records::Error>(&record, |dictionary, _, _| {
+                panic!("stored_table_row cannot intern into {dictionary}")
+            })
+            .expect("the record transcodes"),
+        None => record,
+    };
+    (key, records::encode_variant_record(0, &stored))
 }

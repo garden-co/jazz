@@ -2221,6 +2221,8 @@ pub enum Error {
     UnsupportedInternedPlacement { field: String },
     #[error("a dictionary value cannot hold an indirect large value")]
     IndirectDictionaryValue,
+    #[error("field {index} is named as more than one primary-key part")]
+    DuplicateKeyField { index: usize },
 }
 
 #[cfg(test)]

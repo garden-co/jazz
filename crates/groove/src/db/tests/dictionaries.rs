@@ -107,7 +107,8 @@ fn row_key(id: u64) -> Vec<u8> {
     key
 }
 
-/// The stored payload of one row, bound with the table's physical descriptor.
+/// The stored payload of one row, bound with the table's stored descriptor,
+/// after the `id` its storage key holds: the stored bytes leave it out.
 async fn stored_row(storage: &MemoryStorage, table: &str, id: u64) -> Vec<Value> {
     let stored = storage
         .get(table.to_owned(), row_key(id))
@@ -115,10 +116,15 @@ async fn stored_row(storage: &MemoryStorage, table: &str, id: u64) -> Vec<Value>
         .unwrap()
         .expect("stored row");
     let descriptor = posts_table(table).storage_record_schema();
-    descriptor
-        .bind(version_zero_payload(&stored))
-        .to_values()
-        .unwrap()
+    assert!(descriptor.field_index("id").is_none());
+    std::iter::once(Value::U64(id))
+        .chain(
+            descriptor
+                .bind(version_zero_payload(&stored))
+                .to_values()
+                .unwrap(),
+        )
+        .collect()
 }
 
 /// Contract: point, scan and index reads of a table with interned columns
@@ -412,12 +418,7 @@ async fn a_corrupt_dictionary_is_refused() {
     let storage = posts_storage(&schema);
     let physical = posts_table("posts").storage_record_schema();
     let payload = physical
-        .create(&[
-            Value::U64(1),
-            Value::U32(5),
-            Value::Nullable(None),
-            Value::U64(1),
-        ])
+        .create(&[Value::U32(5), Value::Nullable(None), Value::U64(1)])
         .unwrap();
     storage
         .set(
@@ -935,8 +936,7 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     assert_eq!(
         row(1).await,
         vec![
-            0x00, // variant tag
-            1, 0, 0, 0, 0, 0, 0, 0, // id = 1
+            0x00, // variant tag; id = 1 is in the key only
             0, 0, 0, 0, // tag = code 0 ("red")
             0, 0, 0, 0, 0, // alias = null
         ]
@@ -944,8 +944,7 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     assert_eq!(
         row(2).await,
         vec![
-            0x00, // variant tag
-            2, 0, 0, 0, 0, 0, 0, 0, // id = 2
+            0x00, // variant tag; id = 2 is in the key only
             1, 0, 0, 0, // tag = code 1 ("blue")
             1, 0, 0, 0, 0, // alias = present, code 0 ("red")
         ]

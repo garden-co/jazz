@@ -224,6 +224,12 @@ impl SystemVariantRegistry {
     pub fn deletion_state() -> Self {
         Self(variant_registry_id_for_path("jazz/internal/deletion") | SYSTEM_REGISTRY_MARKER)
     }
+
+    /// The write-base field shared by every Jazz history table, physical and
+    /// logical, so history projections across schema renames keep one shape.
+    pub fn write_base() -> Self {
+        Self(variant_registry_id_for_path("jazz/internal/write_base") | SYSTEM_REGISTRY_MARKER)
+    }
 }
 
 /// Named enum schema whose declaration-order cases have stable `u32` tags.
@@ -280,6 +286,13 @@ impl EnumSchema {
 
     pub fn with_registry_id(mut self, registry_id: u64) -> Self {
         self.registry_id = registry_id;
+        self
+    }
+
+    /// Mark an engine-owned enum identity that is intentionally shared across
+    /// one explicit internal relational boundary.
+    pub fn with_system_registry(mut self, registry: SystemVariantRegistry) -> Self {
+        self.registry_id = registry.0;
         self
     }
 
@@ -1812,7 +1825,9 @@ impl ValueType {
                 );
             }
             Self::Enum(schema) => {
-                if replace || schema.registry_id == 0 {
+                if schema.registry_id & SYSTEM_REGISTRY_MARKER == 0
+                    && (replace || schema.registry_id == 0)
+                {
                     schema.registry_id = variant_registry_id_for_path(path);
                 }
                 for (index, case) in schema.cases.iter_mut().enumerate() {

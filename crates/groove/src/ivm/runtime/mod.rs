@@ -637,6 +637,8 @@ pub enum IvmRuntimeError {
     OutOfOrderRuntimeState { current: String, next: String },
     #[error("persist node expected key/value bytes")]
     PersistRecordMismatch,
+    #[error("stored row of table {table} has a malformed primary key")]
+    InvalidStoredRowKey { table: String },
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
     #[error("multisink subscription must have at least one sink")]

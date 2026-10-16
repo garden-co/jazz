@@ -1,19 +1,25 @@
-//! Conversion between the stored (physical) and logical forms of records
-//! whose descriptor has interned fields.
+//! Conversion between the stored (physical) and logical forms of records.
 //!
-//! An interned field stores a 4-byte dictionary code (`u32` LE) where the
-//! logical record holds the full value. Every other field has the same
-//! encoding in both forms, but the record layout differs: a code is
-//! fixed-width while the logical value usually is not, so fields move between
-//! the fixed region and the variable region. [`RecordTranscoder`] rebuilds a
+//! Two things differ between the forms:
+//!
+//! - An interned field stores a 4-byte dictionary code (`u32` LE) where the
+//!   logical record holds the full value.
+//! - A key field (a primary-key column of the record's table) is not stored
+//!   at all: the row's storage key already holds it, so the logical record
+//!   takes its value from the decoded key.
+//!
+//! Every other field has the same encoding in both forms, but the record
+//! layout differs: a code is fixed-width while the logical value usually is
+//! not, so fields move between the fixed region and the variable region, and
+//! key fields are absent from the stored one. [`RecordTranscoder`] rebuilds a
 //! record field by field in the other form; it never decodes a field that is
-//! not interned.
+//! neither interned nor a key field.
 
 use super::values::{
     decode_value, encode_value, ensure_value_type, validate_canonical_value,
     visit_encoded_indirect_values,
 };
-use super::{Error, RecordDescriptor, ValueType};
+use super::{Error, RecordDescriptor, Value, ValueType};
 
 /// How one interned field of a stored record is laid out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,13 +31,31 @@ struct InternedField {
     logical: ValueType,
 }
 
-/// Rebuilds records of one stored descriptor between its physical form (codes)
-/// and its logical form (values).
+/// Where one field of the logical record comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FieldSource {
+    /// Field `index` of the stored record, resolved through a dictionary when
+    /// interned.
+    Stored {
+        index: usize,
+        interned: Option<InternedField>,
+    },
+    /// Part `index` of the row's primary key.
+    Key(usize),
+}
+
+/// Rebuilds records of one stored descriptor between its physical form (codes,
+/// no key fields) and its logical form (values, every field).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordTranscoder {
     physical: RecordDescriptor,
     logical: RecordDescriptor,
-    fields: Vec<Option<InternedField>>,
+    /// One entry per logical field.
+    sources: Vec<FieldSource>,
+    /// The logical field index of each stored field.
+    logical_by_stored: Vec<usize>,
+    /// The logical field index of each primary-key part, in key order.
+    key_fields: Vec<usize>,
 }
 
 /// The logical descriptor of a stored descriptor: every interned field
@@ -67,44 +91,82 @@ impl RecordDescriptor {
 }
 
 impl RecordTranscoder {
-    /// A transcoder for records stored under `physical`, or `None` when no
-    /// field is interned and the stored bytes already are the logical record.
+    /// A transcoder for records stored under `physical` with every field
+    /// present, or `None` when no field is interned and the stored bytes
+    /// already are the logical record.
     ///
     /// An interned field must sit at top level, optionally under one
     /// `Nullable`; any other placement is refused.
     pub fn new(physical: RecordDescriptor) -> Result<Option<Self>, Error> {
-        if !physical.contains_interned() {
+        Self::with_key_fields(physical, &[])
+    }
+
+    /// A transcoder for records whose full physical descriptor is `physical`
+    /// but whose stored form leaves out the fields at `key_fields` (the
+    /// logical field index of each primary-key part, in key order). `None`
+    /// when nothing is interned or left out.
+    pub fn with_key_fields(
+        physical: RecordDescriptor,
+        key_fields: &[usize],
+    ) -> Result<Option<Self>, Error> {
+        if key_fields.is_empty() && !physical.contains_interned() {
             return Ok(None);
         }
-        let mut fields = Vec::with_capacity(physical.fields().len());
-        for field in physical.fields() {
+        for (position, &index) in key_fields.iter().enumerate() {
+            if index >= physical.fields().len() {
+                return Err(Error::FieldIndexOutOfBounds {
+                    index,
+                    len: physical.fields().len(),
+                });
+            }
+            if key_fields[..position].contains(&index) {
+                return Err(Error::DuplicateKeyField { index });
+            }
+        }
+        let mut sources = Vec::with_capacity(physical.fields().len());
+        let mut logical_by_stored = Vec::with_capacity(physical.fields().len());
+        let mut stored_fields = Vec::with_capacity(physical.fields().len());
+        for (index, field) in physical.fields().iter().enumerate() {
+            if let Some(part) = key_fields.iter().position(|key| *key == index) {
+                sources.push(FieldSource::Key(part));
+                continue;
+            }
             let interned = match &field.value_type {
                 ValueType::Nullable(inner) => inner.as_interned().map(|parts| (parts, true)),
                 other => other.as_interned().map(|parts| (parts, false)),
             };
-            match interned {
+            let interned = match interned {
                 Some(((dictionary, logical), nullable)) if !logical.contains_interned() => {
-                    fields.push(Some(InternedField {
+                    Some(InternedField {
                         dictionary: dictionary.to_owned(),
                         nullable,
                         logical: logical.clone(),
-                    }));
+                    })
                 }
-                None if !field.value_type.contains_interned() => fields.push(None),
+                None if !field.value_type.contains_interned() => None,
                 _ => {
                     return Err(Error::UnsupportedInternedPlacement {
                         field: field.name.clone().unwrap_or_default(),
                     });
                 }
-            }
+            };
+            sources.push(FieldSource::Stored {
+                index: stored_fields.len(),
+                interned,
+            });
+            logical_by_stored.push(index);
+            stored_fields.push(field.clone());
         }
         Ok(Some(Self {
-            physical,
+            physical: RecordDescriptor::new_with_fields(stored_fields),
             logical: logical_record_descriptor(&physical),
-            fields,
+            sources,
+            logical_by_stored,
+            key_fields: key_fields.to_vec(),
         }))
     }
 
+    /// The descriptor of the stored bytes.
     pub fn physical(&self) -> RecordDescriptor {
         self.physical
     }
@@ -113,30 +175,55 @@ impl RecordTranscoder {
         self.logical
     }
 
+    /// The logical field index of each primary-key part the stored form
+    /// leaves out, in key order.
+    pub fn key_fields(&self) -> &[usize] {
+        &self.key_fields
+    }
+
     /// The dictionaries this descriptor's interned fields use, with their
     /// logical value types, in field order (repeats included).
     pub fn interned_dictionaries(&self) -> impl Iterator<Item = (&str, &ValueType)> {
-        self.fields
-            .iter()
-            .flatten()
-            .map(|field| (field.dictionary.as_str(), &field.logical))
+        self.sources.iter().filter_map(|source| match source {
+            FieldSource::Stored {
+                interned: Some(field),
+                ..
+            } => Some((field.dictionary.as_str(), &field.logical)),
+            _ => None,
+        })
     }
 
-    /// Rebuild a stored record in its logical form. `decode` resolves a code
+    /// Rebuild a stored record in its logical form. `key` holds the decoded
+    /// primary-key parts of the row, in key order; `decode` resolves a code
     /// of a named dictionary to the canonical bytes of its value.
     pub fn to_logical<'d, E>(
         &self,
         physical: &[u8],
+        key: &[Value],
         decode: impl Fn(&str, u32) -> Result<&'d [u8], E>,
     ) -> Result<Vec<u8>, E>
     where
         E: From<Error>,
     {
+        if key.len() != self.key_fields.len() {
+            return Err(Error::ArityMismatch {
+                expected: self.key_fields.len(),
+                actual: key.len(),
+            }
+            .into());
+        }
         self.logical
             .create_with_encoded_fields(physical.len() * 2, |index, output| {
-                let span = self.physical.field_span(physical, index)?;
+                let (stored_index, interned) = match &self.sources[index] {
+                    FieldSource::Key(part) => {
+                        self.logical.encode_field_into(index, &key[*part], output)?;
+                        return Ok(());
+                    }
+                    FieldSource::Stored { index, interned } => (*index, interned),
+                };
+                let span = self.physical.field_span(physical, stored_index)?;
                 let stored = &physical[span];
-                let Some(field) = &self.fields[index] else {
+                let Some(field) = interned else {
                     output.extend_from_slice(stored);
                     return Ok(());
                 };
@@ -166,8 +253,9 @@ impl RecordTranscoder {
             })
     }
 
-    /// Rebuild a logical record in its stored form. `encode` returns the code
-    /// of a value (canonical bytes) in a named dictionary.
+    /// Rebuild a logical record in its stored form, leaving out its key
+    /// fields. `encode` returns the code of a value (canonical bytes) in a
+    /// named dictionary.
     pub fn to_physical<E>(
         &self,
         logical: &[u8],
@@ -177,10 +265,15 @@ impl RecordTranscoder {
         E: From<Error>,
     {
         self.physical
-            .create_with_encoded_fields(logical.len(), |index, output| {
+            .create_with_encoded_fields(logical.len(), |stored_index, output| {
+                let index = self.logical_by_stored[stored_index];
                 let span = self.logical.field_span(logical, index)?;
                 let value = &logical[span];
-                let Some(field) = &self.fields[index] else {
+                let FieldSource::Stored {
+                    interned: Some(field),
+                    ..
+                } = &self.sources[index]
+                else {
                     output.extend_from_slice(value);
                     return Ok(());
                 };

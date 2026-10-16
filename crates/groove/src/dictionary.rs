@@ -342,13 +342,14 @@ impl DictionaryRegistry {
 }
 
 /// Transcode a stored record to its logical form, resolving codes through
-/// `dictionaries`.
+/// `dictionaries` and restoring its primary-key fields from `key`.
 pub(crate) fn transcode_to_logical(
     transcoder: &records::RecordTranscoder,
     dictionaries: &DictionaryRegistry,
+    key: &[records::Value],
     physical: &[u8],
 ) -> Result<Vec<u8>, DictionaryTranscodeError> {
-    transcoder.to_logical(physical, |dictionary, code| {
+    transcoder.to_logical(physical, key, |dictionary, code| {
         dictionaries
             .decode(dictionary, code)
             .map_err(DictionaryTranscodeError::Dictionary)

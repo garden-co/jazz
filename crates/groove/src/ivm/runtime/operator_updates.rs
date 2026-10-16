@@ -193,31 +193,28 @@ impl NodeState {
     /// variant. Each variant layout is resolved once for the batch. Every IVM
     /// source that reads base rows from storage comes through here, so a
     /// table's interned columns are resolved to their values (through
-    /// `dictionaries`) before any operator sees a record; tables without
-    /// interned columns keep their stored bytes as they are.
+    /// `dictionaries`), and its primary-key columns restored from each row's
+    /// key, before any operator sees a record.
     pub(super) fn group_source_rows<'a>(
         table: &crate::schema::TableSchema,
         dictionaries: &crate::dictionary::SharedDictionaries,
-        rows: impl IntoIterator<Item = &'a [u8]>,
+        rows: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
         let mut grouped =
             HashMap::<u32, (TableDelta, Option<crate::records::RecordTranscoder>)>::default();
         let mut registry = None;
-        for stored in rows {
+        for (key, stored) in rows {
             let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
             let (group, transcoder) = match grouped.entry(variant_tag) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let storage = table
-                        .storage_record_schema_for_variant(variant_tag)
-                        .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                            table: table.name.clone(),
-                            version: u64::from(variant_tag),
-                        })?;
-                    let transcoder = crate::records::RecordTranscoder::new(storage)?;
-                    let descriptor = transcoder
-                        .as_ref()
-                        .map_or(storage, crate::records::RecordTranscoder::logical);
+                    let unknown = || IvmRuntimeError::UnknownTableVariant {
+                        table: table.name.clone(),
+                        version: u64::from(variant_tag),
+                    };
+                    let (descriptor, transcoder) = table
+                        .stored_record_layout(variant_tag)
+                        .ok_or_else(unknown)??;
                     entry.insert((
                         TableDelta {
                             table: table.name.clone(),
@@ -232,8 +229,13 @@ impl NodeState {
             let record = match transcoder {
                 Some(transcoder) => {
                     let registry = registry.get_or_insert_with(|| dictionaries.borrow());
+                    let key = crate::db::decode_primary_key_values(table, key).map_err(|_| {
+                        IvmRuntimeError::InvalidStoredRowKey {
+                            table: table.name.clone(),
+                        }
+                    })?;
                     Bytes::from(crate::dictionary::transcode_to_logical(
-                        transcoder, registry, payload,
+                        transcoder, registry, &key, payload,
                     )?)
                 }
                 None => Bytes::copy_from_slice(payload),
@@ -263,7 +265,7 @@ impl NodeState {
             inputs
                 .rows(request)?
                 .iter()
-                .map(|(_, stored)| stored.as_slice()),
+                .map(|(key, stored)| (key.as_slice(), stored.as_slice())),
         )?;
         Self::update_table_source(
             input,
@@ -293,7 +295,8 @@ impl NodeState {
             let table_deltas = Self::group_source_rows(
                 table_schema,
                 dictionaries,
-                rows.iter().map(|(_, stored)| stored.as_slice()),
+                rows.iter()
+                    .map(|(key, stored)| (key.as_slice(), stored.as_slice())),
             )?;
             return Self::update_table_source(
                 &TableSourceOp {

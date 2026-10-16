@@ -1422,7 +1422,7 @@ async fn inserts_accept_values_in_table_declaration_order_even_when_storage_orde
         .schema()
         .table("albums")
         .unwrap()
-        .record_schema();
+        .storage_record_schema();
     let stored = database
         .storage
         .get("albums".to_owned(), PrimaryKeyValue::U64(7).into_bytes())
@@ -1431,7 +1431,10 @@ async fn inserts_accept_values_in_table_declaration_order_even_when_storage_orde
         .unwrap();
 
     let stored = version_zero_payload(&stored);
-    assert_eq!(descriptor.get(stored, "id").unwrap(), Value::U64(7));
+    assert!(
+        descriptor.field_index("id").is_none(),
+        "the storage key holds the primary key"
+    );
     assert_eq!(
         descriptor.get(stored, "title").unwrap(),
         Value::String("Blue Train".to_owned())
@@ -1564,7 +1567,7 @@ async fn composite_primary_keys_are_encoded_from_multiple_columns() {
         .schema()
         .table("history")
         .unwrap()
-        .record_schema();
+        .storage_record_schema();
     let stored = database
         .storage
         .get("history".to_owned(), key.clone())

@@ -1000,9 +1000,9 @@ where
     let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
     // The schema is fixed for this batch. Old rows may use several variants,
     // but each variant's descriptor needs preparation only once.
-    // Stored old rows hold dictionary codes; their logical form is built
-    // once per row here, while same-batch rows from the overlay already are
-    // logical.
+    // Stored old rows hold dictionary codes and leave out their key fields;
+    // their logical form is built once per row here, while same-batch rows
+    // from the overlay already are logical.
     let mut old_codecs = HashMap::<(&str, u32), StoredRecordCodec>::new();
     let schema = database.ivm_runtime.schema();
 
@@ -1058,6 +1058,7 @@ where
                     bytes::Bytes::from(crate::dictionary::transcode_to_logical(
                         transcoder,
                         &database.ivm_runtime.dictionaries().borrow(),
+                        &decode_primary_key_values(table_schema, write.key())?,
                         payload,
                     )?)
                 }

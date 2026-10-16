@@ -53,6 +53,8 @@ mod route_barrier_parked_publication;
 mod snapshot_subscription_regressions;
 #[path = "../storage_residency.rs"]
 mod storage_residency;
+#[path = "../stored_rows.rs"]
+mod stored_rows;
 #[path = "../terminal_occurrence_keys.rs"]
 mod terminal_occurrence_keys;
 #[path = "../top_by_terminal_identity.rs"]

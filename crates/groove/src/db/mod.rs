@@ -1512,8 +1512,9 @@ pub struct RuntimeRegistryCheckpoint {
 pub(crate) struct StoredRecordCodec {
     /// The descriptor of the logical record.
     pub(crate) logical: RecordDescriptor,
-    /// Rebuilds stored rows, which hold dictionary codes, as logical records.
-    /// `None` when the table interns nothing and stored bytes are logical.
+    /// Rebuilds stored rows, which hold dictionary codes and leave out the
+    /// primary-key fields, as logical records. `None` when the table interns
+    /// nothing and has no primary key, so stored bytes are logical.
     pub(crate) transcoder: Option<Rc<records::RecordTranscoder>>,
 }
 
@@ -1825,9 +1826,12 @@ mod schema_admission;
 mod storage_helpers;
 
 pub use batch::*;
+#[cfg(test)]
+pub(crate) use encoding::stored_table_row;
 use encoding::*;
 pub(crate) use encoding::{
-    index_record_descriptor, persisted_index_column_value, persisted_index_primary_key,
+    decode_primary_key_values, index_record_descriptor, persisted_index_column_value,
+    persisted_index_primary_key,
 };
 pub use query::GraphOutputDescriptors;
 use schema_admission::*;

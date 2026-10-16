@@ -1304,13 +1304,15 @@ pub(super) async fn snapshot_table_deltas(
         let mut stored_records = Vec::new();
         if let Some(cursor) = &mut cursor {
             while let Some(batch) = cursor.next_batch().await? {
-                stored_records.extend(batch.into_iter().map(|(_, record)| record));
+                stored_records.extend(batch);
             }
         }
         output.extend(NodeState::group_source_rows(
             table_schema,
             dictionaries,
-            stored_records.iter().map(Vec::as_slice),
+            stored_records
+                .iter()
+                .map(|(key, record)| (key.as_slice(), record.as_slice())),
         )?);
     }
     Ok(output)
@@ -1338,7 +1340,7 @@ fn snapshot_table_deltas_from_inputs(
             Some(request) => inputs
                 .rows(request)?
                 .iter()
-                .map(|(_, record)| record.as_slice())
+                .map(|(key, record)| (key.as_slice(), record.as_slice()))
                 .collect::<Vec<_>>(),
             None => Vec::new(),
         };
@@ -1887,14 +1889,16 @@ impl HydrationEvaluator<'_> {
         let storage_descriptor = table_schema.storage_record_schema();
         let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
         let mut scan = store.scan(ScanBounds::Prefix(Vec::new())).await?;
-        let mut stored_records = Vec::<Vec<u8>>::new();
+        let mut stored_records = Vec::new();
         while let Some(batch) = scan.next_batch().await? {
-            stored_records.extend(batch.into_iter().map(|(_, record)| record));
+            stored_records.extend(batch);
         }
         let table_deltas = NodeState::group_source_rows(
             table_schema,
             self.dictionaries,
-            stored_records.iter().map(Vec::as_slice),
+            stored_records
+                .iter()
+                .map(|(key, record)| (key.as_slice(), record.as_slice())),
         )?;
         NodeState::update_table_source(
             table,

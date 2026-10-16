@@ -862,9 +862,10 @@ impl Database {
         }
     }
 
-    /// A set write of a logical record. A table with interned columns also
-    /// gets its stored payload, with dictionary codes in place of values; a
-    /// new value allocates its code here, synchronously.
+    /// A set write of a logical record. A table with a primary key or
+    /// interned columns also gets its stored payload: without the key fields,
+    /// which the storage key holds, and with dictionary codes in place of
+    /// values; a new value allocates its code here, synchronously.
     fn pending_set(
         &self,
         mode: WriteMode,

@@ -5459,8 +5459,8 @@ async fn commits_insert_update_and_delete_batches() {
                 .schema()
                 .table("albums")
                 .unwrap()
-                .record_schema()
-                .create(&[Value::U64(7), Value::String("Blue Train".to_owned())])
+                .storage_record_schema()
+                .create(&[Value::String("Blue Train".to_owned())])
                 .unwrap(),
         ))
     );
@@ -5482,7 +5482,7 @@ async fn commits_insert_update_and_delete_batches() {
         .schema()
         .table("albums")
         .unwrap()
-        .record_schema();
+        .storage_record_schema();
     let stored = version_zero_payload(&stored);
     assert_eq!(
         descriptor.get(stored, "title").unwrap(),
@@ -6854,7 +6854,7 @@ async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes()
             .schema()
             .table("albums")
             .unwrap()
-            .record_schema()
+            .storage_record_schema()
             .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Giant Steps".to_owned())
@@ -6903,7 +6903,7 @@ async fn inserts_over_existing_primary_keys_are_rejected() {
             .schema()
             .table("albums")
             .unwrap()
-            .record_schema()
+            .storage_record_schema()
             .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Blue Train".to_owned())
@@ -7213,6 +7213,9 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
     .with_variant(2, ["id", "label"]);
     let first = table.record_schema_for_variant(1).unwrap();
     let second = table.record_schema_for_variant(2).unwrap();
+    // Stored rows leave out the primary key `id`, which their key holds.
+    let first_stored = table.storage_record_schema_for_variant(1).unwrap();
+    let second_stored = table.storage_record_schema_for_variant(2).unwrap();
     let carrier = table.record_schema();
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&["variant_rows"]).unwrap();
@@ -7220,16 +7223,16 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
     let mut writes = Vec::new();
     for id in 0..1000u64 {
         let (tag, payload) = if id % 2 == 0 {
-            (1, first.create(&[Value::U64(id)]).unwrap())
+            (1, first_stored.create(&[]).unwrap())
         } else {
             (
                 2,
-                second
-                    .create(&[Value::U64(id), Value::String("row".into())])
+                second_stored
+                    .create(&[Value::String("row".into())])
                     .unwrap(),
             )
         };
-        let key = id.to_be_bytes().to_vec();
+        let key = PrimaryKeyValue::U64(id).into_bytes();
         seeds.push(OwnedWriteOperation::Set {
             cf: "variant_rows".into(),
             key: key.clone(),

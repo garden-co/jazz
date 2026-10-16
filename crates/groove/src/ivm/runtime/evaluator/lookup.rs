@@ -151,7 +151,9 @@ impl TickEvaluator<'_> {
             let grouped = NodeState::group_source_rows(
                 table,
                 dictionaries,
-                stored.iter().map(|(_, row)| row.as_slice()),
+                stored
+                    .iter()
+                    .map(|(key, row)| (key.as_slice(), row.as_slice())),
             )?;
             let projected = NodeState::update_table_source(
                 &source,

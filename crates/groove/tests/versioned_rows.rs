@@ -717,7 +717,8 @@ async fn variant_header_is_canonical_varint_and_validated_on_read()
     let entries = storage.prefix("items".to_owned(), Vec::new()).await?;
     let (key, stored) = entries.first().expect("stored row");
     assert_eq!(stored[0], 1);
-    assert_eq!(stored.len(), payload_len + 1);
+    // The stored payload leaves out the 8-byte `id`, which the key holds.
+    assert_eq!(stored.len(), payload_len - 8 + 1);
 
     storage
         .set("items".to_owned(), key.clone(), vec![0x80, 0x00])

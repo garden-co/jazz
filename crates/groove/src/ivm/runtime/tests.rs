@@ -788,21 +788,19 @@ fn recursive_reach_with_renamed_inputs_graph() -> GraphBuilder {
     GraphBuilder::recursive(seed, step, "frontier", 16)
 }
 
-async fn write_edge_rows(
-    storage: &impl OrderedKvStorage,
-    edges: &RecordDescriptor,
-    rows: &[(u64, u64, u64)],
-) {
-    let store = RecordStore::new(storage, "edges", edges);
+async fn write_edge_rows(storage: &impl OrderedKvStorage, rows: &[(u64, u64, u64)]) {
+    let schema = edges_schema();
+    let table = schema.table("edges").unwrap();
+    let descriptor = table.storage_record_schema();
+    let store = RecordStore::new(storage, "edges", &descriptor);
     let operations = rows
         .iter()
         .map(|(id, src, dst)| {
-            let record = edges
-                .create(&[Value::U64(*id), Value::U64(*src), Value::U64(*dst)])
-                .unwrap();
-            let encoded = crate::records::encode_variant_record(0, &record);
-            let key = id.to_be_bytes();
-            store.set(&key, &encoded)
+            let (key, stored) = crate::db::stored_table_row(
+                table,
+                &[Value::U64(*id), Value::U64(*src), Value::U64(*dst)],
+            );
+            store.set(&key, &stored)
         })
         .collect();
     store.write_many(operations).await.unwrap();
@@ -1119,18 +1117,20 @@ async fn table_input_invalidation_removes_retained_memo_index() {
     assert_retained_eval_memo_index_is_consistent(&runtime);
 }
 
-async fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
-    let store = RecordStore::new(storage, "albums", albums);
-    let first = albums
-        .create(&[Value::U64(1), Value::String("one".to_owned())])
-        .unwrap();
-    let second = albums
-        .create(&[Value::U64(2), Value::String("two".to_owned())])
-        .unwrap();
-    let first = crate::records::encode_variant_record(0, &first);
-    let second = crate::records::encode_variant_record(0, &second);
+async fn write_two_album_rows(storage: &impl OrderedKvStorage) {
+    let schema = albums_schema();
+    let table = schema.table("albums").unwrap();
+    let descriptor = table.storage_record_schema();
+    let store = RecordStore::new(storage, "albums", &descriptor);
+    let (first_key, first) =
+        crate::db::stored_table_row(table, &[Value::U64(1), Value::String("one".to_owned())]);
+    let (second_key, second) =
+        crate::db::stored_table_row(table, &[Value::U64(2), Value::String("two".to_owned())]);
     store
-        .write_many(vec![store.set(b"1", &first), store.set(b"2", &second)])
+        .write_many(vec![
+            store.set(&first_key, &first),
+            store.set(&second_key, &second),
+        ])
         .await
         .unwrap();
 }
@@ -1155,10 +1155,9 @@ fn album_count_graph() -> GraphBuilder {
 #[futures_test::test]
 async fn singleton_root_hydration_encodes_once_without_a_second_arrangement() {
     let schema = albums_schema();
-    let albums = schema.table("albums").unwrap().record_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
-    write_two_album_rows(&storage, &albums).await;
+    write_two_album_rows(&storage).await;
     let graph = GraphBuilder::collect_root_ordered(
         GraphBuilder::table("albums"),
         ["id"],
@@ -1201,8 +1200,7 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).expect("valid memory storage families"));
-    let albums = schema.table("albums").unwrap().record_schema();
-    write_two_album_rows(&storage, &albums).await;
+    write_two_album_rows(&storage).await;
 
     let first = runtime
         .subscribe_one_sink(album_count_graph(), &storage)
@@ -1253,7 +1251,7 @@ async fn shared_arg_by_rehydration_replaces_retained_candidates() {
         let albums = schema.table("albums").unwrap().record_schema();
         let mut runtime = IvmRuntime::new(schema).unwrap();
         let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
-        write_two_album_rows(&storage, &albums).await;
+        write_two_album_rows(&storage).await;
         let input = GraphBuilder::table("albums");
         let graph = if maximum {
             GraphBuilder::arg_max_by(input, Vec::<String>::new(), ["id"])
@@ -1322,7 +1320,7 @@ async fn shared_root_collector_rehydration_does_not_multiply_rows() {
     let albums = schema.table("albums").unwrap().record_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
-    write_two_album_rows(&storage, &albums).await;
+    write_two_album_rows(&storage).await;
     let graph = GraphBuilder::collect_root_ordered(
         GraphBuilder::table("albums"),
         ["id"],
@@ -1431,8 +1429,7 @@ async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["albums"]).expect("valid memory storage families"));
-    let albums = schema.table("albums").unwrap().record_schema();
-    write_two_album_rows(&storage, &albums).await;
+    write_two_album_rows(&storage).await;
 
     let one_shot = runtime
         .query_snapshot(album_count_graph(), &storage)
@@ -1704,21 +1701,7 @@ async fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
     let storage = Rc::new(
         crate::storage::MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
     );
-    let albums = schema.table("albums").unwrap().record_schema();
-    let store = RecordStore::new(&storage, "albums", &albums);
-    let first = albums
-        .create(&[Value::U64(1), Value::String("one".to_owned())])
-        .unwrap();
-    let second = albums
-        .create(&[Value::U64(2), Value::String("two".to_owned())])
-        .unwrap();
-    let first = crate::records::encode_variant_record(0, &first);
-    let second = crate::records::encode_variant_record(0, &second);
-
-    store
-        .write_many(vec![store.set(b"1", &first), store.set(b"2", &second)])
-        .await
-        .unwrap();
+    write_two_album_rows(&storage).await;
 
     let subscription = runtime
         .subscribe_one_sink(
@@ -2712,7 +2695,7 @@ async fn recursive_positive_tick_commits_new_facts_exactly_once() {
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
-    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+    write_edge_rows(&storage, &[(1, 1, 2)]).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_graph_with_limit(16), &storage)
@@ -2749,7 +2732,7 @@ async fn recursive_positive_tick_applies_transforms_before_join() {
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
-    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+    write_edge_rows(&storage, &[(1, 1, 2)]).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_with_renamed_inputs_graph(), &storage)
@@ -2787,7 +2770,7 @@ async fn recursive_iteration_limit_rolls_back_partial_positive_tick() {
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
-    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+    write_edge_rows(&storage, &[(1, 1, 2)]).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
@@ -2852,7 +2835,7 @@ async fn recursive_iteration_limit_does_not_leak_staged_durable_index_writes() {
     let storage =
         Rc::new(MemoryStorage::new(&["edges", "indices"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
-    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+    write_edge_rows(&storage, &[(1, 1, 2)]).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
@@ -3051,7 +3034,7 @@ async fn resident_recursive_iteration_limit_discards_staged_state() {
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
     let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
-    write_edge_rows(&storage, &edges, &[(1, 1, 2)]).await;
+    write_edge_rows(&storage, &[(1, 1, 2)]).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_graph_with_limit(1), &storage)
@@ -3106,7 +3089,7 @@ async fn recursive_positive_tick_does_not_reprocess_full_existing_closure() {
     let storage = Rc::new(MemoryStorage::new(&["edges"]).expect("valid memory storage families"));
     let edges = schema.table("edges").unwrap().record_schema();
     let rows = (1..=48).map(|id| (id, id, id + 1)).collect::<Vec<_>>();
-    write_edge_rows(&storage, &edges, &rows).await;
+    write_edge_rows(&storage, &rows).await;
 
     let subscription = runtime
         .subscribe_one_sink(recursive_reach_graph_with_limit(64), &storage)
@@ -3681,9 +3664,12 @@ fn source_batch_prepares_one_descriptor_per_variant() {
     }
     crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
     let dictionaries = crate::dictionary::SharedDictionaries::default();
-    let groups =
-        NodeState::group_source_rows(&table, &dictionaries, rows.iter().map(Vec::as_slice))
-            .unwrap();
+    let groups = NodeState::group_source_rows(
+        &table,
+        &dictionaries,
+        rows.iter().map(|row| (&[][..], row.as_slice())),
+    )
+    .unwrap();
     assert_eq!(
         crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
         2
@@ -3702,7 +3688,7 @@ fn source_batch_prepares_one_descriptor_per_variant() {
     }
     let unknown = crate::records::encode_variant_record(3, &[]);
     assert!(matches!(
-        NodeState::group_source_rows(&table, &dictionaries, [unknown.as_slice()]),
+        NodeState::group_source_rows(&table, &dictionaries, [(&[][..], unknown.as_slice())]),
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }
