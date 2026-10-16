@@ -119,10 +119,11 @@ where
         let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
-        VersionRow::from_wire_with_schema_version(
+        let row = VersionRow::from_wire_with_schema_version(
             table, version, authored, tx_node_alias, schema_alias, tx_time, seq,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
-        )
+        )?;
+        self.with_wire_union_cells(row, version)
     }
 
     async fn ingest_transaction_and_versions_with_current_indexes(
@@ -359,6 +360,7 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
+            let stored = self.with_wire_union_cells(stored, &version)?;
             let mut stored = stored;
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if let Some(global_time) = global_time

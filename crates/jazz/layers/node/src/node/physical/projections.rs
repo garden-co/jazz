@@ -410,16 +410,9 @@ where
                         .ok_or(Error::InvalidStoredValue(
                             "physical projection source schema alias missing",
                         ))?;
-                    let cases = if source_mapping.variant_cases.is_empty() {
-                        vec![(groove_variant_tag(source_alias)?, None)]
-                    } else {
-                        source_mapping
-                            .variant_cases
-                            .iter()
-                            .map(|case| (case.tag, Some(&case.fields)))
-                            .collect()
-                    };
-                    for (tag, present) in cases {
+                    let cases = self.source_row_cases(source_alias, *source_schema, &source_table_name, &source_mapping)?;
+                    for SourceRowCase { tag, present, extras } in cases {
+                    let present = present.as_ref();
                         let Some(fields) = self.physical_history_projection_case(
                             *source_schema,
                             source_table_name,
@@ -427,6 +420,7 @@ where
                             target_schema,
                             &target_table_name,
                             present,
+                            &extras,
                         )?
                         else {
                             self.database
@@ -517,16 +511,9 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical current projection source schema alias missing",
                     ))?;
-                let cases = if source_mapping.variant_cases.is_empty() {
-                    vec![(groove_variant_tag(source_alias)?, None)]
-                } else {
-                    source_mapping
-                        .variant_cases
-                        .iter()
-                        .map(|case| (case.tag, Some(&case.fields)))
-                        .collect()
-                };
-                for (tag, present) in cases {
+                let cases = self.source_row_cases(source_alias, source_schema, &source_table_name, &source_mapping)?;
+                for SourceRowCase { tag, present, extras } in cases {
+                    let present = present.as_ref();
                     let fields = self.physical_current_projection_case(
                         source_schema,
                         &source_table_name,
@@ -534,6 +521,7 @@ where
                         target_schema,
                         &target_table_name,
                         present,
+                        &extras,
                     )?;
                     for storage_table in &storage_tables {
                         if let Some(fields) = fields.clone() {
@@ -662,16 +650,9 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical current projection source schema alias missing",
                 ))?;
-            let cases = if source_mapping.variant_cases.is_empty() {
-                vec![(groove_variant_tag(source_alias)?, None)]
-            } else {
-                source_mapping
-                    .variant_cases
-                    .iter()
-                    .map(|case| (case.tag, Some(&case.fields)))
-                    .collect()
-            };
-            for (tag, present) in cases {
+            let cases = self.source_row_cases(source_alias, source_schema, &source_table_name, &source_mapping)?;
+            for SourceRowCase { tag, present, extras } in cases {
+                    let present = present.as_ref();
                 let fields = self.physical_current_projection_case_for_enum_columns(
                     source_schema,
                     &source_table_name,
@@ -679,6 +660,7 @@ where
                     target_schema,
                     target_table_name,
                     present,
+                    &extras,
                     Some(&required_enum_columns),
                 )?;
                 for storage_table in &storage_tables {
@@ -808,19 +790,13 @@ where
                 .iter()
                 .map(|(column, id)| (physical_user_column_field(*id), column.clone()))
                 .collect::<BTreeMap<_, _>>();
-            let cases = if source_mapping.variant_cases.is_empty() {
-                vec![(groove_variant_tag(source_alias)?, None)]
-            } else {
-                source_mapping
-                    .variant_cases
-                    .iter()
-                    .map(|case| (case.tag, Some(&case.fields)))
-                    .collect()
-            };
-            for (tag, present) in cases {
+            let cases = self.source_row_cases(source_alias, source_schema, &source_table_name, &source_mapping)?;
+            for SourceRowCase { tag, present, extras } in cases {
+                    let present = present.as_ref();
                 let available =
                     physical_current_field_names_for_case(&source_table, &source_mapping, present)?
                         .into_iter()
+                        .chain(extras.iter().map(|column_id| physical_user_column_field(*column_id)))
                         .collect::<BTreeSet<_>>();
                 for storage_table in &storage_tables {
                     let fields = output
@@ -1082,6 +1058,7 @@ where
             target_schema,
             target_table_name,
             None,
+            &[],
             Some(&required_enum_columns),
         )?
         .ok_or(Error::InvalidStoredValue(
@@ -1116,6 +1093,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
         )?;
         for desired in desired_tables {
             let existing = match self.database.table_schema(&desired.name) {
@@ -1198,6 +1176,51 @@ where
         Ok(())
     }
 
+    /// The row cases a source schema's rows are stored under: its authored
+    /// case, and its union case when the lineage has columns it lacks.
+    fn source_row_cases(
+        &mut self,
+        source_alias: SchemaVersionAlias,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+    ) -> Result<Vec<SourceRowCase>, Error> {
+        let mut cases = if source_mapping.variant_cases.is_empty() {
+            vec![SourceRowCase {
+                tag: groove_variant_tag(source_alias)?,
+                present: None,
+                extras: Vec::new(),
+            }]
+        } else {
+            source_mapping
+                .variant_cases
+                .iter()
+                .map(|case| SourceRowCase {
+                    tag: case.tag,
+                    present: Some(case.fields.clone()),
+                    extras: Vec::new(),
+                })
+                .collect()
+        };
+        // A union case reads its stored extras directly; every other column
+        // takes the lens path from the case's schema, as its own case does.
+        let union_case = !union_extra_columns(
+            &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
+            source_schema,
+            source_table_name,
+        )?
+        .is_empty();
+        if union_case {
+            cases.push(SourceRowCase {
+                tag: union_variant_tag(source_alias)?,
+                present: None,
+                extras: self.union_stored_extras(source_schema, source_table_name)?,
+            });
+        }
+        Ok(cases)
+    }
+
     fn physical_history_projection_case(
         &mut self,
         source_schema: SchemaVersionId,
@@ -1206,6 +1229,7 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
         present: Option<&BTreeSet<String>>,
+        extras: &[PhysicalColumnId],
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_content_projection_case(
             source_schema,
@@ -1215,6 +1239,7 @@ where
             target_table_name,
             ContentProjectionShape::History,
             present,
+            extras,
             None,
         )
     }
@@ -1238,6 +1263,7 @@ where
             target_table_name,
             ContentProjectionShape::History,
             present,
+            &[],
             required_enum_columns,
         )
     }
@@ -1250,6 +1276,7 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
         present: Option<&BTreeSet<String>>,
+        extras: &[PhysicalColumnId],
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_current_projection_case_for_enum_columns(
             source_schema,
@@ -1258,6 +1285,7 @@ where
             target_schema,
             target_table_name,
             present,
+            extras,
             None,
         )
     }
@@ -1270,6 +1298,7 @@ where
         target_schema: SchemaVersionId,
         target_table_name: &str,
         present: Option<&BTreeSet<String>>,
+        extras: &[PhysicalColumnId],
         required_enum_columns: Option<&BTreeSet<PhysicalColumnId>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         self.physical_content_projection_case(
@@ -1280,6 +1309,7 @@ where
             target_table_name,
             ContentProjectionShape::Current,
             present,
+            extras,
             required_enum_columns,
         )
     }
@@ -1293,6 +1323,7 @@ where
         target_table_name: &str,
         shape: ContentProjectionShape,
         present: Option<&BTreeSet<String>>,
+        extras: &[PhysicalColumnId],
         required_enum_columns: Option<&BTreeSet<PhysicalColumnId>>,
     ) -> Result<Option<Vec<ProjectField>>, Error> {
         #[derive(Clone)]
@@ -1352,6 +1383,31 @@ where
                     CompiledLensOp::Drop { column } => {
                         cells.remove(&column);
                     }
+                }
+            }
+        }
+        // A union row carries the lineage's other columns as fields of its
+        // own: a target column stored there reads that field, whatever the
+        // lens would derive (SPEC 10 §10.3, "Union row cases").
+        if !extras.is_empty() {
+            let target_columns = self
+                .catalogue
+                .physical_mappings
+                .get(&target_schema)
+                .and_then(|mapping| mapping.tables.get(target_table_name))
+                .ok_or(Error::InvalidStoredValue(
+                    "union projection target mapping missing",
+                ))?
+                .columns
+                .clone();
+            for column in &target_table.columns {
+                if let Some(column_id) = target_columns.get(&column.name)
+                    && extras.contains(column_id)
+                {
+                    cells.insert(
+                        column.name.clone(),
+                        CellProjection::Field(physical_user_column_field(*column_id)),
+                    );
                 }
             }
         }

@@ -208,6 +208,16 @@ fn version_bundle_record_key(
     )
 }
 
+/// Where a version sits in its transaction: its authored identity, or for
+/// Core's post-image of a write, the physical row it addresses. A post-image
+/// is laid out in the row's newest schema version, which need not be the one
+/// (or name the table as) the patch it replaces was authored in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BundleRecordKey {
+    Authored((String, BranchKey, RowUuid, SchemaVersionId, bool)),
+    PostImage(PhysicalTableId, BranchKey, RowUuid, bool),
+}
+
 fn content_row_members_for_bundle(
     members: &[ResultMemberEntry],
     context: &'static str,
@@ -337,6 +347,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn bundle_record_key(
+        &self,
+        version: &VersionRecord,
+        post_image: bool,
+    ) -> Result<BundleRecordKey, Error> {
+        if !post_image {
+            return Ok(BundleRecordKey::Authored(version_bundle_record_key(
+                version,
+            )));
+        }
+        Ok(BundleRecordKey::PostImage(
+            self.physical_table_id_for_schema(version.schema_version(), version.table())?,
+            version.branch_key().clone(),
+            version.row_uuid(),
+            version.deletion().is_some(),
+        ))
+    }
+
     /// Recover the deletion-register winner currently visible at the
     /// subscription tier for an optimized scalar root. Result membership tells
     /// us that the row is visible, but not whether that visibility is due to a
@@ -416,22 +444,6 @@ where
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
-            // A settled transaction's stored versions are read at the
-            // bundle's coordinates; the checks below compare row for row.
-            let stored_versions = self
-                .stored_versions_for_tx_at(*tx_id, &stored, &bundle.versions)
-                .await?;
-            let mut stored_by_key = BTreeMap::new();
-            for stored_version in &stored_versions {
-                let version = self.version_record_from_row(stored_version)?;
-                stored_by_key.insert(version_bundle_record_key(&version), version);
-            }
-            let incoming_by_key = bundle
-                .versions
-                .iter()
-                .cloned()
-                .map(|version| (version_bundle_record_key(&version), version))
-                .collect::<BTreeMap<_, _>>();
             // An accepted, Core-sequenced bundle carries Core's post-images,
             // which replace a locally stored authored unit: this node's own
             // patch, or, on a client relay (a browser worker), the patch it
@@ -446,6 +458,26 @@ where
                     || (self.client_relay_scope().is_some()
                         && (stored.global_time.is_none()
                             || stored.global_time == bundle.global_time)));
+            // A settled transaction's stored versions are read at the
+            // bundle's coordinates; the checks below compare row for row.
+            let stored_versions = self
+                .stored_versions_for_tx_at(*tx_id, &stored, &bundle.versions)
+                .await?;
+            let mut stored_by_key = BTreeMap::new();
+            for stored_version in &stored_versions {
+                let version = self.version_record_from_row(stored_version)?;
+                stored_by_key.insert(
+                    self.bundle_record_key(&version, carries_post_images)?,
+                    version,
+                );
+            }
+            let mut incoming_by_key = BTreeMap::new();
+            for version in &bundle.versions {
+                incoming_by_key.insert(
+                    self.bundle_record_key(version, carries_post_images)?,
+                    version.clone(),
+                );
+            }
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming

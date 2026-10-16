@@ -3408,7 +3408,7 @@ impl ReadOpts {
     }
 }
 
-pub use crate::node::api_error::{Error, ErrorCode};
+pub use crate::node::api_error::{Error, ErrorCode, StorageCodecMismatch};
 
 fn transaction_abandoned(open_tx_id: OpenTransactionId) -> Error {
     Error::new(

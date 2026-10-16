@@ -462,7 +462,7 @@ rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorS
   required, with fields `(time, node_id, kind, made_by, rejection_reason,
 user_metadata)`.
 
-This layout is covered by the `jazz.node-storage.v1` root profile (with
+This layout is covered by the `jazz.node-storage.v2` root profile (with
 `groove.dictionary.v1` for the interned authors). Roots written with an
 earlier layout lack those profile markers and are refused at manifest
 admission, without migration or a physical epoch/wire bump.

@@ -87,7 +87,7 @@ never silently accepted.
 None. alpha.60 is a coordinated breaking release, so a store written by an
 earlier build is refused by the storage codec profile before any of these
 decoders runs, as for earlier layout changes: the layout is covered by the
-node root's `jazz.node-storage.v1` marker (#4071), and interned authors add
+node root's `jazz.node-storage.v2` marker (#4071, v2 since the union row cases of #4023), and interned authors add
 `groove.dictionary.v1` to the node profile, so a node root without it is
 refused with `UnsupportedStorageCodecs { missing: ["groove.dictionary.v1"] }`. A store from this build that a
 later release truncates is refused by this build with
@@ -108,7 +108,7 @@ manifest equals the expected one exactly:
   `StorageEpochManifest::admit_existing`
   (`v2.0.0-alpha.59:crates/groove/src/storage/manifest.rs:220-231`) requires
   `found == self`, so a manifest naming `groove.dictionary.v1`,
-  `groove.durable-index.v2` or `jazz.node-storage.v1` fails with
+  `groove.durable-index.v2` or `jazz.node-storage.v2` fails with
   `Invalid("storage manifest is inconsistent with this adapter")`.
 - Browser (IndexedDB): `assertStorageManifest` compares `requiredCodecIds`
   element by element
