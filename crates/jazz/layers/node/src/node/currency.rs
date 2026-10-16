@@ -50,10 +50,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for record in raws {
-                versions.push(
-                    self.decode_stored_history_record(None, table, &storage_table, record)
-                        .await?,
-                );
+                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -90,10 +87,7 @@ where
             for record in records {
                 // Keep the authoring name; the schema selected the physical
                 // identity before the scan, including after a table rename.
-                versions.push(
-                    self.decode_stored_physical_history_record(&storage_table, record)
-                        .await?,
-                );
+                versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -124,10 +118,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for raw in raws {
-                versions.push(
-                    self.decode_stored_history_record(None, table, &storage_table, raw)
-                        .await?,
-                );
+                versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -406,8 +397,6 @@ where
         // Across a schema lineage the current table may be a different
         // physical projection than this schema's history table; only the
         // same-lineage layout is a byte-for-byte image of the history row.
-        // History stores `updated_by` nullable; current always has it.
-        let updated_by_idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
         // History also ends with `counter_signs` and the merge fields (after
         // `authored_columns`), which current lacks: a settled image's signs
         // are empty, its seq is the current row's, and the image carries no
@@ -438,14 +427,8 @@ where
                     return false;
                 }
                 let source = source_of(index);
-                let history_type = &history_descriptor.fields()[index].value_type;
-                let history_type = match history_type {
-                    groove::records::ValueType::Nullable(inner) if index == updated_by_idx => {
-                        inner.as_ref()
-                    }
-                    other => other,
-                };
-                &current_descriptor.fields()[source].value_type != history_type
+                current_descriptor.fields()[source].value_type
+                    != history_descriptor.fields()[index].value_type
             })
         {
             return Ok(None);
@@ -465,15 +448,6 @@ where
                         _ => Value::Bytes(Vec::new()),
                     };
                     history_descriptor.encode_field_into(index, &value, output)?;
-                    return Ok(());
-                }
-                if index == updated_by_idx {
-                    let author = current.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX)?;
-                    history_descriptor.encode_field_into(
-                        index,
-                        &Value::Nullable(Some(Box::new(author))),
-                        output,
-                    )?;
                     return Ok(());
                 }
                 let value = match index {
@@ -548,9 +522,7 @@ where
             let Some((pending, raw)) = found else {
                 continue;
             };
-            let candidate = self
-                .decode_stored_history_record(None, table, &storage_table, raw)
-                .await?;
+            let candidate = self.decode_history_owned_record(table, &storage_table, raw)?;
             let seq = candidate.seq()?;
             let replace = match winner.as_ref() {
                 None => true,
@@ -601,9 +573,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for record in raws {
-                let version = self
-                    .decode_stored_history_record(None, table, &storage_table, record)
-                    .await?;
+                let version = self.decode_history_owned_record(table, &storage_table, record)?;
                 let tx_id = self.version_tx_id(&version)?;
                 versions_by_key.insert(
                     (version.branch_key().clone(), version.row_uuid(), tx_id),
@@ -632,8 +602,6 @@ where
         let Some(tx) = self.query_transaction(tx_id).await? else {
             return Ok(Vec::new());
         };
-        // Its images omit `updated_by` when it is this author.
-        self.remember_history_tx_author(tx.tx.tx_id.time, tx.node_alias, tx.tx.made_by)?;
         if let Some(mut versions) = self.cached_tx_versions(tx_id) {
             versions.sort_by(|left, right| {
                 left.table()
@@ -669,10 +637,7 @@ where
             let Some(record) = found else {
                 continue;
             };
-            versions.push(
-                self.decode_stored_physical_history_record(&storage_table, record)
-                    .await?,
-            );
+            versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
         }
         versions.sort_by(|left, right| {
             left.table()
@@ -744,46 +709,10 @@ where
         )
     }
 
-    /// Decode a history image read from storage and fill in the
-    /// `updated_by` that storage omits when it is the author of the image's
-    /// own transaction (SPEC 2 §2.7.1). `batch` makes a transaction record
-    /// staged in the open batch visible.
-    pub(super) async fn decode_stored_history_record(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        requested_table: &str,
-        storage_table: &str,
-        record: OwnedRecord,
-    ) -> Result<VersionRow, Error> {
-        let version = self.decode_history_owned_record(requested_table, storage_table, record)?;
-        self.resolve_history_updated_by(batch, version).await
-    }
-
-    /// Cache a transaction's author for `resolve_history_updated_by`.
-    pub(super) fn remember_history_tx_author(
-        &mut self,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-        made_by: AuthorSubject,
-    ) -> Result<(), Error> {
-        if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES
-            && !self
-                .history_tx_authors
-                .contains_key(&(tx_time, tx_node_alias))
-        {
-            self.history_tx_authors.clear();
-        }
-        self.history_tx_authors.insert(
-            (tx_time, tx_node_alias),
-            encode_history_updated_by(row_author_value(made_by)?)?,
-        );
-        Ok(())
-    }
-
     /// Decode a record read from a `jazz_physical_{id}_history` table. The
     /// logical table comes from the catalogue mapping of the record's own
     /// schema version, so no table name is passed.
-    pub(super) async fn decode_stored_physical_history_record(
+    pub(super) fn decode_stored_physical_history_record(
         &mut self,
         storage_table: &str,
         record: OwnedRecord,
@@ -793,45 +722,7 @@ where
                 "history record is not from a physical history table",
             ));
         }
-        self.decode_stored_history_record(None, "", storage_table, record)
-            .await
-    }
-
-    /// Fill in `updated_by` from the `made_by` of the image's transaction
-    /// when history storage omitted it. Transaction authors are immutable,
-    /// so they are cached by `(tx_time, tx_node)`.
-    pub(super) async fn resolve_history_updated_by(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        version: VersionRow,
-    ) -> Result<VersionRow, Error> {
-        if !version.updated_by_is_implicit()? {
-            return Ok(version);
-        }
-        let key = (version.tx_time(), version.tx_node_alias());
-        let author = match self.history_tx_authors.get(&key) {
-            Some(author) => Rc::clone(author),
-            None => self.load_history_tx_author(batch, key).await?,
-        };
-        let input = version.record.borrowed();
-        let descriptor = input.descriptor();
-        let raw = descriptor.create_with_encoded_fields::<Error>(
-            input.raw().len() + author.len(),
-            |index, output| {
-                if index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
-                    output.extend_from_slice(&author);
-                } else {
-                    let span = descriptor.field_span(input.raw(), index)?;
-                    output.extend_from_slice(&input.raw()[span]);
-                }
-                Ok(())
-            },
-        )?;
-        Ok(VersionRow {
-            table: version.table.clone(),
-            branch_key: version.branch_key.clone(),
-            record: OwnedRecord::new(raw, descriptor),
-        })
+        self.decode_history_owned_record("", storage_table, record)
     }
 
     fn remember_history_tx_seq(
@@ -845,7 +736,7 @@ where
             .map(GlobalTime);
         if let Some(global_time) = global_time {
             let mut seqs = self.history_tx_seqs.borrow_mut();
-            if seqs.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
+            if seqs.len() >= HISTORY_TX_SEQ_CACHE_MAX_ENTRIES {
                 seqs.clear();
             }
             seqs.insert((tx_time, tx_node_alias), global_time);
@@ -881,39 +772,6 @@ where
             return Ok(None);
         };
         self.remember_history_tx_seq(tx_time, tx_node_alias, raw.record())
-    }
-
-    async fn load_history_tx_author(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        key: (TxTime, NodeAlias),
-    ) -> Result<Rc<[u8]>, Error> {
-        let primary_key = [Value::U64(key.0.0), Value::U64(key.1.0)];
-        let raw = match batch {
-            Some(batch) => {
-                self.database
-                    .primary_key_get_raw_in_batch(batch, "jazz_transactions", &primary_key)
-                    .await?
-            }
-            None => {
-                self.database
-                    .primary_key_get_raw("jazz_transactions", &primary_key)
-                    .await?
-            }
-        }
-        .ok_or(Error::InvalidStoredValue(
-            "a history image without updated_by needs its transaction record",
-        ))?;
-        self.remember_history_tx_seq(key.0, key.1, raw.record())?;
-        let author = encode_history_updated_by(
-            raw.record()
-                .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-        )?;
-        if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
-            self.history_tx_authors.clear();
-        }
-        self.history_tx_authors.insert(key, Rc::clone(&author));
-        Ok(author)
     }
 
     pub(super) fn decode_history_owned_record(
@@ -978,10 +836,20 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields(tx_id, |state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields(tx_id, |_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     pub(super) async fn query_transaction_state(
@@ -1130,7 +998,9 @@ where
                     continue;
                 }
                 let tx_id = TxId::new(time, node);
-                let tx = self.stored_transaction_from_record(tx_id, alias, record)?;
+                let tx = self
+                    .stored_transaction_from_header(tx_id, alias, record)
+                    .await?;
                 context.tx_rows.insert(tx_id, Some(tx));
             }
         }
@@ -1142,10 +1012,20 @@ where
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields_by_alias(tx_id, expected_alias, &|state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields_by_alias(tx_id, expected_alias, &|_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     async fn query_transaction_fields_by_alias<T>(
@@ -1174,7 +1054,11 @@ where
         decode(self, expected_alias, record).map(Some)
     }
 
-    fn stored_transaction_from_record(
+    /// Assemble a stored transaction from its `jazz_transactions` record and
+    /// the records beside it: its `jazz_pending_transactions` record while it
+    /// is unsettled, and its `jazz_tx_provenance` record when its flags say it
+    /// has one (SPEC 2 §2.8).
+    async fn stored_transaction_from_header(
         &self,
         tx_id: TxId,
         expected_alias: NodeAlias,
@@ -1184,50 +1068,90 @@ where
         TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
-        let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
-            match record.get_idx(idx)? {
-                Value::Nullable(None) => Ok(None),
-                Value::Nullable(Some(value)) => match *value {
-                    Value::Bytes(bytes) => Ok(Some(bytes)),
-                    _ => Err(Error::InvalidStoredValue(
-                        "exclusive read evidence slot is not bytes",
-                    )),
-                },
-                _ => Err(Error::InvalidStoredValue(
-                    "exclusive read evidence slot is not nullable",
-                )),
-            }
+        let flags = transaction_flags(record)?;
+        let made_by =
+            RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject();
+        let permission_subject = transaction_permission_subject(record, made_by)?;
+        let fate = fate_from_encoded_fields(record)?;
+        let global_time = record
+            .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime);
+        let key = [Value::U64(tx_id.time.0), Value::U64(expected_alias.0)];
+        let pending = if global_time.is_none() && !matches!(fate, Fate::Rejected(_)) {
+            self.database
+                .primary_key_get_raw(PENDING_TRANSACTIONS_TABLE, &key)
+                .await?
+        } else {
+            None
         };
-        let slots = [
-            evidence_slot(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
-        ];
-        if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
-            return Err(Error::InvalidStoredValue(
-                "mergeable transaction carries exclusive read evidence",
-            ));
-        }
-        let evidence = super::exclusive_read_evidence::decode_evidence_slots(
-            slots[0].as_deref(),
-            slots[1].as_deref(),
-            slots[2].as_deref(),
-            slots[3].as_deref(),
-        )?;
+        let evidence = match &pending {
+            Some(raw) => {
+                let pending = raw.record();
+                let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
+                    match pending.get_idx(idx)? {
+                        Value::Nullable(None) => Ok(None),
+                        Value::Nullable(Some(value)) => match *value {
+                            Value::Bytes(bytes) => Ok(Some(bytes)),
+                            _ => Err(Error::InvalidStoredValue(
+                                "exclusive read evidence slot is not bytes",
+                            )),
+                        },
+                        _ => Err(Error::InvalidStoredValue(
+                            "exclusive read evidence slot is not nullable",
+                        )),
+                    }
+                };
+                let slots = [
+                    evidence_slot(PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
+                ];
+                if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "mergeable transaction carries exclusive read evidence",
+                    ));
+                }
+                if !matches!(fate, Fate::Pending) && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "settled transaction keeps exclusive read evidence",
+                    ));
+                }
+                super::exclusive_read_evidence::decode_evidence_slots(
+                    slots[0].as_deref(),
+                    slots[1].as_deref(),
+                    slots[2].as_deref(),
+                    slots[3].as_deref(),
+                )?
+            }
+            None => super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
+        };
+        let contribution_merge = if flags & TX_FLAG_HAS_PROVENANCE != 0 {
+            let raw = self
+                .database
+                .primary_key_get_raw(TX_PROVENANCE_TABLE, &key)
+                .await?
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction flags name a missing provenance record",
+                ))?;
+            let provenance = raw.record();
+            Some(self.contribution_merge_from_storage_record(
+                <OwnedRecord as records::RecordField>::read(
+                    &provenance,
+                    TxProvenanceRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
+                )?,
+            )?)
+        } else {
+            None
+        };
         let tx = Transaction {
             tx_id,
             kind,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: RowAuthor::from_record(
-                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
-            permission_subject: <Option<AuthorSubject> as groove::records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
-            )?,
+            made_by,
+            permission_subject,
             base_snapshot: evidence.base_snapshot,
             row_read_set: evidence.row_read_set,
             absent_read_set: evidence.absent_read_set,
@@ -1235,29 +1159,21 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            contribution_merge: <Option<OwnedRecord> as records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
-            )?
-            .map(|record| self.contribution_merge_from_storage_record(record))
-            .transpose()?,
+            contribution_merge,
         };
         // Recovery and ordinary durable reads must fail closed on malformed
         // strategy-defined contribution identities before they can influence
         // a later merge calculation.
         self.validate_contribution_merge_operation_identities(&tx)?;
-        let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
             tx,
             node_alias: expected_alias,
             fate,
-            global_time: record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                .map(GlobalTime),
+            global_time,
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            is_partial: record.get_bool(TransactionRowRecord::FIELD_IS_PARTIAL_IDX)?,
+            is_partial: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 
@@ -1387,23 +1303,7 @@ where
         let Some(record) = raw else {
             return Ok(None);
         };
-        self.decode_stored_history_record(None, table, storage_table, record)
-            .await
+        self.decode_history_owned_record(table, storage_table, record)
             .map(Some)
     }
-}
-
-/// The encoded history `updated_by` field (`Nullable<RowAuthor>`) holding
-/// `author`. A variable field's bytes do not depend on its position, so one
-/// encoding serves every history table's field
-/// `HistoryRowRecord::FIELD_UPDATED_BY_IDX`, and resolving an image copies it
-/// instead of re-encoding the author.
-fn encode_history_updated_by(author: Value) -> Result<Rc<[u8]>, Error> {
-    let descriptor = records::RecordDescriptor::new([(
-        "updated_by",
-        crate::ids::RowAuthor::value_type().nullable(),
-    )]);
-    let mut encoded = Vec::new();
-    descriptor.encode_field_into(0, &Value::Nullable(Some(Box::new(author))), &mut encoded)?;
-    Ok(encoded.into())
 }

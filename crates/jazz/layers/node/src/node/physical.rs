@@ -44,11 +44,8 @@ enum PhysicalWriteField {
     },
     CreatedAtMillis,
     UpdatedAtMillis,
-    /// A current row's `updated_by`: always stored.
+    /// A current row's `updated_by`.
     UpdatedBy,
-    /// A history image's `updated_by`: null when it is the author of the
-    /// image's own transaction, which a read takes from that transaction.
-    HistoryUpdatedBy,
     GlobalTime,
 }
 

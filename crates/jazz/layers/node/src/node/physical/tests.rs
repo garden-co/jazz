@@ -162,11 +162,7 @@ mod variant_case_tests {
                 ("counter_signs", GrooveColumnType::Bytes),
                 ("seq", GrooveColumnType::U64),
                 ("base_seq", GrooveColumnType::U64.nullable()),
-                (
-                    "base_pending",
-                    GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
-                        .nullable()
-                ),
+                ("base_pending", crate::schema::history_base_pending_storage_type()),
             ]
         );
         let key = history.primary_key.as_ref().unwrap();

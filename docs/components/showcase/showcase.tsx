@@ -37,6 +37,7 @@ import {
 } from "@/lib/showcase/catalogue";
 import { stitchFormerHistory, summarize, type MetricSummary } from "@/lib/showcase/summary";
 
+import { FieldMetrics } from "./field-metrics";
 import { basisText, Change, WithHistory } from "./metrics";
 
 const repo = "https://github.com/garden-co/jazz";
@@ -298,6 +299,7 @@ function Hero({
             <BenchmarkTable entries={others} />
           </VStack>
         )}
+        <FieldMetrics exampleId={example.id} />
         <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
           <Placeholder
             title="What it costs to run"

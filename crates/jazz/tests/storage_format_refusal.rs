@@ -20,6 +20,7 @@ use jazz::tools::{
 };
 use sha2::{Digest, Sha256};
 
+const DICTIONARY_V1: &str = "groove.dictionary.v1";
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
 const TRANSACTION_RECORD: &str = "jazz.transaction-record.v1";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
@@ -51,6 +52,9 @@ fn assert_legacy_profile_refused(
     if !old.codec_ids().any(|id| id == DURABLE_INDEX_V2) {
         expected_missing.insert(0, DURABLE_INDEX_V2);
     }
+    if !old.codec_ids().any(|id| id == DICTIONARY_V1) {
+        expected_missing.insert(0, DICTIONARY_V1);
+    }
     let expected_unknown = old
         .codec_ids()
         .filter(|id| id.starts_with("jazz."))
@@ -80,6 +84,7 @@ fn published_alpha54_archive() -> Vec<u8> {
 
 fn alpha54_missing() -> Vec<String> {
     vec![
+        DICTIONARY_V1.to_owned(),
         DURABLE_INDEX_V2.to_owned(),
         "groove.large-value.v2".to_owned(),
         "groove.ordered-chunk-storage.v2".to_owned(),
@@ -185,15 +190,16 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 }
 
 /// A published alpha.54 client root (DAG layout) is refused at open with the
-/// typed `UnsupportedStorageCodecs` error naming the durable-index,
-/// node-storage profiles it lacks, instead of opening and failing later with a record decode error.
+/// typed `UnsupportedStorageCodecs` error naming the dictionary,
+/// durable-index and node-storage families it lacks, instead of opening and failing later with a record decode error.
 ///
 /// Actors: `alice` upgrades her native app from alpha.54 over the same
 /// data directory.
 ///
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                               missing [groove.durable-index.v2,
+///                                               missing [groove.dictionary.v1,
+///                                                        groove.durable-index.v2,
 ///                                                        jazz.node-storage.v2]
 /// ```
 #[test]
@@ -294,7 +300,9 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 ///
 /// ```text
 /// dave's pre-index-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                              missing [groove.durable-index.v2, jazz.node-storage.v2]
+///                                              missing [groove.dictionary.v1,
+///                                                       groove.durable-index.v2,
+///                                                       jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durable_index_family_is_refused() {
@@ -329,7 +337,8 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 ///
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                                  missing [jazz.node-storage.v2]
+///                                                  missing [groove.dictionary.v1,
+///                                                           jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durability_v2_family_is_refused() {
@@ -470,4 +479,50 @@ fn transaction_string_marker_root_is_refused_before_mutation() {
     let before = std::fs::read(&path).unwrap();
     assert_legacy_profile_refused(open_sqlite(&path), &old);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A node root written before interned author columns (no
+/// `groove.dictionary.v1`) is refused at manifest admission, naming only the
+/// dictionary family, before any author column is decoded: its rows hold
+/// full authors where the current layout expects 4-byte codes. The SQLite
+/// file is left byte-for-byte unchanged.
+///
+/// Actors: `frank` upgrades a client whose store holds uninterned authors.
+///
+/// ```text
+/// frank's pre-dictionary root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                                missing [groove.dictionary.v1]
+/// ```
+#[test]
+fn node_root_without_the_dictionary_family_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let pre_dictionary_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs([DURABLE_INDEX_V2, "jazz.node-storage.v2"])
+        .expect("pre-dictionary node profile");
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &pre_dictionary_profile,
+        )
+        .expect("pre-dictionary profile root"),
+    );
+    let before = std::fs::read(&path).unwrap();
+    match open_sqlite(&path) {
+        Err(StorageError::UnsupportedStorageCodecs {
+            epoch: 1,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(missing, vec![DICTIONARY_V1.to_owned()]);
+            assert!(unknown.is_empty());
+        }
+        Err(other) => panic!("expected a typed format refusal, got {other}"),
+        Ok(()) => panic!("a root without the dictionary family must not open"),
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }

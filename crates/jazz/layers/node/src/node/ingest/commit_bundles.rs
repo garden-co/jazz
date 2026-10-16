@@ -266,6 +266,13 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
         // Validate through the SAME authority path the core uses for an incoming
         // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
@@ -576,6 +583,16 @@ where
                 .await
                 .map(PublicationOutcome::settled);
         }
+        // An aggregate read is validated by the result it recorded; a
+        // missing or garbled result is a malformed commit, not a conflict.
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            return self
+                .reject_malformed_commit(tx, reason)
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if tx.tx_id.time.physical_ms() > now_ms.saturating_add(SKEW_TOLERANCE_MS) {
             let fate = Fate::Rejected(RejectionReason::ClientClockTooFarAhead);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -710,7 +727,7 @@ where
             };
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, seq, &version).await?;
-                let (table, record) = self.version_storage_write_binding(&stored, existing.tx.made_by)?;
+                let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's copy,
@@ -944,22 +961,24 @@ where
             let contribution_merge = self.contribution_merge_storage_value(
                 tx.contribution_merge.as_ref(),
             )?;
-            batch.insert(
-                "jazz_transactions",
-                // A reset may bulk-load only the view-authorized rows of an
-                // exclusive transaction. Preserve that scope marker even when
-                // the redacted write count equals this fragment's length, so a
-                // later sibling view can extend the same local projection.
-                transaction_values_with_partial_flag(
-                    tx_node_alias,
-                    tx,
+            // A reset may bulk-load only the view-authorized rows of an
+            // exclusive transaction. Preserve that scope marker even when
+            // the redacted write count equals this fragment's length, so a
+            // later sibling view can extend the same local projection.
+            stage_transaction_record(
+                &mut batch,
+                TransactionRecordWrite::Insert {
+                    provenance: contribution_merge,
+                },
+                tx_node_alias,
+                tx,
+                &TransactionRecordStatus::new(
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
-                    view_scoped,
-                    contribution_merge,
-                )?,
-            );
+                )
+                .view_scoped(view_scoped),
+            )?;
 
             let mut unique_versions = BTreeMap::<
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId),
@@ -1001,7 +1020,7 @@ where
                         .then_some(author_schema),
                 )?;
                 let stored = self.with_wire_union_cells(stored, version)?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     self.version_storage_primary_key(&stored)?,

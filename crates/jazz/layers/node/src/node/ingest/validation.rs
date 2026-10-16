@@ -294,25 +294,23 @@ where
         } else {
             &tx
         };
-        let contribution_merge = if std::ptr::eq(storage_tx, &tx) {
-            contribution_merge
+        // A stored transaction keeps its immutable payload, provenance
+        // included; only a new one stores its admitted provenance.
+        let write = if tx_already_known {
+            TransactionRecordWrite::Update
         } else {
-            self.admit_contribution_merge_for_storage(storage_tx)?
+            TransactionRecordWrite::Insert {
+                provenance: contribution_merge,
+            }
         };
-        let tx_values = transaction_values_with_partial_flag(
+        stage_transaction_record(
+            batch,
+            write,
             tx_node_alias,
             storage_tx,
-            fate.clone(),
-            global_time,
-            durability,
-            is_partial && !preserve_authoritative_cardinality,
-            contribution_merge,
+            &TransactionRecordStatus::new(fate.clone(), global_time, durability)
+                .view_scoped(is_partial && !preserve_authoritative_cardinality),
         )?;
-        if tx_already_known {
-            batch.update("jazz_transactions", tx_values);
-        } else {
-            batch.insert("jazz_transactions", tx_values);
-        }
         if tx.tx_id.node != self.node_uuid {
             if matches!(fate, Fate::Pending) && global_time.is_none() {
                 self.open_tx.pending_foreign_transactions.insert(tx.tx_id);
@@ -416,7 +414,7 @@ where
             // immutable history and deleting it in the same batch would violate
             // ensure_exact's promise that admitted immutable bytes survive.
             if !matches!(fate, Fate::Rejected(_)) {
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 let storage_key = self.version_storage_primary_key(&stored)?;
                 if tx_already_known && stored.seq()? != GlobalTime(0) {
                     // The write is accepted now: its pending record moves to
@@ -736,17 +734,15 @@ where
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
-        batch.insert(
-            "jazz_transactions",
-            transaction_values(
-                tx_node_alias,
-                &tx,
-                fate.clone(),
-                None,
-                DurabilityTier::Local,
-                contribution_merge,
-            )?,
-        );
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Insert {
+                provenance: contribution_merge,
+            },
+            tx_node_alias,
+            &tx,
+            &TransactionRecordStatus::new(fate.clone(), None, DurabilityTier::Local),
+        )?;
         let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;

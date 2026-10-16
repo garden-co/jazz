@@ -480,6 +480,18 @@ enum InternalValueTypeRepr {
     RawString,
     RawBytes,
     StoredScalar(crate::large_values::LargeValueKind),
+    /// A value stored as its 4-byte code in the named Groove dictionary.
+    ///
+    /// Physically this is a fixed-width little-endian `u32`. Logically it is
+    /// `logical`: Groove encodes values to codes on write and decodes codes
+    /// back on every read, so callers above the storage boundary only ever see
+    /// `logical`. It is a storage-only marker and never crosses a persisted
+    /// descriptor encoding. Appended last so existing serde variant indices of
+    /// this type are unchanged.
+    Interned {
+        dictionary: String,
+        logical: Box<ValueType>,
+    },
 }
 
 // A self-contained record descriptor occasionally has to cross a durable
@@ -762,6 +774,16 @@ fn descriptor_codec_push_value_type(
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
             crate::large_values::LargeValueKind::Json,
         ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_JSON)),
+        // Interning is a property of one Groove storage column, not of a
+        // value. A descriptor carrying it never leaves Groove's storage
+        // boundary: wire, result and persisted descriptors name the logical
+        // type, so encoding one here is a caller bug and fails closed.
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned {
+            dictionary,
+            ..
+        })) => Err(Error::InternedTypeNotEncodable {
+            dictionary: dictionary.clone(),
+        }),
         ValueType::Uuid => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_UUID)),
         ValueType::EnumTag(schema) => descriptor_codec_push(
             nodes,
@@ -1406,6 +1428,98 @@ impl ValueType {
         Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind)))
     }
 
+    /// A storage column whose values are interned into the Groove dictionary
+    /// `dictionary`: each row stores the value's 4-byte code (`u32` LE) and
+    /// every read resolves it back to a `logical` value.
+    ///
+    /// Only valid as a table column type, either at top level or directly
+    /// under a top-level [`ValueType::Nullable`]; schema admission refuses
+    /// every other placement. Reads and subscriptions see `logical`.
+    pub fn interned(dictionary: impl Into<String>, logical: ValueType) -> Self {
+        Self::Internal(InternalValueType(InternalValueTypeRepr::Interned {
+            dictionary: dictionary.into(),
+            logical: Box::new(logical),
+        }))
+    }
+
+    /// The dictionary and logical type of an interned column type.
+    pub fn as_interned(&self) -> Option<(&str, &ValueType)> {
+        match self {
+            Self::Internal(InternalValueType(InternalValueTypeRepr::Interned {
+                dictionary,
+                logical,
+            })) => Some((dictionary, logical)),
+            _ => None,
+        }
+    }
+
+    /// Whether an engine-only physical type occurs anywhere in this type.
+    pub(crate) fn contains_internal_storage_type(&self) -> bool {
+        match self {
+            Self::Internal(_) => true,
+            Self::Tuple(members) => members.iter().any(Self::contains_internal_storage_type),
+            Self::Array(inner) | Self::Nullable(inner) => inner.contains_internal_storage_type(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| field.value_type.contains_internal_storage_type()),
+            Self::Enum(schema) => schema.cases.iter().any(|case| {
+                case.payload
+                    .fields()
+                    .iter()
+                    .any(|field| field.value_type.contains_internal_storage_type())
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether an interned marker occurs anywhere in this type.
+    pub fn contains_interned(&self) -> bool {
+        match self {
+            Self::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => true,
+            Self::Tuple(members) => members.iter().any(Self::contains_interned),
+            Self::Array(inner) | Self::Nullable(inner) => inner.contains_interned(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| field.value_type.contains_interned()),
+            Self::Enum(schema) => schema.cases.iter().any(|case| {
+                case.payload
+                    .fields()
+                    .iter()
+                    .any(|field| field.value_type.contains_interned())
+            }),
+            _ => false,
+        }
+    }
+
+    /// This type with every interned marker replaced by its logical type:
+    /// what reads, subscriptions and the wire see for a storage column.
+    pub fn logical(&self) -> ValueType {
+        if !self.contains_interned() {
+            return self.clone();
+        }
+        match self {
+            Self::Internal(InternalValueType(InternalValueTypeRepr::Interned {
+                logical, ..
+            })) => logical.logical(),
+            Self::Tuple(members) => Self::Tuple(members.iter().map(Self::logical).collect()),
+            Self::Array(inner) => Self::Array(Box::new(inner.logical())),
+            Self::Nullable(inner) => Self::Nullable(Box::new(inner.logical())),
+            Self::Record(descriptor) => {
+                Self::Record(Box::new(super::logical_record_descriptor(descriptor)))
+            }
+            Self::Enum(schema) => {
+                let mut schema = schema.as_ref().clone();
+                for case in &mut schema.cases {
+                    case.payload = super::logical_record_descriptor(&case.payload);
+                }
+                Self::Enum(Box::new(schema))
+            }
+            other => other.clone(),
+        }
+    }
+
     /// Whether a value of this type can contain an indirect stored scalar.
     ///
     /// The IVM evaluator uses this schema-only proof to avoid decoding and
@@ -1743,6 +1857,7 @@ impl ValueType {
             Self::F64 => Some(8),
             Self::Uuid => Some(16),
             Self::EnumTag(_) => Some(1),
+            Self::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => Some(4),
             Self::Tuple(members) => members
                 .iter()
                 .try_fold(0usize, |total, member| Some(total + member.fixed_size()?)),
@@ -1896,6 +2011,10 @@ pub(super) fn encode_fixed_value(
         }
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
+        (
+            Value::U32(code),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })),
+        ) => bytes.extend(code.to_le_bytes()),
         (Value::String(value), ValueType::EnumTag(schema)) => {
             bytes.push(schema.discriminant(value)?)
         }
@@ -1988,6 +2107,9 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => {
             Ok(Value::Bytes(bytes.to_vec()))
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
+            Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?)))
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
             match crate::large_values::decode_stored_scalar(*kind, bytes)? {
@@ -2095,6 +2217,9 @@ fn validate_value_inner(
                 .map_err(|_| Error::InvalidUtf8)
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
+            read_exact::<4>(bytes).map(|_| ())
+        }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
             match crate::large_values::inline_scalar_bytes(*kind, bytes) {
                 Ok(_) | Err(crate::large_values::Error::RequiresEvaluation) => Ok(()),
@@ -2469,7 +2594,11 @@ pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
                 | crate::large_values::LargeValueKind::Json,
             ))),
         )
-        | (Value::Uuid(_), ValueType::Uuid) => Ok(()),
+        | (Value::Uuid(_), ValueType::Uuid)
+        | (
+            Value::U32(_),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })),
+        ) => Ok(()),
         (
             Value::Large(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),

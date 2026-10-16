@@ -116,6 +116,7 @@ function unpackPublishedAlpha54Root(): { dir: string; root: string } {
 // Matches `alpha54_missing()` / `alpha54_unknown()` in
 // crates/jazz/tests/storage_format_refusal.rs.
 const ALPHA54_MISSING = [
+  "groove.dictionary.v1",
   "groove.durable-index.v2",
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",

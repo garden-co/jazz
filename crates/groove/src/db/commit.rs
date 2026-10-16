@@ -185,8 +185,7 @@ impl Database {
             .zip(&descriptors)
             .map(|(write, descriptor)| RecordStore::new(&overlay, write.table(), descriptor))
             .collect::<Vec<_>>();
-        let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
+        let table_deltas = compute_table_deltas(&pending_writes, &stores, self).await?;
         let mut changed_tables = table_deltas
             .iter()
             .map(|delta| delta.table.clone())
@@ -214,9 +213,11 @@ impl Database {
                     key,
                     variant_tag,
                     record,
+                    stored,
                     ..
                 } => {
-                    let value = encode_variant_record(variant_tag, &record);
+                    let value =
+                        encode_variant_record(variant_tag, stored.as_deref().unwrap_or(&record));
                     #[cfg(feature = "cold-settle-attribution")]
                     {
                         use std::hash::{Hash, Hasher};
@@ -283,6 +284,11 @@ impl Database {
         // publication, before or with the first entry that uses them.
         let index_id_registrations = self.ivm_runtime.index_ids().borrow().pending();
         staged_operations.extend(index_id_registrations.operations().iter().cloned());
+        // Likewise every dictionary entry not yet durable: those this batch's
+        // rows allocated, and any a dropped batch reserved. An entry is thus
+        // durable with, or before, the first row that stores its code.
+        let dictionary_entries = self.ivm_runtime.dictionaries().borrow().pending();
+        staged_operations.extend(dictionary_entries.operations().iter().cloned());
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -433,6 +439,10 @@ impl Database {
             .index_ids()
             .borrow_mut()
             .mark_persisted(&index_id_registrations);
+        self.ivm_runtime
+            .dictionaries()
+            .borrow_mut()
+            .mark_persisted(&dictionary_entries);
         if !roots.is_empty() {
             if let Some(guard) = lifecycle_guard {
                 self.large_value_publication_lifecycle_guard = Some(guard);
@@ -675,14 +685,14 @@ impl Database {
                 let (variant_tag, descriptor, record) =
                     resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Insert,
-                    table: table.clone(),
+                self.pending_set(
+                    WriteMode::Insert,
+                    table.clone(),
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
@@ -691,14 +701,14 @@ impl Database {
                     resolve_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.clone().into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Insert,
-                    table: table.clone(),
+                self.pending_set(
+                    WriteMode::Insert,
+                    table.clone(),
                     key,
                     variant_tag,
                     descriptor,
-                    record: record.clone(),
-                })
+                    record.clone(),
+                )
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(table)?;
@@ -707,14 +717,14 @@ impl Database {
                     resolve_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.clone().into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::InsertFresh,
-                    table: table.clone(),
+                self.pending_set(
+                    WriteMode::InsertFresh,
+                    table.clone(),
                     key,
                     variant_tag,
                     descriptor,
-                    record: record.clone(),
-                })
+                    record.clone(),
+                )
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
@@ -722,14 +732,14 @@ impl Database {
                 let (variant_tag, descriptor, record) =
                     resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Update,
-                    table: table.clone(),
+                self.pending_set(
+                    WriteMode::Update,
+                    table.clone(),
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
@@ -738,14 +748,14 @@ impl Database {
                     resolve_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.clone().into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Update,
-                    table: table.clone(),
+                self.pending_set(
+                    WriteMode::Update,
+                    table.clone(),
                     key,
                     variant_tag,
                     descriptor,
-                    record: record.clone(),
-                })
+                    record.clone(),
+                )
             }
             BatchOperation::Delete { table, key } => {
                 let table_schema = self.table(table)?;
@@ -769,14 +779,14 @@ impl Database {
                 let (variant_tag, descriptor, record) =
                     resolve_owned_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Insert,
+                self.pending_set(
+                    WriteMode::Insert,
                     table,
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(&table)?;
@@ -785,14 +795,14 @@ impl Database {
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Insert,
+                self.pending_set(
+                    WriteMode::Insert,
                     table,
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(&table)?;
@@ -801,14 +811,14 @@ impl Database {
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::InsertFresh,
+                self.pending_set(
+                    WriteMode::InsertFresh,
                     table,
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(&table)?;
@@ -816,14 +826,14 @@ impl Database {
                 let (variant_tag, descriptor, record) =
                     resolve_owned_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Update,
+                self.pending_set(
+                    WriteMode::Update,
                     table,
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(&table)?;
@@ -832,14 +842,14 @@ impl Database {
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
                 let key = key.into_bytes();
                 validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
-                Ok(PendingTableWrite::Set {
-                    mode: WriteMode::Update,
+                self.pending_set(
+                    WriteMode::Update,
                     table,
                     key,
                     variant_tag,
                     descriptor,
                     record,
-                })
+                )
             }
             BatchOperation::Delete { table, key } => {
                 let descriptor = self.table(&table)?.record_schema();
@@ -850,6 +860,43 @@ impl Database {
                 })
             }
         }
+    }
+
+    /// A set write of a logical record. A table with interned columns also
+    /// gets its stored payload, with dictionary codes in place of values; a
+    /// new value allocates its code here, synchronously.
+    fn pending_set(
+        &self,
+        mode: WriteMode,
+        table: String,
+        key: Vec<u8>,
+        variant_tag: u32,
+        descriptor: RecordDescriptor,
+        record: Vec<u8>,
+    ) -> Result<PendingTableWrite, Error> {
+        let stored = match self
+            .stored_record_codec(self.table(&table)?, variant_tag)?
+            .transcoder
+        {
+            Some(transcoder) => {
+                debug_assert_eq!(transcoder.logical(), descriptor);
+                Some(crate::dictionary::transcode_to_physical(
+                    &transcoder,
+                    &mut self.ivm_runtime.dictionaries().borrow_mut(),
+                    &record,
+                )?)
+            }
+            None => None,
+        };
+        Ok(PendingTableWrite::Set {
+            mode,
+            table,
+            key,
+            variant_tag,
+            descriptor,
+            record,
+            stored,
+        })
     }
 
     fn record_descriptor_for_input(

@@ -316,6 +316,7 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+mod aggregate_read_result;
 /// The local delta's rows, held in memory: overlay row key (physical table,
 /// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
 /// image it holds, plus how many rows each physical table holds under each
@@ -508,8 +509,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
-/// Bound on `history_tx_authors`; the cache is cleared when it fills.
-const HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_seqs`; the cache is cleared when it fills.
+const HISTORY_TX_SEQ_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -698,15 +699,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
     /// the transaction's `jazz_tx_touched_rows` list.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
-    /// `made_by` of transactions whose history images omitted `updated_by`
-    /// (`resolve_history_updated_by`). Bounded; transaction authors never
-    /// change, so entries never go stale.
-    /// Each entry is the encoded field, ready to splice into an image.
-    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
     /// Global times of transactions read from storage, which key their
-    /// history records (`history_tx_seq`). Bounded like
-    /// `history_tx_authors`; a transaction's global time never changes once
-    /// set, so entries never go stale.
+    /// history records (`history_tx_seq`). Bounded by
+    /// `HISTORY_TX_SEQ_CACHE_MAX_ENTRIES`; a transaction's global time never
+    /// changes once set, so entries never go stale.
     history_tx_seqs: RefCell<FxHashMap<(TxTime, NodeAlias), GlobalTime>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
@@ -3287,6 +3283,15 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// The store's history was truncated at or below a horizon, which this
+    /// build cannot read (SPEC 2 §2.8, `jazz_history_horizon`).
+    #[error(
+        "Opening a store whose history is truncated at or below seq {horizon} is not supported by this build yet"
+    )]
+    TruncatedHistoryUnsupported {
+        /// The store's history horizon.
+        horizon: u64,
+    },
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.

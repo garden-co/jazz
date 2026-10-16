@@ -88,27 +88,24 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        let contribution_merge = self.contribution_merge_storage_value(
-            stored.tx.contribution_merge.as_ref(),
-        )?;
-        batch.update(
-            "jazz_transactions",
-            transaction_values_with_partial_flag(
-                stored.node_alias,
-                &stored.tx,
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
-                stored.is_partial,
-                contribution_merge,
-            )?,
-        );
+            )
+            .view_scoped(stored.is_partial),
+        )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
                 // History holds the row's post-image at this seq, which is
                 // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
+                self.write_history_post_image(&mut batch, version)?;
             }
             let mut moved = !global_current_updates.is_empty();
             if matches!(stored.fate, Fate::Accepted) {
@@ -135,7 +132,7 @@ where
                     ));
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
-                        self.write_history_post_image(&mut batch, &at_seq, stored.tx.made_by)?;
+                        self.write_history_post_image(&mut batch, &at_seq)?;
                         moved = true;
                     }
                 }
@@ -289,6 +286,12 @@ where
         }
         let no_rows = BTreeSet::new();
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
+            if predicate.shape.aggregate.is_some() {
+                if self.aggregate_read_result_differs(predicate, identity).await? {
+                    return Ok(false);
+                }
+                continue;
+            }
             let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
             if self
                 .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
@@ -368,7 +371,8 @@ where
     /// it read; otherwise a row appeared or changed into the result since. A
     /// proved row the predicate returned at the base snapshot but no longer
     /// returns left the result through another row (a join or policy
-    /// source). An aggregate read is validated through the rows it consumed.
+    /// source). Aggregate reads are validated by
+    /// [`Self::aggregate_read_result_differs`] instead.
     ///
     /// A client that recorded no row proofs for its predicate reads (before
     /// alpha.58) conflicts whenever such a read returned rows.
@@ -406,9 +410,40 @@ where
             .any(|(row, _)| proven.contains(&row) && !now.contains(&row)))
     }
 
+    /// Whether an exclusive aggregate read no longer returns the result the
+    /// transaction recorded (garden-co/jazz#3768). The authority re-runs the
+    /// aggregate as the transaction's permission subject over its current
+    /// global state and compares the canonical `jazz.aggregate-read-result.v1`
+    /// bytes exactly. Rewrites of consumed rows that leave the result
+    /// unchanged do not conflict; a reader that lacked rows computed another
+    /// result and does. Ingest rejects an aggregate read without a well-formed
+    /// result as a malformed commit before validation; one that still reaches
+    /// here, or whose shape is unknown, conflicts.
+    async fn aggregate_read_result_differs(
+        &mut self,
+        predicate: &PredicateRead,
+        identity: AuthorSubject,
+    ) -> Result<bool, Error> {
+        let Some(recorded) = &predicate.aggregate_result else {
+            return Ok(true);
+        };
+        let Some((shape, binding)) = self.predicate_read_validation_shape(predicate)? else {
+            return Ok(true);
+        };
+        let now = self
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                None,
+                identity,
+            )
+            .await?;
+        Ok(crate::node::aggregate_read_result::aggregate_read_result_from_rows(&now)? != *recorded)
+    }
+
     /// The shape and binding an authority evaluates to validate a predicate
-    /// read: the read's own shape, or for an aggregate the rows it consumed.
-    /// `None` when the read no longer names a known shape and binding.
+    /// read. `None` when the read no longer names a known shape and binding.
     fn predicate_read_validation_shape(
         &self,
         predicate: &PredicateRead,
@@ -428,21 +463,15 @@ where
                     .validate(schema)
                     .ok()
                     .filter(|shape| shape.shape_id() == predicate.shape_id)
-                    .map(|shape| (shape, schema))
             });
-        let Some((shape, schema)) = validated else {
+        let Some(shape) = validated else {
             return Ok(None);
         };
         let binding = shape.bind(predicate.binding_values.clone())?;
         if binding.binding_id() != predicate.binding_id {
             return Ok(None);
         }
-        let Some(input) = shape.query().aggregate_input() else {
-            return Ok(Some((shape, binding)));
-        };
-        let input = input.validate(schema)?;
-        let binding = input.bind(predicate.binding_values.clone())?;
-        Ok(Some((input, binding)))
+        Ok(Some((shape, binding)))
     }
 
     #[cfg(test)]
