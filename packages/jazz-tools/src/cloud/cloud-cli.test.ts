@@ -386,7 +386,7 @@ describe("session handling", () => {
 
   it("waits for a live holder and gives up after the timeout", async () => {
     await writeFile(join(configDir, "credentials.lock"), `${process.pid} livelock\n`);
-    const env = { JAZZ_CONFIG_DIR: configDir };
+    const env: NodeJS.ProcessEnv = { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir };
     await expect(
       withCredentialsLock(async () => "acquired", env, { timeoutMs: 100 }),
     ).rejects.toThrow("Timed out waiting for another jazz-tools process");
@@ -396,7 +396,7 @@ describe("session handling", () => {
   });
 
   it("does not release a lock that another process took over", async () => {
-    const env = { JAZZ_CONFIG_DIR: configDir };
+    const env: NodeJS.ProcessEnv = { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir };
     await withCredentialsLock(async () => {
       // As if our lock had been broken as stale and re-taken by someone else.
       await writeFile(join(configDir, "credentials.lock"), `${process.pid} someone-else\n`);
@@ -412,7 +412,7 @@ describe("session handling", () => {
     await expect(
       getAccessToken({
         cloudUrl: cloud.url,
-        env: { JAZZ_CONFIG_DIR: configDir },
+        env: { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir },
         refreshTimeoutMs: 50,
       }),
     ).rejects.toMatchObject({ code: "refresh_failed" });
