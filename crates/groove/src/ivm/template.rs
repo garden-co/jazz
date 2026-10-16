@@ -115,8 +115,9 @@ impl TypedGraphTemplate {
         let inputs = inputs
             .iter()
             .zip(&self.inputs)
-            .map(|(graph, output)| {
-                TemplateGraphInput::with_output_contract((**graph).clone(), *output)
+            .map(|(graph, output)| TemplateGraphInput {
+                graph: Arc::clone(graph),
+                output: *output,
             })
             .collect::<Vec<_>>();
         Ok(bind_template_graphs_inner(
