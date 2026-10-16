@@ -389,19 +389,18 @@ function normalizeColumnMergeStrategy(
   return "counter";
 }
 
-class ScalarBuilder implements ColumnBuilder {
+abstract class BaseColumnBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
-
-  constructor(public _sqlType: ScalarSqlType) {}
+  abstract readonly _sqlType: SqlType;
 
   optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
+    if (this._mergeStrategy !== undefined) {
+      // Counter and g-set both require non-nullable columns; re-validate as
+      // nullable so the strategy's own error is thrown.
+      normalizeColumnMergeStrategy(this._mergeStrategy, this._sqlType, true);
     }
     this._nullable = true;
     return this;
@@ -437,14 +436,17 @@ class ScalarBuilder implements ColumnBuilder {
   }
 }
 
-class EnumBuilder implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
+class ScalarBuilder extends BaseColumnBuilder {
+  constructor(public _sqlType: ScalarSqlType) {
+    super();
+  }
+}
+
+class EnumBuilder extends BaseColumnBuilder {
   public _sqlType: EnumSqlType;
-  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(variantsOrCases: string[] | Record<string, ColumnBuilder>) {
+    super();
     if (Array.isArray(variantsOrCases)) {
       this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variantsOrCases) };
       return;
@@ -484,45 +486,6 @@ class EnumBuilder implements ColumnBuilder {
     }
     this._sqlType = { kind: "ENUM", cases };
   }
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-    };
-  }
-
-  get _references(): string | undefined {
-    return undefined;
-  }
 }
 
 function containsReference(sqlType: SqlType): boolean {
@@ -541,66 +504,20 @@ function isUuidArrayReference(builder: ColumnBuilder): boolean {
   );
 }
 
-class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
+class JsonBuilder<Output = JsonValue> extends BaseColumnBuilder {
   public _sqlType: JsonSqlType<Output>;
-  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
+    super();
     this._sqlType = schema
       ? { kind: "JSON", schema: normalizeJsonSchema(schema) }
       : { kind: "JSON" };
   }
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-    };
-  }
-
-  get _references(): string | undefined {
-    return undefined;
-  }
 }
 
-class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
-
+class ArrayBuilder<T extends ColumnBuilder> extends BaseColumnBuilder {
   constructor(public _element: T) {
+    super();
     if (isUuidArrayReference(_element)) {
       throw new Error(
         "Nested reference arrays are not supported; use a direct array(ref(...)) column.",
@@ -608,38 +525,8 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     }
   }
 
-  optional(): this {
-    if (this._mergeStrategy === "g-set") {
-      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
   _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-      references: this._references,
-    };
+    return { ...super._build(name), references: this._references };
   }
 
   get _sqlType(): SqlType {

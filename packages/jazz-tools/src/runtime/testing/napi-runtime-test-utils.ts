@@ -8,6 +8,7 @@ import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { testAuthorBytes } from "./account-fixtures.js";
+import { deterministicBytes } from "../deterministic-bytes.js";
 
 type NapiModule = typeof import("jazz-napi");
 export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };
@@ -142,18 +143,4 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   registerRuntimeCleanup(runtime);
 
   return runtime;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }

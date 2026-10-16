@@ -25,7 +25,7 @@ Invariant digest:
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
-- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, the row provenance cells, nullable `_deletion`, and nullable `user_{col}` cells, inside the `JVRR` version-2 envelope; it MUST NOT carry `parents`, and receiver-local currentness and authority-state columns MUST be excluded.
+- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, the row provenance cells, nullable `_deletion`, and nullable `user_{col}` cells, inside the `JVRR` version-3 envelope; it MUST NOT carry `parents`, and receiver-local currentness and authority-state columns MUST be excluded.
 - `INV-DATA-17`: A stored row version MUST belong to exactly one physical layer: content with user cells or deletion-register state with `_deletion` and no user cells.
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
@@ -231,7 +231,7 @@ cross-branch-key row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
-`_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
+`_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-3
 row blob (SPEC 16) and followed by the record's `authored_columns`, its
 `base` (SPEC 4 §4.6) and its `counter_signs` (SPEC 4 §4.3).
 Wire protocol v6 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
@@ -387,8 +387,8 @@ accepted/reopen/rebuild receipts for the same coordinate.
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
-  and branch mappings), `jazz_catalogue`, and
-  `jazz_catalogue_pointer`;
+  and branch mappings), and `jazz_catalogue` (including the required active
+  schema selection);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
@@ -416,19 +416,31 @@ by Groove's storage epoch; this section freezes logical record and transport
 bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
 **Transaction audit record.** `jazz_transactions` has permanent logical field
-positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+positions `0..=16`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
 made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
-view_scoped_cardinality_marker, fate, global_time, rejection_reason,
-cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+is_partial: bool, fate, global_time, rejection_reason, durability)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
 `None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
-`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
-`view-scoped-cardinality` marker is exactly the internal string
-`"view-scoped-cardinality"` in retained position 12; it says only that the
-stored `n_total_writes` is view-redacted, and is cleared when a complete payload
-arrives. Fate/global time and durability remain separate lattice observations:
+`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
+
+Rejection reasons use a Groove payload enum. Cases 0–3 have empty payloads;
+`Cascade` has one required `root: Tuple<U64, Uuid>`, and `MalformedCommit`
+has one required `message: String` (an empty message is allowed).
+The audit row's reason is nullable and must be present when fate is rejected.
+The retry store `jazz_rejected_transactions` uses the same enum, required,
+with fields `(time, node_id, kind, made_by, rejection_reason, user_metadata)`.
+
+The `is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
+`jazz.transaction-record.v1`. True means the transaction was learned from
+selected fragments, so `n_total_writes` is not an authoritative total. A
+complete payload clears the flag; later fragments do not downgrade it.
+False does not guarantee that every row remains cached after eviction.
+This encoding receipt is covered by the `jazz.node-storage.v1` root profile.
+Roots with the former nullable string field lack that profile marker and are refused
+at manifest admission, without migration or a physical epoch/wire bump.
+Fate/global time and durability remain separate lattice observations:
 accepted/global uses an authority `GlobalTime`, rejection has no global winner,
 and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot
@@ -519,7 +531,7 @@ created_by, created_at, updated_by, updated_at)`, followed by declared
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
 `(row_uuid, created_by, created_at_ms, updated_by, updated_at_ms,
-nullable _deletion, user cells...)` (`JVRR` version 2; version 1 also had
+nullable _deletion, user cells...)` (`JVRR` version 3, as in version 2; version 1 also had
 `parents` at position 1). A version is content iff `_deletion` is
 null, otherwise it is the deletion/register layer. Parent references are the
 strictly increasing lexicographic sequence of `(TxTime, NodeUuid)` pairs;

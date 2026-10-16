@@ -14,8 +14,8 @@ Usage:
 The local form performs one debug-profile `cargo check` only. It never runs
 `cargo bench`, never writes a timing ledger, and does not request release
 RocksDB artifacts. `--ci` executes deterministic correctness assertions on
-ordinary PR CI. `--compile-ci` checks all maintained benchmark APIs on the
-realistic benchmark workflow, where compile/performance coverage already lives.
+ordinary PR CI. `--compile-ci` checks all maintained benchmark APIs; it runs
+in the nightly `benchmark-api` job (.github/workflows/nightly-tests.yml).
 EOF
 }
 
