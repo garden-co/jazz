@@ -589,6 +589,52 @@ installs the authority UUID manifest, and reconciles ancestors and descendants
 around the local anchor. Pending local rows therefore remain addressable while
 cross-node semantic identity converges.
 
+**Union row cases.** Besides one Groove case per schema version (tag = the
+schema's local alias), every physical history, global current, ahead current
+and ahead shadow table has a **union case** per schema version `G` whose
+lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
+`G`'s own case followed by those columns ("extras"), in physical column id
+order. The extras of `G` are the columns of the same physical table mapped by
+any schema version ranked no later than `G` in the catalogue: a lineage's
+target ranks at its catalogue position and the authority genesis before them
+all. Every node replicates that order from its Core, so every node that knows
+`G` derives the same extras, fixed once `G` is published; old union cases
+never change. Local aliases cannot order them: a client allocates its own
+schema's alias first and learns older schemas later. A schema version only
+the node knows (not yet published) has no union case. Rejected-version tables
+have no union case. A union row reads exactly like a `G` row to code that only
+knows `G`.
+
+Core stores each post-image in the union case of the schema version ranked
+last among those mapping the table (ch. 4 §4.6, "Across schema versions").
+That need not be the write's own schema, nor name the table as the write
+does, so a post-image replaces the write's pending record by its physical
+row (table, branch, row), not by its name or schema. An extra is
+**derived** when the lens path from `G` carries it on from one of `G`'s own
+columns (a rename chain or a bijective transform); it stays null, and readers
+derive it from `G`'s cell as for any `G` row. Every other extra is
+**stored**: a column `G` dropped, a sibling's column, and a copy
+(`CopyColumn`) target, which is a column of its own (ch. 4 §4.6) whose
+writes a lens from `G` would otherwise overwrite with the source's value.
+The lens path is taken through schema versions ranked no later than `G`
+only, so the stored set is fixed with `G`'s union case: a later schema with
+several predecessors cannot open a shorter route that turns a stored extra
+into a derived one (or the reverse) under existing union rows. Reading a
+union row as schema `R`, by any read path: a column of `R` that is a stored
+extra reads that field (null reads as absent); any other column takes the
+`G` → `R` projection.
+
+On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
+travel as `UnionExtraCells`, one entry per schema version defining them, each
+a record of that schema's authored cells (`_app_<column>`, nullable). The
+entries travel inside the row's `JVRR` v3 blob, flagged by its descriptor
+head (ch. 16); a row without entries leaves the flag clear and carries
+nothing extra. A receiver validates each cell against its schema and
+stores the image unchanged, in `G`'s union case: its entries must be exactly
+`G`'s stored extras there, as the shared catalogue order guarantees. The image
+keeps its identity, so what the receiver serves or compares later is Core's
+record. Commit units carry no union cells.
+
 ### 10.4 Writes: authored schema variants
 
 New local writes carry the schema selected by `current_write_schema` as their

@@ -1213,7 +1213,7 @@ where
             ));
         }
         if self
-            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema)
+            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema, None)
             .is_none()
         {
             return Err(Error::InvalidCatalogueUpdate(
