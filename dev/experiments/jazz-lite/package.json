@@ -1,0 +1,23 @@
+{
+  "name": "jazz-lite-experiment",
+  "private": true,
+  "description": "Experiment: storage-less, worker-less, WASM-less browser client against a server-side client proxy. Not a workspace package.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "sizes": "node scripts/sizes.mjs"
+  },
+  "dependencies": {
+    "jazz-tools": "2.0.0-alpha.59",
+    "ws": "8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.25.10",
+    "playwright-core": "^1.58.2",
+    "typescript": "5.9.3",
+    "vite": "7.1.12",
+    "vitest": "3.2.4"
+  }
+}
