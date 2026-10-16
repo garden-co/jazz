@@ -355,15 +355,6 @@ fn app_row_payload_projection(
             // terminal payload is delivered as is, so they keep the plain
             // selection. Include reads still sort without the key (#3503).
             if retain_order_keys {
-                if query
-                    .table
-                    .starts_with(crate::schema::history::HISTORY_PREFIX)
-                {
-                    fields.extend(
-                        crate::schema::history::HistoryMetadataColumn::ALL
-                            .map(|column| column.name().to_owned()),
-                    );
-                }
                 for order in &query.order_by {
                     if order.column != "id" {
                         fields.insert(order.column.clone());

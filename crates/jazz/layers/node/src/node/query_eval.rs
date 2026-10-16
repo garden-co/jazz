@@ -2359,7 +2359,13 @@ where
             for (record, weight) in deltas.iter() {
                 if weight > 0 {
                     let row = decode_current_row(table_schema, record)?;
-                    rows.push(self.materialize_current_row(table_schema, row)?);
+                    let row = self.materialize_current_row(table_schema, row)?;
+                    let count = usize::try_from(weight).map_err(|_| {
+                        Error::InvalidStoredValue(
+                            "query result multiplicity exceeds addressable memory",
+                        )
+                    })?;
+                    rows.extend(std::iter::repeat_n(row, count));
                 }
             }
             rows
@@ -5111,6 +5117,18 @@ fn normalize_public_current_rows(
     let columns = table
         .columns
         .iter()
+        // Normalize only columns retained by the terminal projection. Missing
+        // unselected metadata must not be recreated as application cells.
+        .filter(|column| {
+            query.aggregate.is_some()
+                || query.select.as_ref().is_none_or(|selected| {
+                    selected.contains(&column.name)
+                        || query
+                            .order_by
+                            .iter()
+                            .any(|order| order.column == column.name)
+                })
+        })
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     for row in rows {

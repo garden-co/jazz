@@ -74,6 +74,34 @@ impl Ord for ObjectId {
 mod occurrence {
     use super::*;
 
+    /// Complete identity of one occurrence emitted by a query source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct SourceOccurrenceId {
+        row: ObjectId,
+        version: Option<(TxTime, NodeUuid)>,
+    }
+
+    impl SourceOccurrenceId {
+        pub fn current(row: ObjectId) -> Self {
+            Self { row, version: None }
+        }
+
+        pub fn history(row: ObjectId, time: TxTime, node: NodeUuid) -> Self {
+            Self {
+                row,
+                version: Some((time, node)),
+            }
+        }
+
+        pub fn row_id(&self) -> ObjectId {
+            self.row
+        }
+
+        pub fn version(&self) -> Option<(TxTime, NodeUuid)> {
+            self.version
+        }
+    }
+
     /// Stable identity of one rendered query-output occurrence.
     ///
     /// The root source row is always first. `joined` contains contributing source
@@ -84,21 +112,19 @@ mod occurrence {
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     #[serde(from = "ResultKey", into = "ResultKey")]
     pub struct OutputOccurrenceId {
-        pub(super) root: ObjectId,
-        pub(super) joined: SmallVec<[ObjectId; 2]>,
+        root: SourceOccurrenceId,
+        joined: SmallVec<[SourceOccurrenceId; 2]>,
         /// Stable typed derivation discriminators keyed by joined-source position.
         union_arms: SmallVec<[(usize, String); 1]>,
-        /// Portable content transaction for a history root.
-        root_version: Option<(TxTime, NodeUuid)>,
     }
 
     impl OutputOccurrenceId {
         pub fn has_typed_discriminators(&self) -> bool {
-            !self.union_arms.is_empty() || self.root_version.is_some()
+            !self.union_arms.is_empty() || self.root.version().is_some()
         }
 
         pub fn root_source(&self) -> ObjectId {
-            self.root
+            self.root.row_id()
         }
 
         pub fn union_arms(&self) -> &[(usize, String)] {
@@ -111,10 +137,12 @@ mod occurrence {
         /// cases stay inline.
         pub fn new(root: ObjectId, joined: impl IntoIterator<Item = ObjectId>) -> Self {
             Self {
-                root,
-                joined: joined.into_iter().collect(),
+                root: SourceOccurrenceId::current(root),
+                joined: joined
+                    .into_iter()
+                    .map(SourceOccurrenceId::current)
+                    .collect(),
                 union_arms: SmallVec::new(),
-                root_version: None,
             }
         }
 
@@ -123,47 +151,67 @@ mod occurrence {
             joined: impl IntoIterator<Item = ObjectId>,
             union_arms: impl IntoIterator<Item = (usize, String)>,
         ) -> Option<Self> {
+            Self::from_source_occurrences(
+                SourceOccurrenceId::current(root),
+                joined.into_iter().map(SourceOccurrenceId::current),
+                union_arms,
+            )
+        }
+
+        /// Compose complete source identities. History joins and history union
+        /// arms remain unsupported by the current result-key encoding.
+        pub fn from_source_occurrences(
+            root: SourceOccurrenceId,
+            joined: impl IntoIterator<Item = SourceOccurrenceId>,
+            union_arms: impl IntoIterator<Item = (usize, String)>,
+        ) -> Option<Self> {
             let joined = joined.into_iter().collect::<SmallVec<[_; 2]>>();
             let mut union_arms = union_arms.into_iter().collect::<SmallVec<[_; 1]>>();
             union_arms.sort_by_key(|(position, _)| *position);
-            let valid = union_arms
-                .iter()
-                .all(|(position, label)| *position <= joined.len() && !label.is_empty())
+            let valid = !joined.iter().any(|source| source.version().is_some())
+                && (root.version().is_none() || (joined.is_empty() && union_arms.is_empty()))
+                && union_arms
+                    .iter()
+                    .all(|(position, label)| *position <= joined.len() && !label.is_empty())
                 && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
             valid.then_some(Self {
                 root,
                 joined,
                 union_arms,
-                root_version: None,
             })
         }
 
         /// Construct the single-source occurrence used by plain-table output.
         pub fn single_source(root: ObjectId) -> Self {
             Self {
-                root,
+                root: SourceOccurrenceId::current(root),
                 joined: SmallVec::new(),
                 union_arms: SmallVec::new(),
-                root_version: None,
             }
         }
 
         /// Identify one retained content version without synthesizing a row UUID.
         pub fn history(root: ObjectId, time: TxTime, node: NodeUuid) -> Self {
             Self {
-                root_version: Some((time, node)),
-                ..Self::single_source(root)
+                root: SourceOccurrenceId::history(root, time, node),
+                joined: SmallVec::new(),
+                union_arms: SmallVec::new(),
             }
         }
 
         /// Full portable transaction identity of a historical root, if any.
         pub fn root_version(&self) -> Option<(TxTime, NodeUuid)> {
-            self.root_version
+            self.root.version()
         }
 
         /// Source rows contributed after the root, in declared join order.
-        pub fn joined_sources(&self) -> &[ObjectId] {
-            &self.joined
+        pub fn joined_sources(&self) -> impl ExactSizeIterator<Item = ObjectId> + '_ {
+            self.joined.iter().map(SourceOccurrenceId::row_id)
+        }
+
+        /// Complete source keys in declared join order, including the root.
+        pub fn source_occurrences(&self) -> impl Iterator<Item = SourceOccurrenceId> + '_ {
+            std::iter::once(self.root).chain(self.joined.iter().copied())
         }
 
         /// Canonical positional bytes for terminal-state keys and consolidation.
@@ -176,25 +224,25 @@ mod occurrence {
         pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
             if self.has_typed_discriminators() {
                 let mut bytes = self.typed_canonical_bytes();
-                if self.root_version.is_some() {
+                if self.root.version().is_some() {
                     bytes.insert(0, RESULT_KEY_WIRE_VERSION);
                 }
                 return bytes;
             }
             let mut bytes = SmallVec::with_capacity((self.joined.len() + 1) * 16);
-            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            bytes.extend_from_slice(self.root.row_id().uuid().as_bytes());
             for id in &self.joined {
-                bytes.extend_from_slice(id.uuid().as_bytes());
+                bytes.extend_from_slice(id.row_id().uuid().as_bytes());
             }
             bytes
         }
 
         pub(super) fn typed_canonical_bytes(&self) -> SmallVec<[u8; 48]> {
             let mut bytes = SmallVec::new();
-            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            bytes.extend_from_slice(self.root.row_id().uuid().as_bytes());
             bytes.extend_from_slice(&(self.joined.len() as u32).to_be_bytes());
             for id in &self.joined {
-                bytes.extend_from_slice(id.uuid().as_bytes());
+                bytes.extend_from_slice(id.row_id().uuid().as_bytes());
             }
             bytes.extend_from_slice(&(self.union_arms.len() as u32).to_be_bytes());
             for (position, label) in &self.union_arms {
@@ -202,8 +250,8 @@ mod occurrence {
                 bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
                 bytes.extend_from_slice(label.as_bytes());
             }
-            bytes.push(u8::from(self.root_version.is_some()));
-            if let Some((time, node)) = self.root_version {
+            bytes.push(u8::from(self.root.version().is_some()));
+            if let Some((time, node)) = self.root.version() {
                 bytes.extend_from_slice(&time.0.to_be_bytes());
                 bytes.extend_from_slice(node.0.as_bytes());
             }
@@ -222,7 +270,9 @@ mod occurrence {
     /// row id would recreate the flat-join collapse this type prevents.
     impl PartialEq<ObjectId> for OutputOccurrenceId {
         fn eq(&self, other: &ObjectId) -> bool {
-            self.joined.is_empty() && !self.has_typed_discriminators() && self.root == *other
+            self.joined.is_empty()
+                && !self.has_typed_discriminators()
+                && self.root.row_id() == *other
         }
     }
 
@@ -234,7 +284,7 @@ mod occurrence {
 }
 
 #[doc(hidden)]
-pub use occurrence::OutputOccurrenceId;
+pub use occurrence::{OutputOccurrenceId, SourceOccurrenceId};
 
 /// Stable, opaque identity of one query result.
 ///
@@ -368,7 +418,7 @@ impl ResultKey {
 
     /// Return the logical source row id for a single-source result, including history.
     pub fn row_id(&self) -> Option<ObjectId> {
-        self.0.joined.is_empty().then_some(self.0.root)
+        (self.0.joined_sources().len() == 0).then(|| self.0.root_source())
     }
 }
 

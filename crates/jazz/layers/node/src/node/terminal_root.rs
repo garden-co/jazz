@@ -122,7 +122,8 @@ pub fn terminal_root_binding_field_names(layout: &TerminalRootLayout) -> Vec<Opt
 /// Plain joins are UUID sequences; joined-source discriminators precede their
 /// UUIDs at source positions one and above. Root-union collector keys retain
 /// their physical UUID first and need the prepared layout to identify the
-/// following `(label, actual-root-row)` pair as source position zero.
+/// following `(label, actual-root-row)` pair as source position zero. History
+/// roots carry exactly `UUID, U64, UUID`, independently of public fields.
 pub fn terminal_root_occurrence_id_with_root_union(
     encoded: &[u8],
     root_union_arm: bool,
@@ -173,6 +174,30 @@ pub fn terminal_root_occurrence_id_with_root_union(
             "terminal root key must begin with a UUID",
         )
     })?;
+    if encoded.get(cursor) == Some(&3) {
+        // Groove tags: U64=3, UUID=10. History joins are not admitted.
+        if root_union_arm || encoded.len() != cursor + 26 {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "invalid history root transaction key",
+            ));
+        }
+        let time = crate::time::TxTime(u64::from_be_bytes(
+            encoded[cursor + 1..cursor + 9].try_into().unwrap(),
+        ));
+        cursor += 9;
+        let node = uuid_at(encoded, &mut cursor).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "history root transaction node must be a UUID",
+            )
+        })?;
+        return Ok(OutputOccurrenceId::history(
+            root,
+            time,
+            crate::ids::NodeUuid(*node.uuid()),
+        ));
+    }
     let mut joined = Vec::new();
     let mut union_arms = Vec::new();
     if root_union_arm {

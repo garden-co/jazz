@@ -508,7 +508,9 @@ where
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata,
                 },
                 routing_fields: BTreeSet::new(),
@@ -644,7 +646,9 @@ where
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata,
                 },
                 routing_fields: BTreeSet::new(),
@@ -739,7 +743,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields: BTreeSet::new(),
@@ -835,7 +841,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields,
@@ -1079,7 +1087,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields,
@@ -1916,7 +1926,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2016,7 +2028,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2179,7 +2193,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2259,7 +2275,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields: BTreeSet::new(),
@@ -2425,7 +2443,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .collect()
         })
         .map_err(|_| overlay_error())?;
-        let row_field = resolved.row_shape.row_uuid_field.clone();
+        let row_field = resolved.row_shape.occurrence_key.row_field().clone();
         let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
         let written_records =
             TransactionOverlayTable::cached(&rows.written_records, written_descriptor, || {

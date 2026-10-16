@@ -724,7 +724,9 @@ impl SourceGraphPreparer for FakeSourceResolver {
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor: RecordDescriptor::new(descriptor_fields),
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata,
                 },
                 routing_fields: BTreeSet::new(),
@@ -983,7 +985,9 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata: BTreeMap::new(),
                 },
                 routing_fields: BTreeSet::new(),

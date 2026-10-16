@@ -2622,12 +2622,26 @@ fn decode_typed_terminal_record(
                     "maintained result membership table_name must exist",
                 ))?;
             let row_uuid = RowUuid(record.get_uuid(field_idx(record, &schema.row_field)?)?);
-            let mut occurrence_ids = Vec::with_capacity(schema.occurrence_id_fields.len());
-            for field in &schema.occurrence_id_fields {
-                occurrence_ids.push(ObjectId::from_uuid(
-                    record.get_uuid(field_idx(record, field)?)?,
-                ));
-            }
+            let occurrence_ids = schema
+                .occurrence_keys
+                .iter()
+                .map(|key| {
+                    use crate::node::query_engine::SourceOccurrenceKey;
+                    use crate::object::SourceOccurrenceId;
+                    let row =
+                        ObjectId::from_uuid(record.get_uuid(field_idx(record, key.row_field())?)?);
+                    Ok(match key {
+                        SourceOccurrenceKey::Current { .. } => SourceOccurrenceId::current(row),
+                        SourceOccurrenceKey::History { time, node, .. } => {
+                            SourceOccurrenceId::history(
+                                row,
+                                TxTime(record_u64(record, time)?),
+                                crate::ids::NodeUuid(record.get_uuid(field_idx(record, node)?)?),
+                            )
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
             let Some((root, joined)) = occurrence_ids.split_first() else {
                 return Err(super::Error::InvalidStoredValue(
                     "maintained result membership occurrence must include its root row",
@@ -2648,11 +2662,14 @@ fn decode_typed_terminal_record(
                     Ok((*position, label))
                 })
                 .collect::<Result<Vec<_>, super::Error>>()?;
-            let occurrence_id =
-                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "maintained result union occurrence carrier is malformed",
-                    ))?;
+            let occurrence_id = OutputOccurrenceId::from_source_occurrences(
+                *root,
+                joined.iter().copied(),
+                union_arms,
+            )
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained result occurrence carrier is malformed or unsupported",
+            ))?;
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
@@ -3837,7 +3854,9 @@ mod tests {
                                     )))),
                                 ),
                             ]),
-                            row_uuid_field: "row_uuid".to_owned(),
+                            occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                                "row_uuid".to_owned(),
+                            ),
                             metadata: BTreeMap::new(),
                         },
                         routing_fields: BTreeSet::new(),
@@ -6057,7 +6076,10 @@ mod tests {
         let schema = ResultMembershipSchema {
             table_field: "table".to_owned(),
             row_field: "row_uuid".to_owned(),
-            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_keys: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()]
+                .into_iter()
+                .map(crate::node::query_engine::SourceOccurrenceKey::current)
+                .collect(),
             occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
             payload_fields: Vec::new(),
             payload_publication_fields: BTreeMap::new(),

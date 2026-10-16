@@ -244,13 +244,23 @@ support does not claim to implement this coverage protocol.
    eligibility. The shared pipeline owns filtering, ordering, slicing, projection,
    and materialization; no eager history load or separate permission query is
    executed. Programs can be cached because their sources remain live.
-   Retain version metadata through internal projection, then remove it when it
-   was not selected. This increment does not publish result keys or
-   change their encoding; version-aware maintained keys belong to the next
-   step. Enable the admitted shapes above and fail closed for the rest.
-4. **Rust subscriptions.** First add version-aware occurrence identities and
-   binding-codec support (implemented). Next carry these identities through
-   lowering and maintained result materialization, then enable subscriptions.
+   Source resolution declares one `SourceOccurrenceKey`: a current row's UUID
+   or a history row's UUID plus transaction time and portable node UUID. Result
+   schemas carry these complete keys in source order, and maintained decoding
+   produces `SourceOccurrenceId` values before composing the output identity.
+   Logical row IDs for policies and storage lookups are obtained from the key.
+   Graph lowering expands the key into scalar fields for grouping, projection
+   and pagination tie-breakers, even when metadata is not selected; Groove's
+   ordering operators cannot sort tuple-valued fields. Its ordered key is
+   `UUID(row), U64(transaction time), UUID(originating node)` using Groove's
+   existing typed key encoding. Maintained decoding reconstructs the complete
+   result identity from that key, independently of the public payload.
+   Equal projected values therefore retain separate version keys. Ordinary
+   one-shot order-key retention still applies, but history no longer forces
+   all metadata into the payload to preserve multiplicity.
+4. **Rust subscriptions.** Version-aware identity, binding-codec support,
+   collector lowering, and maintained result decoding are implemented. Next
+   enable the public subscription entry point and its history source facts.
    Reuse the same program, with incremental history, current-row authorization
    and policy dependencies over locally available history. Subscriptions remain
    disabled until that path is complete.

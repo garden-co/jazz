@@ -190,6 +190,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 ProjectField::renamed("updated_at", "$updatedAt"),
                 ProjectField::named("tx_time"),
                 ProjectField::named("tx_node_id"),
+                ProjectField::named("transaction_node"),
             ]);
             fields
         };
@@ -212,7 +213,11 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::History {
+                    row: "row_uuid".to_owned(),
+                    time: "tx_time".to_owned(),
+                    node: "transaction_node".to_owned(),
+                },
                 metadata,
             },
             routing_fields: BTreeSet::new(),

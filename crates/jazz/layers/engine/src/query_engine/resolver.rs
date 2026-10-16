@@ -196,11 +196,60 @@ pub struct SourceRowShape {
     pub source: SourceId,
     /// Descriptor of the record emitted by this source.
     pub descriptor: RecordDescriptor,
-    /// Field containing row identity.
-    pub row_uuid_field: String,
+    /// Complete identity of one occurrence emitted by this source.
+    pub occurrence_key: SourceOccurrenceKey,
     /// Internal metadata fields emitted by this source, keyed by the matching
     /// requirement.
     pub metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+}
+
+/// Field mapping for one source occurrence. The row UUID remains available for
+/// application IDs, policy checks and storage lookups, but is not by itself the
+/// identity of a historical occurrence. This definition travels with the source
+/// and result schema; scalar fields are expanded only for graph operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceOccurrenceKey {
+    /// A current row has one occurrence regardless of its content version.
+    Current {
+        /// Field containing the logical row UUID.
+        row: String,
+    },
+    /// Each retained content transaction is a separate occurrence.
+    History {
+        /// Field containing the logical row UUID.
+        row: String,
+        /// Field containing the transaction's packed HLC timestamp.
+        time: String,
+        /// Field containing the originating node's portable UUID.
+        node: String,
+    },
+}
+
+impl SourceOccurrenceKey {
+    /// Declare the occurrence key of an ordinary current-row source.
+    pub fn current(row: impl Into<String>) -> Self {
+        Self::Current { row: row.into() }
+    }
+
+    /// Logical row UUID used by application IDs, policies and storage lookups.
+    pub fn row_field(&self) -> &String {
+        match self {
+            Self::Current { row } | Self::History { row, .. } => row,
+        }
+    }
+
+    /// Ordered scalar components for graph grouping, ordering and projection.
+    pub fn fields(&self) -> Vec<(&String, groove::records::ValueType)> {
+        use groove::records::ValueType;
+        match self {
+            Self::Current { row } => vec![(row, ValueType::Uuid)],
+            Self::History { row, time, node } => vec![
+                (row, ValueType::Uuid),
+                (time, ValueType::U64),
+                (node, ValueType::Uuid),
+            ],
+        }
+    }
 }
 
 /// Concrete source metadata fields emitted for one requirement.

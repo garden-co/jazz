@@ -212,7 +212,7 @@ pub(super) fn lowered_terminals(
     let mut available_fields_owned = available_fields.clone();
     if matches!(plan, AnalyzedQueryPlan::Union(_)) {
         available_fields_owned.extend(
-            root_join_occurrence_fields(plan, resolved_sources, request)?
+            root_occurrence_fields(plan, resolved_sources, request)?
                 .into_iter()
                 .map(|(name, _)| name),
         );
@@ -226,7 +226,7 @@ pub(super) fn lowered_terminals(
     // routes. Ordinary query parameters can be absent from provenance-only
     // closure graphs; requiring those fields would either reject the program
     // or suppress raw evidence needed for local evaluation.
-    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources, request)?
+    let root_occurrence_fields = root_occurrence_fields(plan, resolved_sources, request)?
         .into_iter()
         .map(|(name, _)| name)
         .filter(|name| available_fields.contains(name))
@@ -560,7 +560,7 @@ pub(super) fn lowered_terminals(
                 // Authorization consumes existence, not candidate payloads.
                 // Project only after all predicates/relations have run, and
                 // retain scope routes required by prepared bindings.
-                let row_id = &source.row_shape.row_uuid_field;
+                let row_id = source.row_shape.occurrence_key.row_field();
                 let fields = std::iter::once(row_id.clone())
                     .chain(root_route_fields.iter().cloned())
                     .collect::<Vec<_>>();
@@ -849,7 +849,7 @@ pub(super) fn lowered_terminals(
             let occurrence_addressed = matches!(
                 &output.schema,
                 ProgramFactSchema::ResultMembership(schema)
-                    if schema.occurrence_id_fields.len() > 1
+                    if schema.occurrence_keys.len() > 1
             );
             let result_membership_input =
                 if flat_join_payload_fields(plan).is_empty() && !occurrence_addressed {
@@ -1477,7 +1477,7 @@ fn align_collect_join_key_types(
         }
         let parent_type = source_field_type(parent, &parent_key).map(ValueType::non_nullable);
         if parent_type.is_some_and(ValueType::is_array_fk)
-            && child_key == child.row_shape.row_uuid_field
+            && child_key == *child.row_shape.occurrence_key.row_field()
         {
             let input = format!("{}_references", slot.row_id_input);
             let value_type =
@@ -1688,11 +1688,12 @@ fn retain_collect_slot_value(
     let source_value_type = descriptor_field.value_type.clone();
     let prefix = slot
         .row_id_input
-        .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
+        .strip_suffix(&format!("_{}", source.row_shape.occurrence_key.row_field()))
         .ok_or_else(|| {
             CapabilityReport::runtime(format!(
                 "collector child row-id input {:?} does not match source row-id field {:?}",
-                slot.row_id_input, source.row_shape.row_uuid_field
+                slot.row_id_input,
+                source.row_shape.occurrence_key.row_field()
             ))
         })?;
     // Derive the unwrapped and input types exactly as selected slot fields do,
@@ -1814,6 +1815,32 @@ pub(super) fn collect_window_source_field<'a>(
         .find(|field| field.name.as_deref() == Some(carrier.as_str()))
 }
 
+pub(super) fn root_occurrence_fields(
+    plan: &AnalyzedQueryPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &LoweringContext<'_>,
+) -> CapabilityResult<Vec<(String, ValueType)>> {
+    let mut fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
+    let source = ResolvedSource::lookup(resolved_sources, plan.root_source(), "root occurrence")?;
+    if let SourceOccurrenceKey::History { .. } = &source.row_shape.occurrence_key {
+        if !fields.is_empty() {
+            return Err(CapabilityReport::runtime(
+                "history joins and union occurrences are not supported",
+            ));
+        }
+        fields.extend(
+            source
+                .row_shape
+                .occurrence_key
+                .fields()
+                .into_iter()
+                .skip(1)
+                .map(|(name, ty)| (name.clone(), ty)),
+        );
+    }
+    Ok(fields)
+}
+
 pub(super) fn root_join_occurrence_fields(
     plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -1869,7 +1896,7 @@ pub(super) fn root_join_occurrence_fields(
                 linear.steps.last(),
                 Some(LinearStep::Project(columns))
                     if !columns.iter().any(|column| {
-                        column.output.name == source.row_shape.row_uuid_field
+                        column.output.name == *source.row_shape.occurrence_key.row_field()
                     })
             ),
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => false,
@@ -1880,7 +1907,7 @@ pub(super) fn root_join_occurrence_fields(
         let name = if matches!(steps.get(step_index + 1), Some(LinearStep::Join { .. })) {
             format!(
                 "__flat_join_source_{step_index}_{}",
-                source.row_shape.row_uuid_field
+                source.row_shape.occurrence_key.row_field()
             )
         } else {
             format!("__root_join_row_{step_index}")
@@ -2406,7 +2433,7 @@ fn fact_output_with_terminal(
 ) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
         ProgramFactKey::AuthorizedRows => ProgramFactSchema::AuthorizedRows(AuthorizedRowsSchema {
-            row_field: source.row_shape.row_uuid_field.clone(),
+            row_field: source.row_shape.occurrence_key.row_field().clone(),
             routing_param_fields,
         }),
         ProgramFactKey::ResultMembership => {
@@ -2422,8 +2449,7 @@ fn fact_output_with_terminal(
                 });
             }
             let version = version_witness_fields(&source.row_shape)?;
-            let occurrence_id_fields =
-                result_occurrence_id_fields(plan, source, resolved_sources, request)?;
+            let occurrence_keys = result_occurrence_keys(plan, source, resolved_sources, request)?;
             let occurrence_union_arm_fields =
                 result_occurrence_union_arm_fields(plan, source, resolved_sources, request)?;
             let flat_join_payload = flat_join_payload_fields(plan);
@@ -2434,8 +2460,8 @@ fn fact_output_with_terminal(
                 .flatten();
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
-                row_field: source.row_shape.row_uuid_field.clone(),
-                occurrence_id_fields,
+                row_field: source.row_shape.occurrence_key.row_field().clone(),
+                occurrence_keys,
                 occurrence_union_arm_fields,
                 payload_publication_fields: payload_fields
                     .iter()
@@ -2522,13 +2548,13 @@ fn fact_output_with_terminal(
     })
 }
 
-fn result_occurrence_id_fields(
+fn result_occurrence_keys(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &LoweringContext<'_>,
-) -> CapabilityResult<Vec<String>> {
-    let mut fields = vec![source.row_shape.row_uuid_field.clone()];
+) -> CapabilityResult<Vec<SourceOccurrenceKey>> {
+    let mut fields = vec![source.row_shape.occurrence_key.clone()];
     if &source.row_shape.source != plan.root_source() {
         return Ok(fields);
     }
@@ -2540,13 +2566,15 @@ fn result_occurrence_id_fields(
                 .output
                 .name
                 .strip_prefix("__flat_join_row_")
-                .map(|_| column.output.name.clone())
+                .map(|_| SourceOccurrenceKey::current(column.output.name.clone()))
         }));
     } else {
         fields.extend(
             root_join_occurrence_fields(plan, resolved_sources, request)?
                 .into_iter()
-                .filter_map(|(name, value_type)| (value_type == ValueType::Uuid).then_some(name)),
+                .filter_map(|(name, value_type)| {
+                    (value_type == ValueType::Uuid).then(|| SourceOccurrenceKey::current(name))
+                }),
         );
     }
     Ok(fields)
@@ -2621,7 +2649,7 @@ fn result_payload_fields(
         .iter()
         .filter_map(|field| {
             let name = field.name.as_ref()?;
-            (name != &source.row_shape.row_uuid_field
+            (name != source.row_shape.occurrence_key.row_field()
                 && !hidden.contains(name)
                 && !source.routing_fields.contains(name))
             .then(|| TypedOutputField {
@@ -2642,7 +2670,7 @@ fn projected_multisource_terminal(
     })?;
     let output_source = columns.iter().find_map(|column| match &column.value {
         NormalizedValueRef::RowId(RowIdRef::Source(source))
-            if column.output.name == root_source.row_shape.row_uuid_field =>
+            if column.output.name == *root_source.row_shape.occurrence_key.row_field() =>
         {
             Some(source.clone())
         }
@@ -2754,9 +2782,11 @@ fn fact_terminal_graph(
 ) -> CapabilityResult<GraphBuilder> {
     match key {
         ProgramFactKey::AuthorizedRows => Ok(graph.project_fields(
-            std::iter::once(ProjectField::named(source.row_shape.row_uuid_field.clone()))
-                .chain(routing_param_fields.into_iter().map(ProjectField::named))
-                .collect::<Vec<_>>(),
+            std::iter::once(ProjectField::named(
+                source.row_shape.occurrence_key.row_field().clone(),
+            ))
+            .chain(routing_param_fields.into_iter().map(ProjectField::named))
+            .collect::<Vec<_>>(),
         )),
         ProgramFactKey::ResultMembership => {
             if root_aggregate_step(plan).is_some() {
@@ -2772,7 +2802,10 @@ fn fact_terminal_graph(
                 )?));
             }
             let mut occurrence_fields =
-                result_occurrence_id_fields(plan, source, resolved_sources, request)?;
+                result_occurrence_keys(plan, source, resolved_sources, request)?
+                    .iter()
+                    .flat_map(|key| key.fields().into_iter().map(|(name, _)| name.clone()))
+                    .collect::<Vec<_>>();
             occurrence_fields.extend(
                 result_occurrence_union_arm_fields(plan, source, resolved_sources, request)?
                     .into_values(),
@@ -3296,7 +3329,10 @@ fn correlated_relation_edge_fields(
             "source_table",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::renamed(left_field(&source.row_shape.row_uuid_field), "source_row"),
+        ProjectField::renamed(
+            left_field(source.row_shape.occurrence_key.row_field()),
+            "source_row",
+        ),
         ProjectField::renamed(left_field(&source_version.tx_time_field), "source_tx_time"),
         ProjectField::renamed(
             left_field(&source_version.tx_node_field),
@@ -3313,7 +3349,10 @@ fn correlated_relation_edge_fields(
             "target_table",
             Value::String(target.table_schema.name.clone()),
         ),
-        ProjectField::renamed(right_field(&target.row_shape.row_uuid_field), "target_row"),
+        ProjectField::renamed(
+            right_field(target.row_shape.occurrence_key.row_field()),
+            "target_row",
+        ),
         ProjectField::renamed(right_field(&target_version.tx_time_field), "target_tx_time"),
         ProjectField::renamed(
             right_field(&target_version.tx_node_field),
@@ -3401,7 +3440,7 @@ fn deletion_witness_graph_for_current_register(
         let witness = routed_deletion_authorization_graph(
             register.graph.clone().project_fields(witness_fields),
             &witness_names,
-            &source.row_shape.row_uuid_field,
+            source.row_shape.occurrence_key.row_field(),
             authorized_deleted_winner,
             &present_routes,
         );
@@ -3525,7 +3564,7 @@ pub(super) fn source_rows_for_visible_graph(
 ) -> CapabilityResult<GraphBuilder> {
     let version = version_witness_fields(&source.row_shape)?;
     let mut keys = vec![
-        source.row_shape.row_uuid_field.clone(),
+        source.row_shape.occurrence_key.row_field().clone(),
         version.tx_time_field,
         version.tx_node_field,
     ];
@@ -3592,7 +3631,7 @@ fn content_version_witness_graph_from_visible_graph(
     });
     let version = version_witness_fields(&source.row_shape)?;
     let visible_keys = vec![
-        FieldRef::name(source.row_shape.row_uuid_field.clone()),
+        FieldRef::name(source.row_shape.occurrence_key.row_field().clone()),
         FieldRef::name(version.tx_time_field),
         FieldRef::name(version.tx_node_field),
     ];
@@ -3668,7 +3707,7 @@ fn result_membership_fields(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
     payload_fields: &[TypedOutputField],
-    occurrence_id_fields: &[String],
+    occurrence_fields: &[String],
     include_settle_position: bool,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let version = version_witness_fields(&source.row_shape)?;
@@ -3681,7 +3720,7 @@ fn result_membership_fields(
             "table_name",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::named(source.row_shape.row_uuid_field.clone()),
+        ProjectField::named(source.row_shape.occurrence_key.row_field().clone()),
         ProjectField::renamed(version.tx_time_field, "content_tx_time"),
         ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
     ];
@@ -3689,9 +3728,9 @@ fn result_membership_fields(
         fields.push(ProjectField::named(branch_or_prefix));
     }
     fields.extend(
-        occurrence_id_fields
+        occurrence_fields
             .iter()
-            .filter(|field| **field != source.row_shape.row_uuid_field)
+            .filter(|field| **field != *source.row_shape.occurrence_key.row_field())
             .cloned()
             .map(ProjectField::named),
     );
@@ -3709,7 +3748,7 @@ fn result_membership_fields(
             .iter()
             // The row identity is already the terminal's authoritative root
             // carrier. Branch payloads also list it among their source cells.
-            .filter(|field| field.name != source.row_shape.row_uuid_field)
+            .filter(|field| field.name != *source.row_shape.occurrence_key.row_field())
             .map(|field| ProjectField::named(field.name.clone())),
     );
     Ok(fields)
@@ -3914,7 +3953,7 @@ fn aggregate_source_field_name(
         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
             if value_source == &source.row_shape.source =>
         {
-            Ok(source.row_shape.row_uuid_field.clone())
+            Ok(source.row_shape.occurrence_key.row_field().clone())
         }
         _ => Err(CapabilityReport::operator(
             "aggregate group keys must be root source fields",
@@ -4029,7 +4068,10 @@ fn inline_version_witness_fields_for_tagged_rows(
             "table_name",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::renamed(source.row_shape.row_uuid_field.clone(), "row_uuid"),
+        ProjectField::renamed(
+            source.row_shape.occurrence_key.row_field().clone(),
+            "row_uuid",
+        ),
         ProjectField::renamed(version.tx_time_field.clone(), "content_tx_time"),
         ProjectField::renamed(version.tx_node_field.clone(), "content_tx_node_id"),
         ProjectField::renamed(version.tx_time_field, "tx_time"),
@@ -4067,7 +4109,7 @@ fn deletion_witness_fields_for_tagged_rows(
             "table_name",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::named(source.row_shape.row_uuid_field.clone()),
+        ProjectField::named(source.row_shape.occurrence_key.row_field().clone()),
         ProjectField::renamed("tx_time", "content_tx_time"),
         ProjectField::renamed("tx_node_id", "content_tx_node_id"),
         ProjectField::named("tx_time"),
@@ -4198,7 +4240,7 @@ fn versioned_row_ref_schema(source: &ResolvedSource) -> CapabilityResult<Version
         row: RowRefSchema {
             source_field: "source".to_owned(),
             table_field: "table".to_owned(),
-            row_field: source.row_shape.row_uuid_field.clone(),
+            row_field: source.row_shape.occurrence_key.row_field().clone(),
         },
         version: Some(content_version_schema(&version)),
         branch_or_prefix_field: version.branch_or_prefix_field,
@@ -4245,7 +4287,7 @@ fn version_witness_schema(
         descriptor: source.row_shape.descriptor,
         identity: VersionIdentityFields {
             table_field: "table_name".to_owned(),
-            row_field: source.row_shape.row_uuid_field.clone(),
+            row_field: source.row_shape.occurrence_key.row_field().clone(),
             tx_time_field: "tx_time".to_owned(),
             tx_node_field: "tx_node_id".to_owned(),
             batch_id_field: None,

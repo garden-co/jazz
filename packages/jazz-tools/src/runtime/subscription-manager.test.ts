@@ -1189,3 +1189,53 @@ describe("SubscriptionManager", () => {
     expect(reduceDeltas(result).map((item) => item.id)).toEqual(["2"]);
   });
 });
+
+it("keeps equal history rows distinct and addresses updates by their full transaction", () => {
+  const manager = new SubscriptionManager<TestItem>();
+  const id = "11111111-1111-1111-1111-111111111111";
+  const node = uuidBytes("22222222-2222-2222-2222-222222222222");
+  const times = [0xfffffffffffffff0n, 0xfffffffffffffff1n];
+  const timeBytes = (time: bigint) => {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setBigUint64(0, time);
+    return bytes;
+  };
+  const keys = times.map((time) =>
+    Uint8Array.from([...occurrenceKey(id).subarray(0, 25), 1, ...timeBytes(time), ...node]),
+  );
+  const first = manager.handleDelta(
+    emptyRuntimeDelta({
+      added: keys.map((key, index) => runtimeAddedRecord(id, index, "same", 1, key)),
+    }),
+    transform,
+  );
+  expect(first.all).toEqual([
+    { id, name: "same", count: 1 },
+    { id, name: "same", count: 1 },
+  ]);
+  const edited = manager.handleDelta(
+    emptyRuntimeDelta({
+      updated: [
+        {
+          sourceId: id,
+          occurrenceKey: keys[1]!,
+          previousIndex: 1,
+          index: 1,
+          row: makeRow(id, "changed", 2),
+        },
+      ],
+    }),
+    transform,
+  );
+  expect(edited.all).toEqual([
+    { id, name: "same", count: 1 },
+    { id, name: "changed", count: 2 },
+  ]);
+  const removed = manager.handleDelta(
+    emptyRuntimeDelta({
+      removed: [{ sourceId: id, occurrenceKey: keys[0]!, index: 0 }],
+    }),
+    transform,
+  );
+  expect(removed.all).toEqual([{ id, name: "changed", count: 2 }]);
+});

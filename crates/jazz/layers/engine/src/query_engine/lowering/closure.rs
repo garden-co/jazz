@@ -107,7 +107,7 @@ pub(super) fn reachable_contribution_membership_graph(
     Ok(GraphBuilder::join(
         visible_root,
         contribution_graph,
-        [root_source.row_shape.row_uuid_field.clone()],
+        [root_source.row_shape.occurrence_key.row_field().clone()],
         [join_field],
     )
     .project_fields(project_join_contribution_fields_with_root_routes(
@@ -136,7 +136,7 @@ fn reachable_root_reference_field(source: &ResolvedSource, field: &str) -> Strin
     {
         user_field
     } else {
-        source.row_shape.row_uuid_field.clone()
+        source.row_shape.occurrence_key.row_field().clone()
     }
 }
 
@@ -560,8 +560,8 @@ fn required_closure_parent_graph_from_segment(
             "closure source field {source_key:?} is not projected"
         )));
     };
-    let parent_row_uuid = parent_source.row_shape.row_uuid_field.clone();
-    let target_row_uuid = target.row_shape.row_uuid_field.clone();
+    let parent_row_uuid = parent_source.row_shape.occurrence_key.row_field().clone();
+    let target_row_uuid = target.row_shape.occurrence_key.row_field().clone();
     let (required_base, required_key_type) =
         unwrap_nullable_layers(parent_graph.clone(), source_key.clone(), source_key_type);
     let required = match required_key_type {
@@ -690,7 +690,7 @@ fn closure_membership_graph_for_path(
         project_source_fields_with_routes(root_source, route_fields)
             .into_iter()
             .chain([ProjectField::renamed(
-                root_source.row_shape.row_uuid_field.clone(),
+                root_source.row_shape.occurrence_key.row_field().clone(),
                 "__closure_root_row_uuid",
             )]),
     );
@@ -725,7 +725,7 @@ fn closure_membership_graph_for_path(
             GraphBuilder::semi_join(
                 target.graph.clone(),
                 source_keys.project_fields(vec![ProjectField::named(source_key.clone())]),
-                [target.row_shape.row_uuid_field.clone()],
+                [target.row_shape.occurrence_key.row_field().clone()],
                 [source_key],
             )
             // The root carries no binding route here, so the semi-join only
@@ -748,7 +748,7 @@ fn closure_membership_graph_for_path(
                 current_graph.unwrap_nullable(source_key.clone()),
                 target.graph.clone(),
                 std::iter::once(source_key).chain(shared_routes.iter().cloned()),
-                std::iter::once(target.row_shape.row_uuid_field.clone())
+                std::iter::once(target.row_shape.occurrence_key.row_field().clone())
                     .chain(shared_routes.iter().cloned()),
             )
             .project_fields(

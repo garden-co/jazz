@@ -998,11 +998,13 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   }
   if (cursor !== sidecar.byteLength) return undefined;
 
-  if (transaction) return undefined; // History terminal lowering is not enabled yet.
   const ordered: number[] = [];
   const rootArm = arms.get(0);
   if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
   ordered.push(10, ...root);
+  if (transaction) {
+    ordered.push(3, ...transaction.subarray(0, 8), 10, ...transaction.subarray(8));
+  }
   for (const [index, uuid] of joined.entries()) {
     const arm = arms.get(index + 1);
     if (arm) {

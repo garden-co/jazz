@@ -303,15 +303,12 @@ pub(super) fn fact_public_fields(
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
             fields.extend(
                 schema
-                    .occurrence_id_fields
+                    .occurrence_keys
                     .iter()
-                    .filter(|field| **field != schema.row_field)
+                    .flat_map(|key| key.fields().into_iter().map(|(name, _)| name))
+                    .filter(|name| **name != schema.row_field)
                     .cloned(),
             );
-            // A union arm is part of a result occurrence address, just like
-            // its paired joined-row id. Retaining only the id causes prepared
-            // maintained subscriptions to publish a descriptor that cannot be
-            // decoded against the membership schema.
             fields.extend(schema.occurrence_union_arm_fields.values().cloned());
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
@@ -1690,7 +1687,10 @@ mod tests {
             ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
                 row_field: "row_uuid".to_owned(),
-                occurrence_id_fields: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()],
+                occurrence_keys: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()]
+                    .into_iter()
+                    .map(crate::node::query_engine::SourceOccurrenceKey::current)
+                    .collect(),
                 occurrence_union_arm_fields: BTreeMap::from([(0, "__root_join_arm_0".to_owned())]),
                 payload_fields: Vec::new(),
                 payload_publication_fields: BTreeMap::new(),

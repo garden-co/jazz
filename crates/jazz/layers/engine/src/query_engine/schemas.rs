@@ -161,11 +161,9 @@ pub struct ResultMembershipSchema {
     pub table_field: String,
     /// Row identity field in the terminal row.
     pub row_field: String,
-    /// Ordered source-row identity fields for the rendered output occurrence.
-    /// The root source is first; ordinary output contains only `row_field`.
-    pub occurrence_id_fields: Vec<String>,
-    /// Typed UNION ALL arm discriminators keyed by source position: root is
-    /// position zero and joined sources are positions one and above.
+    /// Complete keys of contributing sources, in declared join order (root first).
+    pub occurrence_keys: Vec<super::SourceOccurrenceKey>,
+    /// Typed UNION ALL arm discriminators keyed by source position.
     pub occurrence_union_arm_fields: BTreeMap<usize, String>,
     /// Flattened public tuple fields retained with the membership record when
     /// this is a flat joined output. Ordinary row output leaves this empty.
