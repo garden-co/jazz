@@ -108,10 +108,10 @@ enough row history to converge deterministically after peers reconnect.
 
 ## Conflict resolution
 
-When concurrent writes touch the same field of the same row, Jazz resolves the visible result with
-[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). Jazz uses a deterministic
-[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering to choose the
-winning row version for the conflicting field.
+When concurrent writes touch the same field of the same row, Core resolves the visible result
+[field by field against what each writer saw](/docs/concepts/how-sync-works#consistency-model): a
+write replaces the values its writer had seen, and when two writers changed the same field from the
+same starting point, the [edit Core receives first wins](/docs/concepts/how-sync-works#concurrent-edits).
 
 If two peers update different fields, both changes can still be preserved in the resulting visible
 row state. Even row versions that lose out in the current visible result remain in row history, so

@@ -10,24 +10,11 @@ byte codecs and `NativeRuntimeAdapter` as the other native hosts; it is not a
 second React-Native-shaped database API.
 
 The current `createDb()` path installs `ReactNativeRuntimeSource`. Persistent
-configurations without the platform-issued `nativeRelay` capability fail before
-opening any SQLite driver with:
+configurations use the installed JazzRelay native artifact through account
+admission or a platform-issued `nativeRelay` capability. Storage is owned by
+the native runtime; there is no JavaScript SQLite driver option.
 
-`React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability`
-
-The fail-fast boundary is intentional. A `ReactNativeSqliteStorageDriver`
-cannot yet be installed into the v2 Rust ordered-KV runtime. Merely opening a
-SQLite connection and then delegating queries to WASM would leave Jazz data in
-the WASM store and falsely claim persistence. The deprecated driver interfaces
-remain as a proposed storage ABI, but supplying one is rejected before
-`open()` and does not opt into persistence. This rejection also applies when
-`sqliteStorage` is combined with `driver: { type: "memory" }`; the option is
-never silently ignored.
-
-Explicit `driver: { type: "memory" }` currently reaches the v2 WASM runtime in
-the Node/forks test harness. That regression proves TypeScript wiring only. It
-has not run under Metro/Hermes on iOS or Android and must not be described as a
-supported React Native runtime mode until an actual device smoke passes.
+Explicit `driver: { type: "memory" }` is rejected by the React Native entrypoint.
 
 This is still an alpha boundary, not a device-support claim. Remote tiers,
 historical/terminal relation reads, branch writes, custom attribution, restore,

@@ -4234,8 +4234,10 @@ fn commit_operator_state(state: &mut OperatorState) {
         OperatorState::CollectBy(collect_by) => {
             collect_by.groups.commit_overlay();
         }
-        OperatorState::Stateless | OperatorState::Join(_) | OperatorState::StreamingChecksum(_) => {
-        }
+        OperatorState::Stateless
+        | OperatorState::Join(_)
+        | OperatorState::StreamingChecksum(_)
+        | OperatorState::Lookup(_) => {}
     }
 }
 

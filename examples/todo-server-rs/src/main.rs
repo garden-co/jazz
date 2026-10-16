@@ -6,12 +6,11 @@
 //! # Running
 //!
 //! ```bash
-//! # First, create an app and start the Jazz server
-//! jazz-tools create app --name todo-app
-//! jazz-tools server <APP_ID> --port 1625
+//! # Start a configured Jazz server with this example's schema and permissions.
+//! # Set JAZZ_APP_ID, JAZZ_SERVER_URL and JAZZ_JWT_TOKEN for an ordinary user.
 //!
 //! # Then run the todo backend
-//! cargo run -p todo-server
+//! cargo run --manifest-path examples/todo-server-rs/Cargo.toml
 //! ```
 //!
 //! # API
@@ -22,7 +21,7 @@
 //! | `/todos` | POST | Create new item |
 //! | `/todos/:id` | PUT | Update item |
 //! | `/todos/:id` | DELETE | Delete item |
-//! | `/updates` | GET | SSE stream of add/remove events |
+//! | `/todos/live` | GET | SSE stream of full-list snapshots |
 
 // mimalloc replaces the system allocator for ~25% throughput on Rust-side
 // allocation-heavy paths (query/insert/observer). Single-process, single-language —
@@ -85,6 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "019d4349-2460-73fc-9e98-5d67c9697598".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
+    let jwt_token = std::env::var("JAZZ_JWT_TOKEN")
+        .map_err(|_| "set JAZZ_JWT_TOKEN to a valid ordinary-user JWT")?;
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
     let port: u16 = std::env::var("TODO_PORT")
         .ok()
@@ -114,7 +115,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_factory: Some(std::sync::Arc::new(
             jazz_storage_rocksdb::RocksDbStorageFactory,
         )),
-        jwt_token: None,
+        account_id: None,
+        jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
     };
