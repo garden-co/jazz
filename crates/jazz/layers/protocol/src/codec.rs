@@ -866,6 +866,23 @@ tuple_codec!((A 0, B 1), (A 0, B 1, C 2), (A 0, B 1, C 2, D 3));
 
 mod leaves;
 
+impl WireCodec for crate::query::RelationQuery {
+    fn put(&self, buf: &mut Vec<u8>) {
+        if let Err(message) = crate::query::relation_query_wire::encode_postcard_required(self, buf)
+        {
+            record_encode_error(CodecError::Encode { message });
+        }
+    }
+
+    fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError> {
+        let (value, used) =
+            crate::query::relation_query_wire::decode_postcard_required(&data[*offset..])
+                .map_err(|message| CodecError::DecodeError { message })?;
+        *offset += used;
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,22 +1012,5 @@ mod tests {
                 context: "Shape"
             })
         );
-    }
-}
-
-impl WireCodec for crate::query::RelationQuery {
-    fn put(&self, buf: &mut Vec<u8>) {
-        if let Err(message) = crate::query::relation_query_wire::encode_postcard_required(self, buf)
-        {
-            record_encode_error(CodecError::Encode { message });
-        }
-    }
-
-    fn get(data: &[u8], offset: &mut usize) -> Result<Self, CodecError> {
-        let (value, used) =
-            crate::query::relation_query_wire::decode_postcard_required(&data[*offset..])
-                .map_err(|message| CodecError::DecodeError { message })?;
-        *offset += used;
-        Ok(value)
     }
 }

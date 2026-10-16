@@ -574,7 +574,7 @@ mod tests {
             ValueType::Array(Box::new(ValueType::String)),
             ValueType::Nullable(Box::new(ValueType::U48)),
             ValueType::Record(Box::new(identified)),
-            ValueType::Record(Box::new(RecordDescriptor::default())),
+            ValueType::Record(Box::default()),
             ValueType::Enum(Box::new(enum_schema.clone())),
             ValueType::U48,
         ];

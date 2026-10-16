@@ -254,9 +254,7 @@ impl ProtocolTrace {
             SyncMessage::FateUpdate { .. } => "FateUpdate",
             _ => "other",
         };
-        let bytes =
-            postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
-                .expect("canonical payload size");
+        let bytes = jazz::codec::encoded_len(message).expect("canonical payload size");
         self.messages
             .push(json!({"direction":direction, "kind":kind,
             "canonical_payload_bytes":bytes, "detail":detail}));

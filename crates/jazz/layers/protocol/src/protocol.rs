@@ -1604,7 +1604,7 @@ mod version_record_wire_row {
             );
             // Each message starts with an empty table, and nested scopes
             // restore the outer table.
-            assert!(decode_all(&[defined.clone()]).is_ok());
+            assert!(decode_all(std::slice::from_ref(&defined)).is_ok());
             assert!(decode_all(&[with_reference(&[1])]).is_err());
             with_message_descriptor_table(|| {
                 decode(&defined).unwrap();

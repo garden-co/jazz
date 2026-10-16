@@ -50,9 +50,8 @@ fn main() {
             completeness: KnownStateCompleteness::FastCurrentMembership,
             position: versions[known_count - 1].2,
         });
-        let declaration_bytes = postcard::to_allocvec(&declaration)
-            .expect("encode known-state declaration payload")
-            .len();
+        let declaration_bytes =
+            jazz::codec::encoded_len(&declaration).expect("encode known-state declaration payload");
 
         let mut peer = PeerState::new();
         peer.declare_known_state(subscription, declaration);
@@ -196,8 +195,8 @@ impl Fixture {
     }
 }
 
-fn membership_digest<T: serde::Serialize>(members: &T) -> String {
-    let bytes = postcard::to_allocvec(members).expect("encode membership digest input");
+fn membership_digest<T: jazz::codec::WireCodec>(members: &T) -> String {
+    let bytes = jazz::codec::try_encode(members).expect("encode membership digest input");
     hex::encode(Sha256::digest(bytes))
 }
 
