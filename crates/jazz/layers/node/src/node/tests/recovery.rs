@@ -2495,7 +2495,7 @@ fn author_columns_store_dictionary_codes() {
                 );
             }
             let (tag, payload) = groove::records::split_variant_record(&value).unwrap();
-            let descriptor = table.storage_record_schema_for_variant(tag).unwrap();
+            let descriptor = table.record_schema_for_variant(tag).unwrap();
             let record = OwnedRecord::new(payload.to_vec(), descriptor);
             let columns: &[&str] = if name == "jazz_transactions" {
                 &["made_by"]

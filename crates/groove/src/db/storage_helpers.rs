@@ -916,13 +916,10 @@ pub(super) enum PendingTableWrite {
         table: String,
         key: Vec<u8>,
         variant_tag: u32,
-        /// The logical descriptor of `record`.
+        /// The descriptor of `record`.
         descriptor: RecordDescriptor,
-        /// The logical record: what maintained views and reads see.
+        /// The record as stored and as maintained views and reads see it.
         record: Vec<u8>,
-        /// The stored payload when the table interns columns (codes in place
-        /// of values); `None` when the logical record is stored as is.
-        stored: Option<Vec<u8>>,
     },
     Delete {
         table: String,
@@ -963,12 +960,8 @@ impl PendingTableWrite {
             Self::Set {
                 variant_tag,
                 record,
-                stored,
                 ..
-            } => Some(encode_variant_record(
-                *variant_tag,
-                stored.as_deref().unwrap_or(record),
-            )),
+            } => Some(encode_variant_record(*variant_tag, record)),
             Self::Delete { .. } => None,
         }
     }
@@ -1000,16 +993,12 @@ where
     let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
     // The schema is fixed for this batch. Old rows may use several variants,
     // but each variant's descriptor needs preparation only once.
-    // Stored old rows hold dictionary codes; their logical form is built
-    // once per row here, while same-batch rows from the overlay already are
-    // logical.
-    let mut old_codecs = HashMap::<(&str, u32), StoredRecordCodec>::new();
+    let mut old_descriptors = HashMap::<(&str, u32), RecordDescriptor>::new();
     let schema = database.ivm_runtime.schema();
 
     for (write, store) in pending_writes.iter().zip(stores) {
         let overlay_key = (write.table(), write.key());
         let stored_current;
-        let mut current_is_stored = false;
         let current = if let Some(record) = overlay.get(&overlay_key) {
             *record
         } else if matches!(
@@ -1022,7 +1011,6 @@ where
             None
         } else {
             stored_current = store.get_raw(write.key()).await?;
-            current_is_stored = true;
             stored_current
                 .as_deref()
                 .map(split_variant_record)
@@ -1046,27 +1034,17 @@ where
             .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
         if let Some((variant_tag, payload)) = current {
             let descriptor_key = (write.table(), variant_tag);
-            let codec = if let Some(codec) = old_codecs.get(&descriptor_key) {
-                codec.clone()
+            let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key) {
+                *descriptor
             } else {
-                let codec = database.stored_record_codec(table_schema, variant_tag)?;
-                old_codecs.insert(descriptor_key, codec.clone());
-                codec
-            };
-            let payload = match (&codec.transcoder, current_is_stored) {
-                (Some(transcoder), true) => {
-                    bytes::Bytes::from(crate::dictionary::transcode_to_logical(
-                        transcoder,
-                        &database.ivm_runtime.dictionaries().borrow(),
-                        payload,
-                    )?)
-                }
-                _ => bytes::Bytes::copy_from_slice(payload),
+                let descriptor = database.stored_record_descriptor(table_schema, variant_tag)?;
+                old_descriptors.insert(descriptor_key, descriptor);
+                descriptor
             };
             *by_table
-                .entry((write.table(), variant_tag, codec.logical))
+                .entry((write.table(), variant_tag, descriptor))
                 .or_default()
-                .entry(payload)
+                .entry(bytes::Bytes::copy_from_slice(payload))
                 .or_default() -= 1;
         }
         if let PendingTableWrite::Set {

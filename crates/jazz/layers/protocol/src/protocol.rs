@@ -1154,12 +1154,32 @@ mod version_record_wire_row {
             std::cell::RefCell::new(DescriptorProofCache::default());
     }
 
+    /// Dictionary codes are node-local, so a row carrying them never crosses
+    /// the wire: egress resolves it first (`Dictionaries::resolve_record`).
+    fn refuse_dictionary_codes(
+        descriptor: &RecordDescriptor,
+    ) -> Result<(), groove::records::Error> {
+        for field in descriptor.fields() {
+            let interned = match &field.value_type {
+                groove::records::ValueType::Nullable(inner) => inner.as_interned(),
+                other => other.as_interned(),
+            };
+            if let Some((dictionary, _)) = interned {
+                return Err(groove::records::Error::InternedTypeNotEncodable {
+                    dictionary: dictionary.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn descriptor_for_encode(
         descriptor: &RecordDescriptor,
     ) -> Result<DescriptorProof, groove::records::Error> {
         if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_source(descriptor)) {
             return Ok(proof);
         }
+        refuse_dictionary_codes(descriptor)?;
         let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
         let canonical = groove::records::decode_persisted_record_descriptor(&encoded)?;
         let proof = DescriptorProof {
@@ -1678,7 +1698,7 @@ mod version_record_wire_row {
                 [crate::schema::ColumnSchema::new("title", ValueType::String)],
             )
             .global_current_storage_table();
-            let stored = table.storage_record_schema();
+            let stored = table.record_schema();
             assert!(stored.contains_interned(), "author columns are interned");
             assert!(matches!(
                 groove::records::encode_persisted_record_descriptor(&stored),

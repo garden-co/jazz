@@ -2212,7 +2212,7 @@ pub enum Error {
     #[error("unexpected end of record")]
     UnexpectedEof,
     #[error(
-        "a descriptor with a column interned into dictionary {dictionary} cannot be encoded: interning is storage-only"
+        "a descriptor with a column interned into dictionary {dictionary} cannot leave the node: dictionary codes are node-local, resolve the record first"
     )]
     InternedTypeNotEncodable { dictionary: String },
     #[error(

@@ -5167,7 +5167,7 @@ mod transaction_record_tests {
             .lower_to_groove()
             .table(table)
             .unwrap()
-            .storage_record_schema();
+            .record_schema();
         let transcoder = records::RecordTranscoder::new(schema)
             .unwrap()
             .expect("the author column is interned");
