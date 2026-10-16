@@ -22,6 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol_limits::PolicyExpressionLimitError;
 
+mod bridge_model_tx;
+mod model_tx;
+
 /// Encoding and decoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodecError {
