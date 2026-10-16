@@ -157,6 +157,9 @@ void jz_btree_append(jz_btree *dst, jz_btree *src);
 bool jz_btree_eq(const jz_btree *a, const jz_btree *b, bool (*veq)(const void *, const void *));
 /* bulk build from a vec of (k,v) pairs: sorts once with jz_sort then inserts (std's collect()) */
 void jz_btree_from_pairs(jz_btree *t, const jz_btree_desc *d, void *pairs, u32 n);
+/* (added) from_pairs with explicit pair layout: stride = sizeof(pair), val_off = offsetof(pair, v).
+ * jz_btree_from_pairs assumes a packed pair (stride = key_size + val_size, val_off = key_size). */
+void jz_btree_from_pairs_ex(jz_btree *t, const jz_btree_desc *d, void *pairs, u32 n, usize stride, usize val_off);
 #define JZ_BTREE_FOR(t, kp, vp) for (jz_btree_iter _it_##kp = ((void)jz_btree_iter_begin(&_it_##kp, (t)), _it_##kp); jz_btree_next(&_it_##kp, (void **)&(kp), (void **)&(vp));)
 
 /* ---------- HashMap / HashSet (type-erased open addressing, hashbrown-like) ---------- */
@@ -204,6 +207,9 @@ void *jz_rc_make_mut(void **pp, usize size, void (*clone)(void *dst, const void 
 
 /* ---------- Interning (internment::Intern) ---------- */
 typedef struct jz_interner jz_interner;
+/* (added) like jz_intern, reports whether val was moved into the pool (shallow copy).
+ * When *inserted is false the caller still owns val and should drop it (Intern::new drops it). */
+const void *jz_intern_ex(jz_interner **pool, const void *val, usize size, u64 (*hash)(const void *), bool (*eq)(const void *, const void *), bool *inserted);
 const void *jz_intern(jz_interner **pool, const void *val, usize size, u64 (*hash)(const void *), bool (*eq)(const void *, const void *));
 
 /* ---------- UUID / ids ---------- */
@@ -217,6 +223,7 @@ jz_uuid jz_uuid_v5(const jz_uuid *ns, const u8 *name, u32 len);
 jz_uuid jz_uuid_v4(void);
 void jz_uuid_to_string(const jz_uuid *u, char out[37]);
 jz_err jz_uuid_parse(jz_slice s, jz_uuid *out);
+enum { JZ_UUID_ERR = 0xffd0, JZ_BASE64_ERR, JZ_HEX_ERR, JZ_ZSTD_ERR }; /* (added) error codes of rt helpers */
 void jz_random_bytes(u8 *out, u32 n); /* imported from host (getrandom) */
 u64 jz_now_ms(void);                  /* imported from host (web-time) */
 

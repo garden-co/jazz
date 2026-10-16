@@ -1,0 +1,67 @@
+total code bytes 14465416
+
+## by kind
+   5473591  37.8% plain fns
+   2925334  20.2% async/closure bodies
+   2001147  13.8% BTree monomorphs
+   1223068   8.5% sort monomorphs
+   1208202   8.4% serde/postcard
+    639703   4.4% drop glue
+    365522   2.5% Clone
+    245313   1.7% Eq/Ord/Hash
+    243553   1.7% fmt/Debug/Display
+    139983   1.0% hashbrown monomorphs
+
+## by crate (top 40)
+   2683154  18.5% jazz_node
+   2418501  16.7% groove
+   2359626  16.3% alloc
+   1877983  13.0% core
+   1176213   8.1% jazz_db
+   1057755   7.3% jazz_model
+    597529   4.1% jazz_engine
+    274235   1.9% jazz_protocol
+    206582   1.4% groove (via std generic)
+    158232   1.1% serde_core
+    139548   1.0% hashbrown
+    127751   0.9% serde
+    124456   0.9% postcard
+    121386   0.8% T
+    120743   0.8% jazz_node (via std generic)
+     91328   0.6% jazz_wasm
+     91241   0.6% jazz_model (via std generic)
+     90812   0.6% serde_json
+     75833   0.5% jazz_engine (via std generic)
+     71258   0.5% js_sys
+     60148   0.4% jazz_db (via std generic)
+     45150   0.3% idb_tree
+     38380   0.3% wasmdb_registerSchema
+     37818   0.3% jazz_types
+     37367   0.3% jazz_protocol (via std generic)
+     33504   0.2% std
+     27674   0.2% curve25519_dalek
+     22693   0.2% serde_wasm_bindgen
+     17653   0.1% tracing_subscriber
+     15735   0.1% futures_util
+     13175   0.1% smallvec
+     12880   0.1% internment
+     12724   0.1% blake3
+     11150   0.1% sha2
+      9643   0.1% uuid
+      9174   0.1% ?
+      8775   0.1% jazz_types (via std generic)
+      8079   0.1% jazz_wasm (via std generic)
+      7872   0.1% ruzstd
+      7650   0.1% __testValidateWireFrameBatchCorpus
+
+## own crates x kind
+jazz_node 2683154 plain fns=1367465 async/closure bodies=1304162 fmt/Debug/Display=6935 Clone=4592
+groove 2418501 plain fns=1380407 async/closure bodies=617695 Eq/Ord/Hash=155384 serde/postcard=117953 Clone=93828 fmt/Debug/Display=53234
+jazz_db 1176213 async/closure bodies=806628 plain fns=338477 serde/postcard=30304 Clone=755 fmt/Debug/Display=49
+jazz_model 1057755 plain fns=486991 serde/postcard=386162 Clone=128888 Eq/Ord/Hash=46402 fmt/Debug/Display=6340 async/closure bodies=2972
+jazz_engine 597529 plain fns=503813 Clone=48524 async/closure bodies=22161 Eq/Ord/Hash=12041 fmt/Debug/Display=10990
+jazz_protocol 274235 plain fns=166999 serde/postcard=45201 Eq/Ord/Hash=28176 Clone=27934 fmt/Debug/Display=4579 async/closure bodies=1346
+jazz_types 37818 plain fns=18067 serde/postcard=16878 fmt/Debug/Display=2233 Eq/Ord/Hash=640
+jazz_wasm 91328 plain fns=57567 async/closure bodies=33761
+idb_tree 45150 plain fns=23212 async/closure bodies=21938
+wasm_tracing 3273 plain fns=3068 async/closure bodies=131 fmt/Debug/Display=74
