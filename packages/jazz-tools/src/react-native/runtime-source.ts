@@ -18,8 +18,6 @@ import {
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
-import type { ReactNativeSqliteStorageDriver } from "./storage.js";
-import { REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR } from "./storage.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
 import {
   beginNativeAccountSession,
@@ -44,17 +42,6 @@ export type ReactNativeRelayConfig = Readonly<{
 
 export type ReactNativeDbConfig = DbConfig & {
   /**
-   * Proposal-only SQLite storage hook for a future native v2 runtime.
-   *
-   * The current runtime does not install or open this driver. Every persistent
-   * configuration is rejected before `sqliteStorage.open()` can run. Supplying
-   * it with an explicit memory driver is also rejected rather than ignored.
-   *
-   * @deprecated Ignored and rejected; do not supply this option until the
-   * native ordered-KV runtime exists.
-   */
-  sqliteStorage?: ReactNativeSqliteStorageDriver;
-  /**
    * Opaque authority issued by trusted native platform admission. The normal
    * persistent RN runtime consumes it through its installed JSI foreground
    * engine; application JavaScript cannot construct scope configuration.
@@ -74,10 +61,6 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
-  override get defaultDurabilityTier(): "local" {
-    return "local";
-  }
-
   private admittedSession: Session | null = null;
   private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
@@ -88,9 +71,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private explicitlyOffline = false;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
-    if (config.sqliteStorage !== undefined) {
-      throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    }
     if (shouldRequireSqliteDriver(config)) {
       if (!config.nativeRelay && config.accountId && config.accountRegistryAuthority) {
         if (this.pendingCapability || this.admittedCapability) return;
@@ -189,10 +169,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         this.admittedCapability = capability;
         return;
       }
-      // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
-      // Rust ordered-KV runtime. Opening one here and then delegating to WASM
-      // only preflights an unrelated database and falsely implies that Jazz
-      // rows are persisted there.
       throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
     }
 
@@ -272,8 +248,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           env: context.config.env,
           jwtToken: context.config.jwtToken,
           cookieSession: context.config.cookieSession,
-          tier: "local",
-          defaultDurabilityTier: this.defaultDurabilityTier,
         };
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {

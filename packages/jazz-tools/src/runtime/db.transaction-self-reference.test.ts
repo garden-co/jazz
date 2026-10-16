@@ -52,7 +52,6 @@ describe("transaction-committed rows in a hierarchical table", () => {
               adminSecret: server.adminSecret,
               backendSecret: server.backendSecret,
               driver: { type: "memory" },
-              tier: "local",
               env: "test",
             });
             db = context.asBackend();
