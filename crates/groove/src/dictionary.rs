@@ -112,6 +112,15 @@ impl Dictionaries {
         Self(shared)
     }
 
+    /// Empty dictionaries for `schemas` that belong to no database: codes
+    /// they allocate are never stored. For codecs and tests that need codes
+    /// without opening a database.
+    pub fn detached<'a>(schemas: impl IntoIterator<Item = &'a DictionarySchema>) -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            DictionaryRegistry::declared(schemas),
+        )))
+    }
+
     /// The canonical bytes of the value `code` stands for in `dictionary`.
     pub fn resolve(&self, dictionary: &str, code: u32) -> Result<Arc<[u8]>, DictionaryError> {
         self.0.borrow().decode_shared(dictionary, code)

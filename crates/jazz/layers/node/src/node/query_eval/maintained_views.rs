@@ -1112,6 +1112,7 @@ where
         // logical projection as a synthetic version in the read schema.
         let schema_alias = version.schema_version_alias();
         let record = super::read_sources::covered_input_record(
+            &self.authors,
             &source_table,
             &runtime_source.descriptor,
             &row,
@@ -1228,6 +1229,7 @@ where
                         &local.terminal_schemas,
                         &local.tables,
                         &self.node_aliases,
+                        &self.authors,
                     )?;
                     terminal_operations.extend(transitions.terminal_operations);
                     if crate::debug_env::covered_input_trace() {

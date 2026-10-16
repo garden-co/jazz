@@ -1685,11 +1685,11 @@ mod version_record_wire_row {
 
         /// Actors: a node replicating one of its global-current rows.
         ///
-        /// A Jazz row whose stored form interns its author columns reaches
-        /// JVRR in its logical form: Groove reads it back with full
-        /// `RowAuthor` values under plain `RowAuthor` types, it round-trips
-        /// as plain values, and the stored descriptor itself refuses to
-        /// encode, so a dictionary code is never framed as a wire value.
+        /// A Jazz row holds its author columns as `authors` dictionary codes,
+        /// which are node-local: JVRR refuses to frame a row that still
+        /// carries them, and the row the node resolves at egress, with full
+        /// `RowAuthor` values under plain `RowAuthor` types, round-trips as
+        /// plain values.
         /// White-box: the JVRR envelope is below every public API.
         #[test]
         fn rows_with_interned_author_columns_cross_jvrr_as_plain_values() {
@@ -1700,18 +1700,14 @@ mod version_record_wire_row {
             .global_current_storage_table();
             let stored = table.record_schema();
             assert!(stored.contains_interned(), "author columns are interned");
-            assert!(matches!(
-                groove::records::encode_persisted_record_descriptor(&stored),
-                Err(groove::records::Error::InternedTypeNotEncodable { dictionary })
-                    if dictionary == crate::schema::AUTHORS_DICTIONARY
-            ));
             let stored_row = OwnedRecord::new(Vec::new(), stored);
             assert!(matches!(
                 encode(&stored_row),
-                Err(groove::records::Error::InternedTypeNotEncodable { .. })
+                Err(groove::records::Error::InternedTypeNotEncodable { dictionary })
+                    if dictionary == crate::schema::AUTHORS_DICTIONARY
             ));
 
-            let logical = table.record_schema();
+            let logical = stored.logical();
             assert!(!logical.contains_interned());
             let alice = crate::ids::RowAuthor::from_persisted_subject(
                 crate::ids::AuthorSubject::for_test_bytes([0xa1; 16]),

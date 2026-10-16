@@ -1332,6 +1332,18 @@ impl<'a> BorrowedRecord<'a> {
         read_exact_array::<4>(bytes).map(u32::from_le_bytes)
     }
 
+    /// The dictionary code an interned field holds.
+    pub fn get_dictionary_code(&self, field_idx: usize) -> Result<u32, Error> {
+        let field = self.field(field_idx)?;
+        if field.value_type.as_interned().is_none() {
+            return Err(Error::TypeMismatch {
+                expected: field.value_type.clone(),
+            });
+        }
+        let span = self.descriptor.field_span(self.raw, field_idx)?;
+        read_exact_array::<4>(&self.raw[span]).map(u32::from_le_bytes)
+    }
+
     pub fn get_u8(&self, field_idx: usize) -> Result<u8, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U8)?;
         bytes.first().copied().ok_or_else(|| Error::UnexpectedEof)

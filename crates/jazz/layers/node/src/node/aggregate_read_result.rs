@@ -84,6 +84,7 @@ fn invalid(what: &'static str) -> Error {
 
 fn encode_typed_value(value_type: &ValueType, value: &Value) -> Result<Vec<u8>, Error> {
     let value_descriptor = RecordDescriptor::new([("value", value_type.clone())]);
+    super::author_codes::refuse_codes(&value_descriptor)?;
     let descriptor = encode_persisted_record_descriptor(&value_descriptor)?;
     let value = value_descriptor.create(std::slice::from_ref(value))?;
     Ok(typed_value_descriptor().create(&[Value::Bytes(descriptor), Value::Bytes(value)])?)

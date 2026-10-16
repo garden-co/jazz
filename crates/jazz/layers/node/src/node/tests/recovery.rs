@@ -819,6 +819,7 @@ fn mark_accepted_without_ahead_cleanup<S>(
     let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
     stage_transaction_record(
+        &node.authors.clone(),
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,
@@ -978,6 +979,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
         let stored = node.query_transaction(tx_id).unwrap().unwrap();
         let mut batch = node.database.open_batch();
         stage_transaction_record(
+            &node.authors.clone(),
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
@@ -2184,6 +2186,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
                 let mut values = transaction_record_values(
+                    &core.authors.clone(),
                     stored.node_alias,
                     &stored.tx,
                     &TransactionRecordStatus::new(fate.clone(), global_time, durability),
@@ -2224,6 +2227,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             .unwrap();
         stored.tx.contribution_merge = Some(provenance);
         let values = transaction_record_values(
+            &core.authors.clone(),
             stored.node_alias,
             &stored.tx,
             &TransactionRecordStatus::new(
@@ -2576,9 +2580,9 @@ fn author_columns_store_dictionary_codes() {
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(version.updated_by(), author);
+        assert_eq!(reopened.authors.subject(version.updated_by()).unwrap(), author);
         // Bob's edit keeps alice as the row's creator.
         let creator = if index == 2 { alice } else { author };
-        assert_eq!(version.created_by(), creator);
+        assert_eq!(reopened.authors.subject(version.created_by()).unwrap(), creator);
     }
 }

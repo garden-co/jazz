@@ -838,6 +838,7 @@ impl NodeState {
                 pending_foreign_transactions: BTreeSet::new(),
             },
             rejections: RejectionTracking::default(),
+            authors: author_codes::AuthorCodes::new(database.dictionaries()),
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,

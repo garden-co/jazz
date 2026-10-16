@@ -320,6 +320,7 @@ where
             }
         }
         stage_transaction_record(
+&self.authors,
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
@@ -367,10 +368,11 @@ where
                 }
                 None => None,
             };
+            let made_by = self.authors.code(commit.made_by)?;
             let (created_by, created_at) = previous_current
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, provenance_at));
+                .unwrap_or((made_by, provenance_at));
             // The image this write is made over (SPEC 4 §4.6, "Base of a
             // write"): the settled image's seq, and this node's own newest
             // pending write to the row, also when a foreign pending write
@@ -483,7 +485,7 @@ where
                         tx_time: made_at,
                         created_by,
                         created_at,
-                        updated_by: commit.made_by,
+                        updated_by: made_by,
                         updated_at: provenance_at,
                         cells,
                         authored_columns: authored_column_ids.clone(),
@@ -1199,7 +1201,7 @@ where
         table: &TableSchema,
         version: &VersionRow,
     ) -> Result<CurrentRow, Error> {
-        current_row_from_version_projection(table, version)
+        current_row_from_version_projection(&self.authors, table, version)
     }
 
     fn materialized_cells_for_version(
@@ -1456,7 +1458,7 @@ where
             None => false,
         };
         let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
-        Ok(Some((decode_current_row(table, record)?, tx, deleted)))
+        Ok(Some((decode_current_row(&self.authors, table, record)?, tx, deleted)))
     }
 
     fn current_record_sort_key(

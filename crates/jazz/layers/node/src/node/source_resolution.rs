@@ -525,6 +525,7 @@ where
             }
             let updated = self.newer_of_deletion(version, deletion)?;
             rows.push(current_row_from_materialized_cells_with_layer_provenance(
+                &self.authors,
                 &read_table,
                 version,
                 version,
@@ -680,7 +681,12 @@ where
             };
             let updated = self.newer_of_deletion(&content, deletions.get(&row_uuid))?;
             match current_row_from_materialized_cells_with_layer_provenance(
-                read_table, &content, &content, updated, &cells,
+                &self.authors,
+                read_table,
+                &content,
+                &content,
+                updated,
+                &cells,
             ) {
                 Ok(row) => rows.push(row),
                 Err(error) if is_unrepresentable_enum_projection(&error) => {}

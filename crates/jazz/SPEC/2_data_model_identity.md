@@ -313,8 +313,12 @@ dictionaries", codec family `groove.dictionary.v1`): each stores a 4-byte code
 into the node-local `authors` dictionary, whose entries are the canonical
 `RowAuthor` record bytes, so an image spends 5 bytes on its two authors
 however long they are (the 1-byte nullable `updated_by` that omitted the
-transaction's own author is gone with them). Every read, IVM source, query,
-policy and the wire see the full `RowAuthor`; codes never leave the node. It has no `parents`, no
+transaction's own author is gone with them). Inside the node the code is
+the author: reads, IVM sources, queries and policies carry codes, and a policy
+or projection that needs the author's fields (`$createdBy.account`) resolves
+the code through the dictionary. Codes never leave the node: wire versions,
+query results and every public row carry the full `RowAuthor`, resolved at
+that egress. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
@@ -447,7 +451,8 @@ rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorS
 - `made_by` (here and in `jazz_rejected_transactions`) is an interned column:
   the record stores a 4-byte code into the node-local `authors` Groove
   dictionary (`groove.dictionary.v1`), whose entry is the canonical
-  `RowAuthor` record bytes. Groove allocates the code and writes a new entry
+  `RowAuthor` record bytes. The node interns the author when it writes the
+  record; Groove allocates the code and writes a new entry
   in the same storage write as the first record that uses it; an entry never
   changes, and a code without an entry is corrupt storage, refused at open.
   Every read sees the full author, and codes never leave the node: receipts
