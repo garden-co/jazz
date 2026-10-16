@@ -26,8 +26,10 @@ schema selection lives in `jazz_catalogue`; the redundant write-pointer table
 and retired scope-relay repair ledger are no longer registered.
 
 History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`.
-They include required `counter_signs`, `seq`, `base_seq`, and `base_pending`
-columns, with nullable base values where appropriate. The corpus also pins the
+They include required `counter_signs` and `seq` columns and one nullable `base`
+enum (settled seq, pending predecessor, or both). Stored values leave out the
+primary-key columns, which the storage key already holds, and `authored_columns`
+holds u16 physical column ids. The corpus also pins the
 unified catalogue encoding and kind-specific record descriptors.
 
 | Store                               | Entries |
@@ -73,7 +75,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `99cfe4277e42a57246215d008a76a3725d9cebd81eace8f02ac218799a3d469d` |
-| SQLite payload      | `5be21874e59bc740894cb4372ae07846b2ee63b0d756d8178ea7546240d2b2b4` |
-| gzip SQLite archive | `e748016a7a6daaa295299cdb668f95381ce412c1e6b109b7fe6be18cab9185e3` |
-| RocksDB archive     | `66d48677a5abd1b65b0f214d2eb58f027a73d73313c32d33d736787be5299188` |
+| logical pack        | `83b4136aaeca5cda98cba414054528cab53f1e401b2771a806703aec659d8c24` |
+| SQLite payload      | `18f8b7a406f1e804afe702097762b6044364cd979b3a26fb21e204b24889c12f` |
+| gzip SQLite archive | `bb37e83033a1471f6664cb001aa8180f6a813583641e8fed228bd73e58c3157c` |
+| RocksDB archive     | `6d53880ca6391b27fabb385b5e507514ef6cd3f4eff6c390b0e83a6be6a9b9cc` |
