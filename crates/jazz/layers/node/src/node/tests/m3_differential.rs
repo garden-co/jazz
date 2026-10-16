@@ -1067,7 +1067,7 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     let schema = m3_differential_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x73), schema.clone());
     seed_m3_differential_base(&mut core, 0);
-    let mut reader = open_node_with_schema(node(0x74), schema.clone()).1;
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x74), schema.clone());
     let shape = created_by_shape(&schema);
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let identity = user(0xa1);

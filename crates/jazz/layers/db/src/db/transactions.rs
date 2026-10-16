@@ -6,14 +6,6 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Return whether two schema facades share one open-transaction runtime.
-    ///
-    /// This compares the private runtime capability, not caller-controlled ids.
-    #[doc(hidden)]
-    pub fn shares_runtime_with(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.node, &other.node)
-    }
-
     async fn lock_for_transaction_open(
         &self,
         open_tx_id: OpenTransactionId,
@@ -198,17 +190,7 @@ where
         author: Option<AuthorSubject>,
         attribution: Option<AuthorSubject>,
     ) -> Result<(), Error> {
-        if attribution.is_some() && author.is_some() {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                "attributed transaction cannot override admission identity",
-            ));
-        }
-        let identity = match (author, attribution) {
-            (_, Some(attribution)) => WriteIdentity::Attribution(attribution),
-            (Some(author), None) => WriteIdentity::Session(author),
-            (None, None) => WriteIdentity::Database,
-        };
+        let identity = queued_begin_identity(author, attribution)?;
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -735,14 +717,7 @@ where
             .commit_mergeable_open(open_tx_id, || self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
-        if self.node.defer_local_persistence.get() {
-            self.finish_deferred_local_publication(published, None)
-                .await?;
-        } else {
-            self.finish_publication_outcome(PublicationOutcome::published((), published))
-                .await?;
-            self.finalize_local_commit(tx_id)?;
-        }
+        self.settle_local_publication(published, None).await?;
         Ok(tx_id)
     }
 
@@ -779,14 +754,7 @@ where
                     .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
                     .await?;
                 debug_assert_eq!(published.tx_id, tx_id);
-                if db.node.defer_local_persistence.get() {
-                    db.finish_deferred_local_publication(published, None)
-                        .await?;
-                } else {
-                    db.finish_publication_outcome(PublicationOutcome::published((), published))
-                        .await?;
-                    db.finalize_local_commit(tx_id)?;
-                }
+                db.settle_local_publication(published, None).await?;
                 Ok(())
             }),
         );
@@ -892,37 +860,12 @@ where
         author: Option<AuthorSubject>,
         attribution: Option<AuthorSubject>,
     ) -> Result<(), Error> {
-        if attribution.is_some() && author.is_some() {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                "attributed transaction cannot override admission identity",
-            ));
-        }
-        let identity = match (author, attribution) {
-            (_, Some(attribution)) => WriteIdentity::Attribution(attribution),
-            (Some(author), None) => WriteIdentity::Session(author),
-            (None, None) => WriteIdentity::Database,
-        };
+        let identity = queued_begin_identity(author, attribution)?;
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move { db.begin_exclusive_with_identity(id, identity).await }),
         )
-    }
-
-    /// Queue capture of an open transaction's immutable base snapshot behind
-    /// its already-admitted operations. Foreign-function bindings use this to
-    /// defer snapshot-scoped query coverage until transaction opening finishes.
-    #[doc(hidden)]
-    pub fn enqueue_open_transaction_snapshot(
-        &self,
-        id: OpenTransactionId,
-    ) -> futures::channel::oneshot::Receiver<Result<crate::tx::Snapshot, Error>> {
-        let db = self.clone_for_owner_operation();
-        self.node.enqueue_transaction_read(id, async move {
-            let node = db.lock_for_transaction_operation(id).await?;
-            node.open_transaction_snapshot(id).map_err(Into::into)
-        })
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -1691,14 +1634,7 @@ where
         unit: SyncMessage,
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
-        if self.node.defer_local_persistence.get() {
-            self.finish_deferred_local_publication(published, Some(unit))
-                .await?;
-        } else {
-            self.finish_publication_outcome(PublicationOutcome::published((), published))
-                .await?;
-            self.node.queue_pending_upload(tx_id, Some(unit));
-        }
+        self.settle_local_publication(published, Some(unit)).await?;
         Ok(tx_id)
     }
 
@@ -1723,5 +1659,22 @@ where
             .open_exclusive_for_identity(id, author)
             .await
             .map_err(Into::into)
+    }
+}
+
+/// Admission identity for a queued transaction begin: an attribution, a
+/// session author, or the database itself, but never both of the first two.
+fn queued_begin_identity(
+    author: Option<AuthorSubject>,
+    attribution: Option<AuthorSubject>,
+) -> Result<WriteIdentity, Error> {
+    match (author, attribution) {
+        (Some(_), Some(_)) => Err(Error::new(
+            ErrorCode::WriteRejected,
+            "attributed transaction cannot override admission identity",
+        )),
+        (None, Some(attribution)) => Ok(WriteIdentity::Attribution(attribution)),
+        (Some(author), None) => Ok(WriteIdentity::Session(author)),
+        (None, None) => Ok(WriteIdentity::Database),
     }
 }

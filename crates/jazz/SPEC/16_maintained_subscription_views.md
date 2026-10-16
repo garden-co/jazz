@@ -101,22 +101,6 @@ retained transaction time nor a discarded subscription cursor is promoted to
 a complete-history frontier. Only history-complete nodes have that guarantee;
 remote query settlement remains an exact live subscription claim.
 
-The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
-are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
-keys and cursors are not interpreted as authority evidence, including malformed
-retired payloads. No new scope writer, encoder or decoder exists. The closed
-storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
-legacy family ID so old roots open; this does not introduce a new encoding or
-reuse that ID for new values. Native storage encodings and manifests remain
-unchanged. Shared policy/availability metadata has independent consumers and
-is not discarded with the scope cache.
-
-`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
-pins both retired byte generations and native/pending retention;
-`retired_scope_payloads_never_restore_authority` covers malformed retired
-payloads. Cleanup must finish successfully before open returns; partial cleanup
-is safe to retry because no durable cursor or scope is ever recovered.
-
 Active subscriptions still maintain exact physical membership and predecessor
 revisions in memory. A retained process may use its own valid unevicted cursor
 for native-body dedup on reconnect, but a new process starts without one.
@@ -155,11 +139,20 @@ that role rather than being replaced by local numeric catalogue aliases.
 
 The concrete v1 byte contracts are:
 
-- Immutable-version row blob: ASCII `JVRR`, byte `2` (wire protocol v6; the
-  version-1 blob carried `parents` and is rejected), descriptor byte length as
-  little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
-  canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length (canonical Postcard unsigned varint followed by exactly that
+- Immutable-version row blob: ASCII `JVRR`, byte `3` (alpha.60; version 2
+  repeated the descriptor in every row and version 1 carried `parents`; both
+  are rejected), then a descriptor `reference` as a canonical (shortest)
+  unsigned LEB128 no larger than 2^32. Reference `0` defines the next entry of
+  the enclosing sync message's descriptor table inline: descriptor byte length
+  as little-endian `U32`, then exactly that many Groove persisted-descriptor
+  bytes. Reference `k > 0` reuses entry `k - 1`, which an earlier row of the
+  same message defined. Canonical row bytes consume the remainder. Each sync
+  message starts with an empty table; the encoder defines a descriptor at its
+  first use in serialization order and references it afterwards, so a
+  receiver rejects a reference to an undefined entry and a second definition
+  of the same descriptor bytes. A row encoded outside a sync message always
+  defines its descriptor inline. The enclosing sync message owns the blob
+  length (canonical Postcard unsigned varint followed by exactly that
   many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
   in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of

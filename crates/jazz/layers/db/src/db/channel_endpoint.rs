@@ -147,16 +147,14 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         // A preceding delivery may introduce this transaction. Preserve that
         // dependency across independently scheduled delivery/write channels.
         FateUpdate { .. } => (ChannelClass::Writes, true),
-        // Same channel as fates: a retry-later must not overtake the fate of
-        // the predecessor it names, or the writer would read it as lost.
-        RetryLater { .. } => (ChannelClass::Writes, false),
         CommitUnit { .. } => (ChannelClass::Writes, false),
         RegisterShape { .. }
         | Subscribe(_)
         | Unsubscribe { .. }
         | AuthorizationScopeIntent { .. }
         | CurrentRowsRequest(_)
-        | CurrentRowsCancel { .. } => (ChannelClass::Requests, false),
+        | CurrentRowsCancel { .. }
+        | ReadBarrier { .. } => (ChannelClass::Requests, false),
         ChunkUploadStart(_) | ChunkUploadNodes(_) | ChunkUploadResult(_) => {
             (ChannelClass::LargeValue, false)
         }

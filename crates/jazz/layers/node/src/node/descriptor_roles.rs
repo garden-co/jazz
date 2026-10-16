@@ -1088,7 +1088,7 @@ mod tests {
         };
         assert_eq!(
             blake3::hash(&payload.descriptor).to_hex().as_str(),
-            "89fb1b80e90645fc68aaeccf9fbcd4082bcefdd2b606c8ed859827bd99465fff"
+            "9e4dca1b1a47c92d7b70c153efee02587f40c413e47e82cb9a5b23e72694688b"
         );
         assert_eq!(
             hex::encode(&payload.record),

@@ -6,8 +6,8 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::{
-    Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-    StorageCodecProfile, StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
+    Error, LayoutStorage, OrderedKvStorage, ReopenableStorage, ScanRequest, StorageCodecProfile,
+    StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
 };
 use jazz_storage_sqlite::{Durability, SqliteStorage};
 use sha2::{Digest, Sha256};
@@ -251,7 +251,7 @@ fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
 }
 
 #[test]
-fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen() {
+fn historical_epoch_1_sqlite_fixture_is_rejected_without_mutation() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let historical_path = directory.path().join("epoch-1.sqlite");
@@ -285,57 +285,16 @@ fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen()
         assert_eq!(snapshot, epoch_1_ordered_kv_pack());
         drop(read_only);
 
-        let current = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            current
-                .get("records".into(), b"user:2".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Grace".to_vec())
-        );
-        current
-            .write_many(vec![
-                OwnedWriteOperation::Set {
-                    cf: "records".into(),
-                    key: b"user:3".to_vec(),
-                    value: b"Lin".to_vec(),
-                },
-                OwnedWriteOperation::Delete {
-                    cf: "indices".into(),
-                    key: b"name:Ada".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "indices".into(),
-                    key: b"name:Lin".to_vec(),
-                    value: b"3".to_vec(),
-                },
-            ])
-            .await
-            .unwrap();
-        drop(current);
-
-        let reopened = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            reopened
-                .get("records".into(), b"user:3".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Lin".to_vec())
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Ada".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Lin".to_vec())
-                .await
-                .unwrap(),
-            Some(b"3".to_vec())
-        );
+        let before = std::fs::read(&historical_path).unwrap();
+        // The historical root declares the retired Groove v1 families, so
+        // admission names them instead of failing with a layout error.
+        assert!(matches!(
+            SqliteStorage::open(&historical_path, &["records", "indices"]),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+                if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                    && unknown.iter().any(|codec| codec == "groove.large-value.v1")
+        ));
+        assert_eq!(std::fs::read(&historical_path).unwrap(), before);
     });
 }
 
@@ -479,11 +438,11 @@ fn epoch_1_table_row_bytes_and_order_survive_a_fresh_sqlite_open() {
             vec![
                 (
                     vec![0x01, 0x00, 0x02],
-                    vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+                    vec![0x00, 0x02, 0x00, 0x00, 0x00, b'a'],
                 ),
                 (
                     vec![0x01, 0x12, 0x34],
-                    vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+                    vec![0x00, 0x34, 0x12, 0x01, 0x00, b'h', b'i'],
                 ),
             ],
             "SQLite must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",
