@@ -855,7 +855,6 @@ impl NodeState {
             absent_node_alias: None,
             ahead_current_keys: AheadCurrentKeys::default(),
             tx_touched_dirty: BTreeMap::new(),
-            history_tx_authors: BTreeMap::new(),
             history_tx_seqs: RefCell::new(FxHashMap::default()),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),

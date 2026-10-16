@@ -793,6 +793,52 @@ shorthand for the declared durable pk-ref case.)
 `IndexBy`/`Persist` path; they have not yet been folded into the target unified
 arrangement abstraction.
 
+### Interned columns and dictionaries
+
+Codec family `groove.dictionary.v1`. A table column may be declared
+**interned** into a named dictionary with `ValueType::interned(dictionary,
+logical)`. A row then stores the 4-byte code of the column's value instead of
+the value: a fixed-width little-endian `u32`, or, for
+`Nullable(Interned)`, a presence byte followed by the code (`00` and four zero
+bytes when null). Interning is declared per Groove physical column, so every
+variant payload that declares the interned type stores codes too.
+
+Each dictionary is declared by a `DictionarySchema { name, value_type }` and
+stored in its own Groove-owned column family `__groove_dictionary_<name>`:
+
+```text
+key   = code as u32 big-endian (4 bytes)
+value = canonical Groove encoding of the value (value_type)
+```
+
+Codes are dense from 0: the entries of a dictionary are exactly the codes
+`0..n`, and one value has one code. A value holds no indirect large value.
+Groove owns the whole mapping. It allocates the next code synchronously
+while preparing a write, and every publication carries every entry not yet
+durable in its single atomic `write_many`, so an entry is durable with, or
+before, the first row that stores its code. An allocation is never undone: a
+code reserved by a dropped batch keeps its value and its entry is written by
+the next publication. Opening loads each declared dictionary into memory and
+refuses (`DictionaryError::InvalidDictionary`) a key that is not 4 bytes, a
+gap in the codes, a value that is not canonical, and a repeated value.
+
+Interned columns are storage-only. `TableSchema::record_schema` and
+`record_schema_for_variant` return the **logical** descriptor (each interned
+field has its logical type); `storage_record_schema*` return the physical one.
+Every point, scan and index read, every old row of a write's delta, and every
+IVM table source resolves codes before a caller or operator sees the record,
+so queries, policies and the wire only ever see values. A descriptor carrying
+an interned type cannot be encoded as a persisted or wire descriptor
+(`records::Error::InternedTypeNotEncodable`).
+
+Schema admission refuses (`InternedColumnError`) an interned column in a
+primary key, an index or a foreign key, in a direct record store, nested
+anywhere but at top level or directly under a top-level `Nullable`, naming an
+undeclared dictionary or a different value type than the dictionary holds,
+and a dictionary whose value type contains an engine storage type or an enum.
+A schema rebuild keeps the dictionaries loaded at open and refuses to declare
+another (`DictionaryError::NotLoaded`).
+
 ### 2.6 Commit ordering
 
 A committed `DatabaseBatch` is the storage boundary at which table writes become

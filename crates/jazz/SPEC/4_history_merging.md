@@ -533,7 +533,7 @@ no stamp fields. A history record carries, after
 
 - `seq` (`U64`) — the write's seq; `0` on a pending record (below);
 - `base_seq` (nullable `U64`) — the base's settled seq;
-- `base_pending` (nullable `(U64 tx time, UUID node)`) — the base's pending
+- `base_pending` (nullable record `{time: U64, node: UUID}`, which costs a null byte and an offset when null) — the base's pending
   predecessor.
 
 History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row

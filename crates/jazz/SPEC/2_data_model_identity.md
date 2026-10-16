@@ -304,19 +304,22 @@ forwarding and materialization read the listed `(table, branch, row)` keys at
 the transaction's seq (from its `jazz_transactions` record) and its
 `(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
-high-water mark from the last `jazz_transactions` key. A history image's
-`updated_by` is null when it equals the `made_by` of the transaction its key
-names, and every read fills it in from that `jazz_transactions` record. An
-image takes `updated_by` from the write it applies, so it is the author of the
-row's latest applied write (SPEC 4 §4.6) and is stored only when that write's
-own provenance names another author than its transaction's `made_by`.
-`created_by`, `created_at` and `updated_at` stay in every image, and global
-current and the ahead overlay keep all four. It has no `parents`, no
+high-water mark from the last `jazz_transactions` key. Every history image,
+global-current record and ahead-overlay record stores all four provenance
+fields. An image takes `updated_by` from the write it applies, so it is the
+author of the row's latest applied write (SPEC 4 §4.6). `created_by` and
+`updated_by` are interned columns (Groove SPEC 2, "Interned columns and
+dictionaries", codec family `groove.dictionary.v1`): each stores a 4-byte code
+into the node-local `authors` dictionary, whose entries are the canonical
+`RowAuthor` record bytes, so an image spends 5 bytes on its two authors
+however long they are (the 1-byte nullable `updated_by` that omitted the
+transaction's own author is gone with them). Every read, IVM source, query,
+policy and the wire see the full `RowAuthor`; codes never leave the node. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
 unreleased v2 (history and ahead-current `by_tx` indexes, no touched-row list)
-or v3 (`updated_by` stored in every history image) row layouts lacks the v4
+or v3 (a `jazz_transactions.touched_rows` column) row layouts lacks the v4
 family (v4 itself is unreleased, and its history key and merge fields
 changed in place before release, without a new codec ID), so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
@@ -389,8 +392,11 @@ accepted/reopen/rebuild receipts for the same coordinate.
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
   and branch mappings), and `jazz_catalogue` (including the required active
   schema selection);
-- _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
-  `jazz_rejected_transactions`;
+- _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`, with
+  `jazz_pending_transactions` and `jazz_tx_provenance` beside it,
+  `jazz_history_horizon`, and `jazz_rejected_transactions` (§2.8). Both open
+  stages also declare the `authors` Groove dictionary (§2.8, `made_by`) that
+  every stored author column is interned into;
 - _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
   `(branch_key, row_uuid, seq, tx_time, tx_node_id)` (`seq = 0` while pending), plus a per-lineage combined derived current
   row per exact branch key. The database has exactly one
@@ -415,36 +421,78 @@ layout: malformed, trailing, and non-canonical bytes fail closed
 by Groove's storage epoch; this section freezes logical record and transport
 bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
-**Transaction audit record.** `jazz_transactions` has permanent logical field
-positions `0..=16`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
-made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
-user_metadata_json, contribution_merge, permission_subject,
-is_partial: bool, fate, global_time, rejection_reason, durability)`. `TxKind` is `Mergeable=0`,
-`Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
-`None=0`, `Local=1`, `Global=2` in `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
+**Transaction record (`jazz.tx-record.v2`).** `jazz_transactions` holds only
+what a node needs for as long as it keeps a transaction, so fate, seq and
+durability reads never load anything that grows with the transaction or that
+matters only while it is pending. Its fields are, in order: `(time: TxTime,
+node_id: NodeAlias, kind, flags: U8, n_total_writes: U32, made_by: RowAuthor
+interned into `authors`, fate,
+global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
+rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorSubject>)`, keyed
+`(time, node_id)` with the `by_global_time` index.
+`TxKind` is `Mergeable=0`, `Exclusive=1`; fate is `Pending=0`, `Accepted=1`,
+`Rejected=2`; durability is `None=0`, `Local=1`, `Global=2` in
+`jazz.transaction-durability.v2` (ch. 9); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
 
-Rejection reasons use a Groove payload enum. Cases 0–3 have empty payloads;
-`Cascade` has one required `root: Tuple<U64, Uuid>`, and `MalformedCommit`
-has one required `message: String` (an empty message is allowed).
-The audit row's reason is nullable and must be present when fate is rejected.
-The retry store `jazz_rejected_transactions` uses the same enum, required,
-with fields `(time, node_id, kind, made_by, rejection_reason, user_metadata)`.
+- `flags` bit 0 says the stored `n_total_writes` is view-redacted; it is
+  cleared when a complete payload arrives. Bit 1 says a `jazz_tx_provenance`
+  record exists. Bit 2 says the permission subject is the author, and
+  `permission_subject` is then null. Other bits are reserved and refused on
+  read.
+- `permission_subject` is the identity the writes were authorized as when it
+  is not the author. Replayed and relayed units carry it, so a settled
+  transaction keeps it; a set bit 2 with a non-null field is refused.
+- `made_by` (here and in `jazz_rejected_transactions`) is an interned column:
+  the record stores a 4-byte code into the node-local `authors` Groove
+  dictionary (`groove.dictionary.v1`), whose entry is the canonical
+  `RowAuthor` record bytes. Groove allocates the code and writes a new entry
+  in the same storage write as the first record that uses it; an entry never
+  changes, and a code without an entry is corrupt storage, refused at open.
+  Every read sees the full author, and codes never leave the node: receipts
+  carry the full author.
+- `rejection` is non-null exactly when fate is `Rejected`. Rejection reasons
+  use a Groove payload enum: cases 0–3 have empty payloads; `Cascade` has one
+  required `root: Tuple<U64, Uuid>`, and `MalformedCommit` has one required
+  `message: String` (an empty message is allowed). Any other spelling is
+  refused. The retry store `jazz_rejected_transactions` uses the same enum,
+  required, with fields `(time, node_id, kind, made_by, rejection_reason,
+user_metadata)`.
 
-The `is_partial` field in position 12 is a canonical boolean (`0` or `1`) in
-`jazz.transaction-record.v1`. True means the transaction was learned from
-selected fragments, so `n_total_writes` is not an authoritative total. A
-complete payload clears the flag; later fragments do not downgrade it.
-False does not guarantee that every row remains cached after eviction.
-This encoding receipt is covered by the `jazz.node-storage.v1` root profile.
-Roots with the former nullable string field lack that profile marker and are refused
-at manifest admission, without migration or a physical epoch/wire bump.
+This layout is covered by the `jazz.node-storage.v1` root profile (with
+`groove.dictionary.v1` for the interned authors). Roots written with an
+earlier layout lack those profile markers and are refused at manifest
+admission, without migration or a physical epoch/wire bump.
+
 Fate/global time and durability remain separate lattice observations:
 accepted/global uses an authority `GlobalTime`, rejection has no global winner,
 and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot
 make that transaction a content or deletion winner (ch. 3).
+
+**Provenance record.** A transaction with `contribution_merge` provenance has
+one `jazz_tx_provenance` record keyed like its transaction record, holding the
+non-nullable provenance record. It is written once, in the batch that inserts
+the transaction record, and read only when flag bit 1 is set; a set flag
+without the record is corrupt storage. Provenance grows with the
+transaction's branch writes, so the transaction record stays the same size
+whatever the write count.
+
+**Pending record.** An unsettled transaction (no global time and not
+rejected) may have one `jazz_pending_transactions` record keyed like its
+transaction record: `(time, node_id, base_snapshot, row_read_set,
+absent_read_set, predicate_read_set)`, the last four nullable bytes holding
+its exclusive read evidence. It exists only when one of those fields is
+non-null, and the batch that records the transaction's seq or rejection
+deletes it. A settled transaction therefore keeps no read evidence; a stored
+copy without it still matches a redelivery that carries it.
+
+**History horizon.** `jazz_history_horizon` holds at most one record, `(id: U8
+= 0, horizon: U64)`: the seq at or below which this store's history was
+truncated. This release never truncates and refuses to open a store whose
+horizon is not 0 (`TruncatedHistoryUnsupported`), so a later release can
+start truncating without another layout change.
 
 **Touched-row list.** The history rows this node stored for a transaction
 are listed in the node-local table `jazz_tx_touched_rows`, one record per
@@ -466,26 +514,30 @@ transaction's versions, which reads every listed row anyway, so pending
 history stays findable by transaction until its fate arrives without a
 per-version index.
 
-Positions 5 through 8 hold exclusive read evidence in the
-`jazz.exclusive-read-evidence.v1` family, and only while it can still be
+The pending record's four evidence slots hold exclusive read evidence in the
+`jazz.exclusive-read-evidence.v2` family, and only while it can still be
 retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
 authored or relays an `Exclusive` transaction whose fate is still `Pending`
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 `predicate_read_set` in these slots, so a unit rebuilt from storage after a
 restart (outbox or relay recovery) is byte-for-byte the unit that was
-committed. The row rewrite that records a settled fate writes all four back to
-null; the slots are not an audit or revalidation log. Every other row, and any
+committed. The batch that records a settled fate deletes the pending record;
+the slots are not an audit or revalidation log. Every other row, and any
 exclusive row whose evidence v1 cannot represent, writes all four null, and a
 missing snapshot still fails authority validation. Each non-null slot is the
-Groove typed-record v1 bytes of one fixed descriptor led by `format_v1 = 1`:
-`(format_v1, owner, global_base, local_base, dots[(time, node)])`,
-`(format_v1, reads[(table, row_uuid, version_time, version_node)])`,
-`(format_v1, reads[(table, row_uuid)])` and
-`(format_v1, reads[(table, shape_id, query, binding_id, bindings)])`, where
-`query` is the native query Postcard carrier and `bindings` the canonical
-`jazz-binding-v0` preimage of `binding_id`. Decoders MUST reject non-canonical
-bytes, an unknown `format_v1`, a binding id that does not match its bindings,
+Groove typed-record v1 bytes of one fixed descriptor led by a format byte:
+`(format_v1 = 1, owner, global_base, local_base, dots[(time, node)])`,
+`(format_v1 = 1, reads[(table, row_uuid, version_time, version_node)])`,
+`(format_v1 = 1, reads[(table, row_uuid)])` and
+`(format_v2 = 2, reads[(table, shape_id, query, binding_id, bindings,
+aggregate_result?)])`, where `query` is the native query Postcard carrier,
+`bindings` the canonical `jazz-binding-v0` preimage of `binding_id`, and
+`aggregate_result` the canonical `jazz.aggregate-read-result.v1` bytes an
+aggregate read observed (null exactly when the shape has no aggregate).
+Decoders MUST reject non-canonical bytes, an unknown format byte (including a
+v1 predicate-read slot), a missing, malformed or stray aggregate result, a
+binding id that does not match its bindings,
 read sets without a snapshot, and evidence on a `Mergeable` row, as corrupt
 storage. Validation MUST still finish before lowering discards the evidence.
 Reopen recovers the resulting fate and immutable versions, and MUST NOT

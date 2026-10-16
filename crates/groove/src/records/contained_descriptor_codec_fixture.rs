@@ -212,6 +212,12 @@ fn descriptor_codec_push_value_type(
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
             crate::large_values::LargeValueKind::Json,
         ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_JSON)),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned {
+            dictionary,
+            ..
+        })) => Err(Error::InternedTypeNotEncodable {
+            dictionary: dictionary.clone(),
+        }),
         ValueType::Uuid => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_UUID)),
         ValueType::EnumTag(schema) => descriptor_codec_push(
             nodes,
