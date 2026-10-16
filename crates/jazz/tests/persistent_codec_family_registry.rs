@@ -219,7 +219,7 @@ fn validate_registry_with_profiles(
         "jazz.catalogue.write-pointer.v1",
         "jazz.server-catalogue-entry.v1",
         "jazz.transaction-durability.v2",
-        "jazz.transaction-record.v1",
+        "jazz.tx-record.v2",
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
         "groove.jazz-physical-class.v2",
