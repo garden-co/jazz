@@ -1198,6 +1198,20 @@ where
                 access_paths: BTreeMap::new(),
             });
         };
+        // The binding source names plain params by their declared name; proofs
+        // route them by their route field. Expose the binding under the route
+        // names so both sides of the route join agree.
+        let binding = binding.project_fields(
+            binding_route_fields
+                .iter()
+                .map(|field| {
+                    ProjectField::renamed(
+                        route_param_from_field(field).unwrap_or(field),
+                        field.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
         let with_binding = |graph: GraphBuilder, keys: Vec<String>, carried: &[String]| {
             GraphBuilder::join(graph, binding.clone(), keys.clone(), keys).project_fields(
                 output_fields

@@ -2201,6 +2201,34 @@ where
         self.version_tx_id(&version).ok()
     }
 
+    /// The newest snapshot-covered version that wrote content. Linear history
+    /// records a deletion as a row version of its own, which carries the row
+    /// image but is not its content witness.
+    async fn snapshot_content_write_witness(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        snapshot: &Snapshot,
+    ) -> Option<TxId> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await
+            .ok()?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            if version.deletion() == Some(DeletionEvent::Deleted) {
+                continue;
+            }
+            let tx_id = self.version_tx_id(version).ok()?;
+            if self.snapshot_covers(tx_id, snapshot).await {
+                candidate_indices.push(idx);
+            }
+        }
+        let idx = current_version_index(&versions, &candidate_indices, &self.node_aliases)?;
+        self.version_tx_id(&versions[idx]).ok()
+    }
+
     /// Capture content settlements while the caller still holds the node lock
     /// used to evaluate these rows. The generic updater alias may name a
     /// deletion, so it is only a stored-provenance check, never the witness.
@@ -2234,7 +2262,12 @@ where
                 return Ok(None);
             }
             let Some(witness) = self
-                .snapshot_content_witness(schema_version, row.table(), row.row_uuid(), &snapshot)
+                .snapshot_content_write_witness(
+                    schema_version,
+                    row.table(),
+                    row.row_uuid(),
+                    &snapshot,
+                )
                 .await
             else {
                 return Ok(None);
