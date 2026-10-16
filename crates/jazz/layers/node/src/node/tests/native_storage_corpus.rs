@@ -42,15 +42,15 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "99cfe4277e42a57246215d008a76a3725d9cebd81eace8f02ac218799a3d469d";
+    "9ae89fe2220c377d9b441ec38af7aeb1392d3dfdadf1721a5f8506c1e668607e";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "2875ee1e2624856220f926a992aeecd27f4383fc8ba8b75127b1e24f22ee700c";
+    "6d3c981c90b19fae16aa2e76dad0b445d1288d3084f1d1969d707ed19bd6ac25";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "99cfe4277e42a57246215d008a76a3725d9cebd81eace8f02ac218799a3d469d";
+    "9ae89fe2220c377d9b441ec38af7aeb1392d3dfdadf1721a5f8506c1e668607e";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
