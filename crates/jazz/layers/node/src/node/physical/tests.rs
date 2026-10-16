@@ -151,18 +151,17 @@ mod variant_case_tests {
         let schema = JazzSchema::new(&public).unwrap();
         let table = &schema.tables[0];
         let history = table.history_storage_table();
-        let trailing = history.columns[history.columns.len() - 5..]
+        let trailing = history.columns[history.columns.len() - 4..]
             .iter()
             .map(|column| (column.name.as_str(), column.column_type.clone()))
             .collect::<Vec<_>>();
         assert_eq!(
             trailing,
             [
-                ("authored_columns", GrooveColumnType::U64.array_of().nullable()),
+                ("authored_columns", GrooveColumnType::U16.array_of().nullable()),
                 ("counter_signs", GrooveColumnType::Bytes),
                 ("seq", GrooveColumnType::U64),
-                ("base_seq", GrooveColumnType::U64.nullable()),
-                ("base_pending", crate::schema::history_base_pending_storage_type()),
+                ("base", crate::schema::history_base_storage_type()),
             ]
         );
         let key = history.primary_key.as_ref().unwrap();
@@ -173,7 +172,7 @@ mod variant_case_tests {
         assert_eq!(key.columns[2], PrimaryKeyColumn::integer("seq", IntegerKeyType::U64));
         for current in [table.global_current_storage_table(), table.rejected_versions_storage_table()] {
             assert!(current.columns.iter().all(|column| {
-                !["seq", "base_seq", "base_pending"].contains(&column.name.as_str())
+                !["seq", "base"].contains(&column.name.as_str())
                     && !column.name.starts_with("_ts_")
             }));
         }

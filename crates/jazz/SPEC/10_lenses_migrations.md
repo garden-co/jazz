@@ -407,8 +407,9 @@ An alias or mapping remains retained while any retained history, current row,
 branch-local row, snapshot, or rejected payload can name it.
 
 Every content-history row also has nullable `authored_columns` metadata. When
-present, its sole durable spelling is a Groove `Array<U64>` containing strictly
-increasing, nonzero local `PhysicalColumnId`s. It is not JSON-in-bytes, a
+present, its sole durable spelling is a Groove `Array<U16>` containing strictly
+increasing, nonzero local `PhysicalColumnId`s (a node allocates at most 65534
+physical columns; `u16::MAX` is the reserved `_deletion` marker). It is not JSON-in-bytes, a
 logical-name payload, or an alternate serialized collection. The same typed
 field is copied into derived ahead/global content-current carriers only after
 resolving every id through the row's exact authored schema and logical table;

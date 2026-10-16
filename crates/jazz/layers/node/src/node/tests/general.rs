@@ -1454,7 +1454,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         assert_eq!(
             content_values[authored_columns_idx],
             Value::Nullable(Some(Box::new(Value::Array(
-                (1..=table.columns.len() as u64).map(Value::U64).collect()
+                (1..=table.columns.len() as u16).map(Value::U16).collect()
             ))))
         );
 
@@ -1541,18 +1541,18 @@ fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
 #[test]
 fn stored_authored_columns_require_a_canonical_physical_id_array() {
     assert_eq!(
-        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(5)]))
+        authored_column_ids_from_value(Value::Array(vec![Value::U16(2), Value::U16(5)]))
             .unwrap(),
         BTreeSet::from([PhysicalColumnId(2), PhysicalColumnId(5)])
     );
     assert!(matches!(
-        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(2)])),
+        authored_column_ids_from_value(Value::Array(vec![Value::U16(2), Value::U16(2)])),
         Err(Error::InvalidStoredValue(
             "authored physical column ids must be strictly increasing"
         ))
     ));
     assert!(matches!(
-        authored_column_ids_from_value(Value::Array(vec![Value::U64(5), Value::U64(2)])),
+        authored_column_ids_from_value(Value::Array(vec![Value::U16(5), Value::U16(2)])),
         Err(Error::InvalidStoredValue(
             "authored physical column ids must be strictly increasing"
         ))
@@ -1565,7 +1565,7 @@ fn stored_authored_columns_require_a_canonical_physical_id_array() {
     ));
     assert!(matches!(
         authored_column_ids_from_value(Value::Array(vec![
-            Value::U64(1),
+            Value::U16(1),
             Value::String("not an id".to_owned()),
         ])),
         Err(Error::InvalidStoredValue(
@@ -1573,7 +1573,7 @@ fn stored_authored_columns_require_a_canonical_physical_id_array() {
         ))
     ));
     assert!(matches!(
-        authored_column_ids_from_value(Value::Array(vec![Value::U64(0)])),
+        authored_column_ids_from_value(Value::Array(vec![Value::U16(0)])),
         Err(Error::InvalidStoredValue(
             "authored physical column ids must be nonzero"
         ))

@@ -3941,6 +3941,13 @@ mod tests {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
             crate::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            // Jazz's own nullable write-base enum; public columns never
+            // lower to whole-row enums.
+            crate::groove::records::ValueType::Nullable(inner)
+                if matches!(inner.as_ref(), crate::groove::records::ValueType::Enum(_)) =>
+            {
+                GrooveValue::Nullable(None)
+            }
             crate::groove::records::ValueType::Nullable(inner) => {
                 GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
             }

@@ -435,9 +435,7 @@ where
                         Some(crate::schema::SEQ_FIELD) => {
                             Value::U64(current.get_nullable_u64(global_time_idx)?.unwrap_or(0))
                         }
-                        Some(crate::schema::BASE_SEQ_FIELD | crate::schema::BASE_PENDING_FIELD) => {
-                            Value::Nullable(None)
-                        }
+                        Some(crate::schema::BASE_FIELD) => Value::Nullable(None),
                         _ => Value::Bytes(Vec::new()),
                     };
                     history_descriptor.encode_field_into(index, &value, output)?;

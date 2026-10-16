@@ -532,9 +532,11 @@ no stamp fields. A history record carries, after
 `authored_columns` and `counter_signs` (§4.3):
 
 - `seq` (`U64`) — the write's seq; `0` on a pending record (below);
-- `base_seq` (nullable `U64`) — the base's settled seq;
-- `base_pending` (nullable record `{time: U64, node: UUID}`, which costs a null byte and an offset when null) — the base's pending
-  predecessor.
+- `base` (nullable enum) — the base. Its case names the parts present:
+  `seq` (the base's settled seq, `U64`), `pending` (the base's pending
+  predecessor, tuple `(time: U64, node: UUID)`) or `seq_and_pending` (both).
+  An empty base is the null byte alone; a present one costs the null byte, a
+  1-byte case tag and its parts, never a reserved slot for an absent part.
 
 History is keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`: "the row
 at seq `S`" is one prefix read, and "the row's writes after `S`" is one range
@@ -553,9 +555,9 @@ transaction's accepted `GlobalTime`, which travels with the bundle and is not
 repeated per record. The byte receipt is the protocol test of the
 `VersionRecord` postcard layout.
 
-**Per-row cost.** A history record costs its `seq` (8 bytes) and its two
-nullable base fields over the former stamp-free layout, and nothing on
-current rows.
+**Per-row cost.** A history record costs its `seq` (8 bytes) and its
+nullable `base` (1 byte when empty, 10 with a settled seq) over the former
+stamp-free layout, and nothing on current rows.
 
 ### 4.7 Refs: local work over origin
 

@@ -444,6 +444,9 @@ where
     }
 
     fn allocate_physical_column_id(&mut self) -> Result<PhysicalColumnId, Error> {
+        crate::node::codec::ensure_allocatable_physical_column_id(
+            self.catalogue.next_physical_column_id,
+        )?;
         let id = PhysicalColumnId(self.catalogue.next_physical_column_id);
         self.catalogue.next_physical_column_id = self
             .catalogue

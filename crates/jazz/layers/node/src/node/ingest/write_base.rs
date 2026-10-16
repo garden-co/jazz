@@ -51,7 +51,7 @@ fn authored_overlap(
 /// writer's own node (`INV-HIST-20`).
 ///
 /// This is the only place cross-writer chains are refused. Nothing stored or
-/// sent encodes the rule (`base_pending` is a full `TxId`), so a peer remote
+/// sent encodes the rule (a pending base is a full `TxId`), so a peer remote
 /// whose writes chain over another node's pending write needs only this
 /// check relaxed, together with what SPEC 4 §4.7 lists for peers. The
 /// conflict walk's counterpart is [`in_writers_chain`].

@@ -1046,7 +1046,7 @@ impl TableSchema {
         // version. Logical names remain a wire/schema-boundary concern.
         columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            GrooveColumnType::U16.array_of().nullable(),
         ));
         // Sign bits of a pending patch's counter ops, one per counter column
         // in schema order (SPEC 4, "Counter ops"). Empty on a settled image.
@@ -1056,11 +1056,7 @@ impl TableSchema {
         columns.push(column(SEQ_FIELD, GrooveColumnType::U64));
         // The write's base: the settled seq its writer's image rested on and
         // the writer's own pending predecessor to this row.
-        columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
-        columns.push(column(
-            BASE_PENDING_FIELD,
-            history_base_pending_storage_type(),
-        ));
+        columns.push(column(BASE_FIELD, history_base_storage_type()));
 
         // Accepted writes are keyed by seq, so "the row at seq S" is a point
         // read and "the row's writes after S" a range read. A write without
@@ -1107,7 +1103,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            GrooveColumnType::U16.array_of().nullable(),
         ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
@@ -1162,7 +1158,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            GrooveColumnType::U16.array_of().nullable(),
         ));
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
@@ -1329,25 +1325,55 @@ fn durability_column() -> GrooveColumnType {
 #[doc(hidden)]
 pub const SEQ_FIELD: &str = "seq";
 
-/// History field holding the settled seq of a write's base (SPEC 4 §4.6).
+/// History field holding a write's base (SPEC 4 §4.6): the settled seq its
+/// writer's image rested on and the writer's own pending predecessor.
 #[doc(hidden)]
-pub const BASE_SEQ_FIELD: &str = "base_seq";
+pub const BASE_FIELD: &str = "base";
 
-/// History field holding the pending predecessor of a write's base.
+/// Physical type of the history `base` field: a nullable enum whose case says
+/// which parts of the base are present. A write without a base (an insert or
+/// a blind update) costs one null byte; every other case costs its present
+/// parts plus a null byte and a case tag, never a reserved slot for an absent
+/// part.
 #[doc(hidden)]
-pub const BASE_PENDING_FIELD: &str = "base_pending";
-
-/// Physical type of the history `base_pending` field: a nullable record of the
-/// predecessor's `(time, node)`. A record is variable-width, so the common
-/// null costs a null byte and an offset instead of a reserved 25-byte tuple.
-#[doc(hidden)]
-pub fn history_base_pending_storage_type() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
-        ("time", GrooveColumnType::U64),
-        ("node", GrooveColumnType::Uuid),
-    ])))
+pub fn history_base_storage_type() -> GrooveColumnType {
+    let seq = || ("seq", GrooveColumnType::U64);
+    let pending = || {
+        (
+            "pending",
+            GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid]),
+        )
+    };
+    GrooveColumnType::Enum(Box::new(
+        EnumSchema::new(
+            "jazz_write_base",
+            [
+                EnumCase::new(HISTORY_BASE_SEQ_CASE, RecordDescriptor::new([seq()])),
+                EnumCase::new(
+                    HISTORY_BASE_PENDING_CASE,
+                    RecordDescriptor::new([pending()]),
+                ),
+                EnumCase::new(
+                    HISTORY_BASE_SEQ_AND_PENDING_CASE,
+                    RecordDescriptor::new([seq(), pending()]),
+                ),
+            ],
+        )
+        .expect("fixed write base schema")
+        .with_system_registry(SystemVariantRegistry::write_base()),
+    ))
     .nullable()
 }
+
+/// `base` case: only a settled seq.
+#[doc(hidden)]
+pub const HISTORY_BASE_SEQ_CASE: &str = "seq";
+/// `base` case: only a pending predecessor.
+#[doc(hidden)]
+pub const HISTORY_BASE_PENDING_CASE: &str = "pending";
+/// `base` case: a settled seq and a pending predecessor.
+#[doc(hidden)]
+pub const HISTORY_BASE_SEQ_AND_PENDING_CASE: &str = "seq_and_pending";
 
 /// History field carrying the sign bits of a patch's counter ops: bit `i`
 /// (least significant first) belongs to the table's `i`-th counter column in
@@ -2246,7 +2272,7 @@ mod tests {
                     .iter()
                     .find(|column| column.name == "authored_columns")
                     .map(|column| &column.column_type),
-                Some(&GrooveColumnType::U64.array_of().nullable()),
+                Some(&GrooveColumnType::U16.array_of().nullable()),
                 "authored_columns must remain a native physical-id array in {}",
                 table.name
             );

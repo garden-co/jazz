@@ -15,6 +15,7 @@ pub(super) fn allocate_provisional_physical_mapping(
             .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
         let mut columns = BTreeMap::new();
         for column in &table.columns {
+            crate::node::codec::ensure_allocatable_physical_column_id(*next_column_id)?;
             let column_id = PhysicalColumnId(*next_column_id);
             *next_column_id = next_column_id
                 .checked_add(1)

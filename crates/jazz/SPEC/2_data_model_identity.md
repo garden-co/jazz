@@ -292,8 +292,8 @@ so they sort before every accepted write of the row and are found by their
 `(tx_time, tx_node_id)`; the batch that stores an accepted fate moves each of
 the transaction's pending records to its key at the transaction's seq, and a
 rejected fate deletes them. A history record ends, after `authored_columns` and the `counter_signs` bytes of a
-patch's counter ops (SPEC 4 §4.3), with `seq`, the write's `base_seq` and
-`base_pending` (SPEC 4 §4.6). Beside them: a
+patch's counter ops (SPEC 4 §4.3), with `seq` and the write's `base`
+(SPEC 4 §4.6). Beside them: a
 global-current record per row with `global_time` (the row's seq) and index
 `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)`; and `_deletion` as an

@@ -124,14 +124,6 @@ pub(super) fn transaction_flags(record: BorrowedRecord<'_>) -> Result<u8, Error>
     Ok(flags)
 }
 
-groove::define_record! {
-    /// A history write's pending predecessor (`base_pending`).
-    pub(super) struct BasePendingRecord {
-        0 => time: TxTime,
-        1 => node: NodeUuid,
-    }
-}
-
 /// `jazz_pending_transactions`: what a transaction needs only until it has a
 /// seq or a rejection (SPEC 2 §2.8).
 pub(super) const PENDING_TRANSACTIONS_TABLE: &str = "jazz_pending_transactions";
@@ -2529,15 +2521,14 @@ impl VersionRow {
                         Value::Nullable(value.map(Box::new))
                     }
                     i if i == HistoryRowRecord::USER_CELLS + table.columns.len() => {
-                        authored_column_ids_value(authored_columns.as_ref())
+                        authored_column_ids_value(authored_columns.as_ref())?
                     }
                     i if i == HistoryRowRecord::USER_CELLS + table.columns.len() + 1 => {
                         Value::Bytes(version.counter_signs().to_vec())
                     }
                     i => match i - first_merge_field {
                         0 => Value::U64(seq.0),
-                        1 => base_seq_value(version.base()),
-                        2 => base_pending_value(version.base()),
+                        1 => base_value(version.base()),
                         _ => {
                             return Err(Error::InvalidStoredValue(
                                 "history layout does not end with the merge fields",
@@ -2755,26 +2746,18 @@ impl VersionRow {
 
     /// The write's base (SPEC 4 §4.6, "Base of a write").
     pub(super) fn base(&self) -> Result<RowBase, Error> {
-        let seq = match nullable_value(self.trailing_field(crate::schema::BASE_SEQ_FIELD)?)? {
-            None => None,
-            Some(Value::U64(seq)) => Some(GlobalTime(seq)),
-            Some(_) => return Err(Error::InvalidStoredValue("history base_seq must be u64")),
-        };
-        let pending = nullable_value(self.trailing_field(crate::schema::BASE_PENDING_FIELD)?)?
-            .map(base_pending_from_value)
-            .transpose()?;
-        Ok(RowBase { seq, pending })
+        base_from_value(nullable_value(
+            self.trailing_field(crate::schema::BASE_FIELD)?,
+        )?)
     }
 
     /// This image with its required merge fields replaced.
     pub(super) fn with_merge_fields(&self, seq: GlobalTime, base: RowBase) -> Result<Self, Error> {
         let seq_idx = self.trailing_field_index(crate::schema::SEQ_FIELD)?;
-        let base_seq_idx = self.trailing_field_index(crate::schema::BASE_SEQ_FIELD)?;
-        let base_pending_idx = self.trailing_field_index(crate::schema::BASE_PENDING_FIELD)?;
+        let base_idx = self.trailing_field_index(crate::schema::BASE_FIELD)?;
         let mut values = self.record.to_values()?;
         values[seq_idx] = Value::U64(seq.0);
-        values[base_seq_idx] = base_seq_value(base);
-        values[base_pending_idx] = base_pending_value(base);
+        values[base_idx] = base_value(base);
         self.with_record_values(values)
     }
 
@@ -3955,9 +3938,24 @@ pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<Versio
 
 /// Reserved authored-column marker for the row image's `_deletion` cell.
 /// Deletion is stamped into every version; a version authors it only when it
-/// deletes or restores the row. Allocated physical ids are small and
-/// increasing, so the maximal id can never collide and sorts last.
-pub(super) const DELETION_COLUMN_ID: PhysicalColumnId = PhysicalColumnId(u64::MAX);
+/// deletes or restores the row. Allocated physical ids are small, increasing
+/// and at most [`MAX_PHYSICAL_COLUMN_ID`], so the maximal stored id can never
+/// collide and sorts last.
+pub(super) const DELETION_COLUMN_ID: PhysicalColumnId = PhysicalColumnId(u16::MAX as u64);
+/// Largest allocatable physical column id. Row images store authored column
+/// ids as `u16`, with `u16::MAX` reserved for [`DELETION_COLUMN_ID`].
+pub(super) const MAX_PHYSICAL_COLUMN_ID: u64 = u16::MAX as u64 - 1;
+
+/// Check a freshly allocated physical column id against the `u16` authored
+/// column encoding.
+pub(super) fn ensure_allocatable_physical_column_id(id: u64) -> Result<(), Error> {
+    if id > MAX_PHYSICAL_COLUMN_ID {
+        return Err(Error::InvalidCatalogueUpdate(
+            "more than 65534 physical columns per node are not supported yet: row images store authored column ids as u16",
+        ));
+    }
+    Ok(())
+}
 /// Wire/logical spelling of [`DELETION_COLUMN_ID`] in `authored_columns`.
 pub(super) const DELETION_COLUMN_NAME: &str = "_deletion";
 
@@ -3975,11 +3973,12 @@ pub(super) fn authored_column_ids_from_value(
     let mut ids = BTreeSet::new();
     let mut previous = None;
     for value in values {
-        let Value::U64(id) = value else {
+        let Value::U16(id) = value else {
             return Err(Error::InvalidStoredValue(
                 "authored columns must contain physical column ids",
             ));
         };
+        let id = u64::from(id);
         if id == 0 {
             return Err(Error::InvalidStoredValue(
                 "authored physical column ids must be nonzero",
@@ -3996,12 +3995,19 @@ pub(super) fn authored_column_ids_from_value(
     Ok(ids)
 }
 
-fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Value {
-    Value::Nullable(columns.map(|columns| {
-        Box::new(Value::Array(
-            columns.iter().map(|column| Value::U64(column.0)).collect(),
-        ))
-    }))
+fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Result<Value, Error> {
+    let Some(columns) = columns else {
+        return Ok(Value::Nullable(None));
+    };
+    let ids = columns
+        .iter()
+        .map(|column| {
+            u16::try_from(column.0).map(Value::U16).map_err(|_| {
+                Error::InvalidStoredValue("authored physical column id does not fit in u16")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Nullable(Some(Box::new(Value::Array(ids)))))
 }
 
 pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
@@ -4031,53 +4037,98 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(authored_column_ids_value(version.authored_columns.as_ref()));
+    values.push(authored_column_ids_value(
+        version.authored_columns.as_ref(),
+    )?);
     values.push(Value::Bytes(version.counter_signs.clone()));
     values.push(Value::U64(version.seq.0));
-    values.push(base_seq_value(version.base));
-    values.push(base_pending_value(version.base));
+    values.push(base_value(version.base));
     Ok(values)
 }
 
-/// History `base_seq` value of `base`.
-pub(super) fn base_seq_value(base: RowBase) -> Value {
-    Value::Nullable(base.seq.map(|seq| Box::new(Value::U64(seq.0))))
-}
-
-/// History `base_pending` value of `base`.
-pub(super) fn base_pending_value(base: RowBase) -> Value {
-    Value::Nullable(base.pending.map(|tx_id| {
-        let record = BasePendingRecord::encode(&BASE_PENDING_DESCRIPTOR, tx_id.time, tx_id.node)
-            .expect("base_pending record fields match their descriptor");
-        Box::new(Value::Record(record.record().clone()))
-    }))
-}
-
-static BASE_PENDING_DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
-    std::sync::LazyLock::new(|| {
-        let records::ValueType::Nullable(inner) =
-            crate::schema::history_base_pending_storage_type()
-        else {
-            unreachable!("history base_pending is nullable")
-        };
-        let records::ValueType::Record(descriptor) = *inner else {
-            unreachable!("history base_pending is a record")
-        };
-        *descriptor
-    });
-
-/// The pending predecessor stored in a history `base_pending` record.
-fn base_pending_from_value(value: Value) -> Result<TxId, Error> {
-    let Value::Record(record) = value else {
-        return Err(Error::InvalidStoredValue(
-            "history base_pending must be a record",
-        ));
+/// History `base` value of `base`: null for an empty base, otherwise the
+/// enum case holding exactly the present parts.
+pub(super) fn base_value(base: RowBase) -> Value {
+    let records::ValueType::Nullable(inner) = crate::schema::history_base_storage_type() else {
+        unreachable!("history base is nullable")
     };
-    let record = record.borrowed();
-    Ok(TxId::new(
-        TxTime(record.get_u64(BasePendingRecord::FIELD_TIME_IDX)?),
-        NodeUuid(record.get_uuid(BasePendingRecord::FIELD_NODE_IDX)?),
-    ))
+    let records::ValueType::Enum(schema) = *inner else {
+        unreachable!("history base is an enum")
+    };
+    let pending =
+        |tx_id: TxId| Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)]);
+    let (case, fields) = match (base.seq, base.pending) {
+        (None, None) => return Value::Nullable(None),
+        (Some(seq), None) => (
+            crate::schema::HISTORY_BASE_SEQ_CASE,
+            vec![Value::U64(seq.0)],
+        ),
+        (None, Some(tx_id)) => (
+            crate::schema::HISTORY_BASE_PENDING_CASE,
+            vec![pending(tx_id)],
+        ),
+        (Some(seq), Some(tx_id)) => (
+            crate::schema::HISTORY_BASE_SEQ_AND_PENDING_CASE,
+            vec![Value::U64(seq.0), pending(tx_id)],
+        ),
+    };
+    let tag = schema
+        .cases
+        .iter()
+        .position(|candidate| candidate.name == case)
+        .and_then(|tag| u32::try_from(tag).ok())
+        .expect("history base declares every case");
+    let value = records::EnumValue::create(tag, schema.cases[tag as usize].payload, &fields)
+        .expect("history base fields match their case");
+    Value::Nullable(Some(Box::new(Value::Enum(value))))
+}
+
+/// The base stored in a history `base` value.
+fn base_from_value(value: Option<Value>) -> Result<RowBase, Error> {
+    let Some(value) = value else {
+        return Ok(RowBase::default());
+    };
+    let Value::Enum(value) = value else {
+        return Err(Error::InvalidStoredValue("history base must be an enum"));
+    };
+    let records::ValueType::Nullable(inner) = crate::schema::history_base_storage_type() else {
+        unreachable!("history base is nullable")
+    };
+    let records::ValueType::Enum(schema) = *inner else {
+        unreachable!("history base is an enum")
+    };
+    let case = schema.case(value.tag())?;
+    let fields = case.payload.bind(value.record().raw()).to_values()?;
+    let seq = |value: &Value| match value {
+        Value::U64(seq) => Ok(GlobalTime(*seq)),
+        _ => Err(Error::InvalidStoredValue("history base seq must be u64")),
+    };
+    let pending = |value: &Value| match value {
+        Value::Tuple(parts) => match parts.as_slice() {
+            [Value::U64(time), Value::Uuid(node)] => Ok(TxId::new(TxTime(*time), NodeUuid(*node))),
+            _ => Err(Error::InvalidStoredValue(
+                "history base pending must be (time, node)",
+            )),
+        },
+        _ => Err(Error::InvalidStoredValue(
+            "history base pending must be (time, node)",
+        )),
+    };
+    match (case.name.as_str(), fields.as_slice()) {
+        (crate::schema::HISTORY_BASE_SEQ_CASE, [s]) => Ok(RowBase {
+            seq: Some(seq(s)?),
+            pending: None,
+        }),
+        (crate::schema::HISTORY_BASE_PENDING_CASE, [p]) => Ok(RowBase {
+            seq: None,
+            pending: Some(pending(p)?),
+        }),
+        (crate::schema::HISTORY_BASE_SEQ_AND_PENDING_CASE, [s, p]) => Ok(RowBase {
+            seq: Some(seq(s)?),
+            pending: Some(pending(p)?),
+        }),
+        _ => Err(Error::InvalidStoredValue("unknown history base case")),
+    }
 }
 
 #[cfg(test)]
@@ -4118,11 +4169,10 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
-    values.push(authored_column_ids_value(authored_columns.as_ref()));
+    values.push(authored_column_ids_value(authored_columns.as_ref())?);
     values.push(Value::Bytes(version.counter_signs().to_vec()));
     values.push(Value::U64(seq.0));
-    values.push(base_seq_value(version.base()));
-    values.push(base_pending_value(version.base()));
+    values.push(base_value(version.base()));
     Ok(values)
 }
 
@@ -4261,7 +4311,7 @@ pub(super) fn global_current_values(
     }
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
-    ));
+    )?);
     Ok(values)
 }
 
@@ -4796,7 +4846,7 @@ mod authority_storage_codec_tests {
     /// writers always produce the complete history layout.
     #[test]
     fn history_merge_fields_require_columns_and_preserve_null_bases() {
-        use crate::schema::{BASE_PENDING_FIELD, BASE_SEQ_FIELD, COUNTER_SIGNS_FIELD, SEQ_FIELD};
+        use crate::schema::{BASE_FIELD, COUNTER_SIGNS_FIELD, SEQ_FIELD};
         use records::{RecordDescriptor, ValueType};
 
         let fields = [
@@ -4807,13 +4857,8 @@ mod authority_storage_codec_tests {
             ),
             (SEQ_FIELD, ValueType::U64, Value::U64(0)),
             (
-                BASE_SEQ_FIELD,
-                ValueType::U64.nullable(),
-                Value::Nullable(None),
-            ),
-            (
-                BASE_PENDING_FIELD,
-                crate::schema::history_base_pending_storage_type(),
+                BASE_FIELD,
+                crate::schema::history_base_storage_type(),
                 Value::Nullable(None),
             ),
         ];
@@ -4850,12 +4895,44 @@ mod authority_storage_codec_tests {
             .with_merge_fields(GlobalTime(0), RowBase::default())
             .unwrap();
         assert_eq!(cleared.base().unwrap(), RowBase::default());
+        let pending = TxId::new(TxTime(8), NodeUuid(uuid::Uuid::from_u128(9)));
+        // Each base case round-trips and costs only its present parts: a null
+        // flag, a case tag, 8 bytes per seq and 24 per pending predecessor.
+        // An empty base is the null flag alone.
+        let base_only =
+            RecordDescriptor::new([(BASE_FIELD, crate::schema::history_base_storage_type())]);
+        for (case, width) in [
+            (RowBase::default(), 1),
+            (
+                RowBase {
+                    seq: Some(GlobalTime(7)),
+                    pending: None,
+                },
+                10,
+            ),
+            (
+                RowBase {
+                    seq: None,
+                    pending: Some(pending),
+                },
+                26,
+            ),
+            (base, 34),
+        ] {
+            assert_eq!(
+                complete
+                    .with_merge_fields(GlobalTime(10), case)
+                    .unwrap()
+                    .base()
+                    .unwrap(),
+                case
+            );
+            assert_eq!(base_only.create(&[base_value(case)]).unwrap().len(), width);
+        }
         assert!(row(Some(COUNTER_SIGNS_FIELD)).counter_signs().is_err());
         assert!(row(Some(SEQ_FIELD)).seq().is_err());
-        for missing in [BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
-            assert!(row(Some(missing)).base().is_err());
-        }
-        for missing in [SEQ_FIELD, BASE_SEQ_FIELD, BASE_PENDING_FIELD] {
+        assert!(row(Some(BASE_FIELD)).base().is_err());
+        for missing in [SEQ_FIELD, BASE_FIELD] {
             assert!(
                 row(Some(missing))
                     .with_merge_fields(GlobalTime(10), base)
@@ -5128,18 +5205,24 @@ mod transaction_record_tests {
         descriptor(table).create(values).unwrap()
     }
 
-    /// The stored record bytes: the logical record with each author column
+    /// The stored record bytes: the logical record without its primary-key
+    /// columns (the storage key holds them) and with each author column
     /// replaced by its `authors` dictionary code, here always the first
     /// code (0).
     fn stored(table: &str, values: &[Value]) -> Vec<u8> {
-        let schema = RuntimeSchema::new(Vec::<TableSchema>::new())
+        let (_, transcoder) = RuntimeSchema::new(Vec::<TableSchema>::new())
             .lower_to_groove()
             .table(table)
             .unwrap()
-            .storage_record_schema();
-        let transcoder = records::RecordTranscoder::new(schema)
+            .stored_record_layout(0)
             .unwrap()
-            .expect("the author column is interned");
+            .unwrap();
+        let transcoder = transcoder.expect("the table has a primary key");
+        let key = transcoder
+            .key_fields()
+            .iter()
+            .map(|index| values[*index].clone())
+            .collect::<Vec<_>>();
         let stored = transcoder
             .to_physical::<records::Error>(&encode(table, values), |dictionary, _, _| {
                 assert_eq!(dictionary, crate::schema::AUTHORS_DICTIONARY);
@@ -5147,7 +5230,7 @@ mod transaction_record_tests {
             })
             .unwrap();
         let logical = transcoder
-            .to_logical::<records::Error>(&stored, |_, code| {
+            .to_logical::<records::Error>(&stored, &key, |_, code| {
                 assert_eq!(code, 0);
                 Ok(
                     RowAuthor::from_persisted_subject(AuthorSubject::for_test_bytes([5; 16]))
@@ -5179,7 +5262,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "020100000000000001000000000000000000030000000000000001010900000000000000022e0000002f000000000000"
+            "0000030000000000000001010900000000000000021e0000001f000000000000"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5201,7 +5284,7 @@ mod transaction_record_tests {
         let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "020100000000000001000000000000000000030000000000000002000000000000000000012e0000004800000000010400000000000001010808080808080808080808080808080800"
+            "0000030000000000000002000000000000000000011e0000003800000000010400000000000001010808080808080808080808080808080800"
         );
         assert_eq!(
             pending_transaction_values(NodeAlias(1), &tx, &status).unwrap(),
@@ -5224,7 +5307,7 @@ mod transaction_record_tests {
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
-            "02010000000000000100000000000000000103000000000000000000000000000000000001310000003200000001007b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000075726e3a6a617a7a3a746573740030363036303630362d303630362d303630362d303630362d303630363036303630363036"
+            "000103000000000000000000000000000000000001210000002200000001007b7d0001019c6dbdef71c955b8a4d72db3a1e0c7d1120000000075726e3a6a617a7a3a746573740030363036303630362d303630362d303630362d303630362d303630363036303630363036"
         );
         let record = OwnedRecord::new(bytes, descriptor("jazz_transactions"));
         assert_eq!(

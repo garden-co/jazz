@@ -4844,7 +4844,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             records::DescriptorField::new("schema_version", ValueType::U64),
             records::DescriptorField::new(
                 "authored_columns",
-                ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
+                ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U16)))),
             ),
             records::DescriptorField::new("created_by", RowAuthor::value_type()),
             records::DescriptorField::new("created_at", ValueType::U64),
