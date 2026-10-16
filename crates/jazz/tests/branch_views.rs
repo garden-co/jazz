@@ -9,7 +9,6 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
@@ -1892,9 +1891,9 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
 }
 
 /// Alice's exact head exposes its tombstones without implicitly reading a base.
-/// An explicit base supplies inherited cells; restoration replaces the tombstone.
+/// A deleted head image masks base cells; restoration supplies new head content.
 ///
-/// alice ──base insert──► head delete ──► exact head (sparse) / declared base (body)
+/// alice ──base insert──► head delete ──► exact head / declared base (empty body)
 #[test]
 fn include_deleted_reads_select_the_requested_live_branch_view() {
     let (db, schema) = open_db();
@@ -2039,7 +2038,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 )
             ),
         ]),
-        "exact head keeps register-only tombstones without fetching an undeclared body"
+        "exact head keeps deleted row images without fetching an undeclared body"
     );
     let base_rows = block_on(db.all(&prepared, current_base_opts.clone())).unwrap();
     assert_eq!(
@@ -2047,13 +2046,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
         BTreeMap::from([
             (
                 inherited_deleted,
-                (
-                    Some(Value::String("deleted from head".to_owned())),
-                    head_cell.clone(),
-                    true,
-                    1_000,
-                    4_000
-                )
+                (None, head_cell.clone(), true, 4_000, 4_000)
             ),
             (
                 inherited_visible,
@@ -2076,7 +2069,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 )
             ),
         ]),
-        "declared base supplies content while head deletion and branch coordinates win"
+        "a deleted head image masks the declared base, including its body and provenance"
     );
     let exact_base_rows = block_on(db.all(
         &prepared,
@@ -2147,7 +2140,7 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
                 (Some(Value::String("deleted on head".to_owned())), true)
             ),
         ]),
-        "restore supersedes the register-only tombstone without a duplicate"
+        "restore supplies head content without duplicating the deleted row image"
     );
 
     let unsupported_snapshot_base = ReadOpts {
@@ -2172,13 +2165,13 @@ fn include_deleted_reads_select_the_requested_live_branch_view() {
     assert_eq!(error.code, jazz::db::ErrorCode::Query);
 }
 
-/// Alice's cached sparse tombstone cannot establish its own authority read proof.
-/// A declared base supplies a subject only under the requested head's policy.
+/// Alice's deleted head image remains subject to the requested head's read policy.
+/// Its empty body masks the base even when Bob later acquires the head grant.
 ///
-/// base content ──head delete──► local tombstone
-///                              └─authority─► selected content AND head grant
+/// alice ──base insert──► head delete ──► empty deleted head image
+///                       head owner -> bob ──► alice denied / bob allowed
 #[test]
-fn include_deleted_branch_tombstones_require_selected_content_for_authority_reads() {
+fn include_deleted_branch_tombstones_follow_head_policy_for_authority_reads() {
     let alice = AuthorSubject::for_test_bytes([0x76; 16]);
     let bob = AuthorSubject::for_test_bytes([0x77; 16]);
     let base_row = RowUuid::from_bytes([0x48; 16]);
@@ -2262,22 +2255,14 @@ fn include_deleted_branch_tombstones_require_selected_content_for_authority_read
             vec![(todo, None, Some(Value::Uuid(head_row.0)), true)],
             "client-local output remains policy-free retained knowledge"
         );
-        assert!(
-            block_on(db.all_for_identity(&query, exact, alice))
-                .unwrap()
-                .is_empty(),
-            "even an unconditional grant needs selected content, not a sparse self-proof"
-        );
-        let allowed = vec![(
-            todo,
-            Some(Value::String("retained base".to_owned())),
-            Some(Value::Uuid(head_row.0)),
-            true,
-        )];
-        assert_eq!(
-            states(block_on(db.all_for_identity(&query, composed.clone(), alice)).unwrap()),
-            allowed
-        );
+        let allowed = vec![(todo, None, Some(Value::Uuid(head_row.0)), true)];
+        for opts in [exact.clone(), composed.clone()] {
+            assert_eq!(
+                states(block_on(db.all_for_identity(&query, opts, alice)).unwrap()),
+                allowed,
+                "authority reads use the stored head image without borrowing base cells"
+            );
+        }
         if reference_policy {
             db.update(
                 "branches",
@@ -2286,29 +2271,33 @@ fn include_deleted_branch_tombstones_require_selected_content_for_authority_read
                 Default::default(),
             )
             .unwrap();
-            assert!(
-                block_on(db.all_for_identity(&query, composed.clone(), alice))
-                    .unwrap()
-                    .is_empty(),
-                "an Alice-readable base cannot authorize a Bob-owned effective head"
-            );
-            assert_eq!(
-                states(block_on(db.all_for_identity(&query, composed.clone(), bob)).unwrap()),
-                allowed
-            );
+            for opts in [exact.clone(), composed.clone()] {
+                assert!(
+                    block_on(db.all_for_identity(&query, opts.clone(), alice))
+                        .unwrap()
+                        .is_empty(),
+                    "an Alice-readable base cannot authorize a Bob-owned effective head"
+                );
+                assert_eq!(
+                    states(block_on(db.all_for_identity(&query, opts, bob)).unwrap()),
+                    allowed
+                );
+            }
             db.delete("branches", head_row, Default::default()).unwrap();
-            assert!(
-                block_on(db.all_for_identity(&query, composed, bob))
-                    .unwrap()
-                    .is_empty(),
-                "missing head reference evidence fails closed"
-            );
+            for opts in [exact, composed] {
+                assert!(
+                    block_on(db.all_for_identity(&query, opts, bob))
+                        .unwrap()
+                        .is_empty(),
+                    "missing head reference evidence fails closed"
+                );
+            }
         }
     }
 }
 
 /// An old reader omits Bob's incompatible head content instead of resurrecting
-/// it as a sparse tombstone or falling through to Alice's compatible base.
+/// Alice's compatible base. An empty deleted head image also masks the base.
 ///
 /// alice: base/open ──► bob: head/closed + delete ──► old reader: omitted
 #[test]
@@ -2446,10 +2435,7 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
     );
     assert_eq!(
         states(block_on(old.all(&whole, composed.clone())).unwrap()),
-        BTreeMap::from([(
-            sparse,
-            (Some(Value::String("base sparse".to_owned())), true)
-        )])
+        BTreeMap::from([(sparse, (None, true))])
     );
     let title_only = old
         .prepare_query(&Query::from("todos").select(["title"]))
@@ -2465,7 +2451,7 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
                 incompatible,
                 Some(Value::String("head incompatible".to_owned()))
             ),
-            (sparse, Some(Value::String("base sparse".to_owned()))),
+            (sparse, None),
         ]),
         "an unselected unknown enum does not omit the retained head row"
     );
@@ -2486,15 +2472,15 @@ fn include_deleted_branch_compatibility_omission_is_not_content_absence() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([
             (incompatible, (Some(Value::EnumTag(1)), true)),
-            (sparse, (Some(Value::EnumTag(0)), true)),
+            (sparse, (None, true)),
         ])
     );
 }
 
 /// Alice distinguishes an absent tombstone body from an authored logical null.
-/// Enum head coordinates and selected JSON survive the sparse-source union.
+/// Enum head coordinates, authored nulls and retained JSON survive deletion.
 ///
-/// base/null + head/closed ──head deletes──► exact sparse / composed base body
+/// base/null + head/closed + head/null ──head deletes──► head images mask base
 #[test]
 fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
     let schema = compile_schema(
@@ -2536,6 +2522,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
     let head = BranchSelector::new([("branch", Value::EnumTag(1))]);
     let sparse = RowUuid::from_bytes([0x7a; 16]);
     let retained = RowUuid::from_bytes([0x7b; 16]);
+    let retained_null = RowUuid::from_bytes([0x7e; 16]);
     let json = Value::String("{\"answer\":42}".to_owned());
     for (row, branch, status) in [
         (sparse, base.clone(), Value::Nullable(None)),
@@ -2544,6 +2531,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
             head.clone(),
             Value::Nullable(Some(Box::new(Value::EnumTag(1)))),
         ),
+        (retained_null, head.clone(), Value::Nullable(None)),
     ] {
         db.insert(
             "todos",
@@ -2559,7 +2547,7 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
         )
         .unwrap();
     }
-    for row in [sparse, retained] {
+    for row in [sparse, retained, retained_null] {
         db.delete(
             "todos",
             row,
@@ -2603,26 +2591,26 @@ fn include_deleted_branch_preserves_enum_nullable_and_json_cells() {
         Some(json.clone()),
         true,
     );
+    let retained_null_cells = (
+        Some(Value::EnumTag(1)),
+        Some(Value::Nullable(None)),
+        Some(json),
+        true,
+    );
     assert_eq!(
         states(block_on(db.all(&query, exact)).unwrap()),
         BTreeMap::from([
             (sparse, (Some(Value::EnumTag(1)), None, None, true)),
             (retained, retained_cells.clone()),
+            (retained_null, retained_null_cells.clone()),
         ])
     );
     assert_eq!(
         states(block_on(db.all(&query, composed)).unwrap()),
         BTreeMap::from([
-            (
-                sparse,
-                (
-                    Some(Value::EnumTag(1)),
-                    Some(Value::Nullable(None)),
-                    Some(json),
-                    true
-                )
-            ),
+            (sparse, (Some(Value::EnumTag(1)), None, None, true)),
             (retained, retained_cells),
+            (retained_null, retained_null_cells),
         ])
     );
 }
@@ -2945,46 +2933,229 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     ));
 }
 
-#[test]
-fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
-    let (db, schema) = open_history_complete_db();
-    let source = selector(0x91);
-    let target = selector(0x92);
-    let row = RowUuid::from_bytes([0x93; 16]);
-    db.insert(
-        "todos",
-        BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
-        jazz::db::InsertOptions {
-            row_id: Some(row),
-            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let selected = || {
-        [ContributionMergeRow {
-            table: "todos".to_owned(),
-            row_uuid: row,
-        }]
-    };
-    let merged = db
-        .merge_branch_contributions(source.clone(), target.clone(), selected())
-        .unwrap()
-        .expect("the first calculation emits an ordinary transaction");
-    let _ordinary_write_state = db.write_state(merged).unwrap();
-    assert!(
-        db.merge_branch_contributions(source, target.clone(), selected())
-            .unwrap()
-            .is_none(),
-        "observed contribution provenance suppresses a retry"
-    );
-
-    let query = db.prepare_query(&db.table("todos")).unwrap();
-    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
-    assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("source".to_owned()))
-    );
-}
 mod common;
+
+/// One write in a scripted branch-view sequence.
+type BranchEdit<'a> = Box<dyn Fn(&Db) + 'a>;
+
+/// Alice subscribes to `title = needle` on her draft over main. Under the
+/// title index each branch's deletion register is read only for the row ids
+/// of the content candidates, and main is masked only by the draft rows
+/// sharing a candidate's id, so every late change on either side must still
+/// reach the view: deletes and restores on the draft and on main, an indexed
+/// value moving into and out of the prefix, a new row, and deletes of rows
+/// outside the prefix. After each write the live result equals the unindexed
+/// read of the same view, filtered to `needle`.
+///
+/// ```text
+/// main:  a=needle  b=needle  c=hay  d=needle  x=hay (deleted)
+/// draft: (empty)
+/// alice ──title = needle, draft over main──► {a, b, d}, then one write at a time
+/// ```
+#[test]
+fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
+    let (db, schema) = open_db();
+    let main = selector(0x81);
+    let draft = selector(0x82);
+    let [a, b, c, d, x, e] =
+        [0x83, 0x84, 0x85, 0x86, 0x87, 0x88].map(|byte| RowUuid::from_bytes([byte; 16]));
+    let title =
+        |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
+    for (row, value) in [
+        (a, "needle"),
+        (b, "needle"),
+        (c, "hay"),
+        (d, "needle"),
+        (x, "hay"),
+    ] {
+        db.insert(
+            "todos",
+            title(value),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let on_main = || jazz::db::WriteTarget::BranchView {
+        head: main.clone(),
+        base: None,
+    };
+    let on_draft = || jazz::db::WriteTarget::BranchView {
+        head: draft.clone(),
+        base: Some(BranchViewBase::Current(main.clone())),
+    };
+    let delete = |db: &Db, row, target| {
+        db.delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let update = |db: &Db, row, value: &str, target| {
+        db.update(
+            "todos",
+            row,
+            title(value),
+            jazz::db::UpdateOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let restore = |db: &Db, row, value: &str, branch: &BranchSelector| {
+        db.restore(
+            "todos",
+            row,
+            Some(title(value)),
+            jazz::db::RestoreOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    delete(&db, x, on_main());
+
+    let opts =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let needle = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+        .unwrap();
+    let all = db.prepare_query(&db.table("todos")).unwrap();
+    let table = &schema.tables[0];
+    let expected = |db: &Db| {
+        let mut rows = block_on(db.all(&all, opts.clone()))
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.cell(table, "title") == Some(Value::String("needle".to_owned())))
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+
+    let mut subscription = block_on(db.subscribe(&needle, opts.clone())).unwrap();
+    let mut live = BTreeMap::new();
+    let apply = |subscription: &mut jazz::db::SubscriptionStream,
+                 live: &mut BTreeMap<RowUuid, ()>| {
+        while let Some(event) = subscription.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                ..
+            } = event
+            else {
+                panic!("unexpected subscription event: {event:?}");
+            };
+            if reset {
+                live.clear();
+            }
+            for row in removed {
+                assert!(
+                    live.remove(&row.row_uuid).is_some(),
+                    "removed an absent row"
+                );
+            }
+            for row in added {
+                assert!(
+                    live.insert(row.row_uuid(), ()).is_none(),
+                    "added a row twice"
+                );
+            }
+        }
+    };
+    let opening = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset: true, added, ..
+    } = opening
+    else {
+        panic!("unexpected opening event: {opening:?}");
+    };
+    live.extend(added.iter().map(|row| (row.row_uuid(), ())));
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), vec![a, b, d]);
+
+    let edits: Vec<(&str, BranchEdit)> = vec![
+        (
+            "draft deletes an inherited row",
+            Box::new(|db| delete(db, a, on_draft())),
+        ),
+        (
+            "main deletes a row",
+            Box::new(|db| delete(db, b, on_main())),
+        ),
+        (
+            "main restores it",
+            Box::new(|db| restore(db, b, "needle", &main)),
+        ),
+        (
+            "draft restores its delete",
+            Box::new(|db| restore(db, a, "needle", &draft)),
+        ),
+        (
+            "main moves a row into the prefix",
+            Box::new(|db| update(db, c, "needle", on_main())),
+        ),
+        (
+            "main deletes the moved row",
+            Box::new(|db| delete(db, c, on_main())),
+        ),
+        (
+            "draft moves a row out of the prefix",
+            Box::new(|db| update(db, d, "hay", on_draft())),
+        ),
+        (
+            "draft deletes that row",
+            Box::new(|db| delete(db, d, on_draft())),
+        ),
+        (
+            "main deletes the row draft deleted",
+            Box::new(|db| delete(db, d, on_main())),
+        ),
+        (
+            "main restores the outside row",
+            Box::new(|db| restore(db, x, "needle", &main)),
+        ),
+        (
+            "main inserts a row",
+            Box::new(|db| {
+                db.insert(
+                    "todos",
+                    title("needle"),
+                    jazz::db::InsertOptions {
+                        row_id: Some(e),
+                        target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            "draft deletes the new row",
+            Box::new(|db| delete(db, e, on_draft())),
+        ),
+    ];
+    for (step, edit) in edits {
+        edit(&db);
+        apply(&mut subscription, &mut live);
+        assert_eq!(
+            live.keys().copied().collect::<Vec<_>>(),
+            expected(&db),
+            "{step}"
+        );
+    }
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), {
+        let mut rows = vec![a, b, x];
+        rows.sort();
+        rows
+    });
+}

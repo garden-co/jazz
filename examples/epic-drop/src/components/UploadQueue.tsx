@@ -39,7 +39,9 @@ export function UploadQueue({ tasks, onCancel, onDismiss }: UploadQueueProps) {
                 max={Math.max(task.size, 1)}
                 hasValueLabel
                 formatValueLabel={(value, max) =>
-                  `${formatBytes(value)} of ${formatBytes(task.size === 0 ? 0 : max)}`
+                  task.status === "saving"
+                    ? `Saving ${formatBytes(task.size)}…`
+                    : `${formatBytes(value)} of ${formatBytes(task.size === 0 ? 0 : max)}`
                 }
               />
             }
