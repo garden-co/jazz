@@ -222,7 +222,7 @@ fn validate_registry_with_profiles(
         "jazz.tx-record.v2",
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
-        "groove.jazz-physical-class.v2",
+        "groove.jazz-physical-class.v3",
         "groove.durable-index.v2",
         "groove.dictionary.v1",
         // Linear row-state history retired `jazz.history-version-current.v1`,

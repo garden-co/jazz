@@ -777,7 +777,7 @@ fn opening_defers_malformed_current_row_to_read() {
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         storage
             .set(
                 table.clone(),
@@ -2336,7 +2336,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
             .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
             .collect::<BTreeMap<_, _>>();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         let marker = b"\0groove-declared-index-generation".to_vec();
         storage.delete("indices".into(), marker).unwrap();
         // Damage index entries only: keys starting with `00` are Groove's
@@ -2385,7 +2385,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         );
     }
     let storage =
-        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
     let indexes = storage
         .prefix("indices".into(), Vec::new())
         .unwrap()
@@ -2468,6 +2468,15 @@ fn author_columns_store_dictionary_codes() {
     let families = rocksdb::DB::list_cf(&options, temp_dir.path()).unwrap();
     let db = rocksdb::DB::open_cf_for_read_only(&options, temp_dir.path(), &families, false)
         .unwrap();
+    let meta = db.cf_handle("__groove_class_meta").unwrap();
+    let table_ids = db
+        .iterator_cf(&meta, rocksdb::IteratorMode::Start)
+        .filter_map(|entry| {
+            let (key, value) = entry.unwrap();
+            groove::storage::decode_class_table_id_entry(&key, &value)
+                .map(|(name, id)| (name.to_owned(), id))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut dictionary = Vec::new();
     // Per table: the stored author codes of each record, in key order.
     let mut codes = BTreeMap::<&str, Vec<Vec<u32>>>::new();
@@ -2480,9 +2489,10 @@ fn author_columns_store_dictionary_codes() {
                 continue;
             }
             let Some((name, table)) = tables.iter().find(|(name, _)| {
-                key.len() > 4 + name.len()
-                    && key[..4] == (name.len() as u32).to_be_bytes()
-                    && &key[4..4 + name.len()] == name.as_bytes()
+                key.len() > 4
+                    && table_ids
+                        .get(name)
+                        .is_some_and(|id| key[..4] == id.to_be_bytes())
             }) else {
                 continue;
             };

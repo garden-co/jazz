@@ -124,7 +124,7 @@
       ]
     },
     {
-      "id": "groove.jazz-physical-class.v2",
+      "id": "groove.jazz-physical-class.v3",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/groove/SPEC/2_storage_model.md",
@@ -146,6 +146,14 @@
         {
           "path": "crates/groove/src/storage/mod.rs",
           "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
+        },
+        {
+          "path": "crates/groove/src/storage/mod.rs",
+          "anchor": "class_table_ids_persist_with_their_first_write_and_survive_reopen"
+        },
+        {
+          "path": "crates/groove/src/storage/mod.rs",
+          "anchor": "class_table_id_registry_rejects_malformed_and_duplicate_entries"
         }
       ]
     },

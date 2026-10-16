@@ -6811,7 +6811,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
     assert_eq!(writes.transactions_indexes.count, 1);
     assert_eq!(writes.other.count, 0);
 
-    let class_writes = run(StorageLayout::jazz_class_v2()).await;
+    let class_writes = run(StorageLayout::jazz_class_v3()).await;
     assert_eq!(class_writes, writes);
 }
 

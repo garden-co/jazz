@@ -124,19 +124,17 @@ struct Group {
     value_bytes: usize,
 }
 
-fn split_logical(cf: &str, key: &[u8]) -> (String, Vec<u8>) {
-    if key.len() >= 4 {
-        let len = u32::from_be_bytes(key[..4].try_into().unwrap()) as usize;
-        if len > 0
-            && key.len() >= 4 + len
-            && key[4..4 + len]
-                .iter()
-                .all(|byte| byte.is_ascii_graphic() && *byte != b'\0')
-        {
-            return (
-                String::from_utf8(key[4..4 + len].to_vec()).unwrap(),
-                key[4 + len..].to_vec(),
-            );
+/// Split a class-layout key into its logical table, named through the
+/// class table-id registry, and its logical key. Registry entries themselves
+/// (table id 0) are grouped together.
+fn split_logical(cf: &str, key: &[u8], tables: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
+    if cf.starts_with("__groove_class_") && key.len() >= 4 {
+        let id = u32::from_be_bytes(key[..4].try_into().unwrap());
+        if id == 0 {
+            return ("class table-id registry".to_owned(), key[4..].to_vec());
+        }
+        if let Some(name) = tables.get(&id) {
+            return (name.clone(), key[4..].to_vec());
         }
     }
     (cf.to_owned(), key.to_vec())
@@ -171,12 +169,12 @@ fn index_name(key: &[u8], names: &BTreeMap<u32, String>) -> Option<String> {
     names.get(&id).cloned()
 }
 
-fn logical_entry(family: &str, key: &[u8]) -> (String, Vec<u8>) {
+fn logical_entry(family: &str, key: &[u8], tables: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
     // The class layout stores the `indices` class without a logical frame.
     if family == "__groove_class_indices" {
         return ("indices".to_owned(), key.to_vec());
     }
-    split_logical(family, key)
+    split_logical(family, key, tables)
 }
 
 fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
@@ -184,12 +182,23 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
     let families = rocksdb::DB::list_cf(&options, path).expect("list column families");
     let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
         .expect("open RocksDB read-only");
+    let meta = db
+        .cf_handle("__groove_class_meta")
+        .expect("class meta family");
+    let tables = db
+        .iterator_cf(&meta, rocksdb::IteratorMode::Start)
+        .filter_map(|entry| {
+            let (key, value) = entry.expect("raw entry");
+            jazz::groove::storage::decode_class_table_id_entry(&key, &value)
+                .map(|(name, id)| (id, name.to_owned()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut names = BTreeMap::new();
     for family in &families {
         let handle = db.cf_handle(family).expect("column family handle");
         for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
             let (key, value) = entry.expect("raw entry");
-            let (logical, rest) = logical_entry(family, &key);
+            let (logical, rest) = logical_entry(family, &key, &tables);
             if logical == "indices"
                 && let Some((id, name)) = index_registry_entry(&rest, &value)
             {
@@ -202,7 +211,7 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
         let handle = db.cf_handle(family).expect("column family handle");
         for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
             let (key, value) = entry.expect("raw entry");
-            let (logical, rest) = logical_entry(family, &key);
+            let (logical, rest) = logical_entry(family, &key, &tables);
             let group = if logical == "indices" {
                 index_name(&rest, &names).unwrap_or(logical)
             } else {
