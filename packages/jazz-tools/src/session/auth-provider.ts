@@ -1,5 +1,6 @@
 import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 /** A stable provider session identifier, never a JWT. Pending means initial hydration. */
 export interface AuthProviderState {
@@ -26,7 +27,10 @@ export interface AuthProviderConnection {
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
 const releases = new WeakMap<object, Promise<void>>();
-const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
+/** @internal Whether an auth provider connection currently drives this session's logins. */
+export function hasAuthProviderConnection(session: object): boolean {
+  return owners.has(session);
+}
 
 /** Reconcile a provider with an externally owned Jazz session.
  * Signup, login and restoration atomically login-or-register. For linking an
@@ -51,7 +55,7 @@ export function connectAuthProvider<Client>(
   let failure: Error | undefined;
   /** The retained account an in-flight admission is revalidating in place. */
   let revalidating: object | undefined;
-  const listeners = new Set<() => void>();
+  const listeners = createListeners();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
@@ -87,7 +91,7 @@ export function connectAuthProvider<Client>(
     )
       return;
     snapshot = { key: desired.key, ready, isPending, error };
-    for (const listener of [...listeners]) listener();
+    listeners.notify();
   }
   function reconcile(): Promise<void> {
     if (disposed || desired.isPending || desired.error || signOut) {
@@ -144,7 +148,7 @@ export function connectAuthProvider<Client>(
     });
     const task = operation
       .catch((cause) => {
-        if (!disposed && token === generation) failure = asError(cause);
+        if (!disposed && token === generation) failure = toError(cause);
       })
       .finally(() => {
         if (running !== task) return;
@@ -160,12 +164,7 @@ export function connectAuthProvider<Client>(
   const unsubscribe = session.subscribe(publish);
   const connection: AuthProviderConnection = {
     getSnapshot: () => snapshot,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     update(next) {
       if (disposed) return;
       if (desired.key !== next.key || !!desired.isPending !== !!next.isPending) {
@@ -219,7 +218,7 @@ export function connectAuthProvider<Client>(
       });
       running = operation
         .catch((cause) => {
-          failure = asError(cause);
+          failure = toError(cause);
         })
         .finally(() => {
           running = undefined;

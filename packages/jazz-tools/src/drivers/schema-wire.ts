@@ -1,8 +1,5 @@
 import type { WasmSchema } from "./types.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../runtime/util.js";
 
 export function isWasmSchema(value: unknown): value is WasmSchema {
   return isRecord(value);
@@ -19,15 +16,6 @@ interface SerializeRuntimeSchemaOptions {
 }
 
 const runtimeSchemaCacheKeys = new WeakMap<WasmSchema, Map<boolean, string>>();
-
-function isRuntimeSchemaEnvelope(value: unknown): value is RuntimeSchemaEnvelope {
-  return (
-    isRecord(value) &&
-    value.__jazzRuntimeSchema === 1 &&
-    isWasmSchema(value.schema) &&
-    typeof value.loadedPolicyBundle === "boolean"
-  );
-}
 
 export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
   if (schema instanceof Map) {
@@ -107,15 +95,4 @@ export function getRuntimeSchemaCacheKey(
   const key = serializeRuntimeSchema(schema, options);
   keysByPolicyBundle.set(loadedPolicyBundle, key);
   return key;
-}
-
-export function normalizeRuntimeSchemaJson(schemaJson: string): string {
-  const parsed = JSON.parse(schemaJson) as unknown;
-  if (isRuntimeSchemaEnvelope(parsed)) {
-    return JSON.stringify(parsed);
-  }
-  if (!isWasmSchema(parsed)) {
-    throw new Error("Invalid schema JSON payload.");
-  }
-  return serializeRuntimeSchema(parsed);
 }

@@ -11,6 +11,8 @@ import {
   getMigrationGraph,
   deploy as deployCatalogue,
   compileSchema as compileCatalogueSchema,
+  requireAppId,
+  requireServerValue,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -147,35 +149,37 @@ export function loadDotEnv(
   loadEnvFile(join(cwd, ".env"), env);
 }
 
+// The value of `flag` at args[i], given as `flag value` or `flag=value`, and
+// how many args it spans.
+function readFlagAt(
+  args: string[],
+  i: number,
+  flag: string,
+): { value: string; width: number } | undefined {
+  const arg = args[i];
+  const width = arg === flag ? 2 : 1;
+  if (width === 1 && !arg?.startsWith(`${flag}=`)) return undefined;
+  const value = width === 2 ? args[i + 1] : arg!.slice(flag.length + 1);
+  if (!value || value.startsWith("-")) {
+    throw new Error(`Missing value for ${flag}.`);
+  }
+  return { value, width };
+}
+
 // Normalize env-file flags in the same pass that records the files to load.
 // This keeps command and operand positions stable for every dispatch path.
 function normalizeArgs(args: string[]): { args: string[]; envFiles: string[] } {
   const normalized: string[] = [];
   const envFiles: string[] = [];
-  const prefix = "--env-file=";
-
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--env-file") {
-      const value = args[i + 1];
-      if (!value || value.startsWith("-")) {
-        throw new Error("Missing value for --env-file.");
-      }
-      envFiles.push(value);
-      i += 1;
-      continue;
+    const found = readFlagAt(args, i, "--env-file");
+    if (found) {
+      envFiles.push(found.value);
+      i += found.width - 1;
+    } else {
+      normalized.push(args[i]!);
     }
-    if (arg.startsWith(prefix)) {
-      const value = arg.slice(prefix.length);
-      if (!value || value.startsWith("-")) {
-        throw new Error("Missing value for --env-file.");
-      }
-      envFiles.push(value);
-      continue;
-    }
-    normalized.push(arg);
   }
-
   return { args: normalized, envFiles };
 }
 
@@ -201,38 +205,38 @@ function getFlagValue(
   flag: string,
   selection: "first" | "last" = "first",
 ): string | undefined {
-  const prefix = `${flag}=`;
-  let selected: string | undefined;
+  const values: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (!arg) {
-      continue;
-    }
-    if (arg === flag) {
-      const value = args[i + 1];
-      if (!value || value.startsWith("-")) {
-        throw new Error(`Missing value for ${flag}.`);
-      }
-      if (selected === undefined || selection === "last") {
-        selected = value;
-      }
-      continue;
-    }
-    if (arg.startsWith(prefix)) {
-      const value = arg.slice(prefix.length);
-      if (!value || value.startsWith("-")) {
-        throw new Error(`Missing value for ${flag}.`);
-      }
-      if (selected === undefined || selection === "last") {
-        selected = value;
-      }
+    const found = readFlagAt(args, i, flag);
+    if (found) {
+      values.push(found.value);
+      i += found.width - 1;
     }
   }
-  return selected;
+  return selection === "first" ? values[0] : values.at(-1);
 }
 
-function hasFlag(args: string[], flag: string): boolean {
-  return args.includes(flag);
+// Accept only `--flag value` pairs drawn from `allowed`.
+function assertFlagPairs(
+  args: string[],
+  allowed: readonly string[],
+  unknown: (arg: string) => string,
+): void {
+  for (let i = 0; i < args.length; i += 2) {
+    if (!allowed.includes(args[i]!)) {
+      throw new Error(unknown(args[i]!));
+    }
+    if (!args[i + 1] || args[i + 1]!.startsWith("--")) {
+      throw new Error(`Missing value for ${args[i]}.`);
+    }
+  }
+}
+
+function exitOnError(task: Promise<unknown>): void {
+  task.catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
 }
 
 function splitLeadingAppId(args: string[]): { appId?: string; args: string[] } {
@@ -264,33 +268,6 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function requireSchemaExportServerValue(
-  value: string | undefined,
-  kind: "serverUrl" | "adminSecret",
-): string {
-  if (value) {
-    return value;
-  }
-
-  if (kind === "serverUrl") {
-    throw new Error(
-      "Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL (or a framework-prefixed form such as VITE_JAZZ_SERVER_URL).",
-    );
-  }
-
-  throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
-}
-
-function requireAppId(appId: string | undefined): string {
-  if (appId) {
-    return appId;
-  }
-
-  throw new Error(
-    "Missing app ID. Pass an <appId> positional argument or set JAZZ_APP_ID (or a framework-prefixed form such as VITE_JAZZ_APP_ID).",
-  );
-}
-
 function requireMigrationServerOptions(options: MigrationCommandOptions): {
   appId: string;
   serverUrl: string;
@@ -298,8 +275,8 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 } {
   return {
     appId: requireAppId(options.appId),
-    serverUrl: requireSchemaExportServerValue(options.serverUrl, "serverUrl"),
-    adminSecret: requireSchemaExportServerValue(options.adminSecret, "adminSecret"),
+    serverUrl: requireServerValue(options.serverUrl, "serverUrl"),
+    adminSecret: requireServerValue(options.adminSecret, "adminSecret"),
   };
 }
 
@@ -484,37 +461,30 @@ if (isMainModule()) {
 
   if (command === "validate") {
     const { options } = parseArgs(args);
-    validate(options).catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
+    exitOnError(validate(options));
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {
       const commandArgs = args.slice(2);
-      for (let i = 0; i < commandArgs.length; i += 2) {
-        if (!["--schema-dir", "--migrations-dir"].includes(commandArgs[i]!)) {
-          console.error(
-            `Unknown schema compile argument: ${commandArgs[i]}. Only local schema compilation is supported.`,
-          );
-          process.exit(1);
-        }
-        if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
-          console.error(`Missing value for ${commandArgs[i]}.`);
-          process.exit(1);
-        }
-      }
-      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
-      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      compileSchema({
-        schemaDir,
-        migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
-          ? resolve(process.cwd(), getFlagValue(commandArgs, "--migrations-dir")!)
-          : undefined,
-      }).catch((err) => {
-        console.error(err.message);
+      try {
+        assertFlagPairs(
+          commandArgs,
+          ["--schema-dir", "--migrations-dir"],
+          (arg) =>
+            `Unknown schema compile argument: ${arg}. Only local schema compilation is supported.`,
+        );
+      } catch (err) {
+        console.error((err as Error).message);
         process.exit(1);
-      });
+      }
+      const schemaDir = resolve(process.cwd(), getFlagValue(commandArgs, "--schema-dir") ?? ".");
+      const migrationsDir = getFlagValue(commandArgs, "--migrations-dir");
+      exitOnError(
+        compileSchema({
+          schemaDir,
+          migrationsDir: migrationsDir && resolve(process.cwd(), migrationsDir),
+        }),
+      );
     } else {
       console.error("Usage: node dist/cli.js schema compile [--schema-dir <path>] [...]");
       process.exit(1);
@@ -537,18 +507,11 @@ if (isMainModule()) {
     } else if (subcommand === "graph") {
       task = (async () => {
         const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
-        for (let i = 0; i < commandArgs.length; i += 2) {
-          if (
-            !["--server-url", "--admin-secret", "--schema-dir", "--migrations-dir"].includes(
-              commandArgs[i]!,
-            )
-          ) {
-            throw new Error(`Unknown migrations graph argument: ${commandArgs[i]}.`);
-          }
-          if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
-            throw new Error(`Missing value for ${commandArgs[i]}.`);
-          }
-        }
+        assertFlagPairs(
+          commandArgs,
+          ["--server-url", "--admin-secret", "--schema-dir", "--migrations-dir"],
+          (arg) => `Unknown migrations graph argument: ${arg}.`,
+        );
         const localOptions = resolveMigrationOptions(commandArgs);
         const options = requireMigrationServerOptions({ ...localOptions, appId });
         const graph = await getMigrationGraph({
@@ -572,12 +535,9 @@ if (isMainModule()) {
       );
     }
 
-    task.catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
+    exitOnError(task);
   } else if (command === "deploy") {
-    if (hasFlag(args, "--no-verify")) {
+    if (args.includes("--no-verify")) {
       console.error(
         "--no-verify is no longer supported; deploy requires a complete migration path.",
       );
@@ -585,14 +545,13 @@ if (isMainModule()) {
     }
     const { appId, args: commandArgs } = splitLeadingAppId(args.slice(1));
     const options = { ...resolveMigrationOptions(commandArgs), appId };
-    deploy({
-      ...requireMigrationServerOptions(options),
-      schemaDir: options.schemaDir ?? process.cwd(),
-      migrationsDir: options.migrationsDir,
-    }).catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
+    exitOnError(
+      deploy({
+        ...requireMigrationServerOptions(options),
+        schemaDir: options.schemaDir ?? process.cwd(),
+        migrationsDir: options.migrationsDir,
+      }),
+    );
   } else {
     printHelp();
     process.exit(command ? 1 : 0);

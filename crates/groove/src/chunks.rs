@@ -510,43 +510,18 @@ impl OrderedChunkStorage {
         key
     }
 
-    fn encode(hash: ContentHash, bytes: &[u8]) -> Vec<u8> {
-        let mut value = Vec::with_capacity(32 + bytes.len());
+    fn encode_with_install_receipt(hash: ContentHash, bytes: &[u8], receipt: [u8; 16]) -> Vec<u8> {
+        let mut value = Vec::with_capacity(16 + 32 + bytes.len());
+        value.extend_from_slice(&receipt);
         value.extend_from_slice(&hash.0);
         value.extend_from_slice(bytes);
         value
     }
 
-    const INSTALL_RECEIPT_MAGIC: [u8; 32] = *b"\0groove-chunk-install-receipt-v1";
-
-    fn encode_with_install_receipt(hash: ContentHash, bytes: &[u8], receipt: [u8; 16]) -> Vec<u8> {
-        let encoded = Self::encode(hash, bytes);
-        let mut value =
-            Vec::with_capacity(Self::INSTALL_RECEIPT_MAGIC.len() + receipt.len() + encoded.len());
-        value.extend_from_slice(&Self::INSTALL_RECEIPT_MAGIC);
-        value.extend_from_slice(&receipt);
-        value.extend_from_slice(&encoded);
-        value
-    }
-
-    fn split_install_receipt(value: &[u8]) -> Result<([u8; 16], &[u8]), ChunkStorageError> {
-        let Some((magic, remainder)) = value.split_at_checked(Self::INSTALL_RECEIPT_MAGIC.len())
-        else {
-            return Err(ChunkStorageError::Integrity);
-        };
-        if magic != Self::INSTALL_RECEIPT_MAGIC {
-            return Err(ChunkStorageError::Integrity);
-        }
-        let Some((receipt, encoded)) = remainder.split_at_checked(16) else {
-            return Err(ChunkStorageError::Integrity);
-        };
-        let mut receipt_bytes = [0; 16];
-        receipt_bytes.copy_from_slice(receipt);
-        Ok((receipt_bytes, encoded))
-    }
-
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
-        let (_, value) = Self::split_install_receipt(&value)?;
+        let (_, value) = value
+            .split_at_checked(16)
+            .ok_or(ChunkStorageError::Integrity)?;
         let (hash, bytes) = value
             .split_at_checked(32)
             .ok_or(ChunkStorageError::Integrity)?;
@@ -559,7 +534,11 @@ impl OrderedChunkStorage {
         }
         let mut expected = [0_u8; 32];
         expected.copy_from_slice(hash);
-        Ok((ContentHash(expected), Bytes::copy_from_slice(bytes)))
+        let expected = ContentHash(expected);
+        if object_hash(bytes) != expected {
+            return Err(ChunkStorageError::Integrity);
+        }
+        Ok((expected, Bytes::copy_from_slice(bytes)))
     }
 
     fn storage(&self) -> Result<Rc<LayoutStorage>, ChunkStorageError> {
@@ -628,11 +607,8 @@ impl ChunkKvStorage for OrderedChunkStorage {
             else {
                 return Ok(());
             };
-            let (hash, bytes) = Self::decode(existing.clone())?;
-            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
-                || hash != expected_hash
-                || object_hash(&bytes) != expected_hash
-            {
+            let (hash, _) = Self::decode(existing.clone())?;
+            if hash != expected_hash {
                 return Err(ChunkStorageError::Integrity);
             }
             storage
@@ -660,34 +636,14 @@ pub struct StorageChunkProvider<S> {
 
 impl<S> StorageChunkProvider<S> {
     pub fn new(storage: S) -> Self {
-        Self {
-            storage,
-            resolver: Rc::new(UnavailableChunkResolver),
-            observer: Rc::new(NoopChunkInstallObserver),
-            journal: Rc::new(NoopChunkInstallJournal),
-            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
-        }
+        Self::with_resolver(storage, Rc::new(UnavailableChunkResolver))
     }
 
     pub fn with_resolver(storage: S, resolver: Rc<dyn MissingChunkResolver>) -> Self {
-        Self {
-            storage,
-            resolver,
-            observer: Rc::new(NoopChunkInstallObserver),
-            journal: Rc::new(NoopChunkInstallJournal),
-            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
-        }
-    }
-
-    pub fn with_resolver_and_observer(
-        storage: S,
-        resolver: Rc<dyn MissingChunkResolver>,
-        observer: Rc<dyn ChunkInstallObserver>,
-    ) -> Self {
         Self::with_resolver_observer_and_journal(
             storage,
             resolver,
-            observer,
+            Rc::new(NoopChunkInstallObserver),
             Rc::new(NoopChunkInstallJournal),
         )
     }
@@ -2702,6 +2658,41 @@ mod tests {
         assert_eq!(restaged, Default::default());
     }
 
+    /// Alice's ordered chunk bytes pin the receipt/hash/payload boundary below
+    /// the public row API; Bob must reject truncation and corrupted payloads.
+    #[test]
+    fn ordered_chunk_storage_v2_has_pinned_bytes() {
+        let bytes = b"abc";
+        // Domain-separated BLAKE3 object hash of "abc".
+        let hash = ContentHash([
+            74, 170, 113, 202, 97, 161, 252, 152, 201, 156, 119, 178, 179, 88, 215, 129, 74, 87,
+            25, 206, 111, 52, 195, 204, 4, 128, 116, 204, 171, 96, 211, 127,
+        ]);
+        assert_eq!(object_hash(bytes), hash);
+        let mut expected = vec![0xa6; 16];
+        expected.extend_from_slice(&hash.0);
+        expected.extend_from_slice(b"abc");
+        assert_eq!(
+            OrderedChunkStorage::encode_with_install_receipt(hash, bytes, [0xa6; 16]),
+            expected
+        );
+        assert_eq!(
+            OrderedChunkStorage::decode(expected.clone()).unwrap(),
+            (hash, Bytes::from_static(bytes))
+        );
+        for len in 0..expected.len() {
+            assert_eq!(
+                OrderedChunkStorage::decode(expected[..len].to_vec()),
+                Err(ChunkStorageError::Integrity)
+            );
+        }
+        expected.push(0);
+        assert_eq!(
+            OrderedChunkStorage::decode(expected),
+            Err(ChunkStorageError::Integrity)
+        );
+    }
+
     #[test]
     fn ordered_chunk_storage_rejects_unreceipted_mappings() {
         let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF])
@@ -2720,7 +2711,7 @@ mod tests {
         block_on(layout.set(
             crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
             OrderedChunkStorage::key(locator.as_bytes()),
-            OrderedChunkStorage::encode(hash, &bytes),
+            [hash.0.as_slice(), bytes.as_ref()].concat(),
         ))
         .unwrap();
 
