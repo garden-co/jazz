@@ -86,3 +86,27 @@ unreleased roots as well.
 
 As for the transaction record v2: alpha.59 refuses a root written by this
 build at manifest admission, before decoding any row.
+
+## Measured size
+
+`crates/jazz/tests/storage_per_row_bytes.rs` (1000 todos, each inserted and
+then updated in its own transaction; RocksDB raw key plus value bytes), main
+`f1b7ac03` against this branch:
+
+| store                   | before | after | change |
+| ----------------------- | -----: | ----: | -----: |
+| Core (history complete) |   1259 |  1024 | -18.7% |
+| Writer client           |   1260 |  1024 | -18.7% |
+| Reader client           |    771 |   650 | -15.7% |
+
+Average value bytes per entry (keys are unchanged):
+
+| table                            | before | after | main savings                                                  |
+| -------------------------------- | -----: | ----: | ------------------------------------------------------------- |
+| `jazz_physical_2_history`        |    179 |   109 | key copies (46), u16 column ids, 1-byte empty `base`, offsets |
+| `jazz_physical_2_global_current` |    149 |   117 | key copies (22), u16 column ids                               |
+| `jazz_transactions`              |     49 |    33 | key copies (16)                                               |
+| `jazz_tx_touched_rows`           |     55 |    39 | key copies (16)                                               |
+
+History images measure 107 bytes for an insert (was 191) and 111 for an
+update (was 167).
