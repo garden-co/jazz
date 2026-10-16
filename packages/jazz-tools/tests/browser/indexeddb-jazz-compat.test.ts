@@ -301,7 +301,9 @@ describe("browser Jazz storage compatibility corpus", () => {
   }, 90_000);
 
   // `current-browser-jazz-corpus.json` is real output of the producer test
-  // above in the linear row-history layout. Regenerate it only for a storage
+  // above from this build: the linear row-history layout with interned
+  // authors (`groove.dictionary.v1`) and node format `jazz.node-storage.v2`
+  // (union row cases). Regenerate it only for a storage
   // format change: run this file with JAZZ_BROWSER_CORPUS_OUT set to a new
   // path and check in the exported candidate.
   it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
