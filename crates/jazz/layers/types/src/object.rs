@@ -224,11 +224,7 @@ impl Serialize for ResultKey {
     where
         S: Serializer,
     {
-        let identity = self.0.typed_canonical_bytes();
-        let mut encoded = Vec::with_capacity(identity.len() + 1);
-        encoded.push(RESULT_KEY_WIRE_VERSION);
-        encoded.extend_from_slice(&identity);
-        serde_bytes::Bytes::new(&encoded).serialize(serializer)
+        serde_bytes::Bytes::new(&self.to_wire_bytes()).serialize(serializer)
     }
 }
 
@@ -238,17 +234,32 @@ impl<'de> Deserialize<'de> for ResultKey {
         D: Deserializer<'de>,
     {
         let encoded = serde_bytes::ByteBuf::deserialize(deserializer)?.into_vec();
-        let Some(version) = encoded.first().copied() else {
-            return Err(serde::de::Error::custom("unsupported ResultKey version"));
+        Self::from_wire_bytes(&encoded).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ResultKey {
+    /// The versioned binary identity every encoding of this key carries: the
+    /// wire version byte followed by the typed canonical occurrence bytes.
+    #[doc(hidden)]
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let identity = self.0.typed_canonical_bytes();
+        let mut encoded = Vec::with_capacity(identity.len() + 1);
+        encoded.push(RESULT_KEY_WIRE_VERSION);
+        encoded.extend_from_slice(&identity);
+        encoded
+    }
+
+    /// Validate and decode the bytes [`Self::to_wire_bytes`] writes.
+    #[doc(hidden)]
+    pub fn from_wire_bytes(encoded: &[u8]) -> Result<Self, &'static str> {
+        let Some((&version, identity)) = encoded.split_first() else {
+            return Err("unsupported ResultKey version");
         };
-        let identity = &encoded[1..];
         if version != RESULT_KEY_WIRE_VERSION {
-            return Err(serde::de::Error::custom(
-                "unsupported or malformed ResultKey identity",
-            ));
+            return Err("unsupported or malformed ResultKey identity");
         }
-        decode_typed_result_key(identity)
-            .ok_or_else(|| serde::de::Error::custom("malformed ResultKey V1 identity"))
+        decode_typed_result_key(identity).ok_or("malformed ResultKey V1 identity")
     }
 }
 
