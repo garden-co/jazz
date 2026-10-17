@@ -26,6 +26,7 @@ import {
 import type { Session } from "../runtime/context.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
+import { isRecord, toError } from "../runtime/util.js";
 
 /**
  * The request's credential was missing, malformed, unverifiable, expired, for
@@ -127,10 +128,6 @@ const jwksDocuments = new Map<string, CachedJwksDocument>();
 const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
 const jwksRefreshNotBefore = new Map<string, number>();
 const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function readHeader(request: RequestLike, name: string): string | undefined {
   const lower = name.toLowerCase();
@@ -337,7 +334,7 @@ async function verifyJwtSignatureWithJwks(token: string, jwks: LocalJwksDocument
       await compactVerify(token, key);
       return;
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+      lastError = toError(error);
     }
   }
 

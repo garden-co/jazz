@@ -167,11 +167,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let node = NodeState::new_client(
             config.identity.node,
             config.schema.clone(),
@@ -179,6 +174,24 @@ impl Db {
             false,
         )
         .await?;
+        let db = Self::from_opened_node(node, config.schema, config.identity, config.id_source);
+        db.node.restore_pending_uploads(db.identity).await?;
+        Ok(db)
+    }
+
+    /// Wrap an opened node as a `Db` over `schema`, leaving a schema the
+    /// node's catalogue does not know yet pending open-time admission.
+    fn from_opened_node(
+        node: NodeState,
+        schema: JazzSchema,
+        identity: DbIdentity,
+        id_source: Option<Box<dyn RowIdSource>>,
+    ) -> Self {
+        let schema_version_id = schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&schema),
+            schema.clone(),
+        )])));
         let requires_open_schema_admission =
             !node.catalogue_schemas().contains_key(&schema_version_id);
         let node = Node::new(node);
@@ -186,23 +199,20 @@ impl Db {
             *node.open_schema_admission.borrow_mut() =
                 Some(PendingOpenSchema::new(schema_version_id));
         }
-        node.restore_pending_uploads(config.identity).await?;
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: config.schema,
+        let row_id_source_guarantees_fresh = id_source.is_none();
+        Self {
+            schema,
             schema_version_id,
             schema_view_is_fixed: false,
             requires_open_schema_admission,
             schema_views,
-            identity: config.identity,
+            identity,
             node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+                id_source.unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
+            next_now_ms: Rc::new(WriteClock::default()),
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
@@ -210,7 +220,7 @@ impl Db {
             fail_next_subscription_refresh: Rc::new(Cell::new(false)),
             #[cfg(test)]
             stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
+        }
     }
 
     /// Open the durable, scope-admitted half of a client relay.
@@ -295,11 +305,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let (node, receipt) = NodeState::new_with_open_receipt_for_test(
             config.identity.node,
             config.schema.clone(),
@@ -307,37 +312,7 @@ impl Db {
             history_complete,
         )
         .await?;
-        let requires_open_schema_admission =
-            !node.catalogue_schemas().contains_key(&schema_version_id);
-        let node = Node::new(node);
-        if requires_open_schema_admission {
-            *node.open_schema_admission.borrow_mut() =
-                Some(PendingOpenSchema::new(schema_version_id));
-        }
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        let db = Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        };
+        let db = Self::from_opened_node(node, config.schema, config.identity, config.id_source);
         Ok((db, receipt))
     }
 
@@ -359,11 +334,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let node = if recover_client {
             NodeState::new_client(
                 config.identity.node,
@@ -380,37 +350,12 @@ impl Db {
             )
             .await?
         };
-        let requires_open_schema_admission =
-            !node.catalogue_schemas().contains_key(&schema_version_id);
-        let node = Node::new(node);
-        if requires_open_schema_admission {
-            *node.open_schema_admission.borrow_mut() =
-                Some(PendingOpenSchema::new(schema_version_id));
-        }
-        let row_id_source_guarantees_fresh = config.id_source.is_none();
-        Ok(Self {
-            schema: config.schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            requires_open_schema_admission,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
-            reserved_tx_id: None,
-            owner_operation_admitted: false,
-            backend_attribution: false,
-            #[cfg(test)]
-            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
-            #[cfg(test)]
-            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
-        })
+        Ok(Self::from_opened_node(
+            node,
+            config.schema,
+            config.identity,
+            config.id_source,
+        ))
     }
 
     /// History-complete counterpart to [`Db::open_with_backend_attribution`].
@@ -690,6 +635,20 @@ where
     /// This must be called before application writes or subscriptions begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Tick this runtime's transaction HLC from the Unix wall clock for every
+    /// write that does not supply its own `updated_at_ms`.
+    ///
+    /// Application runtimes must do this: linear history resolves plain
+    /// columns last-writer-wins by the writer's physical milliseconds, so the
+    /// default deterministic counter (restarting at 1 on every open) would
+    /// let an earlier write outrank a later one. Shared by every clone of
+    /// this database.
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    pub fn use_wall_clock_for_writes(&self) {
+        self.next_now_ms.wall.set(true);
     }
 
     /// Return the highest transaction HLC observed by this live runtime.
@@ -1579,6 +1538,26 @@ where
     /// Test/bench-only runtime diagnostics used by performance receipts.
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only switch: read arrangements of stored tables from
+    /// storage by key for queries compiled from now on.
+    pub fn set_stored_arrangements_enabled_for_test(&self, enabled: bool) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_stored_arrangements_enabled_for_test(enabled);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test/bench-only switch: bound the query cache of this database's
+    /// runtime; `None` follows the process-wide budget.
+    pub fn set_query_cache_budget_for_test(&self, budget: Option<usize>) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_query_cache_budget_for_test(budget);
     }
 
     #[cfg(feature = "testing")]

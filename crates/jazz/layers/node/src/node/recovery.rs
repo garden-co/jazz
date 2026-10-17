@@ -33,7 +33,7 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
-                let schema_alias = SchemaVersionAlias(u64::from(raw.variant_tag()));
+                let schema_alias = schema_alias_for_variant_tag(raw.variant_tag());
                 let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
                     Error::InvalidStoredValue("rejected row schema version alias missing"),
                 )?;
@@ -108,12 +108,31 @@ where
             }
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
+        // A later release may truncate history at or below a horizon. This
+        // one reads every transaction's history as complete, so it refuses
+        // such a store instead of answering from missing history.
+        if let Some(raw) = self
+            .database
+            .primary_key_get_raw(HISTORY_HORIZON_TABLE, &[Value::U8(0)])
+            .await?
+        {
+            let horizon = raw
+                .record()
+                .get_u64(HistoryHorizonRowRecord::FIELD_HORIZON_IDX)?;
+            if horizon != 0 {
+                return Err(Error::TruncatedHistoryUnsupported { horizon });
+            }
+        }
         let alias_to_node = self
             .node_aliases
             .iter()
             .map(|(node, alias)| (*alias, *node))
             .collect::<BTreeMap<_, _>>();
 
+        // The transaction-clock high-water mark is the newest stored
+        // transaction: `jazz_transactions` is keyed `(time, node_id)`, and every
+        // history row is written in the same batch as its transaction record,
+        // so no history version can carry a later `tx_time`.
         if let Some(raw) = self
             .database
             .primary_key_last_raw("jazz_transactions", &[])
@@ -121,33 +140,6 @@ where
         {
             self.merge_tx_time(TxTime(
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
-            ));
-        }
-        let physical_table_ids = self
-            .catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
-            .collect::<BTreeSet<_>>();
-        for table_id in physical_table_ids {
-            if let Some(raw) = self
-                .database
-                .index_last_raw(&physical_history_table_name(table_id), "by_tx", &[])
-                .await?
-            {
-                self.merge_tx_time(TxTime(
-                    raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
-                ));
-            }
-        }
-        if let Some(raw) = self
-            .database
-            .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])
-            .await?
-        {
-            self.merge_tx_time(TxTime(
-                raw.record()
-                    .get_u64(SharedDeletionHistoryRowRecord::FIELD_TX_TIME_IDX)?,
             ));
         }
         #[cfg(feature = "testing")]
@@ -204,7 +196,20 @@ where
                 continue;
             }
             if let Some(global_time) = global_time {
-                accepted_global_times.push(GlobalTime(global_time));
+                let node = self
+                    .node_for_alias(NodeAlias(
+                        record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
+                    ))
+                    .ok_or(Error::InvalidStoredValue(
+                        "transaction node alias must exist",
+                    ))?;
+                accepted_global_times.push((
+                    GlobalTime(global_time),
+                    TxId::new(
+                        TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                        node,
+                    ),
+                ));
             }
         }
         accepted_global_times.sort();
@@ -214,12 +219,13 @@ where
             receipt.accepted_global_times = accepted_global_times.len();
             receipt.global_time_records_scanned = global_time_records_scanned;
         }
-        for global_time in accepted_global_times {
-            self.record_applied_global_time(global_time);
+        for (global_time, tx_id) in accepted_global_times {
+            self.record_applied_global_time(global_time, tx_id);
         }
         if self.history_complete {
             self.clock.committed_global_time = self.clock.global_time_register;
             self.clock.applied_global_times_after_frontier.clear();
+            self.clock.frontier_dots.clear();
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -228,58 +234,6 @@ where
 
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let mut pending_edges = Vec::new();
-        let mut pending_parent_time_bound = PendingParentTimeBound::Empty;
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .await?
-        {
-            let record = raw.record();
-            let child_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
-            let parent_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-            let Some(child_node) = alias_to_node.get(&child_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge child alias must exist",
-                ));
-            };
-            let Some(parent_node) = alias_to_node.get(&parent_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ));
-            };
-            let child = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                child_node,
-            );
-            let parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                parent_node,
-            );
-            // Validate the persisted row-version coordinate even though the
-            // in-memory rejection graph only needs TxIds. Otherwise a corrupt
-            // pending constraint could silently survive reopen.
-            let _ = pending_edge_coordinate_from_record(record)?;
-            pending_parent_time_bound.observe(parent.time);
-            pending_edges.push((child, parent));
-        }
-        self.rejections.pending_parent_time_bound = pending_parent_time_bound;
-        for (child, parent) in pending_edges {
-            if self
-                .query_transaction(child)
-                .await?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-                && self
-                    .query_transaction(parent)
-                    .await?
-                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-            {
-                self.record_child_edges(child, [parent]).await;
-            }
-        }
-
         let mut rejected_headers = Vec::new();
         for raw in self
             .database
@@ -324,8 +278,8 @@ where
 // Historical exclusive-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
-    /// Rewrite a pending transaction's audit row as a build from before
-    /// `jazz.exclusive-read-evidence.v1` wrote it: slots 5-8 null.
+    /// Rewrite a pending transaction's records as a build from before
+    /// `jazz.exclusive-read-evidence.v1` wrote them: no read evidence.
     #[doc(hidden)]
     pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
@@ -334,20 +288,20 @@ impl<S: OrderedKvStorage> NodeState<S> {
         tx.row_read_set = None;
         tx.absent_read_set = None;
         tx.predicate_read_set = None;
-        let contribution_merge = self
-            .contribution_merge_storage_value(tx.contribution_merge.as_ref())
-            .unwrap();
-        let values = transaction_values(
+        let mut batch = self.database.open_batch();
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
             stored.node_alias,
             &tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            contribution_merge,
+            &TransactionRecordStatus::new(
+                stored.fate.clone(),
+                stored.global_time,
+                stored.durability,
+            )
+            .view_scoped(stored.is_partial),
         )
         .unwrap();
-        let mut batch = self.database.open_batch();
-        batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted).unwrap();

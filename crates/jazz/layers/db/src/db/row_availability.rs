@@ -235,6 +235,22 @@ impl Drop for CurrentRowsGuard {
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
     fn send_current_rows(&mut self, message: SyncMessage) -> Result<bool, Error> {
+        // Requests on an upstream link go after the read barrier naming the
+        // writes sent before them (SPEC 8 §8.2.1).
+        if let ConnectionLink::Upstream(state) = &mut self.link
+            && let Some(barrier) = state.read_barrier.pending_barrier()
+        {
+            if !self.send_current_rows_message(barrier)? {
+                return Ok(false);
+            }
+            let ConnectionLink::Upstream(state) = &mut self.link else {
+                unreachable!("link kind is fixed for a connection");
+            };
+            state.read_barrier.barrier_accepted();
+        }
+        self.send_current_rows_message(message)
+    }
+    fn send_current_rows_message(&mut self, message: SyncMessage) -> Result<bool, Error> {
         match self.transport.send(message) {
             Ok(()) => Ok(true),
             Err(error)
@@ -398,6 +414,9 @@ pub(super) async fn receive_current_rows<S: OrderedKvStorage + ReopenableStorage
         return Ok(());
     }
     if receipt.core.0.is_nil() || receipt.core_epoch == 0 || receipt.authorization_progress == 0 {
+        // Unusable evidence answers nothing: release the route now so its
+        // owner retries instead of waiting out a timeout (INV-SYNC-48).
+        router.borrow_mut().finish(id, None);
         return Ok(());
     }
     let key = (receipt.core, receipt.core_epoch, receipt.context.clone());

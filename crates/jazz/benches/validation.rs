@@ -224,7 +224,10 @@ impl ValidationBench {
                     global_time: Some(global_time),
                     ..
                 } => {
-                    assert!(baseline_accepts, "baseline/core decision mismatch");
+                    assert!(
+                        baseline_accepts,
+                        "baseline/core decision mismatch: core accepted, model rejected"
+                    );
                     self.metrics.accepted += 1;
                     self.model
                         .apply(tx_id, global_time, versions, DurabilityTier::Global);
@@ -233,7 +236,10 @@ impl ValidationBench {
                     fate: Fate::Rejected(reason),
                     ..
                 } => {
-                    assert!(!baseline_accepts, "baseline/core decision mismatch");
+                    assert!(
+                        !baseline_accepts,
+                        "baseline/core decision mismatch: core rejected {reason:?}, model accepted"
+                    );
                     self.metrics.rejected.record(reason);
                 }
                 other => panic!("unexpected fate update: {other:?}"),
@@ -377,14 +383,16 @@ impl BaselineModel {
                 return false;
             }
         }
+        // Linear history: first committer wins unless the written row's
+        // current winner is covered by the base snapshot (settled at or
+        // before its global base, or the snapshot owner's own earlier write).
         for version in versions {
-            let parents = version.parents();
-            let parent = match parents.as_slice() {
-                [] => None,
-                [parent] => Some(*parent),
-                _ => return false,
-            };
-            if self.visible_now(version.row_uuid()) != parent {
+            if let Some(current) = self.visible_now_version(version.row_uuid())
+                && !(current.global_time <= snapshot.global_base
+                    || current.tx_id.node == snapshot.owner
+                        && current.tx_id.time <= snapshot.local_base
+                    || snapshot.dots.contains(&current.tx_id))
+            {
                 return false;
             }
         }
@@ -404,6 +412,12 @@ impl BaselineModel {
                 .or_default()
                 .push(ModelVersion { tx_id, global_time });
         }
+    }
+
+    fn visible_now_version(&self, row_uuid: RowUuid) -> Option<&ModelVersion> {
+        self.history
+            .get(&row_uuid)
+            .and_then(|versions| versions.iter().max_by_key(|version| version.global_time))
     }
 
     fn visible_at(&self, row_uuid: RowUuid, global_base: GlobalTime) -> Option<TxId> {

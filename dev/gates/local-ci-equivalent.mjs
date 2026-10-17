@@ -93,6 +93,9 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    // Ready PRs run only this partition, so it carries the TypeScript
+    // typecheck too. The binding declarations it needs are committed.
+    command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
     command("crate publication selector contract", "bash", [
       "dev/scripts/publish-crates-alpha.test.sh",
     ]),
@@ -203,7 +206,9 @@ export const ciPartitions = Object.freeze({
     }),
     // An exact, named historical-storage receipt rather than an incidental
     // member of the broad browser suite: a green TypeScript partition must mean
-    // current code opened the pinned real-browser corpus.
+    // current code handled the pinned real-browser corpora as designed (opens
+    // and appends to the current linear-history corpus, refuses pre-linear
+    // roots with a typed error).
     command("browser storage compatibility corpus", "pnpm", [
       "--dir",
       "packages/jazz-tools",

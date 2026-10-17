@@ -39,7 +39,7 @@ use crate::model::public_schema::{Schema, validate_json_value};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::transaction::TransactionId;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
@@ -615,9 +615,12 @@ impl Backend {
         } else {
             StackSafeFuture::new(CoreDb::open(config)).await
         };
-        Ok(Self(Rc::new(db.map_err(|error| {
-            JazzError::Connection(error.to_string())
-        })?)))
+        let db = db.map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Application writes carry wall-clock physical milliseconds, exactly
+        // as the TypeScript runtime passes `Date.now()`: linear history
+        // resolves plain columns last-writer-wins by that time.
+        db.use_wall_clock_for_writes();
+        Ok(Self(Rc::new(db)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -654,71 +657,30 @@ impl Backend {
         StackSafeFuture::new(self.0.tick()).await
     }
 
+    /// Insert one row. `None` writes as the database identity; a row id of
+    /// `None` lets the core generate one.
     fn insert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write =
-            crate::local_executor::block_on(self.0.insert(table, cells, Default::default()))?;
-        Ok((write.row_uuid(), write.mergeable_tx_id()))
-    }
-
-    fn insert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
+        row_id: Option<CoreRowUuid>,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
         let write = crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
-                identity,
+                row_id,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
-    fn insert_with_id(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn insert_with_id_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                identity,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
     fn upsert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -729,27 +691,7 @@ impl Backend {
             row_id,
             cells,
             crate::db::UpsertOptions {
-                updated_at_ms,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn upsert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::local_executor::block_on(self.0.upsert(
-            table,
-            row_id,
-            cells,
-            crate::db::UpsertOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 updated_at_ms,
                 ..Default::default()
             },
@@ -776,9 +718,9 @@ impl Backend {
         .mergeable_tx_id())
     }
 
-    fn delete_for_identity(
+    fn delete(
         &self,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -786,29 +728,18 @@ impl Backend {
             table,
             row_id,
             crate::db::DeleteOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?
         .mergeable_tx_id())
     }
 
-    fn delete(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::local_executor::block_on(self.0.delete(table, row_id, Default::default()))?
-                .mergeable_tx_id(),
-        )
-    }
-
     async fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema_async(query).await
+        StackSafeFuture::new(self.0.prepare_query_for_open_schema_async(query)).await
     }
 
     async fn row_provenance_for_subscription(
@@ -869,16 +800,15 @@ impl Backend {
         StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.begin_exclusive(id))
-    }
-
-    fn begin_exclusive_for_identity(
+    fn begin_exclusive(
         &self,
         id: OpenTransactionId,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.begin_exclusive_with_identity(id, identity))
+        crate::local_executor::block_on(
+            self.0
+                .begin_exclusive_with_identity(id, identity.unwrap_or_default()),
+        )
     }
 
     fn exclusive_write(
@@ -1289,32 +1219,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
-        let (row_uuid, tx_id) = match row_id {
-            Some(uuid) => {
-                let row_uuid = CoreRowUuid(uuid);
-                let tx_id = match identity {
-                    Some(identity) => inner
-                        .backend()?
-                        .insert_with_id_for_identity(identity, &table, row_uuid, cells),
-                    None => inner.backend()?.insert_with_id(&table, row_uuid, cells),
-                }
-                .map_err(|error| JazzError::Write(error.to_string()))?;
-                (row_uuid, tx_id)
-            }
-            None => {
-                if let Some(identity) = identity {
-                    inner
-                        .backend()?
-                        .insert_for_identity(identity, &table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                } else {
-                    inner
-                        .backend()?
-                        .insert(&table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                }
-            }
-        };
+        let (row_uuid, tx_id) = inner
+            .backend()?
+            .insert(identity, &table, row_id.map(CoreRowUuid), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
         inner.remember_write(tx_id);
@@ -1353,19 +1261,10 @@ impl ClientDb {
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
-                &table,
-                CoreRowUuid(row_id),
-                cells,
-                updated_at_ms,
-            ),
-            None => inner
-                .backend()?
-                .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .upsert(identity, &table, CoreRowUuid(row_id), cells, updated_at_ms)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1404,8 +1303,9 @@ impl ClientDb {
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
+            // An identity-bound update is applied as an upsert for that identity.
+            Some(identity) => inner.backend()?.upsert(
+                Some(identity),
                 table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
@@ -1453,15 +1353,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => {
-                inner
-                    .backend()?
-                    .delete_for_identity(identity, table, CoreRowUuid(*row_id.uuid()))
-            }
-            None => inner.backend()?.delete(table, CoreRowUuid(*row_id.uuid())),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .delete(identity, table, CoreRowUuid(*row_id.uuid()))
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1497,13 +1392,10 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        match identity {
-            Some(identity) => inner
-                .backend()?
-                .begin_exclusive_for_identity(transaction_id, identity),
-            None => inner.backend()?.begin_exclusive(transaction_id),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        inner
+            .backend()?
+            .begin_exclusive(transaction_id, identity)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         // Explicit sessions bind commit identity; attributed transactions use
         // the core's bound commit path to retain their separate provenance.
         let author = identity.and_then(|identity| match identity {
@@ -2429,9 +2321,11 @@ impl ClientDbInner {
                                 let previous = current_rows
                                     .iter()
                                     .find(|row| row.occurrence_id == occurrence)
-                                    .ok_or_else(|| crate::db::Error {
-                                        code: crate::db::ErrorCode::Protocol,
-                                        message: "terminal edit addressed a missing tools subscription root".into(),
+                                    .ok_or_else(|| {
+                                        crate::db::Error::new(
+                                            crate::db::ErrorCode::Protocol,
+                                            "terminal edit addressed a missing tools subscription root",
+                                        )
                                     })?;
                                 if !changed.contains_key(&occurrence) {
                                     let (descriptor, raw) = previous.row.encoded_record();
@@ -2908,12 +2802,30 @@ async fn core_storage(
                 .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
-                    epoch_1_storage_codec_profile()
+                    node_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
                 )
                 .await
-                .map_err(|error| JazzError::Connection(error.to_string()))
+                .map_err(persistent_storage_open_error)
         }
+    }
+}
+
+/// A store in a format this build does not read is a typed refusal the
+/// application acts on (wipe and resync); any other open failure stays a
+/// connection error.
+fn persistent_storage_open_error(error: crate::groove::storage::Error) -> JazzError {
+    match error {
+        crate::groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        } => JazzError::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        },
+        other => JazzError::Connection(other.to_string()),
     }
 }
 
@@ -3112,8 +3024,10 @@ fn core_row_provenance_to_public(
 /// Current rows already expose public provenance in Unix milliseconds. Packed
 /// HLC values remain internal version and transaction-ordering state.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
-    let (descriptor, raw) = row.encoded_record();
-    let mut values = BorrowedRecord::new(raw, descriptor)
+    let published = crate::binding_codec::published_record(row)
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    let descriptor = &published.descriptor;
+    let mut values = BorrowedRecord::new(&published.raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
     normalize_public_subscription_record_values(descriptor, &mut values)?;
@@ -4064,6 +3978,109 @@ impl JazzClient {
             .core_rows_to_query_results(&query, rows)
     }
 
+    /// Read a byte range from a locally observed bytes or string cell.
+    ///
+    /// The connected database identity and ordinary read policy apply. Only
+    /// intersecting large-value chunks are read; this does not materialise the
+    /// whole value or qualify typed-query projection of large cells. Storage
+    /// and missing chunk retrieval may suspend, so hydrate audio outside a
+    /// device's playback callback.
+    ///
+    /// Explicit backend sessions (`for_session`) and transaction-scoped reads
+    /// are unsupported and return a query error rather than ignoring scope.
+    pub async fn read_value_range(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads in a transaction are not supported".into(),
+                ));
+            }
+            // ponytail: core range reads use the database identity; add a
+            // scoped core operation when backend audio sessions are needed.
+            if context.session().is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads with an explicit session are not supported".into(),
+                ));
+            }
+        }
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let bytes = StackSafeFuture::new(backend.0.read_value_range(
+            table,
+            CoreRowUuid(*object_id.uuid()),
+            column,
+            range,
+        ))
+        .await
+        .map_err(|error| JazzError::Query(error.to_string()))?;
+        self.db.inner.borrow().backend()?;
+        Ok(bytes)
+    }
+
+    /// Stream one bytes, text or JSON cell into a new row using a native reader.
+    ///
+    /// `values` supplies the other columns and must omit `column`. The core
+    /// import uses bounded buffering and publishes the row only after EOF and
+    /// scalar validation. The reader runs on a separate thread. Errors publish
+    /// no row; abandoned staged data follows ordinary staging cleanup.
+    ///
+    /// The database's enrolled identity, permission checks and write settlement
+    /// apply. Await the returned transaction with [`Self::wait_for_transaction`]
+    /// for the required durability tier. No complete imported value is returned.
+    /// Transaction, explicit session and attribution contexts are unsupported
+    /// and rejected before consuming the reader. Native-reader imports are not
+    /// available on WebAssembly.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+        reader: R,
+    ) -> Result<(ObjectId, TransactionId)>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        self.reject_updated_at_override("streaming inserts")?;
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts in a transaction are not supported".into(),
+                ));
+            }
+            if context.session().is_some() || context.attribution.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts with an explicit session or attribution are not supported"
+                        .into(),
+                ));
+            }
+        }
+        let cells = self.core_cells(table, values)?;
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let write = StackSafeFuture::new(
+            backend
+                .0
+                .insert_streaming_value(table, cells, column, reader),
+        )
+        .await
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = write.mergeable_tx_id();
+        let mut inner = self.db.inner.borrow_mut();
+        Self::check_core_write_not_rejected(inner.backend()?, tx_id)?;
+        inner.remember_write(tx_id);
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            core_batch_id(tx_id),
+        ))
+    }
+
     /// Create a new row in a table.
     pub fn insert(
         &self,
@@ -4530,10 +4547,7 @@ mod tests {
     }
 
     fn tick_reconnect_error() -> CoreDbError {
-        CoreDbError {
-            code: CoreDbErrorCode::Protocol,
-            message: "websocket pump is closed".to_owned(),
-        }
+        CoreDbError::new(CoreDbErrorCode::Protocol, "websocket pump is closed")
     }
 
     fn make_native_context(name: &str) -> AppContext {
@@ -5689,10 +5703,10 @@ mod tests {
         ))
         .await
         .expect("connect offline client");
-        let error = CoreDbError {
-            code: CoreDbErrorCode::Storage,
-            message: "simulated local storage corruption".to_string(),
-        };
+        let error = CoreDbError::new(
+            CoreDbErrorCode::Storage,
+            "simulated local storage corruption",
+        );
 
         assert_eq!(
             classify_tick_driver_error(&error),

@@ -86,6 +86,7 @@
 //! ```
 
 pub mod macros;
+mod transcode;
 mod values;
 
 use std::ops::Deref;
@@ -96,14 +97,16 @@ use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-pub use macros::{FieldKind, RecordField, assert_record_field_layout};
+pub use macros::{FieldKind, RecordField, U48, assert_record_field_layout};
+pub use transcode::RecordTranscoder;
+pub(crate) use transcode::{logical_record_descriptor, validate_dictionary_value};
 pub use values::collect_by_ordered_scalar;
-pub(crate) use values::ensure_value_type;
 pub use values::{
-    EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
-    VariantRegistry, decode_persisted_record_descriptor, decode_record_descriptor,
+    EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, U48_MAX, Value,
+    ValueType, VariantRegistry, decode_persisted_record_descriptor, decode_record_descriptor,
     encode_persisted_record_descriptor, encode_record_descriptor, variant_registry_id_for_path,
 };
+pub(crate) use values::{ensure_value_type, u48_be_bytes, u48_from_be_bytes};
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.
 ///
@@ -1313,6 +1316,17 @@ impl<'a> BorrowedRecord<'a> {
         Ok(value)
     }
 
+    pub fn get_u48(&self, field_idx: usize) -> Result<u64, Error> {
+        let bytes = self.field_bytes(field_idx, &ValueType::U48)?;
+        read_exact_array::<6>(bytes).map(values::u48_from_le_bytes)
+    }
+
+    pub fn get_nullable_u48(&self, field_idx: usize) -> Result<Option<u64>, Error> {
+        self.nullable_field(field_idx, &ValueType::U48, |payload| {
+            read_exact_array::<6>(payload).map(values::u48_from_le_bytes)
+        })
+    }
+
     pub fn get_u32(&self, field_idx: usize) -> Result<u32, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U32)?;
         read_exact_array::<4>(bytes).map(u32::from_le_bytes)
@@ -2174,6 +2188,8 @@ pub enum Error {
     InvalidUtf8,
     #[error("NaN is not a valid f64 record value")]
     InvalidF64NaN,
+    #[error("u48 value {0} exceeds 2^48 - 1")]
+    U48OutOfRange(u64),
     #[error("encoded length exceeds u32::MAX")]
     LengthOverflow,
     #[error("value does not match type {expected:?}")]
@@ -2195,6 +2211,16 @@ pub enum Error {
     ProjectSourceDescriptorMismatch,
     #[error("unexpected end of record")]
     UnexpectedEof,
+    #[error(
+        "a descriptor with a column interned into dictionary {dictionary} cannot be encoded: interning is storage-only"
+    )]
+    InternedTypeNotEncodable { dictionary: String },
+    #[error(
+        "field {field} nests an interned type; interning is supported only for a top-level column, optionally nullable"
+    )]
+    UnsupportedInternedPlacement { field: String },
+    #[error("a dictionary value cannot hold an indirect large value")]
+    IndirectDictionaryValue,
 }
 
 #[cfg(test)]

@@ -133,6 +133,12 @@ pub fn bind_template_arguments(
     }
     Ok(graphs
         .iter()
-        .map(|root| (*rewritten[&(root as *const GraphBuilder as usize)]).clone())
+        .map(|root| {
+            Arc::unwrap_or_clone(
+                rewritten
+                    .remove(&(root as *const GraphBuilder as usize))
+                    .expect("rewritten root"),
+            )
+        })
         .collect())
 }

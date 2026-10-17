@@ -1,6 +1,14 @@
+import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
+import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
-type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
+// The foreground command vocabulary is owned by jazz-rn. This module is
+// internal: no public declaration of jazz-tools reaches it, so applications
+// never need the optional jazz-rn peer to type-check.
+type ForegroundCommand = Relay.NativeForegroundCommand;
+type ForegroundResponse = Relay.NativeForegroundResponse;
+type ForegroundMutationKind = Extract<ForegroundCommand, { type: "directMutation" }>["mutation"];
+type NativeConnectionStatus = Extract<ForegroundResponse, { type: "nativeConnectionStatus" }>;
 type ForegroundMutationOptions = {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -11,187 +19,14 @@ type ForegroundMutationOptions = {
   attribution?: Uint8Array;
 };
 
-type ForegroundPermissionAdviceAction =
-  | { type: "insert"; table: string; cells: Uint8Array }
-  | { type: "read" | "delete"; table: string; rowId: Uint8Array }
-  | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
-
-type ForegroundCommand =
-  | { type: "permissionAdvice"; action: ForegroundPermissionAdviceAction }
-  | "tick"
-  | "close"
-  | { type: "disconnectNativeUpstream" }
-  | { type: "reconnectNativeUpstream" }
-  | { type: "nativeConnectionStatus" }
-  | { type: "nativeSessionMetadata" }
-  | {
-      type: "all";
-      query: Uint8Array;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | {
-      type: "subscribe";
-      query: Uint8Array;
-      optionsJson: string;
-    }
-  | { type: "drainSubscription"; subscription: number }
-  | { type: "unsubscribe"; subscription: number }
-  | { type: "poll"; operation: number }
-  | { type: "cancel"; operation: number }
-  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
-  | {
-      type: "insert";
-      transaction: number;
-      table: string;
-      cells: Uint8Array;
-      rowId?: Uint8Array;
-    }
-  | {
-      type: "update";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-    }
-  | {
-      type: "upsert";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-    }
-  | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
-  | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
-  | { type: "waitForPendingWrites"; tier: string }
-  | {
-      type: "stageMutation";
-      transaction: number;
-      mutation: ForegroundMutationKind;
-      table: string;
-      rowId?: Uint8Array;
-      cells: Uint8Array;
-      optionsJson: string;
-    }
-  | {
-      type: "directMutation";
-      mutation: ForegroundMutationKind;
-      table: string;
-      rowId?: Uint8Array;
-      cells: Uint8Array;
-      optionsJson: string;
-    }
-  | { type: "writeState"; txId: Uint8Array }
-  | { type: "drainMutationErrors" }
-  | {
-      type: "beginStreamingMutation";
-      mutation: "insert" | "update" | "upsert";
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-      column: string;
-      optionsJson: string;
-    }
-  | { type: "pushStreamingMutation"; upload: number; chunk: Uint8Array }
-  | {
-      type: "finishStreamingMutation" | "abortStreamingMutation" | "stageStreamingMutation";
-      upload: number;
-    }
-  | { type: "attachStagedStreamingMutation"; staged: number; transaction: number }
-  | { type: "abortStagedStreamingMutation"; staged: number }
-  | {
-      type: "updateLargeValues";
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-      descriptorsJson: string;
-      updatedAtMs?: number;
-    };
-
-type ForegroundEvent =
-  | {
-      type: "delta";
-      reset: boolean;
-      settled: boolean;
-      tier: string;
-      delta: Uint8Array;
-      terminalOperations?: unknown[];
-    }
-  | { type: "rejected"; reason: string }
-  | { type: "closed" };
-
-type NativeConnectionStatus = {
-  type: "nativeConnectionStatus";
-  configured: boolean;
-  explicitlyOffline: boolean;
-  connected: boolean;
-};
-
-type ForegroundResponse =
-  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
-  | {
-      type: "nativeSessionMetadata";
-      node: Uint8Array;
-      registryAuthority: string;
-      accountId: string | null;
-      issuer: string;
-      userId: string;
-    }
-  | NativeConnectionStatus
-  | { type: "ticked" }
-  | { type: "rows"; rows: Uint8Array }
-  | { type: "subscribed"; subscription: number }
-  | { type: "subscriptionEvents"; events: ForegroundEvent[] }
-  | { type: "unsubscribed"; closed: boolean }
-  | { type: "closed"; closed: boolean }
-  | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string; code?: string }
-  | { type: "cancelled"; cancelled: boolean }
-  | { type: "transactionOpened"; transaction: number }
-  | { type: "inserted"; rowId: Uint8Array }
-  | { type: "mutationStaged" }
-  | { type: "transactionCommitted"; txId: Uint8Array }
-  | { type: "transactionRolledBack"; rolledBack: boolean }
-  | { type: "transactionSettled"; txId: Uint8Array }
-  | { type: "writeState"; stateJson: string }
-  | { type: "mutationErrors"; eventsJson: string }
-  | { type: "streamingMutationOpened"; upload: number }
-  | { type: "streamingMutationPushed" }
-  | { type: "streamingMutationAborted"; aborted: boolean }
-  | { type: "streamingMutationStaged"; staged: number }
-  | { type: "stagedStreamingMutationAttached" }
-  | { type: "stagedStreamingMutationAborted"; aborted: boolean }
-  | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array };
-
-export type NativeForegroundRuntime = {
-  execute(command: Uint8Array): Uint8Array;
-  tick(): void;
-  isClosed?(): boolean;
-  setTickScheduler?(callback: (urgency: string) => void): void;
-  close(): boolean;
-};
-
-export type NativeForegroundModule = {
-  installNativeForegroundRuntime(): NativeForegroundFactory;
-  encodeNativeForegroundCommand(command: ForegroundCommand): Uint8Array;
-  decodeNativeForegroundResponse(bytes: Uint8Array): ForegroundResponse;
-};
-
-export type NativeForegroundFactory = {
-  accountSecret?(): Uint8Array;
-  beginAccountSession?(requestJson: string): Uint8Array;
-  attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
-  releaseAccountSession?(capability: Uint8Array): void;
-  refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
-  readonly abiVersion: number;
-  openAttached(capability: Uint8Array): NativeForegroundRuntime;
-};
-
-export const REACT_NATIVE_UNSUPPORTED_ERROR =
-  "React Native native foreground does not support this operation yet";
+export type NativeForegroundRuntime = Relay.NativeForegroundRuntime;
+export type NativeForegroundFactory = Relay.NativeForegroundRuntimeFactory;
+export type NativeForegroundModule = Pick<
+  typeof Relay,
+  | "installNativeForegroundRuntime"
+  | "encodeNativeForegroundCommand"
+  | "decodeNativeForegroundResponse"
+>;
 
 /**
  * Narrow NativeDb consumer for the first JSI foreground slice.
@@ -414,7 +249,7 @@ export class NativeForegroundDb {
     return this.requestPermissionAdvice({ type: "delete", table, rowId });
   }
 
-  private requestPermissionAdvice(action: ForegroundPermissionAdviceAction) {
+  private requestPermissionAdvice(action: Relay.NativeForegroundPermissionAdviceAction) {
     let response = this.execute({ type: "permissionAdvice", action });
     if (response.type === "permissionAdvice") return response.advice;
     if (response.type === "operationError") throw foregroundOperationError(response);

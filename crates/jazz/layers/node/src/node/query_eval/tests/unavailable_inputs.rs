@@ -1160,7 +1160,6 @@ fn local_edit_after_confirmed_unavailable_retains_optimistic_visibility() {
             .commit_mergeable(
                 MergeableCommit::new("parents", id, 100)
                     .made_by(alice)
-                    .parents(vec![parent])
                     .cells(BTreeMap::from([(
                         "label".to_owned(),
                         Value::String("local draft".to_owned()),
@@ -1293,7 +1292,6 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         .commit_mergeable_settled(
             MergeableCommit::new("parents", row(1), 100)
                 .made_by(alice)
-                .parents(vec![parent])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
                     Value::String("core confirmed".to_owned()),
@@ -1304,21 +1302,19 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
     // The public confirmation path normally performs both together.
     let stored = node.query_transaction(accepted).unwrap().unwrap();
     let global_time = node.allocate_global_time_for_test();
-    let version = node.query_versions_for_tx(accepted).unwrap().remove(0);
+    let version = node
+        .stored_versions_for_tx_for_test(accepted)
+        .unwrap()
+        .remove(0);
     let mut batch = node.database.open_batch();
-    batch.update(
-        "jazz_transactions",
-        transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            Fate::Accepted,
-            Some(global_time),
-            DurabilityTier::Global,
-            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stage_transaction_record(
+        &mut batch,
+        TransactionRecordWrite::Update,
+        stored.node_alias,
+        &stored.tx,
+        &TransactionRecordStatus::new(Fate::Accepted, Some(global_time), DurabilityTier::Global),
+    )
+    .unwrap();
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
@@ -1346,7 +1342,6 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         .commit_mergeable_settled(
             MergeableCommit::new("parents", row(1), 200)
                 .made_by(alice)
-                .parents(vec![accepted])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
                     Value::String("pending successor".to_owned()),

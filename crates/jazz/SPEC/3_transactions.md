@@ -20,10 +20,10 @@ Invariant digest:
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
-- `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any same-row/layer history parent's `tx_id.time`, and its versions MUST NOT enter history.
+- `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
+- `INV-TX-6`: A write MUST carry the base of the row image it was made over (ch. 4 §4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
-- `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as `RejectionReason::Cascade { root }`, preserving the original root transaction id.
+- `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection does not cascade: no other transaction is rejected because of it.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. Aggregate predicate reads MUST be validated through the rows the aggregate consumes, which the transaction proves as it reads them. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. An aggregate predicate read MUST carry the canonical `jazz.aggregate-read-result.v1` result it observed and no row proofs for the rows it consumed; the authority MUST re-run the aggregate as the transaction's permission subject and conflict iff the result's bytes differ, and MUST reject an aggregate read with a missing or non-canonical result, or a result on a non-aggregate read, as `MalformedCommit`. An exclusive aggregate read after the transaction's first write MUST fail with `UnsupportedExclusiveRead`, because the authority's re-run does not include the transaction's own writes. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
@@ -264,9 +264,11 @@ ordinary sync receipt into acceptance authority.
 
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
-not decide — any unit that is missing parent transactions or schema versions.
-It decides only once all prerequisites are present; a
-duplicate parked unit parks only once (`INV-TX-5`).
+not decide — any unit authored under a schema version it does not yet know.
+A parked unit has no fate, seq or visible rows; a duplicate parked unit parks
+only once, and the unit is decided exactly once after its schema arrives
+(`INV-TX-5`). Linear history has no version parents, so there are no parent
+prerequisites to wait for.
 
 Client-side staging is deliberately not an authorization boundary. It may reject
 malformed input, an invalid schema operation, or a mutation whose required local
@@ -279,18 +281,18 @@ remain non-authoritative advice and return `Unknown` when completeness is not
 established (ch. 13, `INV-API-28`).
 
 After prerequisites are present, the authority rejects units that violate
-history causality or clock-skew limits. A version parent is an exact prior
-version of the same physical table, branch key, row, and content/deletion
-layer. It is not a general mergeable-transaction dependency or an observed
-state precondition: mergeable transactions carry no read set or arbitrary
-causal dependency graph. A caller that needs "only if I observed X" uses an
-exclusive transaction and its read set (§3.7).
+clock-skew limits. Mergeable transactions carry no read set, version parents
+or causal dependency graph: a caller that needs "only if I observed X" uses
+an exclusive transaction and its read set (§3.7).
 
-A unit whose `tx_id.time` is not strictly greater than every such history
-parent's time is rejected as `CausalityViolation` (`INV-TX-6`). A unit whose `physical_ms` is more than `SKEW_TOLERANCE_MS` (~30
-seconds) ahead of the authority's clock is rejected as
-`ClientClockTooFarAhead` (`INV-TX-7`). In both cases, no visible version rows
-remain. Write-policy authorization (ch. 7) and, for exclusive units, the
+Core orders accepted writes by the seq it assigns, not by the writer's clock,
+and it does not reject a write because the writer's clock is behind: each
+accepted write applies over what Core accepted before it (`INV-TX-6`, ch. 4
+§4.6). A row version names the image its writer made it over (its base), so
+history can tell whether the write was made over the row's latest accepted
+image. No clock takes part in a merge. A unit whose `physical_ms` is more than
+`SKEW_TOLERANCE_MS` (~30 seconds) ahead of the authority's clock is rejected as
+`ClientClockTooFarAhead` (`INV-TX-7`), and no visible version rows remain. Write-policy authorization (ch. 7) and, for exclusive units, the
 validation of §3.7 follow. Only after those checks pass does the authority
 assign a new `GlobalTime` and emit the accept fate.
 
@@ -317,9 +319,13 @@ recorded reads against current global state:
   snapshot is not trusted for anything else: a partial client may have read
   offline or from a replica that never held every row below its base, so it
   can prepare an exclusive transaction offline and commit it later while its
-  reads still hold. An aggregate read proves the rows it consumes (the same
-  shape without aggregate, projection, ordering or pagination) and is
-  validated through them. Each source a query reads other than its root
+  reads still hold. An aggregate read records only the result it observed
+  (`jazz.aggregate-read-result.v1`: one entry per output group, each the
+  group's public output cells as typed Groove values, sorted) and is
+  validated by re-running the aggregate as the permission subject and
+  comparing results exactly: a rewrite that keeps the result is accepted, and
+  a partial client that lacked rows computed another result and conflicts.
+  Its joined sources record no narrowed reads. Each source a query reads other than its root
   (joined, included or correlated tables) is recorded as its own predicate
   read with a proof for each row it returns, so a row added there conflicts
   even when a proof from another read covers the root. A source that
@@ -389,11 +395,12 @@ output-row version does. For example, a read of `bucket = "destination"`
 may commit after an insert into `bucket = "unrelated"`, but must reject
 after an insert into `bucket = "destination"`.
 
-This local comparison only advances root-table history. Relational predicates,
-aggregate predicates, and degenerate whole-table predicates retain conservative
-local conflict detection. An aggregate input rewrite therefore conflicts
-locally even if its aggregate payload is unchanged. Authority validation still
-compares aggregate group identities and public payloads as described above.
+This local comparison only advances root-table history. Relational predicates
+and degenerate whole-table predicates retain conservative local conflict
+detection. A root-table aggregate predicate compares its group identities and
+public payloads at the base and comparison snapshots, so an input rewrite that
+leaves its result unchanged does not conflict locally either; authority
+validation compares the recorded result as described above.
 
 Schema migrations must preserve the physical identity used by these checks.
 Predicate validation resolves the recorded shape against its matching retained
@@ -501,10 +508,14 @@ versions in the normal data path. At an authority that did not author the
 versions, rejection is audit-only: the rejected versions do not remain in normal
 history or current visibility.
 
-Rejection also propagates through dependency chains. It cascades to known
-pending descendants and to later-arriving children of the rejected ancestor, all
-carrying `Cascade { root }` with the original root `TxId` (`INV-TX-8`). The
-**originating** node retains its rejected local payload in the
+Rejection does not cascade. Linear history has no version parents, so no other
+transaction depends on a rejected one. On the originating node the rejected
+transaction's effects leave the local view as soon as the rejection is
+applied: the pending overlay is refolded without it, while the node's other
+pending writes, including edits to the same row, stay visible and settle by
+their own fates (`INV-TX-8`). `RejectionReason::CausalityViolation` and
+`RejectionReason::Cascade` remain decodable wire values, but Core no longer
+produces them. The **originating** node retains its rejected local payload in the
 `RejectedTransaction` / `RejectedVersion` retry stores (so it can retry), while a
 non-origin authority does not retain foreign rejected payloads (`INV-TX-9`).
 

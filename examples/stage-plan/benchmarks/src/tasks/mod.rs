@@ -20,6 +20,7 @@ use jazz::{
     tx::DurabilityTier,
 };
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_sqlite::SqliteStorage;
 use serde_json::json;
 thread_local! { static REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -385,21 +386,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let backend = self.backend;
         let count = self.count;
         let schema = &self.schema;
-        let seed = self.seed;
         let worker = self.worker.as_mut().expect("reopen before updates");
         let foreground = self.foreground.as_mut().expect("reopen before updates");
         let peer = &mut self.peer;
         foreground.reset_storage_read_metrics();
         let commits = range
             .clone()
-            .map(|i| {
-                let commit = MergeableCommit::new("tasks", row(i), 2000).cells(cells(i, !insert));
-                if insert {
-                    commit
-                } else {
-                    commit.parents(vec![seed])
-                }
-            })
+            .map(|i| MergeableCommit::new("tasks", row(i), 2000).cells(cells(i, !insert)))
             .collect();
         let publication = phase(backend, count, "batch_author", || {
             block_on(foreground.commit_mergeable_many(commits)).unwrap()
@@ -457,6 +450,31 @@ impl Fixture<RocksDbStorage> {
     }
     pub fn loaded(count: usize) -> Self {
         let mut fixture = Self::rocksdb(count);
+        fixture.reopen();
+        fixture
+    }
+}
+/// The mobile store: the native relay keeps its durable database in SQLite with
+/// WAL and `synchronous=NORMAL`, the counterpart of RocksDB's WAL without fsync.
+impl Fixture<SqliteStorage> {
+    pub fn sqlite(count: usize) -> Self {
+        if !REPORT.get() {
+            jazz_benchmark_guard::refuse_contaminated_measurement();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema().column_families();
+        Self::seeded("sqlite_wal", count, move || {
+            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+            SqliteStorage::open_with_durability(
+                dir.path().join("tasks.sqlite"),
+                &refs,
+                jazz_storage_sqlite::Durability::WalNoSync,
+            )
+            .unwrap()
+        })
+    }
+    pub fn loaded_sqlite(count: usize) -> Self {
+        let mut fixture = Self::sqlite(count);
         fixture.reopen();
         fixture
     }

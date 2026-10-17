@@ -1,11 +1,11 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
 use crate::query::{Include, JoinMode, OrderDirection};
-use crate::model::public_api::relation_ir::{
-    ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
-    JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
-    PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
-    ValueRef as PublicRelValueRef,
+use crate::query::{
+    RelationCmpOp as PublicRelPredicateCmpOp, RelationColumnRef as PublicRelColumnRef,
+    RelationJoinCondition as PublicRelJoinCondition,
+    RelationJoinKind as PublicRelJoinKind, RelationPredicate as PublicRelPredicateExpr,
+    RelationValueRef as PublicRelValueRef,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -40,9 +40,11 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         key: Vec<u8>,
     ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
     {
-        if key
-            .windows("jazz_transactions".len())
-            .any(|window| window == b"jazz_transactions")
+        // The class layout frames `jazz_transactions` keys by its fixed class
+        // table id in the shared meta class.
+        let transactions_id = groove::storage::class_table_id("jazz_transactions").unwrap();
+        if cf == "__groove_class_meta"
+            && key.starts_with(&transactions_id.to_be_bytes())
             && let Some(remaining) = self.fail_after_transaction_reads.get()
         {
             if remaining == 0 {
@@ -216,10 +218,7 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         coalesced_row,
         owner_cells(author, "coalesced insert"),
         None,
-        Vec::new(),
-        Some(25),
-        false,
-    ))
+        Some(25),))
     .unwrap();
     crate::local_executor::block_on(core.tx_patch_mergeable(
         open_tx,
@@ -330,7 +329,6 @@ fn authority_read_for_write_check_is_mergeable_only() {
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", target, 11)
                 .made_by(user(0xa5))
-                .parents(vec![base])
                 .cells(BTreeMap::from([(
                     "title".to_owned(),
                     Value::String("after".to_owned()),
@@ -402,7 +400,6 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, updated_at_ms)
                 .made_by(author)
-                .parents(vec![insert])
                 .cells(title_cells("updated")),
         )
         .unwrap();
@@ -559,9 +556,9 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         )
         .unwrap();
 
-    // The first six transaction reads are part of validation and acceptance;
-    // The seventh after Accepted persists.
-    storage.fail_after_transaction_reads(6);
+    // The first four transaction reads are part of validation and acceptance;
+    // the fifth comes after Accepted persists.
+    storage.fail_after_transaction_reads(4);
     let error = core
         .finalize_local_mergeable_commit_settled(tx_id)
         .unwrap_err();
@@ -1349,14 +1346,14 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
         right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(outer_name)),
     };
     let task_policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
@@ -1558,14 +1555,14 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
         column: name.to_owned(),
     };
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
@@ -1627,18 +1624,18 @@ fn exists_rel_rejects_compound_joins_in_every_policy_context_before_lowering() {
     // before the lowering implementation can select (and silently retain only)
     // the first equality.
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Join {
-                    left: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("membership".to_owned()),
                     }),
-                    right: Box::new(PublicRelExpr::TableScan {
+                    right: Box::new(RelationExpr::TableScan {
                         table: "grants".into(),
                         alias: Some("grant".to_owned()),
                     }),
@@ -1751,19 +1748,19 @@ fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
         column: name.to_owned(),
     };
     let policy = PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Join {
-                    left: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
                         table: "members".into(),
                         alias: Some("members".to_owned()),
                     }),
-                    right: Box::new(PublicRelExpr::Filter {
-                        input: Box::new(PublicRelExpr::TableScan {
+                    right: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
                             table: "grants".into(),
                             alias: Some("grants".to_owned()),
                         }),

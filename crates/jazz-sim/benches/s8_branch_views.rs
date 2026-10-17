@@ -6,7 +6,6 @@ use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSo
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -152,14 +151,8 @@ pub(crate) fn run(row_count: usize) {
     block_on(cross.commit()).unwrap();
     let cross_branch_tx_us = cross_started.elapsed().as_micros() as u64;
 
-    let merge_rows = (0..overlaid.min(16)).map(|index| ContributionMergeRow {
-        table: "items".to_owned(),
-        row_uuid: row(index),
-    });
-    let merge_started = Instant::now();
-    let merge_tx = block_on(db.merge_branch_contributions(base, head, merge_rows)).unwrap();
-    let contribution_merge_us = merge_started.elapsed().as_micros() as u64;
-    assert!(merge_tx.is_some() || overlaid == 0);
+    // The cross-branch contribution-merge calculator was removed with the
+    // version DAG (linear Core-sequenced history); that phase is no longer timed.
 
     emit_phase(
         "seed_and_overlay",
@@ -187,7 +180,6 @@ pub(crate) fn run(row_count: usize) {
             "indexed_read_us": indexed_read_us,
             "indexed_rows": indexed_rows.len(),
             "cross_branch_tx_us": cross_branch_tx_us,
-            "contribution_merge_us": contribution_merge_us,
         }),
     );
 }

@@ -253,9 +253,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
     .unwrap();
     let table_id = core.catalogue.physical_mappings[&evolved_payload.id].tables["todos"].table_id;
     let history = physical_history_table_name(table_id);
-    let register = physical_register_table_name(table_id);
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
-    assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
     core.activate_catalogue_schema_settled(CurrentWriteSchema {
         revision: 1,
@@ -263,7 +261,6 @@ fn publishing_schema_registers_new_physical_tables_live() {
     })
     .unwrap();
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
-    assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 }
 
 #[test]
@@ -407,7 +404,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     drop(core);
 
     let mut reopened = reopen_node_at(&dir, node(0x3f), base);
-    let versions = reopened.query_versions_for_tx(tx_id).unwrap();
+    let versions = reopened.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].table(), "notes");
     assert_eq!(versions[0].row_uuid(), row(0x3f));
