@@ -2903,26 +2903,6 @@ impl NativeRelayHost {
                 }
             }
 
-            Request::NativeSessionMetadata => {
-                let opened = self
-                    .foregrounds
-                    .get(&foreground)
-                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-                let admitted = self
-                    .relays
-                    .get(&opened.relay)
-                    .and_then(|relay| self.admitted_scopes.get(&relay.admitted_scope))
-                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-                let author = admitted.config.identity.author;
-                let (issuer, user_id) = author.principal_parts();
-                Response::NativeSessionMetadata {
-                    node: *opened.lease.node.0.as_bytes(),
-                    registry_authority: opened.scope.app_namespace.clone(),
-                    account_id: author.account_id().map(|account| *account.0.as_bytes()),
-                    issuer,
-                    user_id,
-                }
-            }
             Request::DisconnectNativeUpstream => {
                 self.foreground_connectivity(foreground, Some(true))?
             }

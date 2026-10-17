@@ -17,7 +17,6 @@ async function client() {
     appId: "initialization-test",
     schema,
     driver: { type: "memory" },
-    tier: "local",
   });
 }
 const query = translateQuery(app.notes._build(), schema);
