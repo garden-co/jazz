@@ -283,25 +283,17 @@ impl<S: OrderedKvStorage> NodeState<S> {
     #[doc(hidden)]
     pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
-        let mut tx = stored.tx.clone();
-        tx.base_snapshot = None;
-        tx.row_read_set = None;
-        tx.absent_read_set = None;
-        tx.predicate_read_set = None;
         let mut batch = self.database.open_batch();
-        stage_transaction_record(
-            &mut batch,
-            TransactionRecordWrite::Update,
-            stored.node_alias,
-            &tx,
-            &TransactionRecordStatus::new(
-                stored.fate.clone(),
-                stored.global_time,
-                stored.durability,
-            )
-            .view_scoped(stored.is_partial),
-        )
-        .unwrap();
+        // The immutable header no longer contains the proof. Explicitly
+        // remove its side record to reproduce the historical evidence-free
+        // store; ordinary redacted receipts deliberately preserve that record.
+        batch.delete(
+            PENDING_TRANSACTIONS_TABLE,
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(tx_id.time.0),
+                PrimaryKeyValue::U64(stored.node_alias.0),
+            ]),
+        );
         let applied = self.database.apply_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted).unwrap();
