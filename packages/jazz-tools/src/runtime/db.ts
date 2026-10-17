@@ -3426,13 +3426,19 @@ export class Db {
     return this.connection.getRuntimeSchema();
   }
 
-  /** @internal Observe explicit reconnection until this Db shuts down. */
+  /** @internal Reconcile known spaces when the configured server becomes reachable. */
   onE2eeReconnect(listener: () => void): void {
-    let wasOffline = this.connection.isExplicitlyOffline();
-    this.connection.onExplicitOfflineChange((offline) => {
-      const reconnected = wasOffline && !offline;
-      wasOffline = offline;
-      if (reconnected) listener();
+    let connected = this.connection.remoteLinkState() === "connected";
+    let interrupted = this.connection.remoteLinkState() === "unavailable";
+    this.connection.onRemoteLinkStateChange((state) => {
+      if (state === "connected") {
+        const recovered = interrupted;
+        connected = true;
+        interrupted = false;
+        if (recovered) listener();
+      } else if (connected || state === "unavailable") {
+        interrupted = true;
+      }
     }, this.shutdownAbort.signal);
   }
 
