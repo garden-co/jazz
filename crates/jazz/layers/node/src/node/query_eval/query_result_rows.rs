@@ -209,6 +209,7 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::U16(left), Value::U16(right)) => left.cmp(right),
         (Value::U32(left), Value::U32(right)) => left.cmp(right),
         (Value::U64(left), Value::U64(right)) => left.cmp(right),
+        (Value::U48(left), Value::U48(right)) => left.cmp(right),
         (Value::I32(left), Value::I32(right)) => left.cmp(right),
         (Value::I64(left), Value::I64(right)) => left.cmp(right),
         (Value::F64(left), Value::F64(right)) => left.total_cmp(right),

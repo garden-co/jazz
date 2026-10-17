@@ -6280,6 +6280,45 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
     ));
 }
 
+/// Provenance timestamps are stored and compared as `U48`; ordering by them
+/// must follow their value, not fall back to row identity.
+#[test]
+fn order_by_provenance_timestamps_follows_their_values() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    for (byte, ms) in [(0x01, 3_000), (0x02, 1_000), (0x03, 2_000)] {
+        db.insert(
+            "todos",
+            doctest_support::todo_cells("ordered", false),
+            crate::db::InsertOptions {
+                row_id: Some(row(byte)),
+                updated_at_ms: Some(ms),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for column in ["$createdAt", "$updatedAt"] {
+        for (direction, expected) in [
+            (OrderDirection::Asc, vec![row(0x02), row(0x03), row(0x01)]),
+            (OrderDirection::Desc, vec![row(0x01), row(0x03), row(0x02)]),
+        ] {
+            for limit in [None, Some(2)] {
+                let mut query = db
+                    .table("todos")
+                    .select(["title", column])
+                    .order_by(column, direction);
+                if let Some(limit) = limit {
+                    query = query.limit(limit);
+                }
+                let prepared = db.prepare_query(&query).unwrap();
+                let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+                let expected = &expected[..limit.unwrap_or(expected.len())];
+                assert_eq!(row_ids(&rows), expected, "{column} {direction:?} {limit:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn version_bearing_current_source_preserves_provenance_timestamps() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
