@@ -1,0 +1,15 @@
+{
+  "format": "jazz-e2ee-local-devices-v2",
+  "devices": [],
+  "stagedGroupKeysV1": [
+    {
+      "scope": "[\"https://registry.example.test\",\"fixture\",\"account-id\"]",
+      "groupId": "11111111-1111-4111-8111-111111111111",
+      "epochId": "22222222-2222-4222-8222-222222222222",
+      "payload": [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31
+      ]
+    }
+  ]
+}

@@ -45,18 +45,19 @@ try {
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
     import type { DeviceInfo } from "jazz-tools";
     import { schema as s } from "jazz-tools";
-    import { deviceRequestSchema, deviceRequestPermissions } from "jazz-tools/e2ee";
+    import { deviceRequestSchema, deviceRequestPermissions, groupSchema, withGroupTopologyPermissions } from "jazz-tools/e2ee";
     export const app = s.defineApp({
       ...deviceRequestSchema,
+      ...groupSchema,
       notes: s.table({ body: s.string() }, {}),
     });
     const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
       policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
     });
-    export const permissions = {
+    export const permissions = withGroupTopologyPermissions(app, {
       ...deviceRequestPermissions,
       notes: applicationPermissions.notes!,
-    };
+    });
     export function deviceState(device: DeviceInfo): "pending" | "active" | "revoked" {
       return device.state;
     }
@@ -111,14 +112,20 @@ try {
       "-e",
       `
     import { strict as assert } from "node:assert";
-    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
+    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, groupSchema, withGroupTopologyPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
     import { schema as s } from "jazz-tools";
     const app = s.defineApp({
       ...deviceRequestSchema,
+      ...groupSchema,
       notes: s.table({ body: s.string() }, {}),
     });
-    assert.ok(app.__e2ee_device_requests);
-    assert.ok(deviceRequestPermissions.__e2ee_device_requests);
+    const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
+    });
+    const permissions = withGroupTopologyPermissions(app, {
+      ...deviceRequestPermissions,
+      notes: applicationPermissions.notes,
+    });
     const error = new E2eeRecoveryError("recovery-material-unusable");
     assert.ok(error instanceof Error);
     assert.equal(error.code, "recovery-material-unusable");

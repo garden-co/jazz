@@ -60,9 +60,22 @@ it("validates recovery material against the account scope and both cryptographic
     await expect(decode(material, "other-account")).rejects.toMatchObject({
       code: "recovery-material-unusable",
     });
+    const v7Root = { ...root, id: "11111111-1111-7111-8111-111111111111" };
+    const restoredV7 = await decode(
+      encodeRecoveryMaterial("account-scope", v7Root, pair.privateKey, signing.privateKey),
+    );
+    try {
+      expect(restoredV7.rootId).toBe(v7Root.id);
+      expect(restoredV7.recipient.privateKey).toEqual(pair.privateKey);
+      expect(restoredV7.signing.privateKey).toEqual(signing.privateKey);
+    } finally {
+      restoredV7.recipient.privateKey.fill(0);
+      restoredV7.signing.privateKey.fill(0);
+    }
     for (const patch of [
       { format: "jazz-e2ee-recovery-v2" },
       { rootId: "not-an-id" },
+      { rootId: "11111111-1111-1111-8111-111111111111" },
       { privateKey: [] },
       { publicKey: [256] },
       { signingPrivateKey: [0.5] },
