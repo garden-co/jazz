@@ -623,12 +623,13 @@ describe("IndexedDbPageStore", () => {
   it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
     const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
     const withoutNodeFormat = required.filter(
-      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v1",
+      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v2",
     );
     for (const [requiredCodecIds, missing, unknown] of [
-      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v1"], []],
+      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v2"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
-      [required.filter((codec) => codec !== "jazz.node-storage.v1"), ["jazz.node-storage.v1"], []],
+      [required.filter((codec) => codec !== "jazz.node-storage.v2"), ["jazz.node-storage.v2"], []],
+      [required.filter((codec) => codec !== "groove.dictionary.v1"), ["groove.dictionary.v1"], []],
       [
         [...required, "jazz.subscription-program-fact-key.v1"].sort(),
         [],

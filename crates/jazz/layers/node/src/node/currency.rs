@@ -50,10 +50,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for record in raws {
-                versions.push(
-                    self.decode_stored_history_record(None, table, &storage_table, record)
-                        .await?,
-                );
+                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -90,10 +87,7 @@ where
             for record in records {
                 // Keep the authoring name; the schema selected the physical
                 // identity before the scan, including after a table rename.
-                versions.push(
-                    self.decode_stored_physical_history_record(&storage_table, record)
-                        .await?,
-                );
+                versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -124,10 +118,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for raw in raws {
-                versions.push(
-                    self.decode_stored_history_record(None, table, &storage_table, raw)
-                        .await?,
-                );
+                versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
             }
         }
         let aliases = &self.node_aliases;
@@ -406,8 +397,6 @@ where
         // Across a schema lineage the current table may be a different
         // physical projection than this schema's history table; only the
         // same-lineage layout is a byte-for-byte image of the history row.
-        // History stores `updated_by` nullable; current always has it.
-        let updated_by_idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
         // History also ends with `counter_signs` and the merge fields (after
         // `authored_columns`), which current lacks: a settled image's signs
         // are empty, its seq is the current row's, and the image carries no
@@ -416,9 +405,16 @@ where
         else {
             return Ok(None);
         };
-        let synthesized = signs_idx..history_descriptor.fields().len();
+        // A union row's extra cells follow the merge fields in history and
+        // `authored_columns` in current (SPEC 10 §10.3, "Union row cases").
+        let synthesized_end = history_descriptor
+            .field_index(crate::schema::BASE_PENDING_FIELD)
+            .map_or(history_descriptor.fields().len(), |last| last + 1);
+        let synthesized = signs_idx..synthesized_end;
         let source_of = |index: usize| {
-            if index >= global_time_idx {
+            if index >= synthesized_end {
+                index + 1 - synthesized.len()
+            } else if index >= global_time_idx {
                 index + 1
             } else {
                 index
@@ -431,14 +427,8 @@ where
                     return false;
                 }
                 let source = source_of(index);
-                let history_type = &history_descriptor.fields()[index].value_type;
-                let history_type = match history_type {
-                    groove::records::ValueType::Nullable(inner) if index == updated_by_idx => {
-                        inner.as_ref()
-                    }
-                    other => other,
-                };
-                &current_descriptor.fields()[source].value_type != history_type
+                current_descriptor.fields()[source].value_type
+                    != history_descriptor.fields()[index].value_type
             })
         {
             return Ok(None);
@@ -458,15 +448,6 @@ where
                         _ => Value::Bytes(Vec::new()),
                     };
                     history_descriptor.encode_field_into(index, &value, output)?;
-                    return Ok(());
-                }
-                if index == updated_by_idx {
-                    let author = current.get_idx(GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX)?;
-                    history_descriptor.encode_field_into(
-                        index,
-                        &Value::Nullable(Some(Box::new(author))),
-                        output,
-                    )?;
                     return Ok(());
                 }
                 let value = match index {
@@ -541,9 +522,7 @@ where
             let Some((pending, raw)) = found else {
                 continue;
             };
-            let candidate = self
-                .decode_stored_history_record(None, table, &storage_table, raw)
-                .await?;
+            let candidate = self.decode_history_owned_record(table, &storage_table, raw)?;
             let seq = candidate.seq()?;
             let replace = match winner.as_ref() {
                 None => true,
@@ -594,9 +573,7 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for record in raws {
-                let version = self
-                    .decode_stored_history_record(None, table, &storage_table, record)
-                    .await?;
+                let version = self.decode_history_owned_record(table, &storage_table, record)?;
                 let tx_id = self.version_tx_id(&version)?;
                 versions_by_key.insert(
                     (version.branch_key().clone(), version.row_uuid(), tx_id),
@@ -615,63 +592,205 @@ where
         Ok(versions)
     }
 
+    /// Every version this node stored for `tx_id`, found through its
+    /// touched-rows list. A settled transaction whose list was released
+    /// ([`releases_touched_rows`]) cannot be listed:
+    /// [`Error::TransactionVersionsReleased`]. Callers that know the rows they
+    /// want read them exactly instead ([`Self::query_tx_version_at`],
+    /// [`Self::stored_versions_for_tx_at`]).
     pub(super) async fn query_versions_for_tx(
         &mut self,
         tx_id: TxId,
     ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            #[cfg(test)]
+            record_query_versions_for_tx_call();
+            return Ok(Vec::new());
+        };
+        self.query_listed_versions_for_tx(tx_id, &tx)
+            .await?
+            .ok_or(Error::TransactionVersionsReleased(tx_id))
+    }
+
+    /// [`Self::query_versions_for_tx`] for a loaded transaction; `None` when
+    /// its touched-rows list was released.
+    pub(super) async fn query_listed_versions_for_tx(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+    ) -> Result<Option<Vec<VersionRow>>, Error> {
         #[cfg(test)]
         record_query_versions_for_tx_call();
 
-        let Some(tx) = self.query_transaction(tx_id).await? else {
-            return Ok(Vec::new());
+        // A released list is decided by the stored record alone, never by
+        // what the version cache still holds, so a caller that lists a
+        // settled transaction fails the same way warm or cold.
+        let listed = if tx.releases_touched_rows() {
+            match self
+                .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
+                .await?
+            {
+                Some(rows) => Some(rows),
+                None => return Ok(None),
+            }
+        } else {
+            None
         };
-        // Its images omit `updated_by` when it is this author.
-        self.remember_history_tx_author(tx.tx.tx_id.time, tx.node_alias, tx.tx.made_by)?;
         if let Some(mut versions) = self.cached_tx_versions(tx_id) {
             versions.sort_by(|left, right| {
                 left.table()
                     .cmp(right.table())
                     .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
             });
-            return Ok(versions);
+            return Ok(Some(versions));
         }
-        // The transaction record lists every history row this node stored
-        // for it; each is one exact history point read. A listed row that is
-        // no longer stored (evicted) is skipped.
+        // The list names every history row this node stored for the
+        // transaction; each is one exact history point read. A listed row
+        // that is no longer stored (evicted) is skipped.
+        let touched_rows = match listed {
+            Some(rows) => rows,
+            None => self
+                .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
+                .await?
+                .unwrap_or_default(),
+        };
         let mut versions = Vec::new();
-        let touched_rows = self
-            .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
-            .await?;
-        let seqs = history_seq_candidates(tx.global_time);
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
-            let storage_table = physical_history_table_name(table_id);
-            let mut found = None;
-            for seq in &seqs {
-                found = self
-                    .database
-                    .primary_key_get_raw(
-                        &storage_table,
-                        &history_key_values(branch_key, row_uuid, *seq, tx_id.time, tx.node_alias),
-                    )
-                    .await?
-                    .map(|raw| raw.owned_record());
-                if found.is_some() {
-                    break;
-                }
+            if let Some(version) = self
+                .query_tx_version_at(tx_id, tx, table_id, branch_key, row_uuid)
+                .await?
+            {
+                versions.push(version);
             }
-            let Some(record) = found else {
-                continue;
-            };
-            versions.push(
-                self.decode_stored_physical_history_record(&storage_table, record)
-                    .await?,
-            );
         }
         versions.sort_by(|left, right| {
             left.table()
                 .cmp(right.table())
                 .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
         });
+        Ok(Some(versions))
+    }
+
+    /// The version `tx_id` stored for one row of one physical table: an exact
+    /// history point read at `(branch, row, seq, tx)`. Needs no touched-rows
+    /// list, so it also reads settled transactions.
+    pub(super) async fn query_tx_version_at(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+        table_id: PhysicalTableId,
+        branch_key: &[u8],
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        // A transaction ingested in this turn may still be staged; its
+        // version cache holds exactly what it stored.
+        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id)
+            && let Some(version) = cached.versions.iter().find(|version| {
+                version.row_uuid() == row_uuid
+                    && version.branch_key().canonical_bytes() == branch_key
+                    && self.physical_table_id_for_version(version).ok() == Some(table_id)
+            })
+        {
+            return Ok(Some(version.clone()));
+        }
+        let storage_table = physical_history_table_name(table_id);
+        for seq in history_seq_candidates(tx.global_time) {
+            if let Some(raw) = self
+                .database
+                .primary_key_get_raw(
+                    &storage_table,
+                    &history_key_values(branch_key, row_uuid, seq, tx_id.time, tx.node_alias),
+                )
+                .await?
+            {
+                let record = raw.owned_record();
+                return self
+                    .decode_stored_physical_history_record(&storage_table, record)
+                    .map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The versions this node stored for a known transaction, to compare with
+    /// a resent or re-delivered copy carrying `versions`: every listed
+    /// version while the transaction keeps its touched-rows list, else the
+    /// stored version at each coordinate of `versions` (exact point reads).
+    /// Once the list is released the transaction is complete and settled, so
+    /// a copy that matches it row for row and in write count is the same
+    /// payload.
+    pub(super) async fn stored_versions_for_tx_at(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+        versions: &[VersionRecord],
+    ) -> Result<Vec<VersionRow>, Error> {
+        if let Some(listed) = self.query_listed_versions_for_tx(tx_id, tx).await? {
+            return Ok(listed);
+        }
+        let mut stored = Vec::new();
+        let mut seen = BTreeSet::new();
+        for version in versions {
+            // A table this node cannot resolve holds no stored version.
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(version.schema_version(), version.table())
+            else {
+                continue;
+            };
+            let branch_key = version.branch_key().canonical_bytes();
+            if !seen.insert((table_id, branch_key.clone(), version.row_uuid())) {
+                continue;
+            }
+            if let Some(found) = self
+                .query_tx_version_at(tx_id, tx, table_id, &branch_key, version.row_uuid())
+                .await?
+            {
+                stored.push(found);
+            }
+        }
+        stored.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+        });
+        Ok(stored)
+    }
+
+    /// The versions of `tx_id` that can witness `row_uuid` under the logical
+    /// name `table`: every listed version while the transaction keeps its
+    /// touched-rows list, else the row's stored version in each physical
+    /// table that name maps to, by exact point reads. A released list only
+    /// ever held default-branch rows, so the default branch is complete.
+    pub(super) async fn tx_versions_for_witness(
+        &mut self,
+        tx_id: TxId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            return Ok(Vec::new());
+        };
+        if let Some(listed) = self.query_listed_versions_for_tx(tx_id, &tx).await? {
+            return Ok(listed);
+        }
+        let sources = match self.version_storage_sources(table) {
+            Ok(sources) => sources,
+            Err(Error::TableNotFound(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let default_branch = BranchKey::default().canonical_bytes();
+        let mut versions = Vec::new();
+        for storage_table in sources {
+            let Some(table_id) = physical_version_table_id(&storage_table) else {
+                continue;
+            };
+            if let Some(version) = self
+                .query_tx_version_at(tx_id, &tx, table_id, &default_branch, row_uuid)
+                .await?
+            {
+                versions.push(version);
+            }
+        }
         Ok(versions)
     }
 
@@ -737,46 +856,10 @@ where
         )
     }
 
-    /// Decode a history image read from storage and fill in the
-    /// `updated_by` that storage omits when it is the author of the image's
-    /// own transaction (SPEC 2 §2.7.1). `batch` makes a transaction record
-    /// staged in the open batch visible.
-    pub(super) async fn decode_stored_history_record(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        requested_table: &str,
-        storage_table: &str,
-        record: OwnedRecord,
-    ) -> Result<VersionRow, Error> {
-        let version = self.decode_history_owned_record(requested_table, storage_table, record)?;
-        self.resolve_history_updated_by(batch, version).await
-    }
-
-    /// Cache a transaction's author for `resolve_history_updated_by`.
-    pub(super) fn remember_history_tx_author(
-        &mut self,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-        made_by: AuthorSubject,
-    ) -> Result<(), Error> {
-        if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES
-            && !self
-                .history_tx_authors
-                .contains_key(&(tx_time, tx_node_alias))
-        {
-            self.history_tx_authors.clear();
-        }
-        self.history_tx_authors.insert(
-            (tx_time, tx_node_alias),
-            encode_history_updated_by(row_author_value(made_by)?)?,
-        );
-        Ok(())
-    }
-
     /// Decode a record read from a `jazz_physical_{id}_history` table. The
     /// logical table comes from the catalogue mapping of the record's own
     /// schema version, so no table name is passed.
-    pub(super) async fn decode_stored_physical_history_record(
+    pub(super) fn decode_stored_physical_history_record(
         &mut self,
         storage_table: &str,
         record: OwnedRecord,
@@ -786,45 +869,7 @@ where
                 "history record is not from a physical history table",
             ));
         }
-        self.decode_stored_history_record(None, "", storage_table, record)
-            .await
-    }
-
-    /// Fill in `updated_by` from the `made_by` of the image's transaction
-    /// when history storage omitted it. Transaction authors are immutable,
-    /// so they are cached by `(tx_time, tx_node)`.
-    pub(super) async fn resolve_history_updated_by(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        version: VersionRow,
-    ) -> Result<VersionRow, Error> {
-        if !version.updated_by_is_implicit()? {
-            return Ok(version);
-        }
-        let key = (version.tx_time(), version.tx_node_alias());
-        let author = match self.history_tx_authors.get(&key) {
-            Some(author) => Rc::clone(author),
-            None => self.load_history_tx_author(batch, key).await?,
-        };
-        let input = version.record.borrowed();
-        let descriptor = input.descriptor();
-        let raw = descriptor.create_with_encoded_fields::<Error>(
-            input.raw().len() + author.len(),
-            |index, output| {
-                if index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
-                    output.extend_from_slice(&author);
-                } else {
-                    let span = descriptor.field_span(input.raw(), index)?;
-                    output.extend_from_slice(&input.raw()[span]);
-                }
-                Ok(())
-            },
-        )?;
-        Ok(VersionRow {
-            table: version.table.clone(),
-            branch_key: version.branch_key.clone(),
-            record: OwnedRecord::new(raw, descriptor),
-        })
+        self.decode_history_owned_record("", storage_table, record)
     }
 
     fn remember_history_tx_seq(
@@ -838,7 +883,7 @@ where
             .map(GlobalTime);
         if let Some(global_time) = global_time {
             let mut seqs = self.history_tx_seqs.borrow_mut();
-            if seqs.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
+            if seqs.len() >= HISTORY_TX_SEQ_CACHE_MAX_ENTRIES {
                 seqs.clear();
             }
             seqs.insert((tx_time, tx_node_alias), global_time);
@@ -874,39 +919,6 @@ where
             return Ok(None);
         };
         self.remember_history_tx_seq(tx_time, tx_node_alias, raw.record())
-    }
-
-    async fn load_history_tx_author(
-        &mut self,
-        batch: Option<&DatabaseBatch>,
-        key: (TxTime, NodeAlias),
-    ) -> Result<Rc<[u8]>, Error> {
-        let primary_key = [Value::U64(key.0.0), Value::U64(key.1.0)];
-        let raw = match batch {
-            Some(batch) => {
-                self.database
-                    .primary_key_get_raw_in_batch(batch, "jazz_transactions", &primary_key)
-                    .await?
-            }
-            None => {
-                self.database
-                    .primary_key_get_raw("jazz_transactions", &primary_key)
-                    .await?
-            }
-        }
-        .ok_or(Error::InvalidStoredValue(
-            "a history image without updated_by needs its transaction record",
-        ))?;
-        self.remember_history_tx_seq(key.0, key.1, raw.record())?;
-        let author = encode_history_updated_by(
-            raw.record()
-                .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-        )?;
-        if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
-            self.history_tx_authors.clear();
-        }
-        self.history_tx_authors.insert(key, Rc::clone(&author));
-        Ok(author)
     }
 
     pub(super) fn decode_history_owned_record(
@@ -971,10 +983,20 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields(tx_id, |state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields(tx_id, |_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     pub(super) async fn query_transaction_state(
@@ -1123,7 +1145,9 @@ where
                     continue;
                 }
                 let tx_id = TxId::new(time, node);
-                let tx = self.stored_transaction_from_record(tx_id, alias, record)?;
+                let tx = self
+                    .stored_transaction_from_header(tx_id, alias, record)
+                    .await?;
                 context.tx_rows.insert(tx_id, Some(tx));
             }
         }
@@ -1135,10 +1159,20 @@ where
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
-        self.query_transaction_fields_by_alias(tx_id, expected_alias, &|state, alias, record| {
-            state.stored_transaction_from_record(tx_id, alias, record)
-        })
-        .await
+        let Some((alias, header)) = self
+            .query_transaction_fields_by_alias(tx_id, expected_alias, &|_, alias, record| {
+                Ok((
+                    alias,
+                    OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+                ))
+            })
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.stored_transaction_from_header(tx_id, alias, header.borrowed())
+            .await
+            .map(Some)
     }
 
     async fn query_transaction_fields_by_alias<T>(
@@ -1167,7 +1201,11 @@ where
         decode(self, expected_alias, record).map(Some)
     }
 
-    fn stored_transaction_from_record(
+    /// Assemble a stored transaction from its `jazz_transactions` record and
+    /// the records beside it: its `jazz_pending_transactions` record while it
+    /// is unsettled, and its `jazz_tx_provenance` record when its flags say it
+    /// has one (SPEC 2 §2.8).
+    async fn stored_transaction_from_header(
         &self,
         tx_id: TxId,
         expected_alias: NodeAlias,
@@ -1177,50 +1215,90 @@ where
         TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
-        let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
-            match record.get_idx(idx)? {
-                Value::Nullable(None) => Ok(None),
-                Value::Nullable(Some(value)) => match *value {
-                    Value::Bytes(bytes) => Ok(Some(bytes)),
-                    _ => Err(Error::InvalidStoredValue(
-                        "exclusive read evidence slot is not bytes",
-                    )),
-                },
-                _ => Err(Error::InvalidStoredValue(
-                    "exclusive read evidence slot is not nullable",
-                )),
-            }
+        let flags = transaction_flags(record)?;
+        let made_by =
+            RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject();
+        let permission_subject = transaction_permission_subject(record, made_by)?;
+        let fate = fate_from_encoded_fields(record)?;
+        let global_time = record
+            .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime);
+        let key = [Value::U64(tx_id.time.0), Value::U64(expected_alias.0)];
+        let pending = if global_time.is_none() && !matches!(fate, Fate::Rejected(_)) {
+            self.database
+                .primary_key_get_raw(PENDING_TRANSACTIONS_TABLE, &key)
+                .await?
+        } else {
+            None
         };
-        let slots = [
-            evidence_slot(TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
-            evidence_slot(TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
-        ];
-        if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
-            return Err(Error::InvalidStoredValue(
-                "mergeable transaction carries exclusive read evidence",
-            ));
-        }
-        let evidence = super::exclusive_read_evidence::decode_evidence_slots(
-            slots[0].as_deref(),
-            slots[1].as_deref(),
-            slots[2].as_deref(),
-            slots[3].as_deref(),
-        )?;
+        let evidence = match &pending {
+            Some(raw) => {
+                let pending = raw.record();
+                let evidence_slot = |idx: usize| -> Result<Option<Vec<u8>>, Error> {
+                    match pending.get_idx(idx)? {
+                        Value::Nullable(None) => Ok(None),
+                        Value::Nullable(Some(value)) => match *value {
+                            Value::Bytes(bytes) => Ok(Some(bytes)),
+                            _ => Err(Error::InvalidStoredValue(
+                                "exclusive read evidence slot is not bytes",
+                            )),
+                        },
+                        _ => Err(Error::InvalidStoredValue(
+                            "exclusive read evidence slot is not nullable",
+                        )),
+                    }
+                };
+                let slots = [
+                    evidence_slot(PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ROW_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
+                    evidence_slot(PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
+                ];
+                if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "mergeable transaction carries exclusive read evidence",
+                    ));
+                }
+                if !matches!(fate, Fate::Pending) && slots.iter().any(Option::is_some) {
+                    return Err(Error::InvalidStoredValue(
+                        "settled transaction keeps exclusive read evidence",
+                    ));
+                }
+                super::exclusive_read_evidence::decode_evidence_slots(
+                    slots[0].as_deref(),
+                    slots[1].as_deref(),
+                    slots[2].as_deref(),
+                    slots[3].as_deref(),
+                )?
+            }
+            None => super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
+        };
+        let contribution_merge = if flags & TX_FLAG_HAS_PROVENANCE != 0 {
+            let raw = self
+                .database
+                .primary_key_get_raw(TX_PROVENANCE_TABLE, &key)
+                .await?
+                .ok_or(Error::InvalidStoredValue(
+                    "transaction flags name a missing provenance record",
+                ))?;
+            let provenance = raw.record();
+            Some(self.contribution_merge_from_storage_record(
+                <OwnedRecord as records::RecordField>::read(
+                    &provenance,
+                    TxProvenanceRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
+                )?,
+            )?)
+        } else {
+            None
+        };
         let tx = Transaction {
             tx_id,
             kind,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: RowAuthor::from_record(
-                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
-            permission_subject: <Option<AuthorSubject> as groove::records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
-            )?,
+            made_by,
+            permission_subject,
             base_snapshot: evidence.base_snapshot,
             row_read_set: evidence.row_read_set,
             absent_read_set: evidence.absent_read_set,
@@ -1228,29 +1306,21 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            contribution_merge: <Option<OwnedRecord> as records::RecordField>::read(
-                &record,
-                TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
-            )?
-            .map(|record| self.contribution_merge_from_storage_record(record))
-            .transpose()?,
+            contribution_merge,
         };
         // Recovery and ordinary durable reads must fail closed on malformed
         // strategy-defined contribution identities before they can influence
         // a later merge calculation.
         self.validate_contribution_merge_operation_identities(&tx)?;
-        let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
             tx,
             node_alias: expected_alias,
             fate,
-            global_time: record
-                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
-                .map(GlobalTime),
+            global_time,
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-            is_partial: record.get_bool(TransactionRowRecord::FIELD_IS_PARTIAL_IDX)?,
+            is_partial: flags & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0,
         })
     }
 
@@ -1380,23 +1450,75 @@ where
         let Some(record) = raw else {
             return Ok(None);
         };
-        self.decode_stored_history_record(None, table, storage_table, record)
-            .await
+        self.decode_history_owned_record(table, storage_table, record)
             .map(Some)
     }
 }
 
-/// The encoded history `updated_by` field (`Nullable<RowAuthor>`) holding
-/// `author`. A variable field's bytes do not depend on its position, so one
-/// encoding serves every history table's field
-/// `HistoryRowRecord::FIELD_UPDATED_BY_IDX`, and resolving an image copies it
-/// instead of re-encoding the author.
-fn encode_history_updated_by(author: Value) -> Result<Rc<[u8]>, Error> {
-    let descriptor = records::RecordDescriptor::new([(
-        "updated_by",
-        crate::ids::RowAuthor::value_type().nullable(),
-    )]);
-    let mut encoded = Vec::new();
-    descriptor.encode_field_into(0, &Value::Nullable(Some(Box::new(author))), &mut encoded)?;
-    Ok(encoded.into())
+#[cfg(any(test, feature = "testing"))]
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Every version this node stores for `tx_id`, found by scanning every
+    /// physical history table. Test-only: it inspects storage without the
+    /// touched-rows list, so it also reads settled transactions whose list
+    /// was released. Ordered like [`Self::query_versions_for_tx`].
+    pub async fn stored_versions_for_tx_for_test(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            return Ok(Vec::new());
+        };
+        let table_ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        let mut versions = Vec::new();
+        for table_id in table_ids {
+            let storage_table = physical_history_table_name(table_id);
+            let records = self
+                .database
+                .primary_key_scan_raw(&storage_table, &[])
+                .await?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for record in records {
+                let view = record.borrowed();
+                if view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)? != tx_id.time.0
+                    || view.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)? != tx.node_alias.0
+                {
+                    continue;
+                }
+                versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
+            }
+        }
+        versions.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+        });
+        Ok(versions)
+    }
+
+    /// [`Self::commit_unit_for`] built from [`Self::stored_versions_for_tx_for_test`],
+    /// so it also rebuilds a settled transaction's unit.
+    pub async fn stored_commit_unit_for_test(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
+        let tx = self
+            .query_transaction(tx_id)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?
+            .tx;
+        let versions = self
+            .stored_versions_for_tx_for_test(tx_id)
+            .await?
+            .iter()
+            .map(|row| self.version_record_from_row(row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(SyncMessage::CommitUnit { tx, versions })
+    }
 }

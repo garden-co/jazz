@@ -21,7 +21,7 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 31 entries in the current storage format. The active
+The logical pack has 32 entries in the current storage format. The active
 schema selection lives in `jazz_catalogue`; the redundant write-pointer table
 and retired scope-relay repair ledger are no longer registered.
 
@@ -35,7 +35,9 @@ unified catalogue encoding and kind-specific record descriptors.
 | `__groove_large_values`             |       3 |
 | `jazz_authority_policy_bindings`    |       1 |
 | `jazz_catalogue`                    |       8 |
+| `jazz_history_horizon`              |       0 |
 | `jazz_nodes`                        |       1 |
+| `jazz_pending_transactions`         |       0 |
 | `jazz_physical_1_ahead_current`     |       1 |
 | `jazz_physical_1_global_current`    |       1 |
 | `jazz_physical_1_history`           |       2 |
@@ -48,7 +50,8 @@ unified catalogue encoding and kind-specific record descriptors.
 | `jazz_schema_versions`              |       2 |
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
-| `jazz_tx_touched_rows`              |       4 |
+| `jazz_tx_provenance`                |       2 |
+| `jazz_tx_touched_rows`              |       3 |
 
 The one `jazz_subscription_watermarks_v1` record names a catch-up revision that
 is a fresh random id per catch-up. The receipt pins its key, record version and
@@ -59,7 +62,10 @@ Row metadata and transaction provenance use the non-null native author record
 `{ account: UUID, identity: { issuer: String, subject: String } }`. SYSTEM authors
 use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node
 UUID as subject. This stored attribution does not grant the internal SYSTEM
-permission capability. The author interner remains memory-only.
+permission capability. Stored author columns hold 4-byte codes into the
+node-local `authors` Groove dictionary (`groove.dictionary.v1`). The
+dictionary family is not one of the logical pack's stores; the physical
+SQLite and RocksDB images carry it.
 
 The RocksDB archive retains internal column family
 `__groove_storage_internal_v1` and profile marker `raw-v1`. ResultKey V1 has a
@@ -67,7 +73,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `4a9d9da67d88310433f6a96aa895090fef81f1d492ae09cf94a3a34fbc03ab1a` |
-| SQLite payload      | `85452bee0a7e42f953dee37e162d57fec0336fb6fce775e54668e41765da240f` |
-| gzip SQLite archive | `196eb5348d407e963cf919b8ec37abf8dc8a20ccb2f01c5b3a6e1c66495cec98` |
-| RocksDB archive     | `1a9a26c9f55bf80cb4d77295be2dfc57db135f8f143895a138fb38d8e2e5517b` |
+| logical pack        | `cb082dbbf76311d0969abea96aafbe6cefee4c10d5be5e2caa2c7a7f992c9d6a` |
+| SQLite payload      | `6cc542586345ac3b3d1e7f3f1419c92683d83f504b0a28390fd4777fc1e1651c` |
+| gzip SQLite archive | `45ca448dcf57433e9e5a329652beb6bf3cbae60b6c508bb54c5a896dbf27199f` |
+| RocksDB archive     | `da4bcb7c54b1ff5bf6266d70b7527a3911caf0a36827ad2b1d5029e283964030` |

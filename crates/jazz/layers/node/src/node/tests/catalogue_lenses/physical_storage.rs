@@ -427,7 +427,7 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
     }
 
     assert_eq!(
-        core.query_versions_for_tx(deletion_tx)
+        core.stored_versions_for_tx_for_test(deletion_tx)
             .unwrap()
             .into_iter()
             .filter(|version| version.layer() == VersionLayer::Deletion)
@@ -439,7 +439,7 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
     let mut reopened = reopen_node_at(&dir, node(0x2c), schema);
     assert_eq!(
         reopened
-            .query_versions_for_tx(deletion_tx)
+            .stored_versions_for_tx_for_test(deletion_tx)
             .unwrap()
             .into_iter()
             .filter(|version| version.layer() == VersionLayer::Deletion)

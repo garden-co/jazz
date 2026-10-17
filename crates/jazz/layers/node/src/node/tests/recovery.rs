@@ -254,12 +254,7 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
     let stored = core
         .contribution_merge_storage_value(Some(&provenance))
         .unwrap();
-    let Value::Nullable(Some(record)) = stored else {
-        panic!("branch-view evidence must use the optional contribution record");
-    };
-    let Value::Record(record) = *record else {
-        panic!("contribution provenance must be a normal Groove record");
-    };
+    let record = stored.expect("branch-view evidence must use the contribution record");
     let decoded = core.contribution_merge_from_storage_record(record).unwrap();
     assert_eq!(decoded, provenance);
     assert!(decoded.substitutions.is_empty());
@@ -456,12 +451,7 @@ fn unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder
             node(1),
         ))))
         .unwrap();
-    let Value::Nullable(Some(record)) = stored else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+    let record = stored.expect("fixture stores contribution provenance");
     let merge = ContributionMergeStorageRecord::new(record);
     let Value::Record(substitution) = merge.substitutions().unwrap().remove(0) else {
         panic!("fixture substitution is a record")
@@ -509,13 +499,8 @@ fn contribution_operation_schema() -> JazzSchema {
     .with_column_merge_strategy("count", MergeStrategy::Counter)])
 }
 
-fn stored_contribution_operation_payloads(value: Value) -> Vec<(u64, Vec<u8>)> {
-    let Value::Nullable(Some(record)) = value else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+fn stored_contribution_operation_payloads(value: Option<OwnedRecord>) -> Vec<(u64, Vec<u8>)> {
+    let record = value.expect("fixture stores contribution provenance");
     let record = ContributionMergeStorageRecord::new(record);
     record
         .substitutions()
@@ -637,18 +622,13 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
         "invalid provenance must never be stored"
     );
     assert!(
-        core.query_versions_for_tx(tx_id).unwrap().is_empty(),
+        core.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty(),
         "rejected input must not store any row versions"
     );
 }
 
-fn stored_contribution_coordinate_ids(value: Value) -> Vec<(u64, u64)> {
-    let Value::Nullable(Some(record)) = value else {
-        panic!("fixture stores contribution provenance")
-    };
-    let Value::Record(record) = *record else {
-        panic!("fixture contribution provenance is a record")
-    };
+fn stored_contribution_coordinate_ids(value: Option<OwnedRecord>) -> Vec<(u64, u64)> {
+    let record = value.expect("fixture stores contribution provenance");
     let record = ContributionMergeStorageRecord::new(record);
     record
         .substitutions()
@@ -797,7 +777,7 @@ fn opening_defers_malformed_current_row_to_read() {
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         storage
             .set(
                 table.clone(),
@@ -836,21 +816,16 @@ fn mark_accepted_without_ahead_cleanup<S>(
     stored.fate = Fate::Accepted;
     stored.global_time = Some(global_time);
     stored.durability = DurabilityTier::Global;
-    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
-    batch.update(
-        "jazz_transactions",
-        transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stage_transaction_record(
+        &mut batch,
+        TransactionRecordWrite::Update,
+        stored.node_alias,
+        &stored.tx,
+        &TransactionRecordStatus::new(stored.fate.clone(), stored.global_time, stored.durability),
+    )
+    .unwrap();
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
     let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
@@ -1002,19 +977,14 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             .unwrap();
         let stored = node.query_transaction(tx_id).unwrap().unwrap();
         let mut batch = node.database.open_batch();
-        batch.update(
-            "jazz_transactions",
-            transaction_values(
-                stored.node_alias,
-                &stored.tx,
-                Fate::Accepted,
-                Some(GlobalTime(7)),
-                DurabilityTier::Local,
-                node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                    .unwrap(),
-            )
-            .unwrap(),
-        );
+        stage_transaction_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(Fate::Accepted, Some(GlobalTime(7)), DurabilityTier::Local),
+        )
+        .unwrap();
         let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
         node.database.finish_persistence(persisted).unwrap();
@@ -1031,6 +1001,48 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
         error,
         Error::InvalidStoredValue("global timestamp requires Global durability")
     ));
+}
+
+/// Actors: one node whose store a later release has truncated.
+///
+/// A store records the horizon below which its history was truncated. This
+/// build reads every transaction's history as complete, so it must refuse a
+/// truncated store with a typed error, and must open one whose horizon is 0.
+#[test]
+fn reopen_refuses_a_store_with_truncated_history() {
+    let schema = schema();
+    for (horizon, refused) in [(0, false), (7, true)] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        {
+            let mut node = open_node_at(&temp_dir, schema.clone());
+            node.commit_mergeable_settled(
+                MergeableCommit::new("todos", row(3), 10).cells(title_cells("before truncation")),
+            )
+            .unwrap();
+            let mut batch = node.database.open_batch();
+            batch.update(
+                HISTORY_HORIZON_TABLE,
+                vec![Value::U8(0), Value::U64(horizon)],
+            );
+            let applied =
+                crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+            let persisted = crate::local_executor::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+        }
+
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        let opened = NodeState::new(node(1), schema.clone(), storage).resolve();
+        if refused {
+            assert!(matches!(
+                opened.err(),
+                Some(Error::TruncatedHistoryUnsupported { horizon: 7 })
+            ));
+        } else {
+            assert!(opened.is_ok(), "a store with horizon 0 is complete");
+        }
+    }
 }
 
 // This is necessarily an internal mechanism regression test: the public API
@@ -2171,13 +2183,10 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         for tag in [0, 1, 2] {
             let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
-                let mut values = transaction_values(
+                let mut values = transaction_record_values(
                     stored.node_alias,
                     &stored.tx,
-                    fate.clone(),
-                    global_time,
-                    durability,
-                    core.contribution_merge_storage_value(None).unwrap(),
+                    &TransactionRecordStatus::new(fate.clone(), global_time, durability),
                 )
                 .unwrap();
                 values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
@@ -2209,19 +2218,32 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         let mut provenance = canonical_contribution_provenance(tx_id);
         let duplicate = provenance.substitutions[0].sources[0].clone();
         provenance.substitutions[0].sources.push(duplicate);
+        let provenance_record = core
+            .contribution_merge_storage_value(Some(&provenance))
+            .unwrap()
+            .unwrap();
         stored.tx.contribution_merge = Some(provenance);
-        let values = transaction_values(
+        let values = transaction_record_values(
             stored.node_alias,
             &stored.tx,
-            stored.fate.clone(),
-            stored.global_time,
-            stored.durability,
-            core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
-                .unwrap(),
+            &TransactionRecordStatus::new(
+                stored.fate.clone(),
+                stored.global_time,
+                stored.durability,
+            ),
         )
         .unwrap();
         let mut batch = core.database.open_batch();
         batch.update("jazz_transactions", values.clone());
+        // The payload lives beside the record: status reads never load it.
+        batch.update(
+            TX_PROVENANCE_TABLE,
+            vec![
+                Value::U64(tx_id.time.0),
+                Value::U64(stored.node_alias.0),
+                Value::Record(provenance_record),
+            ],
+        );
         let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
         let persisted = crate::local_executor::block_on(applied.persist());
         core.database.finish_persistence(persisted).unwrap();
@@ -2256,7 +2278,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             let mut invalid_state = values.clone();
             invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
                 Value::String("rejected".to_owned());
-            invalid_state[TransactionRowRecord::FIELD_REJECTION_REASON_IDX] =
+            invalid_state[TransactionRowRecord::FIELD_REJECTION_IDX] =
                 Value::Nullable(reason.clone().map(Box::new));
             let mut batch = core.database.open_batch();
             batch.update("jazz_transactions", invalid_state);
@@ -2314,7 +2336,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
             .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
             .collect::<BTreeMap<_, _>>();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         let marker = b"\0groove-declared-index-generation".to_vec();
         storage.delete("indices".into(), marker).unwrap();
         // Damage index entries only: keys starting with `00` are Groove's
@@ -2363,7 +2385,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         );
     }
     let storage =
-        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
     let indexes = storage
         .prefix("indices".into(), Vec::new())
         .unwrap()
@@ -2372,4 +2394,200 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         .collect::<Vec<_>>();
     assert_eq!(indexes, expected_indexes);
     storage.close().unwrap();
+}
+
+/// Actors: a writer committing as alice and bob, Core accepting its global
+/// writes, then a cold reopen of the writer.
+///
+/// Every stored author column names its author by a 4-byte code in the
+/// `authors` Groove dictionary: a transaction record's `made_by`, and the
+/// `created_by`/`updated_by` of history images and of global and ahead
+/// current rows. The dictionary holds one entry per distinct author however
+/// many records name it, and a reopen resolves every code back to the full
+/// author. White-box: every read (and the wire) sees full authors, so the
+/// stored bytes are read from RocksDB after close.
+#[test]
+fn author_columns_store_dictionary_codes() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let mut committed = Vec::new();
+    let tables;
+    {
+        let mut writer = open_node_at(&temp_dir, schema.clone());
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        // Accepted: alice creates row 0x40, bob creates 0x41 and then updates
+        // alice's row.
+        for (author, row_byte, title) in [
+            (alice, 0x40, "alice's"),
+            (bob, 0x41, "bob's"),
+            (bob, 0x40, "bob edits alice's"),
+        ] {
+            let tx_id = commit_mergeable_global(
+                &mut writer,
+                &mut core,
+                MergeableCommit::new("todos", row(row_byte), 10)
+                    .made_by(author)
+                    .cells(title_cells(title)),
+            );
+            committed.push((tx_id, author));
+        }
+        // Pending: alice creates row 0x42, which only the ahead overlay holds.
+        let tx_id = writer
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(0x42), 10)
+                    .made_by(alice)
+                    .cells(title_cells("alice's pending")),
+            )
+            .unwrap();
+        committed.push((tx_id, alice));
+
+        let table_id = writer
+            .physical_table_id_for_schema(writer.catalogue.local_schema_version_id, "todos")
+            .unwrap();
+        tables = [
+            "jazz_transactions".to_owned(),
+            physical_history_table_name(table_id),
+            physical_global_current_table_name(table_id),
+            physical_ahead_current_table_name(table_id),
+        ]
+        .map(|name| {
+            let schema = writer.database.table_schema(&name).unwrap().clone();
+            (name, schema)
+        });
+    }
+
+    let encoded = |author: AuthorSubject| {
+        crate::ids::RowAuthor::from_persisted_subject(author)
+            .unwrap()
+            .encoded_record()
+            .raw()
+    };
+    let options = rocksdb::Options::default();
+    let families = rocksdb::DB::list_cf(&options, temp_dir.path()).unwrap();
+    let db = rocksdb::DB::open_cf_for_read_only(&options, temp_dir.path(), &families, false)
+        .unwrap();
+    let mut dictionary = Vec::new();
+    // Per table: the stored author codes of each record, in key order.
+    let mut codes = BTreeMap::<&str, Vec<Vec<u32>>>::new();
+    for family in &families {
+        let handle = db.cf_handle(family).unwrap();
+        for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
+            let (key, value) = entry.unwrap();
+            if family == "__groove_dictionary_authors" {
+                dictionary.push((key.to_vec(), value.to_vec()));
+                continue;
+            }
+            // Class table ids are unique per class, so match the class too.
+            let classes = [
+                "__groove_class_meta",
+                "__groove_class_history",
+                "__groove_class_global_current",
+                "__groove_class_ahead_current",
+            ];
+            let Some((name, table)) = tables.iter().zip(classes).find_map(|((name, table), class)| {
+                (family == class
+                    && key.len() > 4
+                    && groove::storage::class_table_id(name)
+                        .is_ok_and(|id| key[..4] == id.to_be_bytes()))
+                .then_some((name, table))
+            }) else {
+                continue;
+            };
+            for author in [alice, bob] {
+                assert!(
+                    !value
+                        .windows(encoded(author).len())
+                        .any(|window| window == encoded(author)),
+                    "{name} stores a code, never the full author"
+                );
+            }
+            let (tag, payload) = groove::records::split_variant_record(&value).unwrap();
+            let descriptor = table.storage_record_schema_for_variant(tag).unwrap();
+            let record = OwnedRecord::new(payload.to_vec(), descriptor);
+            let columns: &[&str] = if name == "jazz_transactions" {
+                &["made_by"]
+            } else {
+                &["created_by", "updated_by"]
+            };
+            codes.entry(name).or_default().push(
+                columns
+                    .iter()
+                    .map(|column| {
+                        let index = descriptor.field_index(column).unwrap();
+                        assert_eq!(
+                            descriptor.fields()[index].value_type,
+                            crate::schema::interned_author_type()
+                        );
+                        match record.borrowed().get_idx(index).unwrap() {
+                            Value::U32(code) => code,
+                            other => panic!("{name}.{column} stores {other:?}"),
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    drop(db);
+
+    assert_eq!(
+        dictionary,
+        vec![
+            (0u32.to_be_bytes().to_vec(), encoded(alice).to_vec()),
+            (1u32.to_be_bytes().to_vec(), encoded(bob).to_vec()),
+        ],
+        "one entry per distinct author, in first-use order"
+    );
+    let (alice_code, bob_code) = (0, 1);
+    let sorted = |mut rows: Vec<Vec<u32>>| {
+        rows.sort();
+        rows
+    };
+    assert_eq!(
+        sorted(codes.remove("jazz_transactions").unwrap()),
+        sorted(vec![
+            vec![alice_code],
+            vec![bob_code],
+            vec![bob_code],
+            vec![alice_code],
+        ])
+    );
+    assert_eq!(
+        sorted(codes.remove(tables[1].0.as_str()).unwrap()),
+        sorted(vec![
+            vec![alice_code, alice_code],
+            vec![bob_code, bob_code],
+            vec![alice_code, bob_code],
+            vec![alice_code, alice_code],
+        ]),
+        "history: created_by, updated_by of every image"
+    );
+    assert_eq!(
+        sorted(codes.remove(tables[2].0.as_str()).unwrap()),
+        sorted(vec![vec![alice_code, bob_code], vec![bob_code, bob_code]]),
+        "global current"
+    );
+    assert_eq!(
+        codes.remove(tables[3].0.as_str()).unwrap(),
+        vec![vec![alice_code, alice_code]],
+        "ahead current"
+    );
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    for (index, (tx_id, author)) in committed.into_iter().enumerate() {
+        assert_eq!(
+            reopened.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
+            author
+        );
+        let [version] = reopened
+            .stored_versions_for_tx_for_test(tx_id)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(version.updated_by(), author);
+        // Bob's edit keeps alice as the row's creator.
+        let creator = if index == 2 { alice } else { author };
+        assert_eq!(version.created_by(), creator);
+    }
 }

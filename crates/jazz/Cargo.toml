@@ -208,6 +208,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "stored_arrangement_memory"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "accepted_fate_replay"
 harness = false
 required-features = ["testing"]

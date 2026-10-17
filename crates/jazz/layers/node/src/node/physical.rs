@@ -29,7 +29,9 @@ pub(super) struct PreparedPhysicalWritePlan {
     pub(super) physical_descriptor: records::RecordDescriptor,
     history_descriptor: records::RecordDescriptor,
     write_fields: Vec<PhysicalWriteField>,
-    enum_remaps: Vec<EnumOccurrenceRemaps>,
+    pub(super) enum_remaps: Vec<EnumOccurrenceRemaps>,
+    /// Writes the schema's union case (`union_variant_tag`).
+    union: bool,
 }
 
 #[derive(Debug)]
@@ -42,12 +44,17 @@ enum PhysicalWriteField {
     },
     CreatedAtMillis,
     UpdatedAtMillis,
-    /// A current row's `updated_by`: always stored.
+    /// A current row's `updated_by`.
     UpdatedBy,
-    /// A history image's `updated_by`: null when it is the author of the
-    /// image's own transaction, which a read takes from that transaction.
-    HistoryUpdatedBy,
     GlobalTime,
+}
+
+/// One Groove row case a source schema's rows can be stored under.
+struct SourceRowCase {
+    tag: u32,
+    present: Option<BTreeSet<String>>,
+    /// Lineage columns a union case carries beyond the schema's own.
+    extras: Vec<PhysicalColumnId>,
 }
 
 include!("physical/catalogue.rs");
@@ -57,4 +64,5 @@ include!("physical/enum_lookup.rs");
 include!("physical/projections.rs");
 include!("physical/storage.rs");
 include!("physical/descriptors.rs");
+include!("physical/union.rs");
 include!("physical/tests.rs");

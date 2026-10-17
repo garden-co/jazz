@@ -100,8 +100,9 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
+        self.schema.validate_table_interning(&table)?;
         self.table_storage_descriptors
-            .insert(table.name.clone(), table.record_schema());
+            .insert(table.name.clone(), table.storage_record_schema());
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
@@ -128,6 +129,16 @@ impl IvmRuntime {
         columns: Vec<crate::schema::ColumnSchema>,
         variant_tag: crate::schema::TableVariant,
     ) -> Result<(), IvmRuntimeError> {
+        {
+            let mut candidate = self
+                .schema
+                .table(table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+                .clone();
+            candidate.columns.extend(columns.iter().cloned());
+            candidate.variants.push(variant_tag.clone());
+            self.schema.validate_table_interning(&candidate)?;
+        }
         let table_schema = self
             .schema
             .tables
@@ -161,7 +172,7 @@ impl IvmRuntime {
         }
         table_schema.variants.push(variant_tag);
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
         let descriptor = table_schema
             .record_schema_for_variant(version)
             .expect("the newly registered variant exists");
@@ -243,7 +254,7 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
         if !table_schema.has_variants() {
             // Registry evolution changes column types; the plain-table
             // descriptor must follow, as registration keeps it.

@@ -10,7 +10,6 @@
 use super::*;
 use crate::protocol::{CatalogueAck, RowBase, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{commit_unit_limit_violation, validate_shape_registration_size};
-use crate::schema::ColumnSchema;
 
 /// How long a write chained on a predecessor parked at the authority (its
 /// schema not known yet) waits behind it, measured from when the predecessor
@@ -51,6 +50,7 @@ include!("ingest/catalogue.rs");
 include!("ingest/commit_bundles.rs");
 include!("ingest/fates.rs");
 include!("ingest/view_updates.rs");
+include!("ingest/union_merge.rs");
 include!("ingest/validation.rs");
 include!("ingest/write_base.rs");
 

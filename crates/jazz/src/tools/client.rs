@@ -2321,9 +2321,11 @@ impl ClientDbInner {
                                 let previous = current_rows
                                     .iter()
                                     .find(|row| row.occurrence_id == occurrence)
-                                    .ok_or_else(|| crate::db::Error {
-                                        code: crate::db::ErrorCode::Protocol,
-                                        message: "terminal edit addressed a missing tools subscription root".into(),
+                                    .ok_or_else(|| {
+                                        crate::db::Error::new(
+                                            crate::db::ErrorCode::Protocol,
+                                            "terminal edit addressed a missing tools subscription root",
+                                        )
                                     })?;
                                 if !changed.contains_key(&occurrence) {
                                     let (descriptor, raw) = previous.row.encoded_record();
@@ -2804,8 +2806,26 @@ async fn core_storage(
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
                 )
                 .await
-                .map_err(|error| JazzError::Connection(error.to_string()))
+                .map_err(persistent_storage_open_error)
         }
+    }
+}
+
+/// A store in a format this build does not read is a typed refusal the
+/// application acts on (wipe and resync); any other open failure stays a
+/// connection error.
+fn persistent_storage_open_error(error: crate::groove::storage::Error) -> JazzError {
+    match error {
+        crate::groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        } => JazzError::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        },
+        other => JazzError::Connection(other.to_string()),
     }
 }
 
@@ -4527,10 +4547,7 @@ mod tests {
     }
 
     fn tick_reconnect_error() -> CoreDbError {
-        CoreDbError {
-            code: CoreDbErrorCode::Protocol,
-            message: "websocket pump is closed".to_owned(),
-        }
+        CoreDbError::new(CoreDbErrorCode::Protocol, "websocket pump is closed")
     }
 
     fn make_native_context(name: &str) -> AppContext {
@@ -5686,10 +5703,10 @@ mod tests {
         ))
         .await
         .expect("connect offline client");
-        let error = CoreDbError {
-            code: CoreDbErrorCode::Storage,
-            message: "simulated local storage corruption".to_string(),
-        };
+        let error = CoreDbError::new(
+            CoreDbErrorCode::Storage,
+            "simulated local storage corruption",
+        );
 
         assert_eq!(
             classify_tick_driver_error(&error),
