@@ -1631,15 +1631,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     this.bindTable(table);
-    const id = options?.id ?? reserveRowId();
-    const { values, value } = this.prepareCreation(table, data, id, "Insert");
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
+    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    const { values, value } = this.prepareCreation(table, data, id, "Insert");
+    if (!id && (preparation.pending || getOwnerPreparation(client)?.pending)) id = reserveRowId();
+    let row: ReturnType<typeof client.insertInternal> | undefined;
     const stage = () => {
-      client.insertInternal(
+      row = client.insertInternal(
         table._table,
         values,
-        normalizeSelectorOptions(table._schema, table._table, { ...options, id }),
+        normalizeSelectorOptions(table._schema, table._table, id ? { ...options, id } : options),
         session,
         attribution,
         openTransactionId,
@@ -1652,7 +1654,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (!preparation.cancelled) stage();
         }),
       );
-    return value;
+    try {
+      return (
+        value ??
+        (row
+          ? transformOutputRow(table, transformRow(row, table._schema, table._table))
+          : immediateWriteRow(table, id!, values))
+      );
+    } catch (error) {
+      preparation.failure = error;
+      throw error;
+    }
   }
 
   /**
@@ -1689,19 +1701,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (!preparation.cancelled) stage();
         }),
       );
-    return value;
+    return value!;
   }
 
   private prepareCreation<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    id: string,
+    id: string | undefined,
     operation: "Insert" | "Restore",
   ) {
     let record: Record<string, unknown>;
     try {
       record = table._columnTransforms
-        ? transformInputColumns(table, data, { id }, true)
+        ? transformInputColumns(table, data, id === undefined ? undefined : { id }, true)
         : (data as Record<string, unknown>);
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
@@ -1709,7 +1721,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
     try {
-      return { values, value: immediateWriteRow(table, id, values) };
+      return { values, value: id === undefined ? undefined : immediateWriteRow(table, id, values) };
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
       throw error;

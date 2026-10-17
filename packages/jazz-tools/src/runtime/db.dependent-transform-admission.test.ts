@@ -44,7 +44,7 @@ it.each(["mergeable", "exclusive"] as const)(
       expect(plain).toEqual({ id: expect.any(String), title: "plain" });
       expect(transformed).toEqual({ id: expect.any(String), title: "MIXED" });
       expect(insert.mock.calls.map((call) => call[2]?.id)).toEqual([undefined, undefined]);
-      await tx.commit().wait();
+      await tx.commit().wait({ tier: "local" });
       await expect(db.one(app.plain.where({ id: plain.id }))).resolves.toEqual(plain);
       await expect(db.one(app.transformed.where({ id: transformed.id }))).resolves.toEqual(
         transformed,

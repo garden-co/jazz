@@ -89,6 +89,8 @@ Jazz fetches missing dependencies automatically. Reads, included rows, relations
 
 Updates and upserts fetch only the missing dependency columns in the mutation's session, branch and transaction view. Insert, restore and the creation branch of upsert can use schema defaults; an explicit `null` is preserved. Fetched dependencies are context only and are never written back. Lookup and conversion failures reject the write handle or transaction. Transaction updates retain their existing calling style, including unawaited updates inside a transaction callback.
 
+If a transform callback or dependency lookup fails inside an explicit transaction, that transaction cannot commit, even if you catch the error. Roll it back and start a new transaction. This also applies to one-argument transform callbacks. A caught synchronous input validation error before staging does not, by itself, invalidate the transaction.
+
 On a serving host, an empty user-scoped lookup may mean the row is hidden by permissions. Jazz rejects that upsert rather than assuming the row is absent and using creation defaults. Supply the transform's dependencies explicitly when creating a row through that scope.
 
 Changing only `denomination` leaves the stored `price` untouched. Subsequent reads and subscription updates reinterpret it using the new denomination. To preserve the app-facing price while changing denomination, supply both fields in the same write.
