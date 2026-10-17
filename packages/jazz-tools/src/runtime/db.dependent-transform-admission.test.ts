@@ -15,6 +15,47 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
+it.each(["mergeable", "exclusive"] as const)(
+  "keeps generated IDs native for immediate %s transaction inserts without dependencies",
+  async (kind) => {
+    const app = s.defineApp({
+      plain: s.table({ title: s.string() }, {}),
+      transformed: s.table(
+        {
+          title: s.string().transform({
+            from: (value) => value.toUpperCase(),
+            to: (value: string) => value.toLowerCase(),
+          }),
+        },
+        {},
+      ),
+    });
+    const source = new PreparationSource();
+    const db = await createAccountDbWithRuntimeSource(
+      await localAccountConfig(`transform-insert-${crypto.randomUUID()}`),
+      source,
+    );
+    try {
+      await db.one(app.plain);
+      const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+      const insert = vi.spyOn(source.client, "insertInternal");
+      const plain = tx.insert(app.plain, { title: "plain" });
+      const transformed = tx.insert(app.transformed, { title: "Mixed" });
+      expect(plain).toEqual({ id: expect.any(String), title: "plain" });
+      expect(transformed).toEqual({ id: expect.any(String), title: "MIXED" });
+      expect(insert.mock.calls.map((call) => call[2]?.id)).toEqual([undefined, undefined]);
+      await tx.commit().wait();
+      await expect(db.one(app.plain.where({ id: plain.id }))).resolves.toEqual(plain);
+      await expect(db.one(app.transformed.where({ id: transformed.id }))).resolves.toEqual(
+        transformed,
+      );
+    } finally {
+      vi.restoreAllMocks();
+      await db.shutdown();
+    }
+  },
+);
+
 it("retains transaction admission when an earlier transform lookup delays opening", async () => {
   const app = s.defineApp({
     prices: s.table(
