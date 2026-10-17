@@ -4063,6 +4063,29 @@ fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
             ..
         }
     ));
+    // An accepted successor supersedes the parent's image. History holds only
+    // superseded images and eviction removes only those (the row's latest
+    // accepted image is its current record), so the parent's image is the
+    // evictable one (SPEC 2 §2.7.1).
+    let successor = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("accepted successor", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert!(matches!(
+        worker.write_state(successor.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
 
     let child = worker
         .update(

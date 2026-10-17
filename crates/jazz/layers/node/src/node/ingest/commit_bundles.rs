@@ -742,6 +742,35 @@ where
                     version_bundles.push(version);
                     continue;
                 }
+                if seq != GlobalTime(0) {
+                    // An accepted image is held once: in current while it is
+                    // the row's latest, in history once superseded (SPEC 2
+                    // §2.7.1). Compare with whichever holds it; a new one is
+                    // staged plainly, since installing it as current drops
+                    // its history copy in this batch.
+                    match self
+                        .stored_image_record(
+                            Some(&batch),
+                            table.as_ref(),
+                            &stored.branch_key().canonical_bytes(),
+                            stored.row_uuid(),
+                            &[seq],
+                            stored.tx_time(),
+                            stored.tx_node_alias(),
+                        )
+                        .await?
+                    {
+                        Some(existing) if existing.raw() != record.record().raw() => {
+                            return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                        }
+                        Some(_) => previously_stored.push(stored),
+                        None => {
+                            batch.update_raw(table.as_ref(), key, record);
+                            version_bundles.push(version);
+                        }
+                    }
+                    continue;
+                }
                 match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
                     groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
                     groove::db::EnsureExactOutcome::AlreadyIdentical => previously_stored.push(stored),
@@ -1074,12 +1103,22 @@ where
                     continue;
                 }
             }
-            winning_updates.insert(key, (stored, global_time));
+            winning_updates.insert(key, (stored, global_time, has_resident_rows));
         }
-        let current_updates = winning_updates;
-        for (stored, global_time) in current_updates.values() {
-            self.write_global_current_update(&mut batch, stored, *global_time)?;
+        for (stored, global_time, has_resident_rows) in winning_updates.values() {
+            // A table with no current rows has no image to supersede.
+            self.write_global_current_update_over(
+                &mut batch,
+                stored,
+                *global_time,
+                *has_resident_rows,
+            )
+            .await?;
         }
+        let current_updates = winning_updates
+            .into_iter()
+            .map(|(key, (stored, global_time, _))| (key, (stored, global_time)))
+            .collect::<BTreeMap<_, _>>();
         // A new synced image rebases any pending local patches on that row.
         let settling = current_updates
             .values()

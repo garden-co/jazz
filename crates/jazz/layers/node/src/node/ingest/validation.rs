@@ -353,6 +353,15 @@ where
             )?;
             let stored = self.with_wire_union_cells(stored, &version)?;
             let mut stored = stored;
+            // The row's key in `pending_global_updates`. Core's merged
+            // post-image may be laid out in the row's current table (a union
+            // row case after a rename), so it is taken from the write as it
+            // arrived.
+            let current_key = (
+                stored.table().to_owned(),
+                stored.branch_key().clone(),
+                stored.row_uuid(),
+            );
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if let Some(global_time) = global_time
                     && self.minting_global_time
@@ -413,7 +422,15 @@ where
             // Rejected payloads go directly to rejection cleanup. Inserting
             // immutable history and deleting it in the same batch would violate
             // ensure_exact's promise that admitted immutable bytes survive.
-            if !matches!(fate, Fate::Rejected(_)) {
+            // An image that becomes the row's current image is stored in
+            // current alone: history holds only superseded images (SPEC 2
+            // §2.7.1). `write_global_current_update` below drops its pending
+            // record and moves the image it supersedes into history.
+            let becomes_current = update_current_indexes
+                && matches!(fate, Fate::Accepted)
+                && global_time.is_some()
+                && pending_global_updates.contains_key(&current_key);
+            if !matches!(fate, Fate::Rejected(_)) && !becomes_current {
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 let storage_key = self.version_storage_primary_key(&stored)?;
                 if tx_already_known && stored.seq()? != GlobalTime(0) {
@@ -446,7 +463,8 @@ where
         if update_current_indexes && matches!(fate, Fate::Accepted) {
             if let Some(global_time) = global_time {
                 for stored in pending_global_updates.values() {
-                    self.write_global_current_update(batch, stored, global_time)?;
+                    self.write_global_current_update(batch, stored, global_time)
+                        .await?;
                 }
                 let synced = pending_global_updates.values().cloned().collect::<Vec<_>>();
                 self.rebase_ahead_overlays(batch, &synced, &BTreeSet::from([tx.tx_id]))

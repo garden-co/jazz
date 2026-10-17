@@ -2825,24 +2825,36 @@ where
             .primary_key_scan_raw(&current_table, &[Value::Bytes(branch.canonical_bytes())])
             .await?
             .into_iter()
-            .map(|raw| raw.owned_record())
+            .map(|raw| (raw.variant_tag(), raw.owned_record()))
             .collect::<Vec<_>>();
         let mut rows = Vec::new();
-        for record in records {
+        for (variant_tag, record) in records {
             let record = record.borrowed();
             let row_uuid = RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
             let seq = record
                 .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
                 .unwrap_or(0);
             let version = if seq <= position.0 {
-                let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-                let tx_node =
-                    NodeAlias(record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-                self.query_version_by_alias(table, row_uuid, tx_time, tx_node)
-                    .await?
-                    .ok_or(Error::InvalidStoredValue(
-                        "historical row winner is missing",
-                    ))?
+                // The row's latest image is its current record; history
+                // holds only superseded images (SPEC 2 §2.7.1).
+                if let Some(version) = self.history_image_from_current_record(
+                    self.catalogue.local_schema_version_id,
+                    table,
+                    variant_tag,
+                    record,
+                )? {
+                    version
+                } else {
+                    let tx_time =
+                        TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+                    let tx_node =
+                        NodeAlias(record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                    self.query_version_by_alias(table, row_uuid, tx_time, tx_node)
+                        .await?
+                        .ok_or(Error::InvalidStoredValue(
+                            "historical row winner is missing",
+                        ))?
+                }
             } else {
                 let mut best: Option<(GlobalTime, VersionRow)> = None;
                 for version in self

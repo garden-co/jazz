@@ -163,7 +163,10 @@ where
         let mut seen_pinned_txs = BTreeSet::new();
         let mut evictable = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
-            for version in self.query_table_versions(&table.name).await? {
+            // Eviction removes history bodies. A row's latest accepted image
+            // is its global-current record, not a history body (SPEC 2
+            // §2.7.1), so it is never a candidate here.
+            for version in self.query_table_history_versions(&table.name).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 match self.classify_row_version_for_eviction(tx_id).await? {
                     ClientCacheClass::Evictable => {

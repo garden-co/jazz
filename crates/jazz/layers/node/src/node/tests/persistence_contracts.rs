@@ -302,7 +302,9 @@ fn successful_authority_finalization_uses_one_atomic_storage_batch() {
         .unwrap();
 
     let (mut core, storage) = fail_write_many_node();
-    let history = core.subscribe_history("todos").unwrap();
+    // An accepted image lands in global current; history holds only
+    // superseded images (SPEC 2 §2.7.1).
+    let history = core.subscribe_global_current("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
     let writes_before = storage.write_many_call_count();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -378,7 +380,9 @@ fn commit_unit_publishes_one_resident_delta_immediately() {
         .unwrap();
 
     let (mut core, _) = fail_write_many_node();
-    let history = core.subscribe_history("todos").unwrap();
+    // An accepted image lands in global current; history holds only
+    // superseded images (SPEC 2 §2.7.1).
+    let history = core.subscribe_global_current("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")

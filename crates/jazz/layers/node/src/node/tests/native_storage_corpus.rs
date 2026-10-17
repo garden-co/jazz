@@ -42,25 +42,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "844164cc7f8ef8726ff1960b92b9485d7c1ee64b773360b31b6e0233b7debe3a";
+    "41e4d8c066fd1d69b805222298a272b1fa65d63c5aaf900ed852d30fa46a37a0";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "e803f58b999c905721609c49c160e4dee25369cf6ba24c6f23318b20fe986292";
+    "3cde2455ceb1865e0b26dad2e211f4fa485d9738a2f6ee326359040d70ac6b5f";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "844164cc7f8ef8726ff1960b92b9485d7c1ee64b773360b31b6e0233b7debe3a";
+    "41e4d8c066fd1d69b805222298a272b1fa65d63c5aaf900ed852d30fa46a37a0";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "1801ac0b4862a7d0d367e44389a9226867b92eb85bbbfee0a6020da9c3e176d4";
+    "d5f147c8f49779cfe3af9e841817f7a1b59a20e91c66028a113e8edca657b898";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "9e44fde8e100951ffcd09921ddb9689067048e1028d305b35c8585f8c88d6765";
+    "d3f92cb74553585e87ad77b7562a0135a1ce5c36015c3b87a0b93cceb428aa31";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "0e98d46795d79c7b84e70b90d7f968f3e3c9d601866150300752d95cf596050f";
+    "13a764fc200da6a82c351afb05566927485146d90b3d1eb50eb62faefd0ac5c3";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =

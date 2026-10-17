@@ -1308,6 +1308,20 @@ pub(super) fn physical_current_field_names(
     physical_current_field_names_for_case(table, mapping, None)
 }
 
+/// The physical current fields a read projects: every stored field but the
+/// base (`base_seq`, `base_pending`), which reads never publish.
+pub(super) fn physical_current_read_field_names(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<Vec<String>, Error> {
+    Ok(physical_current_field_names(table, mapping)?
+        .into_iter()
+        .filter(|name| {
+            name != crate::schema::BASE_SEQ_FIELD && name != crate::schema::BASE_PENDING_FIELD
+        })
+        .collect())
+}
+
 fn physical_current_field_names_for_case(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
@@ -1318,7 +1332,11 @@ fn physical_current_field_names_for_case(
         mapping,
         present,
         GlobalCurrentRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns"],
+        &[
+            "authored_columns",
+            crate::schema::BASE_SEQ_FIELD,
+            crate::schema::BASE_PENDING_FIELD,
+        ],
         "physical current column mapping missing",
     )
 }

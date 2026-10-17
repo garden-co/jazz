@@ -1570,8 +1570,9 @@ fn late_check_cost(
 /// since the write's base, never the row's whole history. dave edits the
 /// row 60 times; carol syncs, edits twice offline, and her second edit
 /// arrives first; dave edits twice more. Checking carol's late first edit
-/// reads only the three records after her base, as does an on-time write
-/// over the same stale base; a write without a base reads no history record
+/// reads only the records after her base, as does an on-time write over the
+/// same stale base: history holds the two superseded ones, and the newest is
+/// the row's current image. A write without a base reads no history record
 /// at all.
 ///
 /// ```text
@@ -1579,7 +1580,7 @@ fn late_check_cost(
 /// carol (synced at d60) ═offline═ c1, c2
 /// carol ──c2──► core   accepted           marker: carol through c1
 /// dave  ──d61, d62──► core
-/// carol ──c1──► core   late: reads c2, d61, d62 only
+/// carol ──c1──► core   late: reads c2, d61 only (d62 is current)
 /// ```
 #[test]
 fn late_write_check_reads_only_the_writes_since_the_base() {
@@ -1612,10 +1613,12 @@ fn late_write_check_reads_only_the_writes_since_the_base() {
     let (late, metrics) = late_check_cost(&mut core, &c1_unit, current, d62);
     assert!(late, "c1 arrived after carol's c2");
     assert_eq!(metrics.history_rows.ranges, 1, "{metrics:?}");
-    assert_eq!(metrics.history_rows.reads, 3, "c2, d61 and d62: {metrics:?}");
+    // History holds only superseded images: d62 is the row's current
+    // image, whose writer the check compares without reading history.
+    assert_eq!(metrics.history_rows.reads, 2, "c2 and d61: {metrics:?}");
 
     // A write of dave's over the same stale base (d60) is not late, and
-    // reads the same three records.
+    // reads the same two records.
     let (_, on_time) = offline_edit(&mut writers[1].1, target, 304, &[("title", "d")]);
     let c1_base = match &c1_unit {
         SyncMessage::CommitUnit { versions, .. } => versions[0].base(),
@@ -1630,7 +1633,7 @@ fn late_write_check_reads_only_the_writes_since_the_base() {
     );
     let (late, metrics) = late_check_cost(&mut core, &stale, current, c2);
     assert!(!late);
-    assert_eq!(metrics.history_rows.reads, 3, "{metrics:?}");
+    assert_eq!(metrics.history_rows.reads, 2, "{metrics:?}");
 
     // A write without a base seq reads the writer's marker, not history.
     let (_frank_dir, mut frank) = open_node_with_schema(node(0x31), two_column_schema());

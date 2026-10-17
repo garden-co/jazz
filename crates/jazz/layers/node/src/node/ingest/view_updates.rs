@@ -439,24 +439,17 @@ where
         );
         for storage_table in self.version_storage_sources(table)? {
             let _ = schema_version;
-            let mut record = None;
-            for seq in &seqs {
-                let key = history_key_values(
+            let record = self
+                .stored_image_record(
+                    Some(batch),
+                    &storage_table,
                     &branch_key.canonical_bytes(),
                     row_uuid,
-                    *seq,
+                    &seqs,
                     tx_time,
                     tx_node_alias,
-                );
-                record = self
-                    .database
-                    .primary_key_get_raw_in_batch(batch, &storage_table, &key)
-                    .await?
-                    .map(|raw| raw.owned_record());
-                if record.is_some() {
-                    break;
-                }
-            }
+                )
+                .await?;
             let Some(record) = record else {
                 continue;
             };
@@ -526,6 +519,45 @@ where
             }
             self.assert_global_current_row_matches_version_for_test(version, *global_time)
                 .await?;
+            // History holds only superseded images: the current image has no
+            // history copy (SPEC 2 §2.7.1).
+            let schema_version = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+            let history_table = physical_history_table_name(
+                self.physical_table_id_for_schema(schema_version, version.table())?,
+            );
+            let key = history_key_values(
+                &version.branch_key().canonical_bytes(),
+                version.row_uuid(),
+                *global_time,
+                version.tx_time(),
+                version.tx_node_alias(),
+            );
+            let duplicated = self
+                .database
+                .primary_key_get_raw(&history_table, &key)
+                .await?
+                .is_some();
+            let current_converts = self
+                .current_image_records(
+                    &history_table,
+                    &[
+                        Value::Bytes(version.branch_key().canonical_bytes()),
+                        Value::Uuid(version.row_uuid().0),
+                    ],
+                )
+                .await?
+                .len()
+                == 1;
+            if duplicated && current_converts {
+                panic!(
+                    "history duplicates the current image of {}/{:?} at seq {:?}",
+                    version.table(),
+                    version.row_uuid(),
+                    global_time
+                );
+            }
         }
         Ok(())
     }
@@ -584,18 +616,38 @@ where
         Ok(())
     }
 
-    pub(super) fn write_history_post_image(
+    /// Store an accepted write's record in history at its seq, moving its
+    /// pending record (if any) there. Used for an accepted write whose image
+    /// is not the row's current image: history holds only superseded images
+    /// (SPEC 2 §2.7.1). When the row's current image is this write's at the
+    /// same seq, current already holds it, and only the pending record goes.
+    pub(super) async fn write_superseded_history_record(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
     ) -> Result<(), Error> {
         let (history_table, record) = self.version_storage_write_binding(version)?;
-        if version.seq()? != GlobalTime(0) {
-            // An accepted write's pending record, if any, moves to its seq.
+        let seq = version.seq()?;
+        if seq != GlobalTime(0) {
             batch.delete(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&version.with_seq(GlobalTime(0))?)?,
             );
+            let schema_version = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+            let current = self
+                .global_current_seq_and_writer_in_batch(
+                    batch,
+                    schema_version,
+                    version.table(),
+                    version.branch_key(),
+                    version.row_uuid(),
+                )
+                .await?;
+            if current == Some((Some(seq), Some(self.version_tx_id(version)?))) {
+                return Ok(());
+            }
         }
         batch.update_raw(
             history_table.as_ref(),
@@ -605,23 +657,166 @@ where
         Ok(())
     }
 
-    pub(super) fn write_global_current_update(
+    /// Move the row's global-current image into history at its own seq when
+    /// `version` at `global_time` supersedes it: the image is at a lower seq
+    /// and was written by another transaction. The history record is built
+    /// from the current record's bytes, so the image and its base move
+    /// verbatim. A current layout that cannot be converted kept its history
+    /// copy when it was written, so nothing moves.
+    async fn supersede_global_current_in_batch(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        schema_version: SchemaVersionId,
+        history_table: &str,
+        version: &VersionRow,
+        global_time: GlobalTime,
+    ) -> Result<(), Error> {
+        let current_table = self.physical_current_table_for_schema(
+            schema_version,
+            version.table(),
+            PhysicalCurrentClass::Global,
+        )?;
+        let Some((variant_tag, current)) = self
+            .database
+            .primary_key_get_raw_in_batch(
+                batch,
+                &current_table,
+                &[
+                    Value::Bytes(version.branch_key().canonical_bytes()),
+                    Value::Uuid(version.row_uuid().0),
+                ],
+            )
+            .await?
+            .map(|raw| (raw.variant_tag(), raw.owned_record()))
+        else {
+            return Ok(());
+        };
+        let record = current.borrowed();
+        let Some(previous_seq) =
+            record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+        else {
+            return Ok(());
+        };
+        let previous_writer = (
+            record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?,
+            record.get_u32(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
+        );
+        if previous_seq >= global_time.0
+            || previous_writer == (version.tx_time().0, version.tx_node_alias().0)
+        {
+            return Ok(());
+        }
+        let Some(history_record) =
+            self.history_record_from_current(history_table, variant_tag, record)?
+        else {
+            return Ok(());
+        };
+        let (branch_key, row_uuid, seq, tx_time, tx_node_alias) =
+            history_record_identity(&history_record)?;
+        batch.update_raw(
+            history_table.to_owned(),
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::Bytes(branch_key),
+                PrimaryKeyValue::Uuid(row_uuid.0),
+                PrimaryKeyValue::U64(seq),
+                PrimaryKeyValue::U64(tx_time),
+                PrimaryKeyValue::U32(tx_node_alias),
+            ]),
+            groove::records::VariantRecord::new(variant_tag, history_record),
+        );
+        Ok(())
+    }
+
+    /// Make `version` the row's global-current image at `global_time`.
+    ///
+    /// History holds only superseded images; the latest is in current alone
+    /// (SPEC 2 §2.7.1). So the row's previous current image, when this write
+    /// supersedes it (it is at a lower seq), first moves into history at its
+    /// own seq, whole and with its base. Then current is overwritten, and any
+    /// history copy of the new image (the record an ingest path staged at
+    /// its seq, or its pending record at seq 0) is dropped from this batch.
+    pub(super) async fn write_global_current_update(
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
         global_time: GlobalTime,
     ) -> Result<(), Error> {
+        self.write_global_current_update_over(batch, version, global_time, true)
+            .await
+    }
+
+    /// [`Self::write_global_current_update`]; `may_have_current` is false
+    /// only when the caller proved the current table holds no rows, so there
+    /// is no image to supersede and the cold load path reads nothing.
+    pub(super) async fn write_global_current_update_over(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        version: &VersionRow,
+        global_time: GlobalTime,
+        may_have_current: bool,
+    ) -> Result<(), Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        let history_table = physical_history_table_name(table_id);
+        // The image may live only in current: list the row for its
+        // transaction like any history write.
+        self.mark_tx_touched_row(table_id, version);
+        if may_have_current {
+            self.supersede_global_current_in_batch(
+                batch,
+                schema_version,
+                &history_table,
+                version,
+                global_time,
+            )
+            .await?;
+        }
         let plan =
             self.prepared_physical_write_plan_for_row(version, PhysicalWriteTarget::GlobalCurrent)?;
         // Validate node-local authored column aliases before deriving
         // the current carrier; encoding itself retains trusted bytes.
         let _ = self.authored_columns_for_version(version)?;
-        let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
+        let at_seq = version.with_seq(global_time)?;
+        let physical = self.encode_physical_version_record(&plan, &at_seq, Some(global_time))?;
+        // Current keeps the only copy of the latest image when it can give
+        // the history record back; a layout it cannot convert keeps its
+        // history copy as well.
+        let converts = self
+            .history_record_from_current(
+                &history_table,
+                physical.variant_tag(),
+                physical.record().borrowed(),
+            )?
+            .is_some();
         batch.update_raw(
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
+        if converts {
+            batch.delete(
+                history_table.clone(),
+                self.version_storage_primary_key(&at_seq)?,
+            );
+            batch.delete(
+                history_table,
+                self.version_storage_primary_key(&at_seq.with_seq(GlobalTime(0))?)?,
+            );
+        } else {
+            // Not convertible: history keeps the image at its seq.
+            let (history_table, record) = self.version_storage_write_binding(&at_seq)?;
+            batch.delete(
+                history_table.as_ref(),
+                self.version_storage_primary_key(&at_seq.with_seq(GlobalTime(0))?)?,
+            );
+            batch.update_raw(
+                history_table.as_ref(),
+                self.version_storage_primary_key(&at_seq)?,
+                record,
+            );
+        }
         Ok(())
     }
 

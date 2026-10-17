@@ -4203,6 +4203,37 @@ pub(super) fn history_seq_candidates(global_time: Option<GlobalTime>) -> Vec<Glo
     }
 }
 
+/// A history record's key: `(branch_key, row_uuid, seq, tx_time,
+/// tx_node_id)`.
+pub(super) fn history_record_identity(
+    record: &OwnedRecord,
+) -> Result<(Vec<u8>, RowUuid, u64, u64, u32), Error> {
+    let view = record.borrowed();
+    let seq = match view.descriptor().field_index(crate::schema::SEQ_FIELD) {
+        Some(index) => view.get_u64(index)?,
+        None => 0,
+    };
+    let branch_key = match view.get_idx(HistoryRowRecord::FIELD_BRANCH_KEY_IDX)? {
+        Value::Bytes(bytes) => bytes,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "history branch_key must be bytes",
+            ));
+        }
+    };
+    let row_uuid = match view.get_idx(HistoryRowRecord::FIELD_ROW_UUID_IDX)? {
+        Value::Uuid(uuid) => RowUuid(uuid),
+        _ => return Err(Error::InvalidStoredValue("history row_uuid must be a uuid")),
+    };
+    Ok((
+        branch_key,
+        row_uuid,
+        seq,
+        view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
+        view.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
+    ))
+}
+
 /// The history key values of a stored write, for point reads.
 pub(super) fn history_key_values(
     branch_key: &[u8],
@@ -4286,6 +4317,9 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
+    let base = version.base()?;
+    values.push(base_seq_value(base));
+    values.push(base_pending_value(base));
     values.extend(
         version
             .union_extra_cells()?
