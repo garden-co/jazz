@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
+import admissionGolden from "../../fixtures/browser-storage-admission-v1.json";
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
@@ -398,11 +399,26 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawWhileReopened,
       rawAfterReadOnlyInspection,
     );
-    // The corpus is already in this build's layout, so a read-only open has no
-    // upgrade to perform: every page, metadata record and manifest entry must
-    // come back byte-identical, apart from the opaque lease token checked above.
+    // Epoch-one admission changes only the manifest and its exact JSA1
+    // receipt. Every page, B-tree metadata record and owner record stays
+    // byte-identical, apart from the opaque lease token checked above.
+    const expectedAfterAdmission = {
+      ...rawBeforeReadOnlyInspection,
+      [INDEXEDDB_STORAGE_MANIFEST_STORE]: JSON.stringify(
+        [
+          ...rawManifest(rawBeforeReadOnlyInspection).filter(
+            ([key]) => key !== INDEXEDDB_STORAGE_MANIFEST_KEY,
+          ),
+          [INDEXEDDB_STORAGE_MANIFEST_KEY, INDEXEDDB_STORAGE_MANIFEST],
+          [
+            INDEXEDDB_STORAGE_ADMISSION_KEY,
+            Array.from(admissionGolden.completed.match(/../g)!, (byte) => parseInt(byte, 16)),
+          ],
+        ].sort(([left], [right]) => String(left).localeCompare(String(right))),
+      ),
+    };
     expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
-      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+      normalizeRuntimeLeaseRecords(expectedAfterAdmission),
     );
 
     // A second read-only open must also preserve the complete raw receipt,

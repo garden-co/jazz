@@ -1154,7 +1154,7 @@ function assertStorageManifest(
       missing,
       unknown,
       `Missing or invalid IndexedDB storage epoch manifest: unsupported storage format: ` +
-        `this epoch-${INDEXEDDB_STORAGE_EPOCH} root lacks codec families ${JSON.stringify(missing)} ` +
+        `this epoch-${expected.storageEpoch} root lacks codec families ${JSON.stringify(missing)} ` +
         `required by this build and declares ${JSON.stringify(unknown)} that this build does not read`,
     );
   }

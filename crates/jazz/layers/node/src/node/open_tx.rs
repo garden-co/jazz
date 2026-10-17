@@ -350,7 +350,16 @@ where
         let mut accepted_e2ee_dots = Vec::new();
         let mut accepted_e2ee_dot_positions = BTreeMap::new();
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            for (tx_id, accepted) in self.transaction_dots_for_global_time(global_time).await? {
+            // The frontier cache contains accepted Global positions; only an
+            // outstanding persistence acknowledgement can weaken them locally.
+            let positions = match self.clock.frontier_dots.get(&global_time) {
+                Some(tx_ids) => tx_ids
+                    .iter()
+                    .map(|tx_id| (*tx_id, !self.pending_persistence.contains(tx_id)))
+                    .collect(),
+                None => self.transaction_dots_for_global_time(global_time).await?,
+            };
+            for (tx_id, accepted) in positions {
                 dots.push(tx_id);
                 if accepted {
                     accepted_e2ee_dots.push(tx_id);

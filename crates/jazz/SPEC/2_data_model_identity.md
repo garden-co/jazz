@@ -742,10 +742,10 @@ and sync machinery.
 
 In epoch two (`jazz.node-storage.v3`), the pending record's four evidence
 slots remain in the historically named `jazz_pending_transactions` table
-across acceptance and rejection. The pending record's four evidence slots hold exclusive read evidence
+across acceptance and rejection. Its four proof slots retain exclusive read evidence
 using `jazz.exclusive-read-evidence.v2`: snapshot, row-read and absent-read
 slots keep format byte 1; predicate-read slots use format byte 2 and preserve
-`jazz.aggregate-read-result.v1` observations. Settlement releases touched-row
+the canonical aggregate-result codec described above observations. Settlement releases touched-row
 lists independently. Complete redaction has no evidence record. Source epoch
 one records whose proof was already removed remain absent after upgrade;
 missing observations are never invented. A changed proof on replay is refused.
