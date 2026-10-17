@@ -300,9 +300,11 @@ global-current record per row with `global_time` (the row's seq) and index
 ordinary nullable cell. No row state carries a timestamp used for merging.
 The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
-forwarding and materialization read the listed `(table, branch, row)` keys at
+forwarding and settlement read the listed `(table, branch, row)` keys at
 the transaction's seq (from its `jazz_transactions` record) and its
-`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
+`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. Once
+the list is released at settlement (§2.8), every reader already knows the row
+it wants (a result member, a witness, a resent copy) and reads that one key. "The row at seq `S`" and "the row's writes after `S`" are a point read
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. Every history image,
 global-current record and ahead-overlay record stores all four provenance
@@ -513,6 +515,25 @@ rejection deletes the list together with the rejected images. It costs about
 transaction's versions, which reads every listed row anyway, so pending
 history stays findable by transaction until its fate arrives without a
 per-version index.
+
+The list is released, that is deleted, by the node batch whose staged
+`jazz_transactions` record shows a complete mergeable transaction accepted at
+a seq (`kind = Mergeable`, `fate = Accepted`, `global_time` set, view-scoped
+flag clear), provided every listed row is on the default branch. Nothing
+re-sequences, rejects or completes such a transaction, so nothing needs to
+enumerate its versions: a later reader knows the row it wants and reads the
+exact key `(default branch, row, seq, tx_time, tx_node_id)` in the physical
+table it names, and a resent or re-delivered copy is compared row for row at
+the copy's coordinates, its write count already checked against the stored
+record. Asking to list a released transaction's versions is an error
+(`TransactionVersionsReleased`), never an empty answer. Exclusive transactions
+keep the list (complete exclusive payloads list every write), as do
+view-scoped ones (later fragments extend and settle the rows already held) and
+any transaction with a row on another branch (a point read needs the branch).
+A history write after the release comes from a re-ingest of the complete
+payload, which marks every row again, so the release check always sees the
+whole row set and writes no partial list. Releasing changes no record layout:
+a store whose settled transactions still have lists reads them as before.
 
 The pending record's four evidence slots hold exclusive read evidence in the
 `jazz.exclusive-read-evidence.v2` family, and only while it can still be

@@ -206,5 +206,5 @@ image's `updated_by` costs 4 bytes instead of the 1-byte null it had when it
 was the transaction's own author.
 
 The rest of the way to about 120 bytes per transaction is the touched-row
-list, which settled transactions could delete. That changes no layout, so it
-can land after alpha.60 without another format break.
+list, which settled transactions now delete; see
+`touched-rows-release-storage-compatibility.md`. That changes no layout.

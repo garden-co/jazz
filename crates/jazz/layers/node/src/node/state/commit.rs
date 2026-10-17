@@ -1076,6 +1076,26 @@ where
             );
     }
 
+    /// Stage a transaction's records ([`stage_transaction_record`]). When the
+    /// status settles the transaction, the next applied node batch checks
+    /// whether its touched-rows list can be released.
+    pub(in crate::node) fn stage_tx_record(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        write: TransactionRecordWrite,
+        node_alias: NodeAlias,
+        tx: &Transaction,
+        status: &TransactionRecordStatus,
+    ) -> Result<(), Error> {
+        stage_transaction_record(batch, write, node_alias, tx, status)?;
+        if status.releases_touched_rows(tx.kind) {
+            self.tx_touched_dirty
+                .entry((tx.tx_id.time, node_alias))
+                .or_default();
+        }
+        Ok(())
+    }
+
     /// Apply a batch this node built. Every node batch is applied here, and
     /// each one first adds the rows marked since the previous apply to their
     /// transactions' `jazz_tx_touched_rows` lists, so a history row is listed
@@ -1084,7 +1104,8 @@ where
     /// was still being built) or, if that batch is dropped, by a later one:
     /// the list is a superset, and a listed row that was never written is
     /// skipped on read. Nothing is lost because this flush is the only
-    /// writer of the list and always extends what is stored.
+    /// writer of the list and always extends what is stored, until the
+    /// transaction settles and the flush releases the list.
     pub(in crate::node) async fn apply_node_batch(
         &mut self,
         mut batch: DatabaseBatch,
@@ -1099,7 +1120,7 @@ where
         batch: Option<&DatabaseBatch>,
         tx_time: TxTime,
         node_alias: NodeAlias,
-    ) -> Result<TouchedRows, Error> {
+    ) -> Result<Option<TouchedRows>, Error> {
         let key = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
         let raw = match batch {
             Some(batch) => {
@@ -1113,16 +1134,21 @@ where
                     .await?
             }
         };
-        match raw {
-            Some(raw) => TouchedRows::from_list_record(raw.record()),
-            None => Ok(TouchedRows::default()),
-        }
+        raw.map(|raw| TouchedRows::from_list_record(raw.record()))
+            .transpose()
     }
 
     /// Extend each marked transaction's list (as staged in this batch) with
     /// the rows marked since the last flush. The list does not depend on the
     /// transaction record, which may be written by this batch, a later one,
     /// or not yet at all.
+    ///
+    /// A transaction whose record (as staged in this batch) is settled
+    /// ([`releases_touched_rows`]) and whose rows are all on the default
+    /// branch has its list deleted instead: every later reader knows the row
+    /// it wants and reads it exactly. Marks after the release come from a
+    /// re-ingest of the complete payload, which marks every row again, so the
+    /// check always sees the whole row set.
     async fn flush_tx_touched_rows(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1132,12 +1158,33 @@ where
         }
         let dirty = std::mem::take(&mut self.tx_touched_dirty);
         for ((tx_time, node_alias), rows) in dirty {
+            let key = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
             let stored = self
                 .load_tx_touched_rows(Some(batch), tx_time, node_alias)
                 .await?;
-            let mut touched = stored.clone();
+            let mut touched = stored.clone().unwrap_or_default();
             touched.extend(&rows);
-            if touched == stored {
+            let settled = match self
+                .database
+                .primary_key_get_raw_in_batch(batch, "jazz_transactions", &key)
+                .await?
+            {
+                Some(raw) => transaction_record_releases_touched_rows(raw.record())?,
+                None => false,
+            };
+            if settled && touched.is_default_branch_only() {
+                if stored.is_some() {
+                    batch.delete(
+                        TX_TOUCHED_ROWS_TABLE,
+                        PrimaryKeyValue::Composite(vec![
+                            PrimaryKeyValue::U64(tx_time.0),
+                            PrimaryKeyValue::U64(node_alias.0),
+                        ]),
+                    );
+                }
+                continue;
+            }
+            if touched.is_empty() || stored.as_ref() == Some(&touched) {
                 continue;
             }
             batch.update(
