@@ -93,6 +93,9 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    // Ready PRs run only this partition, so it carries the TypeScript
+    // typecheck too. The binding declarations it needs are committed.
+    command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
     command("crate publication selector contract", "bash", [
       "dev/scripts/publish-crates-alpha.test.sh",
     ]),

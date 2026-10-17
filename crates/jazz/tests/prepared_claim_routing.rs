@@ -10,9 +10,9 @@ use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     CmpOp as PublicCmpOp, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef,
-    RowIdRef as RelRowIdRef, Value as PublicValue,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef, Value as PublicValue,
 };
 use jazz::tools::{
     ColumnType as PublicColumnType, Schema as PublicSchema, SchemaBuilder, TablePolicies,
@@ -158,106 +158,106 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
 fn two_hop_seeded_policy_schema() -> JazzSchema {
     let document_policy = exists(MEMBERSHIPS, vec![outer_eq("document", "id")]);
     let membership_policy = exists(PROJECTS, vec![outer_eq("id", "project")]);
-    let seed = RelExpr::Project {
-        input: Box::new(RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: GROUP_MEMBERS.into(),
                 alias: None,
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef {
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
                     scope: None,
                     column: "user".to_owned(),
                 },
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec![
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec![
                     "user".to_owned(),
                     "identity".to_owned(),
                     "subject".to_owned(),
                 ]),
             },
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(RelColumnRef {
+            expr: RelationProjectExpr::Column(RelationColumnRef {
                 scope: None,
                 column: "group".to_owned(),
             }),
         }],
     };
-    let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: GROUP_EDGES.into(),
                     alias: Some("edges".to_owned()),
                 }),
-                predicate: RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("edges".to_owned()),
                         column: "member".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RelRowIdRef::Frontier),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                 },
             }),
-            right: Box::new(RelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: GROUPS.into(),
                 alias: Some("target".to_owned()),
             }),
-            on: vec![RelJoinCondition {
-                left: RelColumnRef {
+            on: vec![RelationJoinCondition {
+                left: RelationColumnRef {
                     scope: Some("edges".to_owned()),
                     column: "parent".to_owned(),
                 },
-                right: RelColumnRef {
+                right: RelationColumnRef {
                     scope: Some("target".to_owned()),
                     column: "id".to_owned(),
                 },
             }],
-            join_kind: RelJoinKind::Inner,
+            join_kind: RelationJoinKind::Inner,
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(RelColumnRef {
+            expr: RelationProjectExpr::Column(RelationColumnRef {
                 scope: Some("target".to_owned()),
                 column: "id".to_owned(),
             }),
         }],
     };
     let project_policy = PublicPolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
-                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: PROJECT_ACCESS.into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "group".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef {
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
                     scope: Some("access".to_owned()),
                     column: "project".to_owned(),
                 },
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::RowId(RelRowIdRef::Outer),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::RowId(RelationRowIdRef::Outer),
             },
         },
     };

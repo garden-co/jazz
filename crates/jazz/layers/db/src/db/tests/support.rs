@@ -186,7 +186,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
 
 pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let storage = rocks_storage(schema);
-    block_on(Db::open(DbConfig {
+    let db = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
         identity: DbIdentity {
@@ -195,7 +195,25 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
     }))
-    .unwrap()
+    .unwrap();
+    if let Some(budget) = query_cache_test_budget() {
+        db.set_stored_arrangements_enabled_for_test(true);
+        db.set_query_cache_budget_for_test(Some(budget));
+    }
+    db
+}
+
+/// `JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES` runs the suite with stored
+/// arrangements read by key and their cache bounded to that many bytes, so
+/// eviction runs under every permission, read and subscription test.
+pub(super) fn query_cache_test_budget() -> Option<usize> {
+    std::env::var("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES")
+        .ok()
+        .map(|bytes| {
+            bytes
+                .parse()
+                .expect("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES is a byte count")
+        })
 }
 
 /// Construct the explicit provider-side identity fixture used by DB tests.
@@ -914,9 +932,9 @@ pub(super) fn public_recursive_access_policy(
     let edge_alias = "recursive_edge";
     let target_alias = "recursive_target";
     let access_alias = "access";
-    let seed = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: seed_table.into(),
                 alias: Some(seed_alias.to_owned()),
             }),
@@ -945,19 +963,19 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             edge_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
-    let step = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Join {
-            left: Box::new(PublicRelExpr::Filter {
-                input: Box::new(PublicRelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: edge_table.into(),
                     alias: Some(edge_alias.to_owned()),
                 }),
                 predicate: PublicRelPredicateExpr::And(edge_predicates),
             }),
-            right: Box::new(PublicRelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(target_alias.to_owned()),
             }),
@@ -972,7 +990,7 @@ pub(super) fn public_recursive_access_policy(
             expr: PublicRelProjectExpr::Column(public_rel_column(target_alias, "id")),
         }],
     };
-    let reachable = PublicRelExpr::Gather {
+    let reachable = RelationExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
         frontier_key: PublicRelKeyRef::RowId(PublicRelRowIdRef::Current),
@@ -988,7 +1006,7 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             access_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
     access_predicates.extend(access_in_filters.iter().map(|(column, values)| {
@@ -997,15 +1015,15 @@ pub(super) fn public_recursive_access_policy(
             values: values
                 .iter()
                 .cloned()
-                .map(PublicRelValueRef::Literal)
+                .map(PublicRelValueRef::literal)
                 .collect(),
         }
     }));
     PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
                 left: Box::new(reachable),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: access_table.into(),
                     alias: Some(access_alias.to_owned()),
                 }),
@@ -1970,6 +1988,10 @@ pub(super) fn open_core_with_claims(
     )
     .unwrap();
     node.set_test_provider_claims(author, claims);
+    if let Some(budget) = query_cache_test_budget() {
+        node.set_stored_arrangements_enabled_for_test(true);
+        node.set_query_cache_budget_for_test(Some(budget));
+    }
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),

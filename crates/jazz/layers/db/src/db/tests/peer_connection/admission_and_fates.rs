@@ -3772,8 +3772,8 @@ fn scope_relay_replays_known_system_origin_without_claiming_authority() {
         .server
         .node()
         .borrow_mut()
-        .commit_unit_for(tx_id)
-        .expect("settled authority unit remains replayable");
+        .stored_commit_unit_for_test(tx_id)
+        .expect("settled authority unit stays in storage");
     let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         unreachable!("commit_unit_for returns a commit unit")
     };
@@ -3801,7 +3801,7 @@ fn scope_relay_replays_known_system_origin_without_claiming_authority() {
     let SyncMessage::CommitUnit { tx: stored, .. } = server
         .node()
         .borrow_mut()
-        .commit_unit_for(tx_id)
+        .stored_commit_unit_for_test(tx_id)
         .expect("known replay does not remove the authority transaction")
     else {
         unreachable!("commit_unit_for returns a commit unit")

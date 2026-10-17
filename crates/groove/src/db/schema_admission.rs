@@ -63,6 +63,7 @@ pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(),
     for table in &schema.tables {
         validate_table_schema_variants(table)?;
     }
+    schema.validate_interned_columns()?;
     Ok(())
 }
 
@@ -326,6 +327,9 @@ impl Database {
         }
         updated.variants.push(variant.clone());
         validate_table_schema_variants(&updated)?;
+        self.ivm_runtime
+            .schema()
+            .validate_table_interning(&updated)?;
         if !evolved_columns.is_empty() {
             self.ivm_runtime
                 .evolve_table_variant_registries(table, &evolved_columns)

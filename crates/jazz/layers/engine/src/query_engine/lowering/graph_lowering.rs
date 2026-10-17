@@ -2539,40 +2539,20 @@ fn lower_join_key_pairs(
     right_source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
-    // A true join condition is an uncorrelated existence gate. Routing keys
-    // are added by the caller, so independent prepared sessions stay isolated.
-    if matches!(predicate, PredicateExpr::True) {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let pairs = match predicate {
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .map(|predicate| {
-                lower_join_key_pair(
-                    predicate,
-                    left_source_id,
-                    left_source,
-                    right_source_id,
-                    right_source,
-                    request,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_join_key_pair(
-            predicate,
-            left_source_id,
-            left_source,
-            right_source_id,
-            right_source,
-            request,
-        )?],
-    };
-    if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join_via requires at least one equality join predicate".to_owned(),
-        ));
-    }
-    Ok(pairs.into_iter().unzip())
+    lower_key_pairs(
+        predicate,
+        "join_via requires at least one equality join predicate",
+        |predicate| {
+            lower_join_key_pair(
+                predicate,
+                left_source_id,
+                left_source,
+                right_source_id,
+                right_source,
+                request,
+            )
+        },
+    )
 }
 
 fn lower_linear_join_key_pair(
@@ -2613,42 +2593,21 @@ fn lower_linear_join_key_pairs(
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
-    // A true join condition is an uncorrelated existence gate. Routing keys
-    // are added by the caller, so independent prepared sessions stay isolated.
-    if matches!(predicate, PredicateExpr::True) {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let pairs = match predicate {
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .map(|predicate| {
-                lower_linear_join_key_pair(
-                    predicate,
-                    left_root,
-                    left_source,
-                    right_plan,
-                    right_output,
-                    accumulated_join_fields,
-                    request,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_linear_join_key_pair(
-            predicate,
-            left_root,
-            left_source,
-            right_plan,
-            right_output,
-            accumulated_join_fields,
-            request,
-        )?],
-    };
-    if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join_via requires at least one equality join predicate".to_owned(),
-        ));
-    }
-    Ok(pairs.into_iter().unzip())
+    lower_key_pairs(
+        predicate,
+        "join_via requires at least one equality join predicate",
+        |predicate| {
+            lower_linear_join_key_pair(
+                predicate,
+                left_root,
+                left_source,
+                right_plan,
+                right_output,
+                accumulated_join_fields,
+                request,
+            )
+        },
+    )
 }
 
 fn lower_root_to_relation_key_pair(
@@ -2674,6 +2633,28 @@ pub(super) fn lower_root_to_relation_key_pairs(
     right_output: &LoweredRelationInput,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    lower_key_pairs(
+        predicate,
+        "join contribution membership requires at least one equality predicate",
+        |predicate| {
+            lower_root_to_relation_key_pair(
+                predicate,
+                root_source,
+                right_plan,
+                right_output,
+                request,
+            )
+        },
+    )
+}
+
+/// Lowers a conjunction of equality predicates (or a single one) into the
+/// parallel left and right key lists, one pair per conjunct.
+fn lower_key_pairs(
+    predicate: &PredicateExpr,
+    empty_message: &str,
+    lower_pair: impl Fn(&PredicateExpr) -> Result<(String, String), UnsupportedReason>,
+) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     // A true join condition is an uncorrelated existence gate. Routing keys
     // are added by the caller, so independent prepared sessions stay isolated.
     if matches!(predicate, PredicateExpr::True) {
@@ -2682,28 +2663,12 @@ pub(super) fn lower_root_to_relation_key_pairs(
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
-            .map(|predicate| {
-                lower_root_to_relation_key_pair(
-                    predicate,
-                    root_source,
-                    right_plan,
-                    right_output,
-                    request,
-                )
-            })
+            .map(&lower_pair)
             .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_root_to_relation_key_pair(
-            predicate,
-            root_source,
-            right_plan,
-            right_output,
-            request,
-        )?],
+        _ => vec![lower_pair(predicate)?],
     };
     if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join contribution membership requires at least one equality predicate".to_owned(),
-        ));
+        return Err(UnsupportedReason::Operator(empty_message.to_owned()));
     }
     Ok(pairs.into_iter().unzip())
 }

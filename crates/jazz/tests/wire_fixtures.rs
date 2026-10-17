@@ -368,14 +368,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "retry_later_awaiting_predecessor",
-            "RetryLater",
-            SyncMessage::RetryLater {
-                tx_id,
-                awaiting: TxId::new(TxTime(11), node),
-            },
-        ),
-        (
             "register_shape_todos",
             "RegisterShape",
             SyncMessage::RegisterShape {
@@ -1202,6 +1194,33 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     view.supporting_rows.added_rows_mut()[0].version_table = String::new().into();
     let bytes = encode_sync_message(&SyncMessage::ViewUpdate(view)).unwrap();
     assert!(decode_sync_message(&bytes).is_err());
+}
+
+/// Retired `SyncMessage` tags stay reserved: a payload under one never
+/// decodes, so a peer that still sends it is refused instead of read as
+/// another message. Tag 29 was the authority's retry-later answer
+/// (`{ tx_id, awaiting }`); its frozen pre-retirement payload is pinned here.
+#[test]
+fn retired_sync_message_tags_are_rejected() {
+    let retired_retry_later =
+        parse_hex("1d0c10111111111111111111111111111111110b1011111111111111111111111111111111");
+    assert_eq!(retired_retry_later[0], 29);
+    assert!(
+        decode_sync_message(&retired_retry_later).is_err(),
+        "tag 29 is reserved and must not decode"
+    );
+    for tag in [14_u8, 15, 29] {
+        let mut bytes = retired_retry_later.clone();
+        bytes[0] = tag;
+        assert!(
+            decode_sync_message(&bytes).is_err(),
+            "reserved SyncMessage tag {tag} must not decode"
+        );
+        assert!(
+            decode_sync_message(&[tag]).is_err(),
+            "reserved SyncMessage tag {tag} must not decode without a payload"
+        );
+    }
 }
 
 #[test]

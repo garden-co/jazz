@@ -52,24 +52,40 @@ where
         &mut self,
         source: SchemaVersionId,
         target: SchemaVersionId,
+        within: Option<u64>,
     ) -> Option<Vec<(MigrationLensId, LensPathDirection)>> {
-        let key = LensPathCacheKey { source, target };
+        let key = LensPathCacheKey {
+            source,
+            target,
+            within,
+        };
         if let Some(path) = self.catalogue.lens_path_cache.get(&key) {
             return path.clone();
         }
-        let path = self.shortest_lens_path(source, target);
+        let path = self.shortest_lens_path(source, target, within);
         self.catalogue.lens_path_cache.insert(key, path.clone());
         path
     }
 
+    /// The shortest lens path from `source` to `target`. With `within`,
+    /// only schemas ranked no later than it in the catalogue
+    /// (`catalogue_ranks`) may lie on the path, so the path is fixed once
+    /// the schema of that rank is published: a later schema cannot add a
+    /// route through itself.
     fn shortest_lens_path(
         &self,
         source: SchemaVersionId,
         target: SchemaVersionId,
+        within: Option<u64>,
     ) -> Option<Vec<(MigrationLensId, LensPathDirection)>> {
         if source == target {
             return Some(Vec::new());
         }
+        let ranks = within.map(|_| self.catalogue_ranks());
+        let allowed = |schema: SchemaVersionId| match (&ranks, within) {
+            (Some(ranks), Some(limit)) => ranks.get(&schema).is_some_and(|rank| *rank <= limit),
+            _ => true,
+        };
 
         // Preserve ancestor-authored columns when a forward route exists.
         // A shorter reverse detour can drop and reintroduce those columns.
@@ -85,7 +101,7 @@ where
                         LensPathDirection::Forward => lens.target,
                         LensPathDirection::Reverse => lens.source,
                     };
-                    if seen.contains(&next) {
+                    if seen.contains(&next) || !allowed(next) {
                         continue;
                     }
                     let mut next_path = path.clone();
@@ -107,16 +123,29 @@ where
         target: SchemaVersionId,
         table: &str,
     ) -> Result<Option<CompiledLensPath>, Error> {
+        self.compiled_lens_path_within(source, target, table, None)
+    }
+
+    /// `compiled_lens_path` over the lenses between schemas ranked no later
+    /// than `within` (`shortest_lens_path`).
+    pub(super) fn compiled_lens_path_within(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        table: &str,
+        within: Option<u64>,
+    ) -> Result<Option<CompiledLensPath>, Error> {
         let key = CompiledLensCacheKey {
             source,
             target,
             table: table.to_owned(),
+            within,
         };
         if let Some(path) = self.catalogue.compiled_lens_cache.get(&key) {
             return Ok(path.clone());
         }
 
-        let Some(steps) = self.shortest_lens_path_cached(source, target) else {
+        let Some(steps) = self.shortest_lens_path_cached(source, target, within) else {
             self.catalogue.compiled_lens_cache.insert(key, None);
             return Ok(None);
         };
@@ -232,7 +261,7 @@ where
         Ok(TxId::new(version.tx_time(), node))
     }
 
-    fn version_record_from_row(&self, version: &VersionRow) -> Result<VersionRecord, Error> {
+    fn version_record_from_row(&mut self, version: &VersionRow) -> Result<VersionRecord, Error> {
         #[cfg(feature = "cold-settle-attribution")]
         version.record_conversion("version_row_to_wire", 0);
         let schema_version = self
@@ -242,7 +271,8 @@ where
             ))?;
         let table = self.table_in_schema_ref(version.table(), schema_version)?;
         let authored_columns = self.authored_columns_for_version(version)?;
-        VersionRecord::from_stored(version, table, schema_version, authored_columns)
+        let record = VersionRecord::from_stored(version, table, schema_version, authored_columns)?;
+        Ok(record.with_extra_cells(self.union_extra_cells_for_wire(version)?))
     }
 
     #[allow(dead_code)]

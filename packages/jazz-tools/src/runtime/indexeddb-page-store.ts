@@ -2,6 +2,9 @@ import {
   claimBrowserReclamationOwnership,
   type BrowserPhysicalDatabaseEpoch,
 } from "./browser-physical-database-epoch.js";
+import { UnsupportedStorageCodecsError } from "./unsupported-storage-codecs-error.js";
+
+export { UnsupportedStorageCodecsError };
 
 /** Durable IndexedDB metadata/page-store format, independent of browser IDB's schema version. */
 export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
@@ -61,27 +64,15 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
-  // Compact durable-index layout (numeric index ids, empty values). A browser
-  // root written by alpha.59 or earlier lacks this family and fails manifest
-  // admission.
+  // Interned author columns: the node-local `authors` Groove dictionary. A
+  // browser root written before them lacks this family and fails manifest
+  // admission instead of decoding full authors as dictionary codes.
+  "groove.dictionary.v1",
   "groove.durable-index.v2",
-  "groove.large-value.v1",
-  "groove.ordered-chunk-storage.v1",
+  "groove.large-value.v2",
+  "groove.ordered-chunk-storage.v2",
   "groove.ordered-kv.v1",
-  "jazz.branch-key.v1",
-  "jazz.catalogue.activation.v1",
-  "jazz.catalogue.bootstrap-ready.v1",
-  "jazz.catalogue.lens.v1",
-  "jazz.catalogue.lineage.v1",
-  "jazz.catalogue.physical-mapping.v1",
-  "jazz.catalogue.schema.v1",
-  "jazz.catalogue.write-pointer.v1",
-  // Linear row-state history. A browser root written by the DAG layout
-  // (alpha.54 to alpha.57) or by the unreleased v2/v3 row layouts lacks this
-  // family and fails manifest admission.
-  "jazz.history-version-current.v4",
-  "jazz.subscription-program-fact-key.v1",
-  "jazz.transaction-durability.v2",
+  "jazz.node-storage.v2",
 ] as const;
 
 /**
@@ -990,38 +981,19 @@ function assertStorageManifest(value: unknown): asserts value is IndexedDbStorag
   const found: readonly string[] = manifest.requiredCodecIds;
   const expected: readonly string[] = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
   if (found.length !== expected.length || found.some((codec, index) => codec !== expected[index])) {
+    // A well-formed epoch manifest whose codec-family inventory differs from
+    // the one this build reads. Raised before any page is decoded; the root
+    // is left untouched. The message keeps the generic manifest-rejection
+    // prefix so existing matches on it still hold.
+    const missing = expected.filter((codec) => !found.includes(codec));
+    const unknown = found.filter((codec) => !expected.includes(codec));
     throw new UnsupportedStorageCodecsError(
-      expected.filter((codec) => !found.includes(codec)),
-      found.filter((codec) => !expected.includes(codec)),
-    );
-  }
-}
-
-/**
- * A well-formed epoch manifest whose codec-family inventory differs from the
- * one this build reads. Codec IDs carry their format version (`name.vN`), so
- * `missing` names the formats this build requires and the root lacks, and
- * `unknown` names the formats the root was written with that this build does
- * not read. Raised before any page is decoded; the root is left untouched.
- *
- * This mirrors Groove's `Error::UnsupportedStorageCodecs`. The message keeps
- * the generic manifest-rejection prefix so existing matches on it still hold.
- */
-export class UnsupportedStorageCodecsError extends Error {
-  override readonly name = "UnsupportedStorageCodecsError";
-  /** Stable code; it survives the browser worker relay, unlike the class. */
-  readonly code = "unsupported_storage_codecs";
-  readonly missing: readonly string[];
-  readonly unknown: readonly string[];
-
-  constructor(missing: readonly string[], unknown: readonly string[]) {
-    super(
+      missing,
+      unknown,
       `Missing or invalid IndexedDB storage epoch manifest: unsupported storage format: ` +
         `this epoch-${INDEXEDDB_STORAGE_EPOCH} root lacks codec families ${JSON.stringify(missing)} ` +
         `required by this build and declares ${JSON.stringify(unknown)} that this build does not read`,
     );
-    this.missing = missing;
-    this.unknown = unknown;
   }
 }
 

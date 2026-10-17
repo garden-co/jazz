@@ -56,8 +56,8 @@ use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
 };
 use crate::schema::{
-    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE,
-    SETTLED_PROGRAM_FACTS_STORE, TableSchema, registered_column_transform,
+    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, SUPERSEDED_WRITES_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{
@@ -316,6 +316,7 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+mod aggregate_read_result;
 /// The local delta's rows, held in memory: overlay row key (physical table,
 /// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
 /// image it holds, plus how many rows each physical table holds under each
@@ -508,8 +509,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
-/// Bound on `history_tx_authors`; the cache is cleared when it fills.
-const HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_seqs`; the cache is cleared when it fills.
+const HISTORY_TX_SEQ_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -584,6 +585,9 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
+    /// Only schemas ranked no later than this may lie on the path
+    /// (`compiled_lens_path_within`).
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -591,6 +595,7 @@ struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
     table: String,
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -692,17 +697,14 @@ pub struct NodeState<S = BoxedStorage> {
     ahead_current_keys: AheadCurrentKeys,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
-    /// the transaction's `jazz_tx_touched_rows` list.
+    /// the transaction's `jazz_tx_touched_rows` list, or releases the list
+    /// when the transaction has settled. A transaction whose settled status
+    /// was staged has an entry here even when it wrote no rows.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
-    /// `made_by` of transactions whose history images omitted `updated_by`
-    /// (`resolve_history_updated_by`). Bounded; transaction authors never
-    /// change, so entries never go stale.
-    /// Each entry is the encoded field, ready to splice into an image.
-    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
     /// Global times of transactions read from storage, which key their
-    /// history records (`history_tx_seq`). Bounded like
-    /// `history_tx_authors`; a transaction's global time never changes once
-    /// set, so entries never go stale.
+    /// history records (`history_tx_seq`). Bounded by
+    /// `HISTORY_TX_SEQ_CACHE_MAX_ENTRIES`; a transaction's global time never
+    /// changes once set, so entries never go stale.
     history_tx_seqs: RefCell<FxHashMap<(TxTime, NodeAlias), GlobalTime>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
@@ -821,7 +823,10 @@ struct SchemaCatalogue {
         SchemaVersionId,
         BTreeMap<
             String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+            BTreeMap<
+                (physical::PhysicalWriteTarget, bool),
+                Arc<physical::PreparedPhysicalWritePlan>,
+            >,
         >,
     >,
     /// Schema version currently used for newly authored writes.
@@ -1030,6 +1035,9 @@ struct Parking {
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
+    /// The newest `now_ms` an authority commit ingest has seen: the clock a
+    /// write's wait behind a parked predecessor is bounded by.
+    newest_ingest_ms: u64,
 }
 
 /// Recently stored transaction versions with a row-addressable cache view.
@@ -2874,6 +2882,14 @@ fn version_indirect_descriptors(
                 collect_indirect_descriptors(&value, &mut descriptors);
             }
         }
+        for extra in version.extra_cells() {
+            let record = extra.record().borrowed();
+            for index in 0..extra.record().descriptor().fields().len() {
+                if let Ok(Value::Nullable(Some(value))) = record.get_idx(index) {
+                    collect_indirect_descriptors(&value, &mut descriptors);
+                }
+            }
+        }
     }
     descriptors
 }
@@ -3020,9 +3036,8 @@ struct CatalogueOpenState {
     active_catalogue_seq: u64,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
-    current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
-    recovered_active_schema: Option<ActiveSchema>,
+    active_schema: ActiveSchema,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -3267,6 +3282,15 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// The store's history was truncated at or below a horizon, which this
+    /// build cannot read (SPEC 2 §2.8, `jazz_history_horizon`).
+    #[error(
+        "Opening a store whose history is truncated at or below seq {horizon} is not supported by this build yet"
+    )]
+    TruncatedHistoryUnsupported {
+        /// The store's history horizon.
+        horizon: u64,
+    },
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.
@@ -3280,6 +3304,11 @@ pub enum Error {
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),
+    /// A settled transaction's versions were asked for as a list, but its
+    /// touched-rows list was released at settle. Its versions are read by
+    /// exact `(table, row, tx)` point reads only.
+    #[error("transaction versions are no longer listed: {0:?}")]
+    TransactionVersionsReleased(TxId),
     /// View update payload was internally inconsistent.
     #[error("malformed view update: {0}")]
     MalformedViewUpdate(&'static str),

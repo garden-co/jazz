@@ -2,9 +2,9 @@
 
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    CmpOp, PolicyExpr, PolicyValue, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind,
-    RelKeyRef, RelPredicateCmpOp, RelPredicateExpr, RelProjectColumn, RelProjectExpr,
-    RelRecursionBound, RelValueRef, RowIdRef,
+    CmpOp, PolicyExpr, PolicyValue, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
+    RelationJoinCondition, RelationJoinKind, RelationKeyRef, RelationPredicate,
+    RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
 use jazz::tools::{SchemaBuilder, TablePolicies};
 
@@ -55,9 +55,9 @@ pub fn reachable_access(
     edge_table: &str,
     edge_member_column: &str,
     edge_parent_column: &str,
-    seed_value: RelValueRef,
+    seed_value: RelationValueRef,
 ) -> PolicyExpr {
-    let column = |scope: &str, column: &str| RelColumnRef {
+    let column = |scope: &str, column: &str| RelationColumnRef {
         scope: Some(scope.to_owned()),
         column: column.to_owned(),
     };
@@ -65,78 +65,78 @@ pub fn reachable_access(
     let edge_alias = "recursive_edge";
     let target_alias = "recursive_target";
     let access_alias = "access";
-    let seed = RelExpr::Project {
-        input: Box::new(RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(seed_alias.to_owned()),
             }),
-            predicate: RelPredicateExpr::Cmp {
+            predicate: RelationPredicate::Cmp {
                 left: column(seed_alias, "id"),
-                op: RelPredicateCmpOp::Eq,
+                op: RelationCmpOp::Eq,
                 right: seed_value,
             },
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(seed_alias, "id")),
+            expr: RelationProjectExpr::Column(column(seed_alias, "id")),
         }],
     };
-    let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: edge_table.into(),
                     alias: Some(edge_alias.to_owned()),
                 }),
-                predicate: RelPredicateExpr::Cmp {
+                predicate: RelationPredicate::Cmp {
                     left: column(edge_alias, edge_member_column),
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RowIdRef::Frontier),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                 },
             }),
-            right: Box::new(RelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(target_alias.to_owned()),
             }),
-            on: vec![RelJoinCondition {
+            on: vec![RelationJoinCondition {
                 left: column(edge_alias, edge_parent_column),
                 right: column(target_alias, "id"),
             }],
-            join_kind: RelJoinKind::Inner,
+            join_kind: RelationJoinKind::Inner,
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(target_alias, "id")),
+            expr: RelationProjectExpr::Column(column(target_alias, "id")),
         }],
     };
     PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
-                    frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: access_table.into(),
                     alias: Some(access_alias.to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
                     right: column(access_alias, access_team_column),
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::Cmp {
+            predicate: RelationPredicate::Cmp {
                 left: column(access_alias, access_row_column),
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::RowId(RowIdRef::Outer),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::RowId(RelationRowIdRef::Outer),
             },
         },
     }

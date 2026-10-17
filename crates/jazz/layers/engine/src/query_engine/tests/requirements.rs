@@ -154,35 +154,11 @@ fn closure_requirements_merge_sparse_root_and_every_alias_hop_key() {
 
 #[test]
 fn read_frontier_facts_are_outputs_not_delivery_profiles() {
-    let key = ProgramSharingKey {
-        shape_id: shape(0x55),
-        reads: QueryReadSet::primary(ResolvedReadKey {
-            read_schema: schema(0x55),
-            policy_schema: schema(0x55),
-            sources: BTreeMap::from([(
-                source("todos", SourceRole::Root),
-                ResolvedSourceExpr::VisibleCurrent {
-                    projection: resolved_projection(0x55),
-                    data: DataSource::Current,
-                    tier: DurabilityTier::Global,
-                },
-            )]),
-        }),
-        policy: PolicySharingKey::System,
-    };
     let local_output = row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership]));
     let covered_output = row_set_output(BTreeSet::from([
         ProgramFactKey::ResultMembership,
         ProgramFactKey::ReadFrontierSettled(program_frontier()),
     ]));
-    let local_output_key = ProgramOutputKey {
-        fingerprint: vec![0x01],
-    };
-    let covered_output_key = ProgramOutputKey {
-        fingerprint: vec![0x02],
-    };
 
-    assert_eq!(key, key.clone());
     assert_ne!(local_output, covered_output);
-    assert_ne!(local_output_key, covered_output_key);
 }
