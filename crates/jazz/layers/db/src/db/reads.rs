@@ -864,6 +864,11 @@ where
                 let mut next = Box::pin(stream.next_event());
                 let event = std::future::poll_fn(|cx| {
                     if coverage_expired() {
+                        if let Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) =
+                            std::future::Future::poll(next.as_mut(), cx)
+                        {
+                            return Poll::Ready(Ok(Some(event)));
+                        }
                         return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
                             format!(
