@@ -14,8 +14,11 @@ import { encryptedRowSpaces, encryptedSchemas } from "./encrypted-schema.js";
 import { frameCryptoRecord } from "./record-frame.js";
 import { cellCryptoForDb, withSpaceKeys } from "./lifecycle.js";
 import type { SpaceRoot } from "./spaces.js";
+import { equalityValue } from "./equality-data.js";
 
 const RECORD = { id: "jazz.e2ee.cell-record", version: 1 } as const;
+// Owned comparison bytes: public decoding may discard JSON spelling or expose mutable arrays.
+export const decryptedIndexBytes = new WeakMap<object, Map<string, Uint8Array>>();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function storedCell(epoch: string, ciphertext: Uint8Array): Uint8Array {
@@ -109,6 +112,7 @@ export async function decryptCellRows(
   tableName: string,
   rows: Record<string, unknown>[],
   initialSpaceKeys?: ReadonlyMap<string, { secret: Uint8Array; root: SpaceRoot }>,
+  onValidatedHistory?: (identifier: string, epochs: ReadonlySet<string>) => void,
 ): Promise<Record<string, unknown>[]> {
   const metadata = encryptedSchemas.get(schema);
   const declaration = metadata?.tables.get(tableName);
@@ -131,8 +135,12 @@ export async function decryptCellRows(
   }
   // Keys stay inside withSpaceKeys. Multi-row groups reobserve authority
   // before returning, including revocation while the cipher was awaiting.
+  // An equality read can reuse this operation's accepted history. Reports
+  // contain epoch IDs only and are emitted after the complete batch succeeds.
+  const histories = onValidatedHistory ? new Map<string, Set<string>>() : undefined;
   const recheck: string[] = [];
   for (const [identifier, group] of groups) {
+    const epochs = histories && group.length === 1 ? new Set<string>() : undefined;
     const entries = group.map(({ row, index }) => ({
       row,
       decoded: (result[index] = { ...row }),
@@ -143,6 +151,7 @@ export async function decryptCellRows(
       ),
     }));
     const decrypt = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
+      epochs?.add(root.epochId);
       for (const { row, decoded, pending } of entries) {
         for (const [name, cell] of pending) {
           if (cell.epoch !== root.epochId) continue;
@@ -161,6 +170,11 @@ export async function decryptCellRows(
               new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength),
             )[0]!;
             decoded[name] = unwrapValue(value, column.column_type, name);
+            if (declaration.indexes?.[name]) {
+              let indexed = decryptedIndexBytes.get(decoded);
+              if (!indexed) decryptedIndexBytes.set(decoded, (indexed = new Map()));
+              indexed.set(name, equalityValue(table, name, value));
+            }
             pending.delete(name);
           } catch {
             throw new E2eeDataError("invalid-ciphertext");
@@ -178,11 +192,29 @@ export async function decryptCellRows(
     } else {
       await withSpaceKeys(db, scope, identifier, decrypt, true);
       if (group.length > 1) recheck.push(identifier);
+      else if (epochs) histories!.set(identifier, epochs);
     }
     if (entries.some(({ pending }) => pending.size)) throw new E2eeDataError("invalid-ciphertext");
   }
   for (const identifier of recheck) {
-    await withSpaceKeys(db, scope, identifier, async () => {}, false);
+    if (histories) {
+      // Use the final authority observation, after every awaited cipher call.
+      const epochs = new Set<string>();
+      await withSpaceKeys(
+        db,
+        scope,
+        identifier,
+        async (_secret, root) => {
+          epochs.add(root.epochId);
+        },
+        true,
+      );
+      histories.set(identifier, epochs);
+    } else {
+      await withSpaceKeys(db, scope, identifier, async () => {}, false);
+    }
   }
+  if (onValidatedHistory && histories)
+    for (const [identifier, epochs] of histories) onValidatedHistory(identifier, epochs);
   return result;
 }

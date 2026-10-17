@@ -171,9 +171,11 @@ it("borrows transaction-owned initial keys and leaves plaintext projections inde
   const initial = new Map([
     [`${currentA.scopeId}:${currentA.identifier}`, { root: currentA, secret }],
   ]);
-  expect((await decryptCellRows(db, app.wasmSchema, "notes", [row], initial))[0]!.title).toBe(
-    "initial",
-  );
+  const observed = vi.fn();
+  expect(
+    (await decryptCellRows(db, app.wasmSchema, "notes", [row], initial, observed))[0]!.title,
+  ).toBe("initial");
+  expect(observed).not.toHaveBeenCalled();
   expect(secret).toEqual(secretFor(currentA));
   expect(access.keys).not.toHaveBeenCalled();
   access.crypto.mockRejectedValue(new Error("unavailable key store"));
@@ -181,12 +183,57 @@ it("borrows transaction-owned initial keys and leaves plaintext projections inde
   expect(await decryptCellRows(db, app.wasmSchema, "notes", plain)).toBe(plain);
 });
 
-it("rechecks authority after decryption before exposing a grouped result", async () => {
-  const rows = [await stored(31, currentA, "first"), await stored(33, currentA, "second")];
-  revokeDuringDecrypt = true;
-  await expect(decryptCellRows(db, app.wasmSchema, "notes", rows)).rejects.toMatchObject({
-    code: "key-not-shared",
+it.each([false, true])(
+  "rechecks authority after decryption before exposing a grouped result (history observer: %s)",
+  async (observe) => {
+    const rows = [await stored(31, currentA, "first"), await stored(33, currentA, "second")];
+    revokeDuringDecrypt = true;
+    const observed = vi.fn();
+    await expect(
+      decryptCellRows(db, app.wasmSchema, "notes", rows, undefined, observe ? observed : undefined),
+    ).rejects.toMatchObject({
+      code: "key-not-shared",
+    });
+    expect(borrowed.every((key) => key.every((byte) => byte === 0))).toBe(true);
+    expect(plaintexts.every((value) => value.every((byte) => byte === 0))).toBe(true);
+    expect(observed).not.toHaveBeenCalled();
+  },
+);
+
+it.each([1, 2])("reports complete validated history after key release (%i rows)", async (count) => {
+  const rows = [await stored(31, currentA, "current"), await stored(33, oldA, "old")].slice(
+    0,
+    count,
+  );
+  const nextA = root(1, 13);
+  const useKeys = access.keys.getMockImplementation()!;
+  let reads = 0;
+  access.keys.mockImplementation(async (...args) => {
+    // A batch's final recheck sees a rotation that the initial decode did not.
+    if (++reads === 2) {
+      const secret = secretFor(nextA);
+      borrowed.push(secret);
+      try {
+        await args[3](secret, nextA);
+      } finally {
+        secret.fill(0);
+      }
+    }
+    await useKeys(...args);
   });
-  expect(borrowed.every((key) => key.every((byte) => byte === 0))).toBe(true);
-  expect(plaintexts.every((value) => value.every((byte) => byte === 0))).toBe(true);
+  const observed = vi.fn(() => {
+    expect(reads).toBe(count);
+    expect(borrowed.every((key) => key.every((byte) => byte === 0))).toBe(true);
+  });
+  const result = await decryptCellRows(db, app.wasmSchema, "notes", rows, undefined, observed);
+  expect(result.map((row) => row.title)).toEqual(count === 1 ? ["current"] : ["current", "old"]);
+  expect(observed).toHaveBeenCalledExactlyOnceWith(
+    currentA.identifier,
+    new Set(
+      count === 1
+        ? [currentA.epochId, oldA.epochId]
+        : [nextA.epochId, currentA.epochId, oldA.epochId],
+    ),
+  );
+  expect(plaintexts.every((bytes) => bytes.every((byte) => byte === 0))).toBe(true);
 });

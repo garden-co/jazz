@@ -10,8 +10,11 @@ it("preserves explicit administration rules and encrypted mutations when composi
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] })
+      .table(
+        { projectId: s.uuid(), body: s.string(), done: s.boolean(), bytes: s.bytes() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["body", "bytes"] })
       .indexOnly(["projectId"]),
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -88,7 +91,12 @@ it("preserves explicit administration rules and encrypted mutations when composi
 
     const tx = db.beginExclusiveTransaction();
     const project = tx.insert(app.projects, { title: "Automatic space" });
-    const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted content" });
+    const note = tx.insert(app.notes, {
+      projectId: project.id,
+      body: "Encrypted content",
+      done: false,
+      bytes: new Uint8Array([1, 2, 255]),
+    });
     expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
     await tx.commit().wait({ tier: "global" });
     expect(await db.all(app.notes, { tier: "remote" })).toEqual([note]);
@@ -102,20 +110,55 @@ it("preserves explicit administration rules and encrypted mutations when composi
       ...note,
       body: "Upserted content",
     });
+    // Ordinary upsert/restore invariants share this accepted policy-composed
+    // scope. Full-row checks also pin preservation of plaintext and byte fields.
     const newId = crypto.randomUUID();
-    await db
-      .upsert(app.notes, newId, { projectId: project.id, body: "New upsert" })
-      .wait({ tier: "global" });
-    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
-      id: newId,
+    const data = {
       projectId: project.id,
       body: "New upsert",
+      done: false,
+      bytes: new Uint8Array([3, 4]),
+    };
+    const created = db.upsert(app.notes, newId, data);
+    expect(created).not.toBeInstanceOf(Promise);
+    await created.wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
+      id: newId,
+      ...data,
     });
+    await db.upsert(app.notes, newId, { body: "Changed" }).wait({ tier: "global" });
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
+      id: newId,
+      ...data,
+      body: "Changed",
+    });
+    await expect(
+      db.upsert(app.notes, newId, { projectId: crypto.randomUUID() }).wait({ tier: "global" }),
+    ).rejects.toThrow("The encryption space of a row is immutable");
+    expect(await db.one(app.notes.where({ id: newId }), { tier: "remote" })).toEqual({
+      id: newId,
+      ...data,
+      body: "Changed",
+    });
+
     await db.delete(app.notes, note.id).wait({ tier: "global" });
     expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
-    await db
-      .restore(app.notes, note.id, { projectId: project.id, body: "Restored content" })
-      .wait({ tier: "global" });
+    const restoredData = {
+      projectId: project.id,
+      body: "Restored content",
+      done: note.done,
+      bytes: note.bytes,
+    };
+    await expect(
+      db
+        .restore(app.notes, note.id, { ...restoredData, projectId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow("The encryption space of a row is immutable");
+    expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
+    const restored = db.restore(app.notes, note.id, restoredData);
+    expect(restored).not.toBeInstanceOf(Promise);
+    expect(restored.value).toEqual({ ...note, body: "Restored content" });
+    await restored.wait({ tier: "global" });
     expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
       ...note,
       body: "Restored content",
