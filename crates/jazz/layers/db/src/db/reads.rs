@@ -590,7 +590,10 @@ where
             } else if coverage_expired() {
                 Poll::Ready(Err(Error::new(
                     ErrorCode::NotObserved,
-                    "Timed out waiting for query coverage",
+                    format!(
+                        "Timed out waiting for query coverage [attachment={attachment:?}] {}",
+                        self.query_delivery_diagnostics_for_test()
+                    ),
                 )))
             } else {
                 Poll::Pending
@@ -773,7 +776,10 @@ where
             std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
                 Poll::Pending if coverage_expired() => Poll::Ready(Err(Error::new(
                     ErrorCode::NotObserved,
-                    "Timed out waiting for query coverage",
+                    format!(
+                        "Timed out waiting for query coverage [schema-admission] {}",
+                        self.query_delivery_diagnostics_for_test()
+                    ),
                 ))),
                 outcome => outcome,
             })

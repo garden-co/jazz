@@ -608,7 +608,6 @@ where
         self.node.trace_query_coverage.set(enabled);
     }
 
-    #[cfg(any(test, feature = "testing"))]
     /// Scheduling and receipt state only: never row values or admitted claims.
     pub fn query_delivery_diagnostics_for_test(&self) -> String {
         use std::fmt::Write;
