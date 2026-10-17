@@ -349,8 +349,15 @@ impl SqliteStorage {
                 |row| row.get(0),
             )
             .map_err(backend)?;
-        if raw_manifest != target.encode()? {
-            source.admit_existing(&raw_manifest)?;
+        match (
+            source.admit_existing(&raw_manifest),
+            target.admit_existing(&raw_manifest),
+        ) {
+            (Ok(_), _) | (_, Ok(_)) => {}
+            // This error identifies the matching epoch. Preserve its
+            // inventory instead of an epoch mismatch from the other spec.
+            (_, Err(error @ Error::UnsupportedStorageCodecs { .. })) => return Err(error),
+            (Err(error), _) => return Err(error),
         }
         let StorageAdmission::Durable(admission) = storage.admission()? else {
             unreachable!()
