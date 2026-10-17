@@ -353,7 +353,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     assert_eq!(received_mapping.tables, local_mapping.tables);
     assert_eq!(received_mapping.identities, authority_identities);
     assert_ne!(received_mapping.identities, local_mapping.identities);
-    let stored = receiver.query_versions_for_tx(tx_id).unwrap();
+    let stored = receiver.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].schema_version_alias(), local_alias);
     receiver.physical_table_id_for_version(&stored[0]).unwrap();
@@ -493,7 +493,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
     assert!(wire.windows(6).any(|bytes| bytes == b"JVRR\x03\x00"));
     let unit = crate::wire::decode_sync_message(&wire).unwrap();
     receiver.apply_sync_message_settled(unit).unwrap();
-    let stored = receiver.query_versions_for_tx(tx_id).unwrap();
+    let stored = receiver.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(stored[0].authored_column_ids().unwrap(), Some(BTreeSet::from([receiver_body_id])));
     assert_eq!(
         receiver
@@ -505,7 +505,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
     drop(receiver);
 
     let mut reopened = reopen_node_at(&receiver_dir, node(0x64), evolved.schema);
-    let stored = reopened.query_versions_for_tx(tx_id).unwrap();
+    let stored = reopened.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(
         reopened
             .version_record_from_row(&stored[0])
@@ -576,7 +576,7 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
     let name_id = authority.catalogue.physical_mappings[&renamed.id].tables["todos"].columns["name"];
     assert_eq!(title_id, name_id, "a compatible rename retains the column id");
     for (tx_id, logical_name) in [(old_tx, "title"), (new_tx, "name")] {
-        let stored = authority.query_versions_for_tx(tx_id).unwrap().remove(0);
+        let stored = authority.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
         assert_eq!(stored.authored_column_ids().unwrap(), Some(BTreeSet::from([title_id])));
         assert_eq!(
             authority.version_record_from_row(&stored).unwrap().authored_columns(),
@@ -597,7 +597,7 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
     let mut reopened_receiver = reopen_node_at(&receiver_dir, node(0x69), renamed_schema);
     for node in [&mut reopened_authority, &mut reopened_receiver] {
         for (tx_id, logical_name) in [(old_tx, "title"), (new_tx, "name")] {
-            let stored = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+            let stored = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
             assert_eq!(
                 node.version_record_from_row(&stored).unwrap().authored_columns(),
                 Some(&BTreeSet::from([logical_name.to_owned()])),

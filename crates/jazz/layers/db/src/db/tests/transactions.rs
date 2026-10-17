@@ -3106,7 +3106,7 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     let target_unit = server
         .node()
         .borrow_mut()
-        .commit_unit_for(target_write.mergeable_tx_id())
+        .stored_commit_unit_for_test(target_write.mergeable_tx_id())
         .unwrap();
     for client in [&alice_client, &bob_client] {
         client

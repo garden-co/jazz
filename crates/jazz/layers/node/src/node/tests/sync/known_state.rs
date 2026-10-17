@@ -1437,7 +1437,7 @@ fn assert_eviction_failure_contract(
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(persisted_versions.len(), 1);
     let persisted_version = persisted_versions
         .first()
@@ -1602,7 +1602,7 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     reader.cache_tx_versions(tx_id, persisted_versions);
     assert!(matches!(
         reader

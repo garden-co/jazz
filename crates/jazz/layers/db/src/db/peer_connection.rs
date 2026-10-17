@@ -1887,7 +1887,16 @@ where
                             let unit = if let Some(unit) = staged {
                                 unit
                             } else {
-                                self.node.lock().await.commit_unit_for(tx_id).await?
+                                match self.node.lock().await.commit_unit_for(tx_id).await {
+                                    Ok(unit) => unit,
+                                    // Settled since it was queued: the
+                                    // authority already holds it and fate
+                                    // cleanup drops it from the outbox.
+                                    Err(crate::node::Error::TransactionVersionsReleased(_)) => {
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                }
                             };
                             if let std::collections::btree_map::Entry::Vacant(entry) =
                                 large_value_uploads.entry(tx_id)

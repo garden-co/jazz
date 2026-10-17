@@ -97,7 +97,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     assert_eq!(bundles[0].versions.len(), 1);
     let shipped = &bundles[0].versions[0];
     let canonical = core
-        .query_versions_for_tx(new_tx)
+        .stored_versions_for_tx_for_test(new_tx)
         .unwrap()
         .into_iter()
         .find(|version| version.row_uuid() == shared_row)
@@ -181,7 +181,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     assert_eq!(shipped.table(), "todos");
     assert_eq!(shipped.cell_at(0), Some(v("old-title")));
 
-    let authored_versions = core.query_versions_for_tx(old_tx).unwrap();
+    let authored_versions = core.stored_versions_for_tx_for_test(old_tx).unwrap();
     let materialization_witness = core
         .maintained_witness_for_result_member(
             &authored_versions,
