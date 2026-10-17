@@ -204,6 +204,10 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
       );
       const note = tx.insert(app.notes, { projectId: project.id, title: "Before removal" });
       await tx.commit().wait({ tier: "global" });
+      // Complete the initial delivery before exercising an already-shared space.
+      expect(await alice.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+        state: "ready",
+      });
       const query = app.notes.where({ id: note.id });
       expect(await bob.one(query, { tier: "remote" })).toEqual(note);
       expect(await bob.one(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual(
