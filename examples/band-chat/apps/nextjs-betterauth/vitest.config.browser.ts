@@ -39,6 +39,7 @@ export default defineConfig({
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
+    setupFiles: ["./tests/browser/styles.ts"],
     browser: {
       enabled: true,
       trace: "retain-on-failure",

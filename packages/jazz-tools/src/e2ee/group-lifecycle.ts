@@ -23,7 +23,6 @@ import type {
 } from "./groups.js";
 import {
   readPublicMembershipHistory,
-  readAccountMembership,
   prefetchPublicMembershipHistory,
   replayAccountMembership,
   historyBefore,
@@ -111,6 +110,10 @@ function accountMemberId(row: GroupMembership): string | undefined {
     ? row.memberId
     : undefined;
 }
+
+// Prepared scopes retain query shape only, never rows, keys or authority. Share
+// the bounded working set with read-only recovery readers on the same Db.
+const preparedGroupScopes = new WeakMap<Db, WeakMap<DeviceTables & GroupTables, Set<string>>>();
 
 /** Group roots are accepted before any recipient envelopes are published. */
 export class Groups {
@@ -453,23 +456,13 @@ export class Groups {
         ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "remote" })
         : null;
     if (memberKind === "group" && !child) throw new Error("Missing E2EE child group");
-    await Promise.all(
-      [
-        ...new Set([observed.accountId, memberKind === "account" ? memberId : child!.accountId]),
-      ].map((accountId) =>
-        readAccountMembership(
-          this.db,
-          accountId,
-          this.accountContext(accountId),
-          this.signer,
-          this.tables,
-        ),
-      ),
-    );
     const relatedGroupId = memberKind === "group" ? memberId : undefined;
-    await this.warmMembership({
-      groupIds: relatedGroupId === undefined ? [observed.id] : [observed.id, relatedGroupId],
-    });
+    await this.warmMembership(
+      {
+        groupIds: relatedGroupId === undefined ? [observed.id] : [observed.id, relatedGroupId],
+      },
+      [observed.accountId, memberKind === "account" ? memberId : child!.accountId],
+    );
     const device = await this.loadDevice();
     try {
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
@@ -482,6 +475,14 @@ export class Groups {
           author.publicHistory,
           relatedGroupId,
         );
+        // Preserve full-current discovery validation even for creators who have
+        // left their group; historical root replay alone checks only its prefix.
+        const creatorIds = new Set([observed.accountId, ...(child ? [child.accountId] : [])]);
+        for (const accountId of creatorIds) {
+          const history = group.histories.get(accountId);
+          if (!history) throw new Error("Missing E2EE group creator account history");
+          await replayAccountMembership(history, this.accountContext(accountId), this.signer);
+        }
         const roots = group.targetRoots;
         if (roots.rows[0]?.accountId !== observed.accountId)
           throw new Error("E2EE group creator changed");
@@ -1013,16 +1014,20 @@ export class Groups {
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "remote",
     });
-    const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
+    // Retained acceptance suffices for these observations. Current authority
+    // and key confirmation remain in the subsequent publication transaction.
+    const [repairs, recovery, deliveries] = await this.db.observeE2eeHistory([
+      this.tables.__e2ee_group_repairs.where({ groupId: id }),
+      this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
+      ...(!preparedDeliveries ? [this.tables.__e2ee_group_deliveries.where({ groupId: id })] : []),
+    ]);
+    return {
       deliveries:
         preparedDeliveries ??
-        (await tx.allSettledForE2ee(this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
-      repairs: await tx.allSettledForE2ee(this.tables.__e2ee_group_repairs.where({ groupId: id })),
-      recovery: await tx.allSettledForE2ee(
-        this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
-      ),
-    }));
-    return await prior.wait({ tier: "global" });
+        (deliveries! as { rows: GroupDelivery[]; settlements: RowSettlement[] }),
+      repairs: repairs! as { rows: GroupRepair[]; settlements: RowSettlement[] },
+      recovery: recovery! as { rows: GroupRecoveryDelivery[]; settlements: RowSettlement[] },
+    };
   }
 
   private async prepareDelivery(
@@ -1361,7 +1366,46 @@ export class Groups {
   }
 
   /** Key-free discovery only; empty group IDs never fall back to account discovery. */
-  async warmMembership(scope: GroupHistoryScope) {
+  async warmMembership(scope: GroupHistoryScope, additionalAccountIds: readonly string[] = []) {
+    let schemas = preparedGroupScopes.get(this.db);
+    if (!schemas) {
+      schemas = new WeakMap();
+      const db = this.db;
+      preparedGroupScopes.set(db, schemas);
+      db.onShutdown(() => preparedGroupScopes.delete(db));
+    }
+    let prepared = schemas.get(this.tables);
+    if (!prepared) schemas.set(this.tables, (prepared = new Set()));
+    // Oversized scopes keep the ordinary chunked discovery path.
+    const key =
+      "accountId" in scope
+        ? JSON.stringify([this.accountId, "account", scope.accountId])
+        : scope.groupIds.length <= 128
+          ? JSON.stringify([this.accountId, "groups", [...new Set(scope.groupIds)].sort()])
+          : undefined;
+    if (key !== undefined && prepared.has(key)) {
+      // Drain preceding writes without collecting the component twice. Every
+      // subsequent authority transaction still discovers and covers the full
+      // current graph, including new edges, accounts and empty predicates.
+      await Promise.all([
+        this.db.all(
+          this.tables.__e2ee_groups.where(
+            "accountId" in scope
+              ? { accountId: scope.accountId }
+              : { id: { in: [...scope.groupIds] } },
+          ),
+          { tier: "remote" },
+        ),
+        ...[
+          ...new Set([
+            this.accountId,
+            ...additionalAccountIds,
+            ...("accountId" in scope ? [scope.accountId] : []),
+          ]),
+        ].map((accountId) => prefetchPublicMembershipHistory(this.db, accountId, this.tables)),
+      ]);
+      return;
+    }
     const { roots, records, successors } = await collectGroupHistory(scope, {
       roots: (selector) =>
         this.db.all(this.tables.__e2ee_groups.where(selector), { tier: "remote" }),
@@ -1372,7 +1416,9 @@ export class Groups {
           tier: "remote",
         }),
     });
-    const accounts = new Set([this.accountId]);
+    // Deduplicate preparation only within this discovery call. Selected accounts
+    // remain covered even if an observed group root changes during discovery.
+    const accounts = new Set([this.accountId, ...additionalAccountIds]);
     if ("accountId" in scope) accounts.add(scope.accountId);
     for (const group of roots) accounts.add(group.accountId);
     for (const row of records) {
@@ -1386,6 +1432,10 @@ export class Groups {
         prefetchPublicMembershipHistory(this.db, accountId, this.tables),
       ),
     );
+    if (key !== undefined) {
+      prepared.add(key);
+      if (prepared.size > 8) prepared.delete(prepared.values().next().value!);
+    }
   }
 
   private async acceptedDelivery(

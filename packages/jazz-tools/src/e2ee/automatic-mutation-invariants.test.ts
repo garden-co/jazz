@@ -271,10 +271,13 @@ it("uses the public begin snapshot for a cold initial recipient", async () => {
   try {
     const cold = await fixture.openOtherAccount();
     await cold.client.e2ee.devices.list();
-    // Advance the creator's known authority coordinate without loading recipient history.
-    await db.insert(app.events, { message: "Recipient enrolment precedes this snapshot" }).wait({
-      tier: "global",
-    });
+    // Observe the creator's own authority marker before capturing begin.
+    // Global write acceptance alone does not establish that read coordinate.
+    // Recipient history remains cold on the creator.
+    const marker = await db
+      .insert(app.events, { message: "Recipient enrolment precedes this snapshot" })
+      .wait({ tier: "global" });
+    expect(await db.one(app.events.where({ id: marker.id }), { tier: "remote" })).toEqual(marker);
     const coldTx = db.beginExclusiveTransaction();
     const coldProject = coldTx.insert(
       app.projects,
