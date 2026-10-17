@@ -22,9 +22,11 @@ an `acceptedHistoryV1` array. Each entry contains:
 - `scope`: the encoded account registry, environment and account ID;
 - `key`: the encoded space scope and identifier;
 - `reads`: a JSON string containing query identities, metadata rows and row
-  settlements;
-- optional `initial`: the root ID, initial row IDs, recipient IDs and accepted
-  transaction ID for a newly created space.
+  settlements.
+
+Initialization proposals and their exact row/recipient/transaction identities
+belong exclusively to the sealed initialization journal. Accepted-history cache
+entries contain only the three fields above.
 
 The local snapshot encoding reserves the single-key object
 `{ "e2eeBytesV1": [0, 127, 255] }` for byte arrays. Every element must be an
@@ -42,8 +44,8 @@ qualification concern rather than a promised storage limit.
 
 Restoration reruns the existing metadata verifier. Its freshly built queries
 must match the saved query identities exactly, with no missing or unused reads.
-Saved query text is never executed. Initial recipient IDs reproduce the original
-preparation's dependency reads, including those needed when group tables exist.
+Saved query text is never executed. Restoration uses the current verifier's
+complete dependency reads, including those needed when group tables exist.
 
 Before reuse, all metadata rows, absences and settlements must match the local
 accepted-only observations. Pending local writes cannot hide an accepted change.
@@ -68,16 +70,16 @@ accepted-history or original provisional-journal path.
 
 ### Initial creation and failure
 
-Atomic creation retains the coherent preparation before staging the signed root
-and grants. It becomes eligible only after global acceptance, identified by the
-actual transaction ID. Before offline reuse, every initial row must have that
-accepted transaction ID and the other dependencies must still match.
+Atomic creation stages one sealed initialization proposal. Its exact row,
+recipient and transaction identities remain in the journal until reconciliation
+confirms global acceptance. Pending or rejected proposals never become accepted
+history. Once accepted, the client captures and validates a coherent accepted-row
+bundle through the same verifier used by ordinary accepted-history reads.
 
-Acceptance attempts to save the bundle locally without another remote query.
-A cache failure must not turn an already accepted transaction into a rejected
-commit receipt. The in-memory bundle remains available in that case, but durable
-offline reopening is not guaranteed. Uncommitted preparation is discarded on
-rollback or rejection, including cancellation while preparation is finishing.
+Saving that verified bundle is best-effort. A cache failure must not turn an
+already accepted transaction into a rejected commit receipt. The in-memory
+bundle can remain available, but durable offline reopening is not guaranteed.
+Rollback, rejection and cancellation do not install accepted cache entries.
 
 ### Local use and reconciliation
 
