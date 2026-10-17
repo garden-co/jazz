@@ -27,6 +27,15 @@ impl<S> Drop for ActiveSessionClaimsScope<'_, S> {
     }
 }
 
+fn session_claim_scope_key(identity: AuthorSubject, claims: &BTreeMap<String, Value>) -> String {
+    let encoded = postcard::to_allocvec(&(identity, claims))
+        .expect("author identity and claim values are postcard encodable");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"jazz/active-session-claim-scope/v1\\0");
+    hasher.update(&encoded);
+    hasher.finalize().to_hex().to_string()
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -1119,12 +1128,20 @@ where
             .active_session_claims
             .as_ref()
             .filter(|(active_identity, _)| *active_identity == identity)?;
-        let encoded = postcard::to_allocvec(&(identity, claims))
-            .expect("author identity and claim values are postcard encodable");
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"jazz/active-session-claim-scope/v1\\0");
-        hasher.update(&encoded);
-        Some(hasher.finalize().to_hex().to_string())
+        Some(session_claim_scope_key(identity, claims))
+    }
+
+    /// Include process-local admission when payload claims cannot be route keys.
+    pub(crate) fn effective_session_claim_scope_key(&self, identity: AuthorSubject) -> String {
+        let empty = BTreeMap::new();
+        let claims = self
+            .active_session_claims
+            .as_ref()
+            .filter(|(active_identity, _)| *active_identity == identity)
+            .map(|(_, claims)| claims)
+            .or_else(|| self.session_claims.get(&identity))
+            .unwrap_or(&empty);
+        session_claim_scope_key(identity, claims)
     }
 
     /// Admit application/provider claims for a synthetic test topology.
