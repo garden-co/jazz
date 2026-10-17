@@ -3,9 +3,10 @@ title: Upgrading from alpha.55
 description: The breaking changes between alpha.55 and alpha.60, what to change in your app, and what happens to clients that haven't upgraded yet.
 ---
 
-This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.60. Stored
-data needs nothing: server data directories and browser storage from alpha.55 open in place, with
-no reset or conversion step. Your code and deployment do need changes.
+This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.60. Your
+code and deployment need changes. Local client stores written by alpha.59 and earlier don't open in
+alpha.60: clients wipe them and resync from Core, as described in
+[Old local stores are refused](#old-local-stores-are-refused).
 
 The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
 [From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58); on alpha.58 or
@@ -146,8 +147,9 @@ See [Durability Tiers](/docs/reference/durability-tiers).
 
 Clients now connect straight to the core server, which authorizes and confirms writes.
 
-- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. `"edge"` still works for
-  waits but warns and waits for `"global"`. It throws as a read tier.
+- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. From alpha.60,
+  `wait({ tier: "edge" })` rejects with a `TypeError` (see
+  [`"edge"` write waits rejected](#edge-write-waits-rejected)). It also throws as a read tier.
 - Remove server upstream and edge configuration.
 - Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
 
@@ -176,6 +178,63 @@ If your app uses exclusive transactions, ship the alpha.58 client build together
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
 
 ## In alpha.60
+
+### `"edge"` write waits rejected
+
+`wait({ tier: "edge" })` used to warn and wait for `"global"`. It now rejects with a `TypeError`, and
+TypeScript no longer accepts it. Only the wait fails: the write was already applied, so a `.catch`
+that undoes the write on failure would undo every write. Change these waits to
+`wait({ tier: "global" })`.
+
+### Read tiers are `"local-first"` and `"remote"`
+
+The read tiers `"local"` and `"global"` (and the `"core"` alias) were removed and throw. Use
+`"local-first"` instead of `"local"`, and `"remote"` instead of `"global"`.
+`"local-first-unless-empty"` was also removed: use `"local-first"` with a `firstLoadRemoteWaitMs`
+of a few seconds. Outside the browser, a client connected to a server now reads `"remote"` by
+default. See [Durability Tiers](/docs/reference/durability-tiers).
+
+### Obsolete client options removed
+
+`defaultDurabilityTier` was removed. Set `tier` on each read that should differ from the default:
+`"local-first"` in browsers, in React Native and without a server, `"remote"` otherwise.
+
+The `tier` option of backend `createJazzContext()` was removed too. A Node or SSR app that set
+`tier: "local"` or `defaultDurabilityTier: "local"` together with a `serverUrl` used to read
+locally. It now reads `"remote"` by default and waits on the server. Pass `tier: "local-first"` on
+reads that should keep the old behavior.
+
+Also removed:
+
+- The React Native `sqliteStorage` option and the `ReactNativeSqlite*` driver types. The option was
+  always rejected; the native runtime owns storage.
+- The `--jazz-bin` flag of `jazz-tools validate`. It had no effect.
+- The `clientId`, `runtimeSources` and `tier` fields of `AppContext`. The backend no longer accepts
+  `runtimeSources`; the client option of the same name is unchanged.
+
+TypeScript flags these options. Plain JavaScript ignores them silently, and the read tier can
+change without warning, so search your code and remove them.
+
+### Old local stores are refused
+
+alpha.60 changes the local storage format. A client store written by alpha.59 or earlier is refused
+when it is opened, on every platform, before anything in it is read or changed. The error is an
+`UnsupportedStorageCodecsError` with `code` set to `"unsupported_storage_codecs"`. Its `missing` and
+`unknown` fields list the storage formats the store lacks and the ones this build doesn't read.
+React Native reports the code and message only.
+
+There is no migration. To recover, delete the local store and let the client resync from Core:
+
+- In the browser, call `await db.deleteClientStorage()` (see
+  [Storage reset](/docs/auth/lifecycle#storage-reset)).
+- In Node, close the client and delete its data directory.
+
+Writes that were still pending in the old store, and never reached Core, are lost.
+
+The error class does not survive every native binding or worker boundary, so detect the refusal by
+its code with `isUnsupportedStorageCodecsError(error)`, exported from `jazz-tools` and
+`jazz-tools/react-native`. In the Rust client, `JazzClient::connect` returns
+`JazzError::UnsupportedStorageCodecs`.
 
 ### Import migration builders from `migration`
 

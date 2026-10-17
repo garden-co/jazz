@@ -25,7 +25,9 @@ fn widened_projection_descriptor(
                     field.name.clone().ok_or(Error::InvalidStoredValue(
                         "physical projection logical field unnamed",
                     ))?,
-                    widen_projection_value_type(&field.value_type, &physical.column_type),
+                    // Projections read logical rows: an interned column
+                    // projects its full value, never its stored code.
+                    widen_projection_value_type(&field.value_type, &physical.column_type.logical()),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?,
@@ -61,9 +63,11 @@ pub(super) fn physical_write_descriptor(
                 // Writes target the physical table itself. Unlike read-side
                 // widening, its descriptor must retain the physical enum
                 // registry identities so Groove accepts the variant record;
-                // values are explicitly re-encoded before this point.
+                // values are explicitly re-encoded before this point. The
+                // record is logical: Groove interns its author columns when
+                // it stores it.
                 let _ = logical;
-                Ok((name.clone(), physical.column_type.clone()))
+                Ok((name.clone(), physical.column_type.logical()))
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))
@@ -151,7 +155,7 @@ fn remap_authored_payload_enum_value(
     }
 }
 
-fn remap_nested_enum_value(
+pub(super) fn remap_nested_enum_value(
     value: Value,
     authored: &records::ValueType,
     physical: &records::ValueType,
@@ -355,6 +359,7 @@ pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -818,17 +823,14 @@ pub(super) fn physical_version_storage_tables(
         );
         physical.primary_key = template.primary_key.clone();
         physical.indices = template.indices.clone();
-        let mut register = template_table.register_storage_table();
-        register.name = physical_register_table_name(table_id);
-
-        let logical_global_tables = template_table.global_current_storage_tables();
-        let current_system_columns = logical_global_tables[0]
+        let logical_global = template_table.global_current_storage_table();
+        let current_system_columns = logical_global
             .columns
             .iter()
             .take(GlobalCurrentRowRecord::USER_CELLS)
             .cloned()
             .collect::<Vec<_>>();
-        let current_trailing_columns = logical_global_tables[0]
+        let current_trailing_columns = logical_global
             .columns
             .iter()
             .skip(GlobalCurrentRowRecord::USER_CELLS + template_table.columns.len())
@@ -850,7 +852,11 @@ pub(super) fn physical_version_storage_tables(
             physical_global_current_table_name(table_id),
             current_columns(),
         );
-        physical_global.primary_key = logical_global_tables[0].primary_key.clone();
+        physical_global.primary_key = logical_global.primary_key.clone();
+        physical_global = physical_global.with_index(GrooveIndexSchema::new(
+            crate::schema::GLOBAL_CURRENT_BY_SEQ_INDEX,
+            ["branch_key", "global_time", "row_uuid"],
+        ));
         let indexed_columns = variants
             .iter()
             .flat_map(|(_, logical_table, mapping, _)| {
@@ -884,16 +890,13 @@ pub(super) fn physical_version_storage_tables(
                     .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
-        let mut register_global = logical_global_tables[1].clone();
-        register_global.name = physical_register_global_current_table_name(table_id);
-
-        let logical_ahead_tables = template_table.ahead_current_storage_tables();
+        let logical_ahead = template_table.ahead_current_storage_table();
         let mut physical_ahead = GrooveTableSchema::new_with_bound_registries(
             physical_ahead_current_table_name(table_id),
             current_columns(),
         );
-        physical_ahead.primary_key = logical_ahead_tables[0].primary_key.clone();
-        physical_ahead.indices = logical_ahead_tables[0].indices.clone();
+        physical_ahead.primary_key = logical_ahead.primary_key.clone();
+        physical_ahead.indices = logical_ahead.indices.clone();
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
@@ -907,9 +910,6 @@ pub(super) fn physical_version_storage_tables(
                     .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
-        let mut register_ahead = logical_ahead_tables[1].clone();
-        register_ahead.name = physical_register_ahead_current_table_name(table_id);
-
         let rejected_template = template_table.rejected_versions_storage_table();
         let rejected_system_columns = rejected_template
             .columns
@@ -966,6 +966,33 @@ pub(super) fn physical_version_storage_tables(
                     ));
                 }
             }
+            // The schema's union case: its own cells, then every other
+            // column of the lineage it may have to carry. Rejected versions
+            // are authored writes and never use it.
+            let extras = union_extra_columns(
+                physical_mappings,
+                catalogue_ranks,
+                *schema_version,
+                &logical_table.name,
+            )?;
+            if !extras.is_empty() {
+                let tag = union_variant_tag(alias)?;
+                let extra_names = extras
+                    .iter()
+                    .map(|column_id| physical_user_column_field(*column_id))
+                    .collect::<Vec<_>>();
+                let mut history = physical_history_field_names(logical_table, mapping)?;
+                history.extend(extra_names.iter().cloned());
+                let mut current = physical_current_field_names(logical_table, mapping)?;
+                current.extend(extra_names);
+                if layouts_by_tag.insert(tag, history).is_some()
+                    || current_layouts_by_tag.insert(tag, current).is_some()
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+            }
         }
         for (tag, fields) in layouts_by_tag {
             let payload = variant_payload_fields_for_names(&physical, &fields)?;
@@ -982,11 +1009,8 @@ pub(super) fn physical_version_storage_tables(
             rejected = rejected.with_variant_payload(tag, payload);
         }
         tables.push(physical);
-        tables.push(register);
         tables.push(physical_global);
-        tables.push(register_global);
         tables.push(physical_ahead);
-        tables.push(register_ahead);
         tables.push(rejected);
     }
     Ok(tables)
@@ -1152,7 +1176,7 @@ fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.global_current_content_storage_table().record_schema();
+    let logical_descriptor = table.global_current_storage_table().record_schema();
     let physical_names = physical_current_field_names(table, mapping)?;
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(
@@ -1266,7 +1290,13 @@ fn physical_history_field_names_for_case(
         mapping,
         present,
         HistoryRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns"],
+        &[
+            "authored_columns",
+            crate::schema::COUNTER_SIGNS_FIELD,
+            crate::schema::SEQ_FIELD,
+            crate::schema::BASE_SEQ_FIELD,
+            crate::schema::BASE_PENDING_FIELD,
+        ],
         "physical history column mapping missing",
     )
 }
@@ -1342,4 +1372,5 @@ fn physical_row_field_names(
     fields.extend(suffix.iter().map(|name| (*name).to_owned()));
     Ok(fields)
 }
+
 

@@ -979,7 +979,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1048,7 +1047,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1123,7 +1121,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1198,7 +1195,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1430,7 +1426,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1529,7 +1524,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 

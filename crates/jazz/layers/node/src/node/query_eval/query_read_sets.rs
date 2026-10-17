@@ -1,8 +1,41 @@
 //! Read-view-specific source selection for query evaluation.
 
 use super::*;
-use crate::node::query_engine::BranchViewSourceBase;
-use crate::protocol::BranchViewBase;
+
+fn canonical_projection(schema_version: SchemaVersionId) -> SchemaProjection<RequestedSourceStage> {
+    SchemaProjection {
+        schema_family: SchemaFamilySelection::Current,
+        storage: StorageSchemaSelection::Single(schema_version),
+        lens: LensSelection::Canonical,
+    }
+}
+
+/// The sources named by the shape's `RowSetExpr::Source` nodes.
+fn node_sources(shape: &NormalizedRowSetShape) -> impl Iterator<Item = &SourceId> {
+    shape.nodes.values().filter_map(|node| match node {
+        RowSetExpr::Source { source, .. } => Some(source),
+        _ => None,
+    })
+}
+
+/// Node sources followed by the shape's auxiliary sources.
+fn all_sources(shape: &NormalizedRowSetShape) -> impl Iterator<Item = &SourceId> {
+    node_sources(shape).chain(&shape.auxiliary_sources)
+}
+
+/// A primary read view that reads every source in `sources` through `expr`.
+fn uniform_read_set<'a>(
+    read_schema: SchemaVersionId,
+    policy_schema: SchemaVersionId,
+    sources: impl Iterator<Item = &'a SourceId>,
+    expr: impl Fn() -> SourceExpr<RequestedSourceStage>,
+) -> RequestedReadSet {
+    QueryReadSet::primary(ReadView {
+        read_schema,
+        policy_schema,
+        sources: sources.map(|source| (source.clone(), expr())).collect(),
+    })
+}
 
 pub(super) fn current_query_read_set(
     shape: &NormalizedRowSetShape,
@@ -13,62 +46,21 @@ pub(super) fn current_query_read_set(
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     settled_current_default: bool,
 ) -> RequestedReadSet {
-    let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(read_schema),
-        lens: LensSelection::Canonical,
+    let projection = canonical_projection(read_schema);
+    let expr = || match settled_binding_view {
+        Some(binding_view) => SourceExpr::SettledBindingView {
+            current_default: settled_current_default,
+            projection: projection.clone(),
+            binding_view,
+            authority_result_key: settled_authority_result_key.clone(),
+        },
+        None => SourceExpr::VisibleCurrent {
+            projection: projection.clone(),
+            data: DataSource::Current,
+            tier,
+        },
     };
-    let mut sources = shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some((
-                source.clone(),
-                if let Some(binding_view) = settled_binding_view {
-                    SourceExpr::SettledBindingView {
-                        current_default: settled_current_default,
-                        projection: projection.clone(),
-                        binding_view,
-                        authority_result_key: settled_authority_result_key.clone(),
-                    }
-                } else {
-                    SourceExpr::VisibleCurrent {
-                        projection: projection.clone(),
-                        data: DataSource::Current,
-                        tier,
-                    }
-                },
-            )),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    for source in &shape.auxiliary_sources {
-        if let Some(binding_view) = settled_binding_view {
-            sources.insert(
-                source.clone(),
-                SourceExpr::SettledBindingView {
-                    current_default: settled_current_default,
-                    projection: projection.clone(),
-                    binding_view,
-                    authority_result_key: settled_authority_result_key.clone(),
-                },
-            );
-            continue;
-        }
-        sources.insert(
-            source.clone(),
-            SourceExpr::VisibleCurrent {
-                projection: projection.clone(),
-                data: DataSource::Current,
-                tier,
-            },
-        );
-    }
-    QueryReadSet::primary(ReadView {
-        read_schema,
-        policy_schema,
-        sources,
-    })
+    uniform_read_set(read_schema, policy_schema, all_sources(shape), expr)
 }
 
 pub(super) fn historical_query_read_set(
@@ -76,30 +68,14 @@ pub(super) fn historical_query_read_set(
     schema_version: SchemaVersionId,
     position: GlobalTime,
 ) -> RequestedReadSet {
-    let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(schema_version),
-        lens: LensSelection::Canonical,
-    };
-    let sources = shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some((
-                source.clone(),
-                SourceExpr::HistoryCut {
-                    projection: projection.clone(),
-                    data: DataSource::Current,
-                    position,
-                },
-            )),
-            _ => None,
-        })
-        .collect();
-    QueryReadSet::primary(ReadView {
-        read_schema: schema_version,
-        policy_schema: schema_version,
-        sources,
+    let projection = canonical_projection(schema_version);
+    // Historical reads cover only the shape's node sources.
+    uniform_read_set(schema_version, schema_version, node_sources(shape), || {
+        SourceExpr::HistoryCut {
+            projection: projection.clone(),
+            data: DataSource::Current,
+            position,
+        }
     })
 }
 
@@ -108,31 +84,13 @@ pub(super) fn snapshot_query_read_set(
     schema_version: SchemaVersionId,
     snapshot: Snapshot,
 ) -> RequestedReadSet {
-    let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(schema_version),
-        lens: LensSelection::Canonical,
-    };
-    let source_expr = || SourceExpr::SnapshotRef {
-        projection: projection.clone(),
-        data: DataSource::Current,
-        snapshot: snapshot.clone(),
-    };
-    let mut sources = shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some((source.clone(), source_expr())),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    for source in &shape.auxiliary_sources {
-        sources.insert(source.clone(), source_expr());
-    }
-    QueryReadSet::primary(ReadView {
-        read_schema: schema_version,
-        policy_schema: schema_version,
-        sources,
+    let projection = canonical_projection(schema_version);
+    uniform_read_set(schema_version, schema_version, all_sources(shape), || {
+        SourceExpr::SnapshotRef {
+            projection: projection.clone(),
+            data: DataSource::Current,
+            snapshot: snapshot.clone(),
+        }
     })
 }
 
@@ -142,36 +100,18 @@ pub(super) fn tx_query_read_set(
     tx_id: OpenTransactionId,
     snapshot: Snapshot,
 ) -> RequestedReadSet {
-    let projection = SchemaProjection {
-        schema_family: SchemaFamilySelection::Current,
-        storage: StorageSchemaSelection::Single(schema_version),
-        lens: LensSelection::Canonical,
-    };
-    let overlay = || SourceExpr::WithOverlays {
-        input: Box::new(SourceExpr::SnapshotRef {
-            projection: projection.clone(),
-            data: DataSource::Current,
-            snapshot: snapshot.clone(),
-        }),
-        overlays: OverlayStack {
-            entries: vec![OverlayRef::OpenTransaction(tx_id)],
-        },
-    };
-    let mut sources = shape
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            RowSetExpr::Source { source, .. } => Some((source.clone(), overlay())),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    for source in &shape.auxiliary_sources {
-        sources.insert(source.clone(), overlay());
-    }
-    QueryReadSet::primary(ReadView {
-        read_schema: schema_version,
-        policy_schema: schema_version,
-        sources,
+    let projection = canonical_projection(schema_version);
+    uniform_read_set(schema_version, schema_version, all_sources(shape), || {
+        SourceExpr::WithOverlays {
+            input: Box::new(SourceExpr::SnapshotRef {
+                projection: projection.clone(),
+                data: DataSource::Current,
+                snapshot: snapshot.clone(),
+            }),
+            overlays: OverlayStack {
+                entries: vec![OverlayRef::OpenTransaction(tx_id)],
+            },
+        }
     })
 }
 
@@ -224,60 +164,30 @@ pub(super) fn query_read_set_for_read_view(
             },
         )),
         ReadViewSourceSpec::BranchView { head, base } => {
-            let projection = SchemaProjection {
-                schema_family: SchemaFamilySelection::Current,
-                storage: StorageSchemaSelection::Single(read_schema),
-                lens: LensSelection::Canonical,
-            };
-            let mut sources = BTreeMap::new();
-            for source in shape
-                .nodes
-                .values()
-                .filter_map(|node| match node {
-                    RowSetExpr::Source { source, .. } => Some(source),
-                    _ => None,
+            let projection = canonical_projection(read_schema);
+            let sources = all_sources(shape)
+                .map(|source| {
+                    let table = schema
+                        .tables
+                        .iter()
+                        .find(|table| table.name == source.table)
+                        .ok_or(Error::InvalidStoredValue(
+                            "branch view source table missing",
+                        ))?;
+                    let (head_key, base) =
+                        layer_stack::branch_view_stack(schema, table, head, base.as_ref())
+                            .map_err(Error::InvalidBranchKey)?;
+                    Ok((
+                        source.clone(),
+                        SourceExpr::BranchView {
+                            projection: projection.clone(),
+                            head: head_key,
+                            base,
+                            tier,
+                        },
+                    ))
                 })
-                .chain(&shape.auxiliary_sources)
-            {
-                let table = schema
-                    .tables
-                    .iter()
-                    .find(|table| table.name == source.table)
-                    .ok_or(Error::InvalidStoredValue(
-                        "branch view source table missing",
-                    ))?;
-                let (head_key, _) = schema
-                    .project_branch_view_selector(table, head)
-                    .map_err(Error::InvalidBranchKey)?;
-                let mut base = base
-                    .as_ref()
-                    .map(|base| match base {
-                        BranchViewBase::Current(selector) => schema
-                            .project_branch_view_selector(table, selector)
-                            .map(|(key, _)| BranchViewSourceBase::Current(key)),
-                        BranchViewBase::Snapshot { branch, snapshot } => schema
-                            .project_branch_view_selector(table, branch)
-                            .map(|(key, _)| BranchViewSourceBase::Snapshot(key, snapshot.clone())),
-                    })
-                    .transpose()
-                    .map_err(Error::InvalidBranchKey)?;
-                if base.as_ref().is_some_and(|base| match base {
-                    BranchViewSourceBase::Current(key) | BranchViewSourceBase::Snapshot(key, _) => {
-                        key == &head_key
-                    }
-                }) {
-                    base = None;
-                }
-                sources.insert(
-                    source.clone(),
-                    SourceExpr::BranchView {
-                        projection: projection.clone(),
-                        head: head_key,
-                        base,
-                        tier,
-                    },
-                );
-            }
+                .collect::<Result<_, Error>>()?;
             Ok(QueryReadSet::primary(ReadView {
                 read_schema,
                 policy_schema,

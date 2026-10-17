@@ -199,24 +199,7 @@ pub fn prepare_deployment(
                 return Err("custom backward transforms are not supported by deployment".into());
             }
             let runtime_lens = compile_lens(lens, &schemas[from], &schemas[to])?;
-            let new_tables = lens
-                .forward
-                .ops
-                .iter()
-                .filter_map(|op| match op {
-                    LensOp::AddTable { table, .. } => Some(table.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let dropped_tables = lens
-                .forward
-                .ops
-                .iter()
-                .filter_map(|op| match op {
-                    LensOp::RemoveTable { table, .. } => Some(table.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+            let (new_tables, dropped_tables) = lens.table_changes();
             validate_migration_lens_between(&runtime_lens, &compiled[from], &compiled[to])
                 .map_err(|error| error.to_string())?;
             validate_lineage_table_partition(

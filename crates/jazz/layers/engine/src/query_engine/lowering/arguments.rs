@@ -219,27 +219,12 @@ impl ProgramArgumentRecipes {
 }
 
 fn predicate_contains_argument(predicate: &PredicateExpr) -> bool {
-    let dynamic = |value: &NormalizedValueRef| {
-        matches!(
-            value,
-            NormalizedValueRef::Param(_) | NormalizedValueRef::TemplateLiteral(_)
-        )
-    };
-    match predicate {
-        PredicateExpr::True | PredicateExpr::False => false,
-        PredicateExpr::Compare { left, right, .. } => dynamic(left) || dynamic(right),
-        PredicateExpr::In { value, options } => dynamic(value) || options.iter().any(dynamic),
-        PredicateExpr::ArrayContains { value, needle }
-        | PredicateExpr::TextContains { value, needle } => dynamic(value) || dynamic(needle),
-        PredicateExpr::IsNull(value) | PredicateExpr::IsNotNull(value) => dynamic(value),
-        PredicateExpr::EnumMatch { value, payload, .. } => {
-            dynamic(value) || predicate_contains_argument(payload)
-        }
-        PredicateExpr::And(children) | PredicateExpr::Or(children) => {
-            children.iter().any(predicate_contains_argument)
-        }
-        PredicateExpr::Not(child) => predicate_contains_argument(child),
-    }
+    predicate
+        .try_for_each_value(&mut |value| match value {
+            NormalizedValueRef::Param(_) | NormalizedValueRef::TemplateLiteral(_) => Err(()),
+            _ => Ok(()),
+        })
+        .is_err()
 }
 
 /// Lift ordinary literal operands into a *compiler-local* argument namespace.
@@ -261,62 +246,12 @@ pub(super) fn extract_template_literals(
         }
         Ok(())
     }
-    fn predicate(
-        expression: &mut PredicateExpr,
-        literals: &mut Vec<Value>,
-    ) -> Result<(), UnsupportedReason> {
-        match expression {
-            PredicateExpr::Compare { left, right, .. } => {
-                value(left, literals)?;
-                value(right, literals)?;
-            }
-            PredicateExpr::In {
-                value: input,
-                options,
-            } => {
-                value(input, literals)?;
-                for option in options {
-                    value(option, literals)?;
-                }
-            }
-            PredicateExpr::ArrayContains {
-                value: input,
-                needle,
-            }
-            | PredicateExpr::TextContains {
-                value: input,
-                needle,
-            } => {
-                value(input, literals)?;
-                value(needle, literals)?;
-            }
-            PredicateExpr::IsNull(input) | PredicateExpr::IsNotNull(input) => {
-                value(input, literals)?
-            }
-            PredicateExpr::EnumMatch {
-                value: input,
-                payload,
-                ..
-            } => {
-                value(input, literals)?;
-                predicate(payload, literals)?;
-            }
-            PredicateExpr::And(children) | PredicateExpr::Or(children) => {
-                for child in children {
-                    predicate(child, literals)?;
-                }
-            }
-            PredicateExpr::Not(child) => predicate(child, literals)?,
-            PredicateExpr::True | PredicateExpr::False => {}
-        }
-        Ok(())
-    }
     let mut literals = Vec::new();
     for node in request.input.shape.nodes.values_mut() {
         match node {
             RowSetExpr::Filter {
                 predicate: filter, ..
-            } => predicate(filter, &mut literals)?,
+            } => filter.try_for_each_value_mut(&mut |input| value(input, &mut literals))?,
             RowSetExpr::Project { columns, .. } => {
                 for column in columns {
                     value(&mut column.value, &mut literals)?;

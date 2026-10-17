@@ -210,6 +210,21 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Roll a failed snapshot activation back to `previous` (and the runtime
+    /// registry to `checkpoint`), and refuse further catalogue activation.
+    fn fail_catalogue_activation(
+        &mut self,
+        previous: SchemaCatalogue,
+        checkpoint: Option<groove::db::RuntimeRegistryCheckpoint>,
+    ) -> Error {
+        self.catalogue = previous;
+        if let Some(checkpoint) = checkpoint {
+            self.database.restore_runtime_registry(checkpoint);
+        }
+        self.catalogue_activation_failed = true;
+        Error::CatalogueActivationFailed
+    }
+
     #[doc(hidden)]
     pub async fn apply_trusted_catalogue_snapshot(
         &mut self,
@@ -294,9 +309,7 @@ where
         // trusted prefix is idempotent and must retain maintained/query state.
         if runtime_semantics_changed {
             if self.rebuild_database_slot().await.is_err() {
-                self.catalogue = previous_catalogue;
-                self.catalogue_activation_failed = true;
-                return Err(Error::CatalogueActivationFailed);
+                return Err(self.fail_catalogue_activation(previous_catalogue, None));
             }
         } else if self.synchronize_physical_version_tables().await.is_err() {
             // A snapshot may extend historical or write-schema variants while
@@ -305,12 +318,9 @@ where
             // subscriptions), but their physical columns, indices and
             // projections must be available before authored history or a
             // later write-schema pointer can be admitted.
-            self.catalogue = previous_catalogue;
-            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
-                self.database.restore_runtime_registry(checkpoint);
-            }
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
+            return Err(
+                self.fail_catalogue_activation(previous_catalogue, runtime_registry_checkpoint)
+            );
         }
 
         #[cfg(any(test, feature = "testing"))]
@@ -318,12 +328,9 @@ where
             == Some(CatalogueActivationFailpoint::BeforeSnapshotActivationCommit)
         {
             self.catalogue_activation_failpoint = None;
-            self.catalogue = previous_catalogue;
-            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
-                self.database.restore_runtime_registry(checkpoint);
-            }
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
+            return Err(
+                self.fail_catalogue_activation(previous_catalogue, runtime_registry_checkpoint)
+            );
         }
 
         let mut batch = self.database.open_batch();
@@ -332,12 +339,10 @@ where
         // against a descendant-shaped local schema; replace that provisional
         // marker atomically with the authority root before it can be recovered.
         if previous_genesis != planned_genesis {
-            batch.delete(
-                "jazz_catalogue",
-                groove::db::PrimaryKeyValue::Composite(vec![
-                    groove::db::PrimaryKeyValue::U64(codec::CatalogueRecordKind::Genesis.key()),
-                    groove::db::PrimaryKeyValue::Uuid(previous_genesis.0),
-                ]),
+            delete_catalogue(
+                &mut batch,
+                codec::CatalogueRecordKind::Genesis,
+                previous_genesis.0,
             );
         }
         if bootstrap_uninitialized
@@ -351,26 +356,22 @@ where
             // authority snapshot completes.  Existing bootstrap markers are
             // refreshed on every later trusted snapshot so a fresh process
             // can verify the exact durable pointer and catalogue high-water.
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::Genesis.key()),
-                    Value::Uuid(planned_genesis.0),
-                    Value::Bytes(Vec::new()),
-                ],
+            put_catalogue(
+                &mut batch,
+                codec::CatalogueRecordKind::Genesis,
+                planned_genesis.0,
+                Vec::new(),
             );
             let ready = CatalogueBootstrapReady {
                 genesis: planned_genesis,
                 current_write_schema: plan.catalogue.active_schema.wire_pointer(),
                 active_catalogue_seq: plan.catalogue.active_catalogue_seq,
             };
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
-                    Value::Uuid(ready.genesis.0),
-                    Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
-                ],
+            put_catalogue(
+                &mut batch,
+                codec::CatalogueRecordKind::BootstrapReady,
+                ready.genesis.0,
+                codec::encode_catalogue_bootstrap_ready(&ready),
             );
         }
         // Retain the immutable lineage receipts, then write the selected
@@ -382,13 +383,11 @@ where
             if previous_catalogue.catalogue_schemas.get(&schema.id) == Some(schema) {
                 continue;
             }
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::Schema.key()),
-                    Value::Uuid(schema.id.0),
-                    Value::Bytes(codec::encode_catalogue_schema(schema)?),
-                ],
+            put_catalogue(
+                &mut batch,
+                codec::CatalogueRecordKind::Schema,
+                schema.id.0,
+                codec::encode_catalogue_schema(schema)?,
             );
         }
         for (schema_version, mapping) in &plan.catalogue.physical_mappings {
@@ -408,20 +407,9 @@ where
                 mapping,
             )?;
         }
-        if plan.catalogue.active_schema.wire_pointer()
-            != previous_catalogue.active_schema.wire_pointer()
-        {
-            batch.update(
-                "jazz_catalogue_pointer",
-                vec![
-                    Value::U64(plan.catalogue.active_schema.revision),
-                    Value::Uuid(plan.catalogue.active_schema.schema.0),
-                ],
-            );
-        }
-        if plan.catalogue.active_schema.revision > 0 {
-            Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
-        }
+        Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
+        // A catalogue-only batch writes no history rows, so it applies directly
+        // rather than through `apply_node_batch`.
         let persistence = async {
             let applied = self.database.apply_batch(batch).await?;
             let persisted = self.database.persist_with_progress(&applied).await;
@@ -430,12 +418,9 @@ where
         }
         .await;
         if persistence.is_err() {
-            self.catalogue = previous_catalogue;
-            if let Some(checkpoint) = runtime_registry_checkpoint {
-                self.database.restore_runtime_registry(checkpoint);
-            }
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
+            return Err(
+                self.fail_catalogue_activation(previous_catalogue, runtime_registry_checkpoint)
+            );
         }
 
         self.catalogue.staged_lineages.clear();

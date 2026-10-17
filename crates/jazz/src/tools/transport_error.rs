@@ -28,39 +28,27 @@ pub struct ErrorResponse {
 }
 
 impl ErrorResponse {
-    pub fn bad_request(message: impl Into<String>) -> Self {
+    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             error: message.into(),
-            code: ErrorCode::BadRequest,
+            code,
         }
+    }
+
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::BadRequest, message)
     }
 
     pub fn unauthorized(message: impl Into<String>) -> Self {
-        Self {
-            error: message.into(),
-            code: ErrorCode::Unauthorized,
-        }
-    }
-
-    pub fn forbidden(message: impl Into<String>) -> Self {
-        Self {
-            error: message.into(),
-            code: ErrorCode::Forbidden,
-        }
+        Self::new(ErrorCode::Unauthorized, message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            error: message.into(),
-            code: ErrorCode::NotFound,
-        }
+        Self::new(ErrorCode::NotFound, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self {
-            error: message.into(),
-            code: ErrorCode::Internal,
-        }
+        Self::new(ErrorCode::Internal, message)
     }
 }
 
@@ -72,6 +60,8 @@ pub enum UnauthenticatedCode {
     Missing,
     Invalid,
     Disabled,
+    /// Authentication could not be checked because its key service is unavailable.
+    Unavailable,
 }
 
 /// Structured unauthenticated response for runtime-facing HTTP endpoints.
@@ -83,35 +73,27 @@ pub struct UnauthenticatedResponse {
 }
 
 impl UnauthenticatedResponse {
-    pub fn expired(message: impl Into<String>) -> Self {
+    fn new(code: UnauthenticatedCode, message: impl Into<String>) -> Self {
         Self {
             error: "unauthenticated",
-            code: UnauthenticatedCode::Expired,
+            code,
             message: message.into(),
         }
     }
 
-    pub fn missing(message: impl Into<String>) -> Self {
-        Self {
-            error: "unauthenticated",
-            code: UnauthenticatedCode::Missing,
-            message: message.into(),
-        }
+    pub fn expired(message: impl Into<String>) -> Self {
+        Self::new(UnauthenticatedCode::Expired, message)
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
-        Self {
-            error: "unauthenticated",
-            code: UnauthenticatedCode::Invalid,
-            message: message.into(),
-        }
+        Self::new(UnauthenticatedCode::Invalid, message)
     }
 
     pub fn disabled(message: impl Into<String>) -> Self {
-        Self {
-            error: "unauthenticated",
-            code: UnauthenticatedCode::Disabled,
-            message: message.into(),
-        }
+        Self::new(UnauthenticatedCode::Disabled, message)
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(UnauthenticatedCode::Unavailable, message)
     }
 }

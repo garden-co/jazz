@@ -82,6 +82,9 @@ function AccountContext({
   const working = useRef(false);
   const [revision, reconcile] = useState(0);
   const [admitted, setAdmitted] = useState<string | null>(null);
+  // The session whose login is revalidating the open, retained account of
+  // its own user: that account renders from local data meanwhile.
+  const [revalidating, setRevalidating] = useState<string | null>(null);
   const [error, setError] = useState<Error>();
   const [failedAction, setFailedAction] = useState<"connect" | "signout">("connect");
 
@@ -103,7 +106,13 @@ function AccountContext({
         await jazz.registerJWT({ getToken: requireBetterAuthToken });
       } else {
         // Every Better Auth session id is a fresh authentication boundary, even
-        // when its subject matches the retained Jazz account.
+        // when its subject matches the retained Jazz account. Logging in again
+        // as that account's identity keeps its open client and gives it the
+        // credential it syncs with: until then it has none, but its local
+        // data is this user's, so it is shown while the login runs.
+        const open = jazz.getSnapshot();
+        if (open.status === "ready" && key && open.account?.identity.subject === principal)
+          setRevalidating(key);
         await jazz.loginJWT({ getToken: requireBetterAuthToken });
       }
       if (currentKey.current !== key) return;
@@ -117,6 +126,7 @@ function AccountContext({
       if (currentKey.current === key) setError(toError(cause));
     } finally {
       working.current = false;
+      setRevalidating(null);
       reconcile((value) => value + 1);
     }
   }
@@ -168,7 +178,10 @@ function AccountContext({
     <LoadingScreen label="Connecting BandChat…" />
   );
   const ready =
-    !isPending && key && admitted === key && snapshot.account?.identity.subject === principal;
+    !isPending &&
+    key &&
+    (admitted === key || revalidating === key) &&
+    snapshot.account?.identity.subject === principal;
   return (
     <AuthContext.Provider value={actions}>
       <JazzSessionProvider session={jazz} fallback={fallback}>

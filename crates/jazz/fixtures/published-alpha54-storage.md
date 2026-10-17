@@ -4,9 +4,11 @@ This fixture was produced by npm's distributed `jazz-tools` and `jazz-napi`
 `2.0.0-alpha.54` packages, without rebuilding either package or importing
 workspace Jazz code. The production NAPI persistent API uses RocksDB; it does
 not expose SQLite. The existing source-produced SQLite corpus remains separate.
-This small release receipt pins two historical text versions and proves that
-current code reads both, appends a new row, and reopens all three versions.
-It supplements the richer source-produced catalogue/branch/large-value corpus.
+This small release receipt pins two historical text versions in the DAG
+history layout. Current code (linear row history,
+`jazz.history-version-current.v4` and `groove.durable-index.v2`) refuses it at
+open with the typed `UnsupportedStorageCodecs` error and leaves every record
+unchanged (`published_alpha54_native_corpus_is_refused_with_the_typed_codec_error`).
 
 `published-alpha54-provenance.json` records tarball URLs and SHA-256 checksums,
 the Linux native binary manifest, target, and fixture archive checksum. The
@@ -73,9 +75,9 @@ dirty-diff digest as NAPI, along with wasm-opt 117 and release profile.
 The public producer creates an authentic local-first account under the synthetic
 registry scope `http://127.0.0.1:1`, writes and updates one note, shuts down, and
 reopens it before exporting. There is no registry server or upstream repair.
-Current browser code installs the checksum-pinned snapshot, reads its original
-current row, appends another note, and reopens both rows in the canonical
-browser storage compatibility suite.
+Current browser code installs the checksum-pinned snapshot and refuses it with
+the typed `UnsupportedStorageCodecsError`, leaving its raw records unchanged,
+in the canonical browser storage compatibility suite.
 
 After extracting and checking the published packages as above, install the full
 published tools dependencies in the isolated ignored directory, then run:

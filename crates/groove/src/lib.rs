@@ -16,6 +16,7 @@ pub mod chunks;
 #[cfg(feature = "cold-settle-attribution")]
 pub mod cold_settle_attribution;
 pub mod db;
+pub mod dictionary;
 pub mod ivm;
 pub mod large_values;
 pub mod queries;

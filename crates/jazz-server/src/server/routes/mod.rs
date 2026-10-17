@@ -35,8 +35,8 @@ use http::{
     schema_hashes_handler,
 };
 use utils::parse_app_id_param;
-pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
+pub(crate) use websocket::{WebSocketAdmissionState, encode_ws_frame_batches};
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -148,10 +148,7 @@ mod tests {
     use crate::server::{
         MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState, StorageBackend,
     };
-    use jazz::wire::{
-        FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
-        WirePeerRole, decode_frame, encode_frame,
-    };
+    use jazz::wire::{WireFrame, WireHello, WirePeerRole, decode_frame, encode_frame};
 
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
@@ -1329,10 +1326,7 @@ mod tests {
             LensOp::AddTable { table, schema } => {
                 assert_eq!(table, "profiles");
                 let expected = v2.get(&TableName::from("profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected AddTable op, got {other:?}"),
@@ -1342,10 +1336,7 @@ mod tests {
             LensOp::RemoveTable { table, schema } => {
                 assert_eq!(table, "legacy_profiles");
                 let expected = v1.get(&TableName::from("legacy_profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected RemoveTable op, got {other:?}"),
@@ -1577,10 +1568,7 @@ mod tests {
         ))
         .await
         .expect("send ws auth prelude");
-        let hello = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        ));
+        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
         let encoded = vec![encode_frame(&hello).expect("encode hello")];
         let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
         ws.send(WsMessage::Binary(batch.into()))
@@ -1602,10 +1590,7 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
-        assert_eq!(
-            server_hello.features,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
-        );
+        assert_eq!(server_hello.features, 0);
 
         let _ = ws.close(None).await;
         server_task.abort();
