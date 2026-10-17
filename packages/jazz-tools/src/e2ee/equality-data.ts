@@ -1,6 +1,6 @@
 import type { Db, TableProxy } from "../runtime/db.js";
 import type { Value } from "../drivers/types.js";
-import { encodeNativeRowValues } from "../runtime/native-runtime/native-row-codec.js";
+import { encodeE2eeValueV1 } from "./value-codec-v1.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
 import { dataContext } from "./cell-data.js";
 import { cellCryptoForDb, equalityCryptoForDb } from "./lifecycle.js";
@@ -25,7 +25,7 @@ export function equalityValue(table: TableProxy<unknown, unknown>, name: string,
     ?.logical[table._table]?.columns.find((column) => column.name === name);
   if (!column) throw new Error("Encrypted index declaration is unavailable");
   // Numeric equality identifies both signed zeros; cell encryption still preserves the value.
-  return encodeNativeRowValues([{ ...column, name: "value" }], [canonicalEqualityValue(value)]);
+  return encodeE2eeValueV1([{ ...column, name: "value" }], [canonicalEqualityValue(value)]);
 }
 
 /** Row-independent, but bound to the stable table, column, space and epoch. */
