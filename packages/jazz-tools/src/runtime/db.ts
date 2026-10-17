@@ -3371,16 +3371,6 @@ export class Db {
     try {
       value = write(tx);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("Timed out waiting for query coverage")
-      ) {
-        throw new Error(
-          `Coverage query table=${builtQuery.table} metadata=${settlementMetadata} global=${global}`,
-          { cause: error },
-        );
-      }
-
       try {
         tx.rollback().catch(() => {});
       } catch {
