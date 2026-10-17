@@ -17,6 +17,11 @@
 //! | `Remote(Origin)`| `Global` (`..._global_current`)   |
 //! | `Local`         | `Ahead` (`..._ahead_current`) over `Global` |
 //!
+//! Only origin is durable. The local delta is derived: a non-durable Groove
+//! table held in memory, folded from history@0 over origin when the node
+//! opens and kept equal to that fold by every write, settlement, rejection
+//! and rebase (SPEC 4 §4.7, `INV-REF-6`).
+//!
 //! A read bounded by an index masks the origin layer by the local delta's
 //! presence (its row ids, whatever their indexed values), read whole or by
 //! origin's candidates, whichever reads fewer rows. It needs no stored copy

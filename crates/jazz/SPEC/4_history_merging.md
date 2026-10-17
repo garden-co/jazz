@@ -32,6 +32,7 @@ Invariant digest:
 - `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
 - `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
+- `INV-REF-6`: A node MUST NOT store its local delta durably: it MUST hold the delta in memory, keep it equal to the fold of its pending history@0 patches over origin through commit, settlement, rejection and rebase, and rebuild it on open from history@0 and origin alone, so local reads after a restart equal those before it. An exclusive transaction joins the delta only once the node holds all of its writes.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
 ## Details
@@ -535,8 +536,8 @@ image is not maybe conflicting although its writer never saw that value.
 Naming the seq of the newest image Core itself delivered would make the
 derivation exact; it is listed under Open Questions.
 
-**Durable layout.** History, global-current and ahead-current records carry
-no stamp fields. A history record carries, after
+**Durable layout.** History and global-current records (and the in-memory
+ahead-current rows, §4.7) carry no stamp fields. A history record carries, after
 `authored_columns` and `counter_signs` (§4.3):
 
 - `seq` (`U64`) — the write's seq; `0` on a pending record (below);
@@ -595,11 +596,33 @@ Storage is delta-encoded and does not name refs. Origin is
 `jazz_physical_{id}_global_current`, stored in full. Local is origin plus
 the sparse delta `jazz_physical_{id}_ahead_current`, which holds the newest
 pending image of each row, already folded over origin's image. Nothing else
-is stored per ref: no copy of the origin images the delta overrides (the
+is kept per ref: no copy of the origin images the delta overrides (the
 `ahead_shadow` table that held them is retired; the read masks origin by the
 delta's presence instead). The tier of a read picks its refs
 (`INV-REF-2`): `Global` reads `[origin]`, and `Local` and `None` read
 `[local delta, origin]`.
+
+**The delta is derived, never stored** (`INV-REF-6`). Pending writes are
+stored once, as history@0 (§4.6); the delta is a function of history@0 and
+origin, so it is a Groove non-durable table (SPEC groove 2 §2.3): its rows and
+index entries live in memory, reads and maintained views see an ordinary
+table, and nothing of it reaches the backend. Each delta row is
+
+```text
+delta(row) = fold(origin(row), pending patches of row in tx order)
+```
+
+where a patch applies its authored plain columns, applies its merge ops to
+the image below, and keeps the rest (`fold_pending_patch`). A patch is
+pending when its transaction has no seq and no rejection, and, for an
+exclusive transaction, when the node holds every one of its writes: an
+incomplete exclusive fragment stays history-only. Commit, ingest, settle,
+rejection and rebase keep the delta equal to this fold incrementally, at the
+same points they did when it was stored. On open the node rebuilds it from
+scratch: it reads the sequence-less transactions (the `None` bucket of
+`jazz_transactions.by_global_time`), their history@0 rows, and folds them
+over origin, at O(pending) cost. A crash therefore needs no repair of the
+delta: there is nothing derived on disk to disagree with history@0.
 
 **The stack rule.** A read is a stack of layers, top first, and the top
 layer holding a row supplies it, whatever its stamp (`INV-REF-1`). Every

@@ -1462,6 +1462,24 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test-only receipt of the stored key/value pairs of logical column
+    /// family `cf` under `prefix`, as this open database reads them:
+    /// in-memory (non-durable) tables such as the ahead overlay included.
+    pub async fn storage_prefix_for_test(
+        &self,
+        cf: &str,
+        prefix: Vec<u8>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        Ok(self
+            .node
+            .node
+            .lock()
+            .await
+            .storage_prefix_for_test(cf, prefix)
+            .await?)
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only encoded storage byte estimate across Jazz physical
     /// classes.
     pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {

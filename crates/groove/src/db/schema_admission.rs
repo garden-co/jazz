@@ -236,6 +236,7 @@ impl Database {
     pub fn restore_runtime_registry(&mut self, checkpoint: RuntimeRegistryCheckpoint) {
         self.batch_preparation_owner = Rc::new(());
         self.ivm_runtime = checkpoint.ivm_runtime;
+        super::facade::declare_non_durable_tables(&self.storage, self.ivm_runtime.schema());
         *self.stored_record_descriptors.borrow_mut() = checkpoint.stored_record_descriptors;
     }
 
@@ -258,6 +259,9 @@ impl Database {
         updated.tables.push(table.clone());
         validate_application_storage_names(&updated)?;
         validate_durable_key_schema(&updated)?;
+        if table.non_durable {
+            self.storage.declare_non_durable_table(&table.name);
+        }
         self.ivm_runtime
             .register_table(table)
             .map_err(Error::IvmRuntime)

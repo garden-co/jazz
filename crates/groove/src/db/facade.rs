@@ -434,6 +434,8 @@ impl Database {
         ));
         let storage_read_metrics =
             Rc::new(ReadMetricsSink::new(Rc::clone(ivm_runtime.index_ids())));
+        storage.attach_non_durable_index_ids(Rc::clone(ivm_runtime.index_ids()));
+        declare_non_durable_tables(&storage, ivm_runtime.schema());
         Self {
             storage,
             chunk_storage,
@@ -498,6 +500,18 @@ impl Database {
     /// the storage backend exposes that optional capability.
     pub async fn approximate_class_bytes(&self, cf: &str) -> Result<Option<u64>, Error> {
         Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
+    }
+
+    /// Every key/value pair of logical column family `cf` under `prefix`, as
+    /// reads see them: non-durable tables are served from memory. For byte
+    /// receipts in tests; ordinary reads go through tables and indexes.
+    #[doc(hidden)]
+    pub async fn storage_prefix_for_test(
+        &self,
+        cf: &str,
+        prefix: Vec<u8>,
+    ) -> Result<Vec<crate::storage::KeyValue>, Error> {
+        Ok(self.storage.prefix(cf.to_owned(), prefix).await?)
     }
 
     /// Return aggregate approximate live bytes for supplied logical column
@@ -619,6 +633,11 @@ impl Database {
         );
         *self = replacement;
         Ok(())
+    }
+
+    /// What this database's non-durable tables hold in memory.
+    pub fn non_durable_residency(&self) -> crate::storage::NonDurableResidency {
+        self.storage.non_durable_residency()
     }
 
     /// Consume this runtime and cancel reconstructible query work. Pending
@@ -2241,5 +2260,12 @@ impl Database {
             key: schema.key_descriptor(),
             value: schema.value_descriptor(),
         })
+    }
+}
+
+/// Route every non-durable table of `schema` to the layout's in-memory class.
+pub(super) fn declare_non_durable_tables(storage: &LayoutStorage, schema: &DatabaseSchema) {
+    for table in schema.tables.iter().filter(|table| table.non_durable) {
+        storage.declare_non_durable_table(&table.name);
     }
 }

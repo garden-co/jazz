@@ -931,15 +931,63 @@ where
             .await?
         {
             let tx_id = self.version_tx_id(&version)?;
-            if !settling.contains(&tx_id)
-                && matches!(
-                    self.query_transaction_state(tx_id).await?,
-                    Some((Fate::Pending, None, _))
-                )
-            {
+            if !settling.contains(&tx_id) && self.pending_tx_folds_into_overlay(tx_id).await? {
                 pending.push((tx_id, version));
             }
         }
+        self.write_folded_ahead_overlay(batch, row, pending).await
+    }
+
+    /// Whether `tx_id`'s history@0 versions belong in the ahead overlay: it
+    /// is pending without a seq, and, when exclusive, this node holds all of
+    /// its writes. An exclusive transaction learned as an incomplete
+    /// fragment stays history-only until its last write arrives
+    /// (`ingest_transaction_fragment_without_current_indexes`).
+    pub(in crate::node) async fn pending_tx_folds_into_overlay(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<bool, Error> {
+        // A status projection, not a payload audit: the overlay needs only
+        // the fate, the seq, the kind and the write count.
+        let Some((alias, fate, global_time, kind, n_total_writes)) = self
+            .query_transaction_fields(tx_id, |_, alias, record| {
+                Ok((
+                    alias,
+                    fate_from_encoded_fields(record)?,
+                    record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?,
+                    tx_kind_from_discriminant(
+                        record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
+                    )?,
+                    record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
+                ))
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !matches!(fate, Fate::Pending) || global_time.is_some() {
+            return Ok(false);
+        }
+        if kind != TxKind::Exclusive {
+            return Ok(true);
+        }
+        let known = self
+            .query_versions_for_tx_header(tx_id, alias, None)
+            .await?
+            .len();
+        Ok(usize::try_from(n_total_writes).ok() == Some(known))
+    }
+
+    /// Write one row's ahead overlay: its synced image with `pending` (the
+    /// row's still-pending patches) folded on top in tx order. Writes nothing
+    /// when `pending` is empty. This is the whole definition of an overlay
+    /// row, so opening a node rebuilds the overlay with it from history@0.
+    pub(in crate::node) async fn write_folded_ahead_overlay(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        row: &VersionRow,
+        mut pending: Vec<(TxId, VersionRow)>,
+    ) -> Result<(), Error> {
         pending.sort_by_key(|(tx_id, _)| *tx_id);
         let Some((_, first)) = pending.first() else {
             return Ok(());
@@ -952,7 +1000,7 @@ where
         // A renamed table names the row differently in the pending patch's
         // schema than in the settling version's.
         let table_schema = self.table_in_schema(first.table(), schema_version)?;
-        let mut image = self
+        let image = self
             .query_global_winner_in_batch(
                 batch,
                 schema_version,
@@ -961,7 +1009,12 @@ where
                 row.row_uuid(),
             )
             .await?;
+        // Stored images spell enum cells with the lineage's physical tags;
+        // the overlay is written from the authored spelling, as a local
+        // commit writes it. Fold in that spelling.
+        let mut image = image.map(|image| self.authored_spelling(image)).transpose()?;
         for (_, patch) in pending {
+            let patch = self.authored_spelling(patch)?;
             image = Some(match image {
                 Some(base) if base.schema_version_alias() == patch.schema_version_alias() => {
                     self.fold_pending_patch(&table_schema, &base, &patch)?
@@ -986,6 +1039,35 @@ where
             self.write_ahead_current_insert(batch, &image)?;
         }
         Ok(())
+    }
+
+    /// `version` in its schema version's authored spelling: a stored image
+    /// (read back from history or global current) re-tags its enum cells
+    /// from the lineage's physical tags; an authored version is returned
+    /// as is.
+    pub(super) fn authored_spelling(&mut self, version: VersionRow) -> Result<VersionRow, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let table_schema = self.table_in_schema(version.table(), schema_version)?;
+        let logical = super::codec::history_record_descriptor(&table_schema);
+        if *version.record.descriptor() == logical {
+            return Ok(version);
+        }
+        let mut values = version.record.to_values()?;
+        for column in 0..table_schema.columns.len() {
+            let field = HistoryRowRecord::USER_CELLS + column;
+            let value = std::mem::replace(&mut values[field], Value::Nullable(None));
+            values[field] =
+                self.physical_cell_to_authored(schema_version, &table_schema.name, column, value)?;
+        }
+        Ok(VersionRow {
+            table: version.table,
+            branch_key: version.branch_key,
+            record: super::codec::owned_record_from_storage_values_with_descriptor(
+                logical, values,
+            )?,
+        })
     }
 
     /// A new synced image rebases any other pending local patches on its row.

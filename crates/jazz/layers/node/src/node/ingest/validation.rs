@@ -156,6 +156,7 @@ where
         is_partial: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
+        let (tx_kind, n_total_writes) = (tx.kind, tx.n_total_writes);
         // Staging owns the decoded records and derived-index working set. Keep
         // it behind an async allocation boundary so admission does not retain
         // that state on the caller's poll stack.
@@ -185,7 +186,24 @@ where
         // stored version with the incoming ones and merges each row into
         // global current exactly once. Merging them again here would apply a
         // merge column's operation twice.
-        let _ = previously_stored;
+        //
+        // A still-pending transaction whose earlier versions were stored as a
+        // history-only fragment (an incomplete exclusive transaction) joins
+        // the ahead overlay once this ingest completes it: the overlay holds
+        // exactly what the open-time fold of history@0 holds (INV-REF-6).
+        if update_current_indexes
+            && matches!(fate, Fate::Pending)
+            && global_time.is_none()
+            && !previously_stored.is_empty()
+            && (tx_kind != TxKind::Exclusive
+                || usize::try_from(n_total_writes).ok()
+                    == Some(previously_stored.len() + staged_versions.len()))
+        {
+            for stored in previously_stored {
+                let stored = self.authored_spelling(stored)?;
+                self.write_ahead_current_insert(&mut batch, &stored)?;
+            }
+        }
         let settled_versions = staged_versions;
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(

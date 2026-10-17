@@ -17,6 +17,7 @@ mod idb;
 mod key_codec;
 mod manifest;
 mod memory;
+mod non_durable;
 #[cfg(any(test, feature = "test"))]
 mod test;
 
@@ -36,6 +37,10 @@ pub use manifest::{
     StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
+pub(crate) use non_durable::NonDurableClass;
+pub use non_durable::{
+    NonDurablePartition, NonDurableResidency, process_non_durable_resident_bytes,
+};
 #[cfg(any(test, feature = "test"))]
 pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
@@ -745,7 +750,6 @@ where
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
 const CLASS_REGISTER_CF: &str = "__groove_class_register";
 const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
-const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
@@ -856,6 +860,93 @@ impl StorageCursor for MappedStorageCursor<'_> {
     }
 }
 
+/// Merges a streaming durable scan with the in-memory rows of the same
+/// bounds, both already in scan order, without materializing the durable
+/// side: each batch holds at most one durable batch plus the in-memory rows
+/// that sort before its end.
+struct MergedStorageCursor<'a> {
+    /// `None` once exhausted.
+    durable: Option<StorageScan<'a>>,
+    /// The unread rest of the current durable batch.
+    pending: VecDeque<KeyValue>,
+    in_memory: std::iter::Peekable<std::vec::IntoIter<KeyValue>>,
+    direction: ScanDirection,
+    remaining: usize,
+}
+
+impl<'a> MergedStorageCursor<'a> {
+    fn new(
+        durable: StorageScan<'a>,
+        in_memory: Vec<KeyValue>,
+        direction: ScanDirection,
+        max_items: Option<usize>,
+    ) -> Self {
+        Self {
+            durable: Some(durable),
+            pending: VecDeque::new(),
+            in_memory: in_memory.into_iter().peekable(),
+            direction,
+            remaining: max_items.unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Whether in-memory `memory` comes before durable `durable` in scan
+    /// order. The classes own disjoint keys, so ties do not occur.
+    fn memory_first(direction: ScanDirection, memory: &[u8], durable: &[u8]) -> bool {
+        match direction {
+            ScanDirection::Forward => memory <= durable,
+            ScanDirection::Reverse => memory >= durable,
+        }
+    }
+}
+
+impl StorageCursor for MergedStorageCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            loop {
+                if self.remaining == 0 {
+                    return Ok(None);
+                }
+                if self.pending.is_empty()
+                    && let Some(durable) = self.durable.as_mut()
+                {
+                    match durable.next_batch().await? {
+                        Some(batch) => self.pending = batch.into(),
+                        None => self.durable = None,
+                    }
+                }
+                let direction = self.direction;
+                let mut batch = Vec::new();
+                while self.remaining > 0 {
+                    let from_memory = match (self.in_memory.peek(), self.pending.front()) {
+                        (Some(memory), Some(durable)) => {
+                            Self::memory_first(direction, &memory.0, &durable.0)
+                        }
+                        (None, Some(_)) => false,
+                        // Only the in-memory side is left once durable is done;
+                        // otherwise refill durable before deciding.
+                        (Some(_), None) if self.durable.is_none() => true,
+                        (Some(_), None) | (None, None) => break,
+                    };
+                    let next = if from_memory {
+                        self.in_memory.next()
+                    } else {
+                        self.pending.pop_front()
+                    };
+                    batch.push(next.expect("peeked side holds a row"));
+                    self.remaining -= 1;
+                }
+                if !batch.is_empty() {
+                    return Ok(Some(batch));
+                }
+                if self.durable.is_none() && self.pending.is_empty() {
+                    return Ok(None);
+                }
+            }
+        })
+    }
+}
+
 fn is_jazz_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
@@ -873,11 +964,6 @@ fn is_jazz_global_current_table(name: &str) -> bool {
         && !name.contains("_ahead_current")
 }
 
-fn is_jazz_ahead_current_table(name: &str) -> bool {
-    name.starts_with("jazz_")
-        && (name.ends_with("_ahead_current") || name.ends_with("_register_ahead_current"))
-}
-
 fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
     if is_jazz_history_table(logical_cf) {
         Some(CLASS_HISTORY_CF)
@@ -885,8 +971,6 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
         Some(CLASS_REGISTER_CF)
     } else if is_jazz_global_current_table(logical_cf) {
         Some(CLASS_GLOBAL_CURRENT_CF)
-    } else if is_jazz_ahead_current_table(logical_cf) {
-        Some(CLASS_AHEAD_CURRENT_CF)
     } else if logical_cf == "jazz_global_changes" {
         Some(CLASS_CHANGES_CF)
     } else if logical_cf == "indices" {
@@ -906,6 +990,9 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
 pub struct LayoutStorage {
     inner: BoxedStorage,
     layout: StorageLayout,
+    /// Rows and index entries of non-durable tables, which never reach
+    /// `inner` (see `non_durable`).
+    non_durable: NonDurableClass,
 }
 
 impl LayoutStorage {
@@ -917,7 +1004,11 @@ impl LayoutStorage {
     }
 
     pub async fn new_boxed(inner: BoxedStorage, layout: StorageLayout) -> Result<Self, Error> {
-        let storage = Self { inner, layout };
+        let storage = Self {
+            inner,
+            layout,
+            non_durable: NonDurableClass::default(),
+        };
         storage.ensure_layout_marker().await?;
         Ok(storage)
     }
@@ -930,6 +1021,9 @@ impl LayoutStorage {
     ) -> Result<Option<u64>, Error> {
         let mut physical_families = BTreeSet::new();
         for logical_cf in logical_families {
+            if self.non_durable.owns(logical_cf, &[]) {
+                continue;
+            }
             physical_families.insert(self.layout.map_cf(logical_cf)?.physical_cf);
         }
 
@@ -949,6 +1043,25 @@ impl LayoutStorage {
 
     pub fn into_inner(self) -> BoxedStorage {
         self.inner
+    }
+
+    /// Keep `table`'s rows and index entries in memory only.
+    pub(crate) fn declare_non_durable_table(&self, table: &str) {
+        self.non_durable.declare_table(table);
+    }
+
+    /// Resolve `indices` keys to their table, so a non-durable table's index
+    /// entries stay in memory with its rows.
+    pub(crate) fn attach_non_durable_index_ids(
+        &self,
+        index_ids: crate::ivm::runtime::SharedIndexIds,
+    ) {
+        self.non_durable.attach_index_ids(index_ids);
+    }
+
+    /// What the non-durable tables hold in memory.
+    pub fn non_durable_residency(&self) -> NonDurableResidency {
+        self.non_durable.residency()
     }
 
     async fn ensure_layout_marker(&self) -> Result<(), Error> {
@@ -1000,7 +1113,6 @@ impl LayoutStorage {
             CLASS_HISTORY_CF,
             CLASS_REGISTER_CF,
             CLASS_GLOBAL_CURRENT_CF,
-            CLASS_AHEAD_CURRENT_CF,
             CLASS_CHANGES_CF,
             CLASS_INDICES_CF,
             CLASS_META_CF,
@@ -1077,6 +1189,13 @@ impl OrderedKvStorage for LayoutStorage {
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                return Ok(match self.non_durable.get(&cf, &key) {
+                    None => ValueComparison::Absent,
+                    Some(value) if value == expected => ValueComparison::Identical,
+                    Some(_) => ValueComparison::Different,
+                });
+            }
             let (cf, key) = self.physical_key(&cf, &key)?;
             self.inner.compare_value(cf, key, expected).await
         })
@@ -1084,6 +1203,9 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                return Ok(self.non_durable.get(&cf, &key));
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.get(physical_cf, physical_key).await
         })
@@ -1096,6 +1218,13 @@ impl OrderedKvStorage for LayoutStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                if let Some(existing) = self.non_durable.get(&cf, &key) {
+                    return Ok(Some(existing));
+                }
+                self.non_durable.write(&cf, &key, Some(&value));
+                return Ok(None);
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner
                 .put_if_absent(physical_cf, physical_key, value)
@@ -1110,6 +1239,13 @@ impl OrderedKvStorage for LayoutStorage {
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<bool, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                if self.non_durable.get(&cf, &key).as_deref() != Some(expected.as_slice()) {
+                    return Ok(false);
+                }
+                self.non_durable.write(&cf, &key, None);
+                return Ok(true);
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner
                 .compare_and_delete(physical_cf, physical_key, expected)
@@ -1124,6 +1260,10 @@ impl OrderedKvStorage for LayoutStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                self.non_durable.write(&cf, &key, Some(&value));
+                return Ok(());
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.set(physical_cf, physical_key, value).await
         })
@@ -1131,6 +1271,10 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &key) {
+                self.non_durable.write(&cf, &key, None);
+                return Ok(());
+            }
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
             self.inner.delete(physical_cf, physical_key).await
         })
@@ -1156,6 +1300,18 @@ impl OrderedKvStorage for LayoutStorage {
             max_items,
         } = request;
         Box::pin(async move {
+            if self.non_durable.owns_bounds(&cf, &bounds) {
+                return Ok(Box::new(ReadyStorageCursor::new(
+                    self.non_durable.scan(&cf, &bounds, direction, max_items),
+                )) as StorageScan<'_>);
+            }
+            // A scan wider than one non-durable table or index (such as a
+            // whole-family `indices` scan) reads both classes.
+            let in_memory = if self.non_durable.is_empty() {
+                Vec::new()
+            } else {
+                self.non_durable.scan(&cf, &bounds, direction, max_items)
+            };
             let (physical_cf, physical_bounds, strip_len) = match bounds {
                 ScanBounds::Prefix(prefix) => {
                     let (physical_cf, physical_prefix, strip_len) =
@@ -1185,7 +1341,13 @@ impl OrderedKvStorage for LayoutStorage {
                     max_items,
                 })
                 .await?;
-            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+            let durable = Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>;
+            if in_memory.is_empty() {
+                return Ok(durable);
+            }
+            Ok(Box::new(MergedStorageCursor::new(
+                durable, in_memory, direction, max_items,
+            )) as StorageScan<'_>)
         })
     }
 
@@ -1195,6 +1357,18 @@ impl OrderedKvStorage for LayoutStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &prefix) {
+                return Ok(self
+                    .non_durable
+                    .scan(
+                        &cf,
+                        &ScanBounds::Prefix(prefix),
+                        ScanDirection::Reverse,
+                        Some(1),
+                    )
+                    .into_iter()
+                    .next());
+            }
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             Ok(collect_scan(
                 self.inner
@@ -1219,6 +1393,18 @@ impl OrderedKvStorage for LayoutStorage {
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
+            if self.non_durable.owns(&cf, &prefix) {
+                return Ok(self
+                    .non_durable
+                    .scan(
+                        &cf,
+                        &ScanBounds::Prefix(prefix),
+                        ScanDirection::Forward,
+                        None,
+                    )
+                    .into_iter()
+                    .rfind(|(key, _)| key <= &upper));
+            }
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             let (_, physical_upper, _) = self.physical_prefix(&cf, &upper)?;
             Ok(collect_scan(
@@ -1238,9 +1424,14 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.inner
-                .write_many(self.physical_operations(operations)?)
-                .await
+            let (non_durable, durable) = self.non_durable.split(operations);
+            if !durable.is_empty() {
+                self.inner
+                    .write_many(self.physical_operations(durable)?)
+                    .await?;
+            }
+            self.non_durable.apply(&non_durable);
+            Ok(())
         })
     }
 
@@ -1249,10 +1440,19 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
         Box::pin(async move {
-            match self.physical_operations(operations) {
-                Ok(operations) => self.inner.write_many_outcome(operations).await,
-                Err(error) => WriteManyOutcome::Uncommitted(error),
+            let (non_durable, durable) = self.non_durable.split(operations);
+            let outcome = if durable.is_empty() {
+                WriteManyOutcome::Committed
+            } else {
+                match self.physical_operations(durable) {
+                    Ok(operations) => self.inner.write_many_outcome(operations).await,
+                    Err(error) => WriteManyOutcome::Uncommitted(error),
+                }
+            };
+            if outcome.is_committed() {
+                self.non_durable.apply(&non_durable);
             }
+            outcome
         })
     }
 
@@ -1261,6 +1461,34 @@ impl OrderedKvStorage for LayoutStorage {
         operations: Vec<WriteOperation<'a>>,
     ) -> StorageFuture<'a, WriteManyOutcome> {
         Box::pin(async move {
+            // Non-durable writes own their bodies in memory; they are applied
+            // only once the durable rest has committed.
+            let (non_durable, operations): (Vec<_>, Vec<_>) =
+                operations.into_iter().partition(|operation| {
+                    let (cf, key) = match operation {
+                        WriteOperation::Set { cf, key, .. }
+                        | WriteOperation::Delete { cf, key } => (*cf, *key),
+                    };
+                    self.non_durable.owns(cf, key)
+                });
+            let non_durable = non_durable
+                .into_iter()
+                .map(|operation| match operation {
+                    WriteOperation::Set { cf, key, value } => OwnedWriteOperation::Set {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    },
+                    WriteOperation::Delete { cf, key } => OwnedWriteOperation::Delete {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                    },
+                })
+                .collect::<Vec<_>>();
+            if operations.is_empty() {
+                self.non_durable.apply(&non_durable);
+                return WriteManyOutcome::Committed;
+            }
             // Mapping owns only physical keys/names, never another value body.
             // Complete all fallible mapping before entering the backend.
             let mapped = operations
@@ -1285,7 +1513,11 @@ impl OrderedKvStorage for LayoutStorage {
                     WriteOperation::Delete { .. } => WriteOperation::Delete { cf, key },
                 })
                 .collect();
-            self.inner.write_many_borrowed_outcome(operations).await
+            let outcome = self.inner.write_many_borrowed_outcome(operations).await;
+            if outcome.is_committed() {
+                self.non_durable.apply(&non_durable);
+            }
+            outcome
         })
     }
 
@@ -1295,6 +1527,10 @@ impl OrderedKvStorage for LayoutStorage {
 
     fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         Box::pin(async move {
+            // A non-durable table holds no backend bytes.
+            if self.non_durable.owns(&cf, &[]) {
+                return Ok(Some(0));
+            }
             let physical_cf = self.layout.map_cf(&cf)?.physical_cf.to_owned();
             self.inner.approximate_class_bytes(physical_cf).await
         })
@@ -2700,7 +2936,6 @@ mod tests {
                 CLASS_HISTORY_CF,
                 CLASS_REGISTER_CF,
                 CLASS_GLOBAL_CURRENT_CF,
-                CLASS_AHEAD_CURRENT_CF,
                 CLASS_CHANGES_CF,
                 CLASS_INDICES_CF,
                 CLASS_META_CF,
@@ -3272,11 +3507,6 @@ mod tests {
                 "jazz_albums_register_global_current",
                 "jazz_tracks_register_global_current",
             ),
-            ("jazz_albums_ahead_current", "jazz_tracks_ahead_current"),
-            (
-                "jazz_albums_register_ahead_current",
-                "jazz_tracks_register_ahead_current",
-            ),
             ("jazz_global_changes", "jazz_authority_policy_bindings"),
             ("jazz_nodes", "jazz_transactions"),
         ];
@@ -3429,9 +3659,11 @@ mod tests {
             jazz_physical_class("jazz_album_register_global_current"),
             Some(CLASS_GLOBAL_CURRENT_CF)
         );
+        // Ahead-current tables are non-durable (their rows never reach the
+        // backend), so they have no class of their own.
         assert_eq!(
             jazz_physical_class("jazz_album_register_ahead_current"),
-            Some(CLASS_AHEAD_CURRENT_CF)
+            Some(CLASS_META_CF)
         );
         assert_eq!(
             jazz_physical_class("jazz_global_changes"),
@@ -5090,5 +5322,143 @@ mod tests {
 
         let stored = store.get(key).await.unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
+    }
+}
+
+#[cfg(test)]
+mod merged_scan_tests {
+    use super::*;
+    use crate::ivm::runtime::index_ids::{IndexIdRegistry, durable_index_key_prefix};
+    use crate::schema::IndexSchema;
+
+    const INDICES_CF_NAME: &str = "indices";
+
+    fn index_key(id: u32, value: u8) -> Vec<u8> {
+        let mut key = durable_index_key_prefix(id);
+        key.extend([0, value]);
+        key
+    }
+
+    /// A whole-family `indices` scan over indexes 1..=4, where 1 and 3
+    /// belong to a non-durable table, merges both classes in key order and
+    /// stops at `max_items` in either direction.
+    #[futures_test::test]
+    async fn merged_wide_scan_streams_the_first_n_rows_in_key_order() {
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&["default", INDICES_CF_NAME]).expect("memory storage opens"),
+            StorageLayout::Identity,
+        )
+        .await
+        .expect("identity layout opens");
+        let mut registry = IndexIdRegistry::default();
+        let mut ids = Vec::new();
+        for (table, index) in [("nd", "a"), ("d", "b"), ("nd", "c"), ("d", "e")] {
+            ids.push(registry.resolve(table, &IndexSchema::new(index, ["x"])));
+        }
+        assert_eq!(ids, [1, 2, 3, 4]);
+        storage.attach_non_durable_index_ids(Rc::new(RefCell::new(registry)));
+        storage.declare_non_durable_table("nd");
+
+        let mut all = Vec::new();
+        for id in ids {
+            for value in 1..=3 {
+                let key = index_key(id, value);
+                storage
+                    .set(INDICES_CF_NAME.to_owned(), key.clone(), vec![id as u8])
+                    .await
+                    .unwrap();
+                all.push(key);
+            }
+        }
+        all.sort();
+        let in_memory = storage.non_durable.scan(
+            INDICES_CF_NAME,
+            &ScanBounds::Prefix(Vec::new()),
+            ScanDirection::Forward,
+            None,
+        );
+        assert_eq!(in_memory.len(), 6, "ids 1 and 3 stay in memory");
+
+        let keys = |rows: Vec<KeyValue>| rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        for limit in [0, 1, 4, 7, 12, 20] {
+            let forward = collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix(INDICES_CF_NAME.to_owned(), Vec::new())
+                            .with_max_items(limit),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            let expected = all.iter().take(limit).cloned().collect::<Vec<_>>();
+            assert_eq!(keys(forward), expected, "forward, {limit} items");
+
+            let reverse = collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix(INDICES_CF_NAME.to_owned(), Vec::new())
+                            .with_max_items(limit)
+                            .reversed(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            let expected = all.iter().rev().take(limit).cloned().collect::<Vec<_>>();
+            assert_eq!(keys(reverse), expected, "reverse, {limit} items");
+        }
+    }
+
+    /// Yields one row per batch, with an empty batch between rows.
+    struct TrickleCursor {
+        rows: VecDeque<KeyValue>,
+        empty_next: bool,
+    }
+
+    impl StorageCursor for TrickleCursor {
+        fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+            Box::pin(async move {
+                self.empty_next = !self.empty_next;
+                if !self.empty_next {
+                    return Ok(Some(Vec::new()));
+                }
+                Ok(self.rows.pop_front().map(|row| vec![row]))
+            })
+        }
+    }
+
+    #[futures_test::test]
+    async fn merge_cursor_interleaves_small_durable_batches() {
+        let row = |key: u8| (vec![key], vec![key]);
+        for direction in [ScanDirection::Forward, ScanDirection::Reverse] {
+            let mut durable = vec![row(2), row(3), row(6), row(9)];
+            let mut memory = vec![row(1), row(4), row(5), row(7), row(10)];
+            if direction == ScanDirection::Reverse {
+                durable.reverse();
+                memory.reverse();
+            }
+            let mut expected = durable.iter().chain(&memory).cloned().collect::<Vec<_>>();
+            expected.sort();
+            if direction == ScanDirection::Reverse {
+                expected.reverse();
+            }
+            for limit in 0..=expected.len() + 1 {
+                let cursor = MergedStorageCursor::new(
+                    Box::new(TrickleCursor {
+                        rows: durable.clone().into(),
+                        empty_next: false,
+                    }),
+                    memory.clone(),
+                    direction,
+                    Some(limit),
+                );
+                let merged = collect_scan(Box::new(cursor)).await.unwrap();
+                let want = expected.iter().take(limit).cloned().collect::<Vec<_>>();
+                assert_eq!(merged, want, "{direction:?}, {limit} items");
+            }
+        }
     }
 }

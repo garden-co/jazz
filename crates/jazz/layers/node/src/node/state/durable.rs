@@ -772,6 +772,20 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test-only receipt of the stored key/value pairs of logical column
+    /// family `cf` under `prefix`, in-memory (non-durable) tables included.
+    pub async fn storage_prefix_for_test(
+        &self,
+        cf: &str,
+        prefix: Vec<u8>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        self.database
+            .storage_prefix_for_test(cf, prefix)
+            .await
+            .map_err(Error::Groove)
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only estimate of all Jazz physical-class bytes. This is the
     /// cheap class-CF meter used for memory-amplification receipts; it is not a
     /// logical table-prefix scan.

@@ -896,6 +896,7 @@ pub(super) fn physical_version_storage_tables(
             current_columns(),
         );
         physical_ahead.primary_key = logical_ahead.primary_key.clone();
+        physical_ahead.non_durable = logical_ahead.non_durable;
         physical_ahead.indices = logical_ahead.indices.clone();
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(

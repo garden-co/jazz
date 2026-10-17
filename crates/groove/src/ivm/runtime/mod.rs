@@ -595,8 +595,8 @@ use evaluator::*;
 mod record_projection;
 use record_projection::*;
 mod key_encoding;
-pub(crate) use key_encoding::encode_key_part;
 use key_encoding::*;
+pub(crate) use key_encoding::{encode_key_part, leading_key_part_len};
 pub(crate) mod index_ids;
 pub(crate) use index_ids::{
     IndexIdRegistry, SharedIndexIds, durable_index_key_prefix, split_durable_index_key,

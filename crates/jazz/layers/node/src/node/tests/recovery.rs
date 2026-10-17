@@ -2559,13 +2559,35 @@ fn author_columns_store_dictionary_codes() {
         sorted(vec![vec![alice_code, bob_code], vec![bob_code, bob_code]]),
         "global current"
     );
-    assert_eq!(
-        codes.remove(tables[3].0.as_str()).unwrap(),
-        vec![vec![alice_code, alice_code]],
-        "ahead current"
-    );
+    // The ahead overlay is derived and kept in memory only (INV-REF-6):
+    // nothing of it is on disk. The reopened node folds it back from
+    // history@0 with alice as both authors.
+    assert_eq!(codes.remove(tables[3].0.as_str()), None, "ahead current");
 
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    let (ahead_name, ahead_table) = &tables[3];
+    let ahead_authors = reopened
+        .database
+        .primary_key_scan_raw(ahead_name, &[])
+        .unwrap()
+        .into_iter()
+        .map(|raw| {
+            let descriptor = ahead_table
+                .storage_record_schema_for_variant(raw.variant_tag())
+                .unwrap();
+            let record = raw.record();
+            ["created_by", "updated_by"]
+                .iter()
+                .map(|column| {
+                    let index = descriptor.field_index(column).unwrap();
+                    crate::ids::RowAuthor::from_record(record.get_record(index).unwrap())
+                        .unwrap()
+                        .as_author_subject()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ahead_authors, vec![vec![alice, alice]], "ahead current");
     for (index, (tx_id, author)) in committed.into_iter().enumerate() {
         assert_eq!(
             reopened.query_transaction(tx_id).unwrap().unwrap().tx.made_by,

@@ -1025,42 +1025,88 @@ where
         self.rebuild_ahead_current_keys_inner(Some(receipt)).await
     }
 
+    /// Build the ahead overlay, which is derived and kept in memory only, by
+    /// folding history@0 over global current: every pending transaction
+    /// sits in the `None` bucket of `jazz_transactions.by_global_time`, and
+    /// its `jazz_tx_touched_rows` list names its history@0 rows. The cost is
+    /// O(sequence-less transactions + their writes), never O(history).
     async fn rebuild_ahead_current_keys_inner(
         &mut self,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
-        let physical_table_ids = self
-            .catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
-            .collect::<BTreeSet<_>>();
-        for table_id in physical_table_ids {
-            let content_table = physical_ahead_current_table_name(table_id);
-            let content_rows = self
-                .database
-                .primary_key_scan_raw(&content_table, &[])
-                .await?;
-            for raw in content_rows {
-                #[cfg(feature = "testing")]
-                if let Some(receipt) = &mut receipt {
-                    receipt.ahead_current_entries += 1;
+        let mut candidates = Vec::new();
+        for raw in self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_time",
+                &[Value::Nullable(None)],
+            )
+            .await?
+        {
+            let record = raw.record();
+            if !matches!(fate_from_encoded_fields(record)?, Fate::Pending) {
+                continue;
+            }
+            candidates.push((
+                NodeAlias(record.get_u32(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+            ));
+        }
+        // Overlay row -> the pending patches on it.
+        let mut rows: BTreeMap<(PhysicalTableId, Vec<u8>), Vec<(TxId, VersionRow)>> =
+            BTreeMap::new();
+        for (alias, time) in candidates {
+            let node = self
+                .node_for_alias(alias)
+                .ok_or(Error::InvalidStoredValue("transaction node alias must exist"))?;
+            let tx_id = TxId::new(time, node);
+            if !self.pending_tx_folds_into_overlay(tx_id).await? {
+                continue;
+            }
+            for version in self.query_versions_for_tx_header(tx_id, alias, None).await? {
+                if version.seq()? != GlobalTime(0) {
+                    continue;
                 }
-                let record = raw.record();
-                let tx_time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
-                let node = self
-                    .node_for_alias(NodeAlias(
-                        record.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                    ))
-                    .ok_or(Error::InvalidStoredValue("overlay node alias must exist"))?;
-                self.ahead_current_keys
-                    .insert((table_id, raw.key().to_vec()), TxId::new(tx_time, node));
+                rows.entry(self.ahead_overlay_key(&version)?)
+                    .or_default()
+                    .push((tx_id, version));
             }
         }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.database.open_batch();
+        for (_, pending) in rows {
+            let row = pending[0].1.clone();
+            match self.write_folded_ahead_overlay(&mut batch, &row, pending).await {
+                Ok(()) => {}
+                // A history@0 row that does not decode stays out of the
+                // derived overlay, as it stays out of every other derived
+                // carrier: the row reads at its synced image, and any later
+                // write over it fails closed on the same decode. One corrupt
+                // row must not keep the whole node from opening.
+                Err(Error::InvalidStoredValue(reason)) => {
+                    tracing::warn!(
+                        table = %row.table(),
+                        reason,
+                        "pending history row left out of the derived ahead overlay"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            #[cfg(feature = "testing")]
+            if let Some(receipt) = &mut receipt {
+                receipt.ahead_current_entries += 1;
+            }
+        }
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = self.database.persist_with_progress(&applied).await;
+        self.database.finish_persistence(persisted)?;
         Ok(())
     }
-
 
     /// Note that `version`'s history row is written in the open batch; the
     /// next applied node batch adds it to the transaction's

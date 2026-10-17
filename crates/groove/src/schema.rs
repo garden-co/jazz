@@ -525,6 +525,12 @@ pub struct TableSchema {
     /// the same layout to another discriminator when it is useful metadata.
     #[serde(default)]
     pub variants: Vec<TableVariant>,
+    /// Rows (and index entries) live only in memory: derived state the owner
+    /// rebuilds from durable tables after a restart (see
+    /// `storage::non_durable`). Reads, writes and maintained views treat the
+    /// table like any other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub non_durable: bool,
 }
 
 #[cfg(test)]
@@ -593,7 +599,14 @@ impl TableSchema {
             indices: Vec::new(),
             foreign_keys: Vec::new(),
             variants: Vec::new(),
+            non_durable: false,
         }
+    }
+
+    /// Keep this table's rows in memory only; see [`Self::non_durable`].
+    pub fn non_durable(mut self) -> Self {
+        self.non_durable = true;
+        self
     }
 
     pub fn with_primary_key(mut self, primary_key: PrimaryKey) -> Self {

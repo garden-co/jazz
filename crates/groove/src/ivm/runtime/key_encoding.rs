@@ -522,6 +522,58 @@ pub(super) fn join_descriptor(
     RecordDescriptor::new(fields)
 }
 
+/// Type tags of the key codec. Every writer below and [`leading_key_part_len`]
+/// read them from here, so a new tag cannot reach one and miss the other.
+mod tag {
+    /// `u8` and enum tags.
+    pub(super) const U8: u8 = 0;
+    pub(super) const U16: u8 = 1;
+    pub(super) const U32: u8 = 2;
+    pub(super) const U64: u8 = 3;
+    pub(super) const F64: u8 = 4;
+    pub(super) const BOOL: u8 = 5;
+    pub(super) const STRING: u8 = 6;
+    pub(super) const BYTES: u8 = 7;
+    pub(super) const NULL: u8 = 8;
+    /// A present nullable value; the wrapped part follows.
+    pub(super) const NOT_NULL: u8 = 9;
+    pub(super) const UUID: u8 = 10;
+    pub(super) const TUPLE: u8 = 11;
+    pub(super) const I64: u8 = 13;
+    pub(super) const I32: u8 = 14;
+    pub(super) const U48: u8 = 16;
+}
+
+/// Length of the leading part [`encode_key_part`] wrote at the start of
+/// `key`, read from its type tag alone. `None` when `key` does not hold a
+/// whole part, and for a tuple, whose members carry no end marker.
+pub(crate) fn leading_key_part_len(key: &[u8]) -> Option<usize> {
+    let (&first, rest) = key.split_first()?;
+    let payload = match first {
+        tag::NULL => 0,
+        tag::U8 | tag::BOOL => 1,
+        tag::U16 => 2,
+        tag::U48 => 6,
+        tag::U32 | tag::I32 => 4,
+        tag::U64 | tag::I64 | tag::F64 => 8,
+        tag::UUID => 16,
+        tag::NOT_NULL => return leading_key_part_len(rest).map(|len| 1 + len),
+        // See `encode_ordered_bytes`: `00 ff` escapes a NUL, `00 00` ends.
+        tag::STRING | tag::BYTES => {
+            let mut position = 0;
+            loop {
+                match (rest.get(position)?, rest.get(position + 1)?) {
+                    (0, 0) => return Some(1 + position + 2),
+                    (0, _) => position += 2,
+                    _ => position += 1,
+                }
+            }
+        }
+        _ => return None,
+    };
+    (rest.len() >= payload).then_some(1 + payload)
+}
+
 pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmRuntimeError> {
     // Type tags make composite keys unambiguous. Payload bytes are chosen to
     // preserve natural ordering in RocksDB's lexicographic iterator order.
@@ -532,16 +584,16 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             ));
         }
         Value::Tuple(values) => {
-            key.push(11);
+            key.push(tag::TUPLE);
             for value in values {
                 encode_key_part(key, value)?;
             }
         }
         Value::Nullable(None) => {
-            key.push(8);
+            key.push(tag::NULL);
         }
         Value::Nullable(Some(value)) => {
-            key.push(9);
+            key.push(tag::NOT_NULL);
             encode_key_part(key, value)?;
         }
         value => encode_scalar_key_part(key, value)?,
@@ -561,7 +613,7 @@ pub(super) fn encode_scalar_key_part(
     match value {
         Value::U8(value) | Value::EnumTag(value) => put_u8(key, *value),
         Value::U16(value) => {
-            key.push(1);
+            key.push(tag::U16);
             key.extend(value.to_be_bytes());
             Ok(())
         }
@@ -591,41 +643,41 @@ type KeyResult = Result<(), IvmRuntimeError>;
 
 #[inline]
 fn put_u8(key: &mut Vec<u8>, value: u8) -> KeyResult {
-    key.extend([0, value]);
+    key.extend([tag::U8, value]);
     Ok(())
 }
 
 #[inline]
 fn put_u32(key: &mut Vec<u8>, value: u32) -> KeyResult {
-    key.push(2);
+    key.push(tag::U32);
     key.extend(value.to_be_bytes());
     Ok(())
 }
 
 #[inline]
 fn put_u64(key: &mut Vec<u8>, value: u64) -> KeyResult {
-    key.push(3);
+    key.push(tag::U64);
     key.extend(value.to_be_bytes());
     Ok(())
 }
 
 #[inline]
 fn put_u48(key: &mut Vec<u8>, value: u64) -> KeyResult {
-    key.push(16);
+    key.push(tag::U48);
     key.extend(crate::records::u48_be_bytes(value)?);
     Ok(())
 }
 
 #[inline]
 fn put_i32(key: &mut Vec<u8>, value: i32) -> KeyResult {
-    key.push(14);
+    key.push(tag::I32);
     key.extend(order_preserving_i32_bits(value).to_be_bytes());
     Ok(())
 }
 
 #[inline]
 fn put_i64(key: &mut Vec<u8>, value: i64) -> KeyResult {
-    key.push(13);
+    key.push(tag::I64);
     key.extend(order_preserving_i64_bits(value).to_be_bytes());
     Ok(())
 }
@@ -633,25 +685,25 @@ fn put_i64(key: &mut Vec<u8>, value: i64) -> KeyResult {
 /// Callers that may see NaN reject it first with [`non_nan`].
 #[inline]
 fn put_f64(key: &mut Vec<u8>, value: f64) -> KeyResult {
-    key.push(4);
+    key.push(tag::F64);
     key.extend(order_preserving_f64_bits(value).to_be_bytes());
     Ok(())
 }
 
 #[inline]
 fn put_bool(key: &mut Vec<u8>, value: bool) -> KeyResult {
-    key.extend([5, u8::from(value)]);
+    key.extend([tag::BOOL, u8::from(value)]);
     Ok(())
 }
 
 #[inline]
 fn put_str(key: &mut Vec<u8>, value: &str) -> KeyResult {
-    put_bytes_tagged(key, 6, value.as_bytes())
+    put_bytes_tagged(key, tag::STRING, value.as_bytes())
 }
 
 #[inline]
 fn put_bytes(key: &mut Vec<u8>, value: &[u8]) -> KeyResult {
-    put_bytes_tagged(key, 7, value)
+    put_bytes_tagged(key, tag::BYTES, value)
 }
 
 #[inline]
@@ -663,7 +715,7 @@ fn put_bytes_tagged(key: &mut Vec<u8>, tag: u8, value: &[u8]) -> KeyResult {
 
 #[inline]
 fn put_uuid(key: &mut Vec<u8>, value: uuid::Uuid) -> KeyResult {
-    key.push(10);
+    key.push(tag::UUID);
     key.extend_from_slice(value.as_bytes());
     Ok(())
 }
@@ -677,11 +729,11 @@ fn put_nullable<T>(
 ) -> KeyResult {
     match value {
         Some(value) => {
-            key.push(9);
+            key.push(tag::NOT_NULL);
             put(key, value)
         }
         None => {
-            key.push(8);
+            key.push(tag::NULL);
             Ok(())
         }
     }
@@ -789,4 +841,82 @@ pub(super) fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
         .into_iter()
         .filter(|delta| delta.weight != 0)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One sample of every key type `encode_key_part` accepts. The match has
+    /// no wildcard so a new `Value` variant fails to compile here until it is
+    /// sorted into supported (sampled below) or unsupported.
+    fn key_samples() -> Vec<Value> {
+        let supported = |value: &Value| match value {
+            Value::U8(_)
+            | Value::U16(_)
+            | Value::U32(_)
+            | Value::U64(_)
+            | Value::U48(_)
+            | Value::I32(_)
+            | Value::I64(_)
+            | Value::F64(_)
+            | Value::Bool(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::Uuid(_)
+            | Value::EnumTag(_)
+            | Value::Nullable(_) => true,
+            Value::Tuple(_)
+            | Value::Array(_)
+            | Value::Record(_)
+            | Value::Enum(_)
+            | Value::Large(_) => false,
+        };
+        let samples = vec![
+            Value::U8(7),
+            Value::U16(0x0102),
+            Value::U32(0),
+            Value::U64(u64::MAX),
+            Value::U48(0x0000_0102_0304),
+            Value::I32(-1),
+            Value::I64(i64::MIN),
+            Value::F64(-0.5),
+            Value::Bool(true),
+            Value::String(String::new()),
+            Value::String("a\0b".to_owned()),
+            Value::Bytes(vec![0, 0, 0xff, 1]),
+            Value::Uuid(uuid::Uuid::from_bytes([0; 16])),
+            Value::EnumTag(3),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::String("x\0".to_owned())))),
+            Value::Nullable(Some(Box::new(Value::U48(5)))),
+        ];
+        assert!(samples.iter().all(supported));
+        samples
+    }
+
+    #[test]
+    fn leading_key_part_len_matches_every_encoded_key_type() {
+        for leading in key_samples() {
+            let mut part = Vec::new();
+            encode_key_part(&mut part, &leading).unwrap();
+            for trailing in key_samples() {
+                let mut key = part.clone();
+                encode_key_part(&mut key, &trailing).unwrap();
+                assert_eq!(
+                    leading_key_part_len(&key),
+                    Some(part.len()),
+                    "{leading:?} then {trailing:?}"
+                );
+            }
+            // A truncated part is never mistaken for a whole one.
+            for cut in 0..part.len() {
+                assert_eq!(leading_key_part_len(&part[..cut]), None, "{leading:?}");
+            }
+        }
+        // Tuple members carry no end marker, so a tuple has no length.
+        let mut tuple = Vec::new();
+        encode_key_part(&mut tuple, &Value::Tuple(vec![Value::U8(1)])).unwrap();
+        assert_eq!(leading_key_part_len(&tuple), None);
+    }
 }

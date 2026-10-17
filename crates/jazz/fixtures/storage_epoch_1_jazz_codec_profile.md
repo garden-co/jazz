@@ -84,3 +84,14 @@ evidence. Current native and browser fixtures are regenerated through their
 production-adapter producers. Node, catalogue and account reopen tests cover
 their independent current profiles. The browser's replica identity and lease
 metadata remain independent physical metadata and are unchanged.
+
+## Derived ahead-current (alpha.60)
+
+The ahead-current tables keep their record layout, but no longer reach a
+backend: they are Groove non-durable tables (`INV-STORAGE-40`), held in memory
+and rebuilt on open by folding history@0 over global current (Jazz SPEC 4
+§4.7, `INV-REF-6`). No family is added or removed, the node marker stays
+`jazz.node-storage.v2` and the manifest is unchanged. The physical
+`__groove_class_ahead_current` column family is no longer created; on a root
+written before the change its bytes are inert
+(`dev/proofs/linear-history-storage-compatibility.md`).
