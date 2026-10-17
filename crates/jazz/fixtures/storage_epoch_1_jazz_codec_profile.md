@@ -62,8 +62,10 @@ physical storage epoch stays 1.
 This is not wire compatible, although the wire protocol version is unchanged
 (v6) in this change:
 
-- `JVRR\x02` row payload bytes change (large-value scalar tags, descriptor and
-  edit layouts, record layouts) while keeping the `JVRR\x02` marker.
+- `JVRR` row payload bytes change (large-value scalar tags, descriptor and
+  edit layouts, record layouts). #4071 made this change under the `JVRR\x02`
+  marker; the current row blob is `JVRR\x03` (#4019's per-message descriptor
+  table, SPEC 16).
 - Large-value scalar tags `Primitive`/`Chunked` move from 2/3 to 0/1, so
   `BranchKey` column-value bytes change (Groove SPEC 9, "Scalar tag history").
 - Catalogue schema bytes always use version 2 and lineage publications always

@@ -145,8 +145,10 @@ compatibility matrix. A change needs this corpus, both binding paths, and the
 SPEC decision reviewed together. Terminal operations remain JSON-native
 metadata rather than an alternative row byte layout.
 
-`wire_frame_artifact_corpus_v5.json` is the companion v5 host-artifact rejection
-receipt. The generated NAPI and WASM artifacts execute **every** exact Hello
+`wire_frame_artifact_corpus_v6.json` is the companion host-artifact rejection
+receipt for the current wire protocol (`WIRE_PROTOCOL_VERSION`); the file name
+carries the wire version. The `_v5` and unversioned corpora are earlier
+versions' files, kept unchanged and not executed. The generated NAPI and WASM artifacts execute **every** exact Hello
 and semantic-message channel batch from the complete frozen frame manifests, plus the
 frozen structured-error and malformed, unsupported-version, trailing-byte,
 corrupt-compressed, malformed-semantic, unsupported-semantic, and
