@@ -196,11 +196,6 @@ impl Db {
     where
         T: OrderedKvStorage + ReopenableStorage + 'static,
     {
-        let schema_version_id = config.schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&config.schema),
-            config.schema.clone(),
-        )])));
         let node = NodeState::new_client_with_cached_catalogue(
             config.identity.node,
             config.schema.clone(),
