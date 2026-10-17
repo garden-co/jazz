@@ -15,8 +15,8 @@ const hex = (bytes: Uint8Array) =>
 const bytes = (value: string) =>
   Uint8Array.from(value.match(/../g)!.map((pair) => Number.parseInt(pair, 16)));
 // Native row corpus: a single variable-width field has no record offsets.
-// The 02 tag is the existing string/bytes carrier, not an E2EE encoding.
-const packed = ["0273796e746865746963", "02dead"];
+// The 00 tag is the native inline string/bytes carrier.
+const packed = ["0073796e746865746963", "00dead"];
 // JE2E, format 1, "test.corpus", adapter version 1, then one fixture byte.
 const inner = "4a453245010b746573742e636f7270757300000001";
 const outer = "4a45324501156a617a7a2e653265652e63656c6c2d7265636f726400000001";
