@@ -209,7 +209,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
             .iter()
             .any(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
-    let original = alice.commit_unit_for_settled(tx_id).unwrap().unwrap();
+    let original = alice.commit_unit_for(tx_id).unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
         .unwrap()
@@ -250,7 +250,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
             .collect::<Vec<_>>(),
         vec![(row(1), title_cells("one"))]
     );
-    let retained = alice.commit_unit_for_settled(tx_id).unwrap().unwrap();
+    let retained = alice.commit_unit_for(tx_id).unwrap();
     let proof = |unit: &SyncMessage| {
         let SyncMessage::CommitUnit { tx, .. } = unit else { panic!("expected commit unit") };
         (tx.base_snapshot.clone(), tx.row_read_set.clone(), tx.absent_read_set.clone(), tx.predicate_read_set.clone())
@@ -258,7 +258,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
     assert_eq!(proof(&retained), proof(&original));
     drop(alice);
     let mut reopened = reopen_node_at(&alice_dir, node(1), schema());
-    assert_eq!(proof(&reopened.commit_unit_for_settled(tx_id).unwrap().unwrap()), proof(&original));
+    assert_eq!(proof(&reopened.commit_unit_for(tx_id).unwrap()), proof(&original));
 }
 
 /// A relay stores downstream exclusive units it did not author. A genuine
