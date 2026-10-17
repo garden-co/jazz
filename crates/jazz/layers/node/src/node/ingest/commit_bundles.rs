@@ -48,6 +48,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.parking.newest_ingest_ms = self.parking.newest_ingest_ms.max(now_ms);
         // A session or relay transport may not select a durable policy
         // capability. Its authenticated context is evaluated separately; only
         // trusted local/backend paths retain an explicit permission subject.
@@ -265,6 +266,13 @@ where
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
         // Validate through the SAME authority path the core uses for an incoming
         // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
@@ -347,7 +355,7 @@ where
             return Ok(false);
         };
         let mut existing_versions = self
-            .query_versions_for_tx(tx.tx_id)
+            .stored_versions_for_tx_at(tx.tx_id, &existing, versions)
             .await?
             .into_iter()
             .map(|stored| self.version_record_from_row(&stored))
@@ -370,7 +378,8 @@ where
         let versions = canonical_versions(versions);
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .stored_versions_for_tx_at(tx.tx_id, &existing, &versions)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -422,7 +431,48 @@ where
         ).await
     }
 
+    /// One admission attempt of a unit at the authority: its decision,
+    /// and, when it is refused, the superseded-writes markers the refusal
+    /// leaves (see [`Self::record_superseded_by_refusal`]).
     pub(super) async fn ingest_commit_unit_once(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
+        let tx_id = tx.tx_id;
+        let predecessors = versions
+            .iter()
+            .filter_map(|version| {
+                version.base().pending.map(|pending| {
+                    (
+                        version.schema_version(),
+                        version.table().to_owned(),
+                        version.branch_key().clone(),
+                        version.row_uuid(),
+                        pending,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcome =
+            Box::pin(self.decide_commit_unit(tx, versions, now_ms, ingest_context)).await?;
+        if !predecessors.is_empty()
+            && outcome.value.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::FateUpdate { tx_id: id, fate: Fate::Rejected(_), .. }
+                        if *id == tx_id
+                )
+            })
+        {
+            self.record_superseded_by_refusal(tx_id, predecessors).await?;
+        }
+        Ok(outcome)
+    }
+
+    async fn decide_commit_unit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
@@ -470,7 +520,8 @@ where
                 }]));
             }
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .stored_versions_for_tx_at(tx.tx_id, &existing, &versions)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -534,6 +585,16 @@ where
                 .await
                 .map(PublicationOutcome::settled);
         }
+        // An aggregate read is validated by the result it recorded; a
+        // missing or garbled result is a malformed commit, not a conflict.
+        if let Some(reason) =
+            crate::node::aggregate_read_result::transaction_aggregate_read_malformation(&tx)
+        {
+            return self
+                .reject_malformed_commit(tx, reason)
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if tx.tx_id.time.physical_ms() > now_ms.saturating_add(SKEW_TOLERANCE_MS) {
             let fate = Fate::Rejected(RejectionReason::ClientClockTooFarAhead);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -544,8 +605,6 @@ where
                 durability: None,
             }]));
         }
-        // The cheap identity checks run before the predecessor check below,
-        // so only an admitted writer is ever asked to retry.
         if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -560,16 +619,6 @@ where
         // looked up for it.
         if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
-        }
-        // A write chained on its writer's pending predecessor is decided only
-        // after that predecessor (SPEC 4 §4.6). Core does not hold it: it
-        // stores nothing and asks the writer to send it again, naming the
-        // predecessor it waits for (SPEC 8).
-        if let Some(awaiting) = self.commit_unit_awaited_predecessor(&tx, &versions).await? {
-            return Ok(PublicationOutcome::settled(vec![SyncMessage::RetryLater {
-                tx_id: tx.tx_id,
-                awaiting,
-            }]));
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,
@@ -654,7 +703,7 @@ where
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.view_scoped_cardinality
+                || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -680,7 +729,7 @@ where
             };
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, seq, &version).await?;
-                let (table, record) = self.version_storage_write_binding(&stored, existing.tx.made_by)?;
+                let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's copy,
@@ -701,7 +750,7 @@ where
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
-            if version_bundles.is_empty() && !existing.view_scoped_cardinality {
+            if version_bundles.is_empty() && !existing.is_partial {
                 self.apply_fate_update(tx.tx_id, fate, global_time, Some(durability))
                     .await?;
                 return Ok(());
@@ -914,22 +963,24 @@ where
             let contribution_merge = self.contribution_merge_storage_value(
                 tx.contribution_merge.as_ref(),
             )?;
-            batch.insert(
-                "jazz_transactions",
-                // A reset may bulk-load only the view-authorized rows of an
-                // exclusive transaction. Preserve that scope marker even when
-                // the redacted write count equals this fragment's length, so a
-                // later sibling view can extend the same local projection.
-                transaction_values_with_cardinality_scope(
-                    tx_node_alias,
-                    tx,
+            // A reset may bulk-load only the view-authorized rows of an
+            // exclusive transaction. Preserve that scope marker even when
+            // the redacted write count equals this fragment's length, so a
+            // later sibling view can extend the same local projection.
+            self.stage_tx_record(
+                &mut batch,
+                TransactionRecordWrite::Insert {
+                    provenance: contribution_merge,
+                },
+                tx_node_alias,
+                tx,
+                &TransactionRecordStatus::new(
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
-                    view_scoped,
-                    contribution_merge,
-                )?,
-            );
+                )
+                .view_scoped(view_scoped),
+            )?;
 
             let mut unique_versions = BTreeMap::<
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId),
@@ -970,7 +1021,8 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
+                let stored = self.with_wire_union_cells(stored, version)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     self.version_storage_primary_key(&stored)?,

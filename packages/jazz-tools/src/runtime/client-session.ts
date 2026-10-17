@@ -3,6 +3,7 @@ import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
 import { getTrustedReservedSession } from "./db-internal-session.js";
+import { isRecord } from "./util.js";
 
 export interface ClientSessionInput {
   /** @internal Assignment supplied by a validated account handle. */
@@ -196,10 +197,6 @@ function trimOptional(value?: string): string | undefined {
 
 function asUsableSubjectString(value: unknown): string | undefined {
   return typeof value === "string" && isUsableSubject(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function maybeBuffer(): BufferLike | undefined {

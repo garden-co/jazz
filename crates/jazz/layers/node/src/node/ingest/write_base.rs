@@ -1,13 +1,3 @@
-/// Plain cells of an image keyed by physical column id: each cell's column
-/// type and value (`None` is null). `_deletion` is keyed by
-/// `DELETION_COLUMN_ID`.
-pub(super) type PhysicalCells = BTreeMap<PhysicalColumnId, (ValueType, Option<Value>)>;
-
-/// The `_deletion` cell's type: the same in every layout.
-fn deletion_cell_type() -> ValueType {
-    ValueType::Nullable(Box::new(ValueType::Bool))
-}
-
 /// What a node's accepted history says about one accepted write (SPEC 4
 /// §4.6, "Maybe conflicting"). Derived on demand; nothing of it is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,22 +120,11 @@ where
             if let Some(refusal) = pending_predecessor_refusal(pending, writer) {
                 return Ok(Err(not_supported(refusal.to_owned())));
             }
-            // An unknown or still pending predecessor is answered with
-            // `RetryLater` before this check (`commit_unit_awaited_predecessor`);
-            // reaching either here means no fate will come.
-            match self.query_transaction(pending).await? {
-                None => {
-                    return Ok(Err(not_supported(
-                        "its pending predecessor is unknown here".to_owned(),
-                    )));
-                }
-                Some(stored) if matches!(stored.fate, Fate::Pending) => {
-                    return Ok(Err(not_supported(
-                        "its pending predecessor has no fate here yet".to_owned(),
-                    )));
-                }
-                Some(_) => {}
-            }
+            // The predecessor's fate is not looked up. A writer's writes
+            // reach Core in their authored order, so a predecessor Core has
+            // not decided by now never arrives: like one Core rejected, it
+            // is not in history, and the write applies as written over the
+            // row's current image (`INV-HIST-20`).
         }
         let Some(seq) = base.seq else {
             return Ok(Ok(()));
@@ -177,6 +156,295 @@ where
             ))));
         }
         Ok(Ok(()))
+    }
+
+    /// Why Core refuses `writer`'s write to a row as arriving after a later
+    /// write of its own node that Core already accepted there, or `None`.
+    /// A writer's writes reach Core in their authored order (SPEC 14), so
+    /// such a write is a protocol violation; applying it would put an older
+    /// image over a newer one (`INV-HIST-23`).
+    ///
+    /// Its reads are bounded by the writes accepted since the writer's base,
+    /// never by the row's whole history:
+    ///
+    /// - The row's current image names its newest write. When that write is
+    ///   the writer's own, or is the write's base, nothing more is read.
+    /// - A write with a base seq `B` under a current seq `C`: the history
+    ///   key is `(branch, row, seq, tx_time, node)`, so one range read per
+    ///   history table covers exactly the records at seqs `B+1..=C`, and only
+    ///   their key fields are read. A later write of the writer's node lies
+    ///   there if anywhere, since the writer had seen `B` when it wrote.
+    /// - A write without a base seq: one point read of the writer's
+    ///   superseded-writes marker for the row (see
+    ///   [`Self::passed_over_predecessor`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::node) async fn late_write_refusal(
+        &mut self,
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        base: RowBase,
+        writer: TxId,
+        current_seq: Option<GlobalTime>,
+        current_writer: Option<TxId>,
+    ) -> Result<Option<String>, Error> {
+        let late = || {
+            format!(
+                "the write to '{table}' row {} arrived after a later write of its writer; a writer's writes must reach the authority in the order they were written",
+                row_uuid.0
+            )
+        };
+        let Some(current_seq) = current_seq else {
+            // No accepted write of the row.
+            return Ok(None);
+        };
+        if let Some(current_writer) = current_writer
+            && current_writer.node == writer.node
+        {
+            // The writer's newest accepted write of the row is the current
+            // image's: its writes before that were accepted in order.
+            return Ok((current_writer.time > writer.time).then(late));
+        }
+        let is_late = match base.seq {
+            // Nothing was accepted after the image the writer had seen.
+            Some(seq) if seq == current_seq => false,
+            // A base above the row's current seq is refused by
+            // `validate_write_base`.
+            Some(seq) if seq > current_seq => false,
+            Some(seq) => {
+                self.own_write_accepted_between(
+                    batch,
+                    table,
+                    branch_key,
+                    row_uuid,
+                    writer,
+                    seq,
+                    current_seq,
+                )
+                .await?
+            }
+            None => self
+                .superseded_through(
+                    self.physical_table_id_for_schema(schema_version, table)?,
+                    branch_key,
+                    row_uuid,
+                    writer.node,
+                )
+                .await?
+                .is_some_and(|through| writer.time <= through),
+        };
+        Ok(is_late.then(late))
+    }
+
+    /// Whether the row holds an accepted record of `writer`'s node newer
+    /// than `writer` at a seq in `after+1..=through`. One range read per
+    /// history table of the row's table; only key fields are read.
+    #[allow(clippy::too_many_arguments)]
+    async fn own_write_accepted_between(
+        &mut self,
+        batch: &DatabaseBatch,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        writer: TxId,
+        after: GlobalTime,
+        through: GlobalTime,
+    ) -> Result<bool, Error> {
+        let bound = |seq: u64| {
+            [
+                Value::Bytes(branch_key.canonical_bytes()),
+                Value::Uuid(row_uuid.0),
+                Value::U64(seq),
+                Value::U64(0),
+                Value::U64(0),
+            ]
+        };
+        let (start, end) = (
+            bound(after.0.saturating_add(1)),
+            bound(through.0.saturating_add(1)),
+        );
+        for history_table in self.version_storage_sources(table)? {
+            for raw in self
+                .database
+                .primary_key_scan_range_raw_in_batch(batch, &history_table, &start, &end)
+                .await?
+            {
+                let record = raw.record();
+                let time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
+                if time <= writer.time {
+                    continue;
+                }
+                let alias = NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                if self.node_for_alias(alias) == Some(writer.node) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The superseded-writes marker key of `node` for a row. It names the
+    /// row's table by its physical id, which a table rename keeps, so a
+    /// marker recorded under one schema version guards writes made under
+    /// another.
+    fn superseded_writes_key(
+        table: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        node: NodeUuid,
+    ) -> [Value; 4] {
+        [
+            Value::U64(table.0),
+            Value::Bytes(branch_key.canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+            Value::Uuid(node.0),
+        ]
+    }
+
+    /// The newest transaction time of `node`'s writes to the row that Core
+    /// passed over (see [`Self::passed_over_predecessor`]): one point read.
+    async fn superseded_through(
+        &self,
+        table: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        node: NodeUuid,
+    ) -> Result<Option<TxTime>, Error> {
+        let store = self.database.direct_record_store(SUPERSEDED_WRITES_STORE)?;
+        let Some(record) = store
+            .get(&Self::superseded_writes_key(table, branch_key, row_uuid, node))
+            .await?
+        else {
+            return Ok(None);
+        };
+        match record.get_idx(0)? {
+            Value::U64(time) => Ok(Some(TxTime(time))),
+            _ => Err(Error::InvalidStoredValue(
+                "superseded-writes marker is not a transaction time",
+            )),
+        }
+    }
+
+    /// The writes of `writer`'s node to a row that Core passes over by
+    /// applying `writer`'s write: through its pending predecessor's time,
+    /// when Core holds no decision for that predecessor (it never arrived,
+    /// or is stored Pending). `None` when the write passes nothing over.
+    ///
+    /// A writer's writes reach Core in the order they were written
+    /// (`INV-HIST-23`), so once a write chained on `P` is decided, none of
+    /// its node's writes at or before `P` arrives for a decision any more;
+    /// Core records the marker before it applies the write, and also when it
+    /// refuses one (see [`Self::record_superseded_by_refusal`]). It is what
+    /// makes the late check of a write without a base seq one point read:
+    /// when such a write `Y` arrives after Core accepted a later write of its
+    /// node to the row, the first of those, `Z`, was written while `Y` was
+    /// still pending at its writer, so `Z` is chained on `Y` or on a later
+    /// write `X` that Core had not accepted either. If Core held no decision
+    /// for `X` (or `X` is `Y`), applying `Z` recorded a marker at or after
+    /// `Y`. If Core had refused `X`, the same holds one link down the chain:
+    /// refusing `X` recorded a marker at or after `Y` unless `X`'s own
+    /// predecessor had been refused before it, and so on down to the write
+    /// chained directly on `Y`, which Core decided while it held no
+    /// decision for `Y`. A predecessor Core already decided (accepted or
+    /// refused) therefore writes nothing: a redelivery of it is deduplicated
+    /// before this check, and the writes before it are covered by the
+    /// marker written when it was decided, if any was needed. Writing
+    /// happens only when a write passes over a predecessor Core never saw,
+    /// which takes a transport fault or a parked predecessor; the ordinary
+    /// chain writes nothing and reads at most the predecessor's transaction.
+    pub(super) async fn passed_over_predecessor(
+        &mut self,
+        base: RowBase,
+        writer: TxId,
+        current_writer: Option<TxId>,
+    ) -> Result<Option<TxTime>, Error> {
+        let Some(pending) = base.pending else {
+            return Ok(None);
+        };
+        if current_writer
+            .is_some_and(|current| current.node == writer.node && current.time >= pending.time)
+        {
+            // The row's image is the predecessor's, or a newer write of its
+            // node Core accepted after it.
+            return Ok(None);
+        }
+        self.undecided_predecessor(pending, writer).await
+    }
+
+    /// `pending`'s time when it is a well-formed predecessor of `writer`
+    /// that Core holds no decision for: not stored, or stored Pending.
+    async fn undecided_predecessor(
+        &mut self,
+        pending: TxId,
+        writer: TxId,
+    ) -> Result<Option<TxTime>, Error> {
+        if pending_predecessor_refusal(pending, writer).is_some() {
+            return Ok(None);
+        }
+        let undecided = self
+            .query_transaction(pending)
+            .await?
+            .is_none_or(|stored| matches!(stored.fate, Fate::Pending));
+        Ok(undecided.then_some(pending.time))
+    }
+
+    /// Record the marker a refused write `writer` leaves for each row it
+    /// addressed whose pending predecessor Core holds no decision for: a
+    /// later write chained on `writer` passes over the refused write without
+    /// a marker (see [`Self::passed_over_predecessor`]), so the refusal
+    /// records the writes it passed over itself. A version whose table this
+    /// node cannot resolve leaves none.
+    pub(super) async fn record_superseded_by_refusal(
+        &mut self,
+        writer: TxId,
+        predecessors: Vec<(SchemaVersionId, String, BranchKey, RowUuid, TxId)>,
+    ) -> Result<(), Error> {
+        for (schema_version, table, branch_key, row_uuid, pending) in predecessors {
+            let Ok(physical_table) = self.physical_table_id_for_schema(schema_version, &table)
+            else {
+                continue;
+            };
+            if let Some(through) = self.undecided_predecessor(pending, writer).await? {
+                self.record_superseded_writes(
+                    physical_table,
+                    &branch_key,
+                    row_uuid,
+                    writer.node,
+                    through,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record that Core passed over `node`'s writes to a row through
+    /// `through` (see [`Self::passed_over_predecessor`]). Markers only grow.
+    pub(super) async fn record_superseded_writes(
+        &mut self,
+        table: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        node: NodeUuid,
+        through: TxTime,
+    ) -> Result<(), Error> {
+        if self
+            .superseded_through(table, branch_key, row_uuid, node)
+            .await?
+            .is_some_and(|recorded| recorded >= through)
+        {
+            return Ok(());
+        }
+        self.database
+            .direct_record_store(SUPERSEDED_WRITES_STORE)?
+            .set(
+                &Self::superseded_writes_key(table, branch_key, row_uuid, node),
+                &[Value::U64(through.0)],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Whether the accepted write `tx` to a row is maybe conflicting, and
@@ -343,40 +611,5 @@ where
             }
         }
         Ok(newest.map(|time| TxId::new(time, self.node_uuid)))
-    }
-
-    /// Every plain cell and `_deletion` of a row image, keyed by physical
-    /// column id.
-    pub(super) fn image_physical_cells(&self, image: &VersionRow) -> Result<PhysicalCells, Error> {
-        let schema_version = self
-            .schema_version_for_alias(image.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "history schema version alias must exist",
-            ))?;
-        let table = self.table_in_schema_ref(image.table(), schema_version)?;
-        let mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(image.table()))
-            .map(|mapping| &mapping.columns)
-            .ok_or(Error::InvalidStoredValue(
-                "history physical table mapping missing",
-            ))?;
-        let record = image.record.borrowed();
-        let mut cells = PhysicalCells::new();
-        for (index, column) in table.columns.iter().enumerate() {
-            if table.merge_strategy(&column.name) != crate::schema::MergeStrategy::Lww {
-                continue;
-            }
-            let id = *mapping.get(&column.name).ok_or(Error::InvalidStoredValue(
-                "history column physical mapping missing",
-            ))?;
-            let value = nullable_value(record.get_idx(HistoryRowRecord::USER_CELLS + index)?)?;
-            cells.insert(id, (column.column_type.clone(), value));
-        }
-        let deletion = nullable_value(record.get_idx(HistoryRowRecord::FIELD__DELETION_IDX)?)?;
-        cells.insert(DELETION_COLUMN_ID, (deletion_cell_type(), deletion));
-        Ok(cells)
     }
 }

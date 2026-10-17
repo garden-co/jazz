@@ -497,6 +497,93 @@ pub enum RejectionReason {
     MalformedCommit(String),
 }
 
+impl RejectionReason {
+    /// Physical payload type shared by transaction audit and retry records.
+    #[doc(hidden)]
+    pub fn storage_value_type() -> groove::records::ValueType {
+        use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "jazz_rejection_reason",
+                [
+                    EnumCase::new("client_clock_too_far_ahead", RecordDescriptor::default()),
+                    EnumCase::new("authorization_denied", RecordDescriptor::default()),
+                    EnumCase::new("exclusive_conflict", RecordDescriptor::default()),
+                    EnumCase::new("causality_violation", RecordDescriptor::default()),
+                    EnumCase::new(
+                        "cascade",
+                        RecordDescriptor::new([(
+                            "root",
+                            ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid]),
+                        )]),
+                    ),
+                    EnumCase::new(
+                        "malformed_commit",
+                        RecordDescriptor::new([("message", ValueType::String)]),
+                    ),
+                ],
+            )
+            .expect("fixed rejection reason schema"),
+        ))
+    }
+
+    /// Encode only the payload belonging to this rejection kind.
+    #[doc(hidden)]
+    pub fn to_storage_value(&self) -> Result<Value, groove::records::Error> {
+        use groove::records::{EnumValue, ValueType};
+        let (tag, fields) = match self {
+            Self::ClientClockTooFarAhead => (0, vec![]),
+            Self::AuthorizationDenied => (1, vec![]),
+            Self::ExclusiveConflict => (2, vec![]),
+            Self::CausalityViolation => (3, vec![]),
+            Self::Cascade { root } => (
+                4,
+                vec![Value::Tuple(vec![
+                    Value::U64(root.time.0),
+                    Value::Uuid(root.node.0),
+                ])],
+            ),
+            Self::MalformedCommit(message) => (5, vec![Value::String(message.clone())]),
+        };
+        let ValueType::Enum(schema) = Self::storage_value_type() else {
+            unreachable!()
+        };
+        Ok(Value::Enum(EnumValue::create(
+            tag,
+            schema.case(tag)?.payload,
+            &fields,
+        )?))
+    }
+
+    /// Decode the exact case payload; missing or unrelated fields are invalid.
+    #[doc(hidden)]
+    pub fn from_storage_value(value: Value) -> Result<Self, groove::records::Error> {
+        use groove::records::{Error, ValueType};
+        let Value::Enum(value) = value else {
+            return Err(Error::NonCanonicalRecord);
+        };
+        let ValueType::Enum(schema) = Self::storage_value_type() else {
+            unreachable!()
+        };
+        let payload = schema.case(value.tag())?.payload;
+        let fields = payload.bind(value.record().raw()).to_values()?;
+        if payload.create(&fields)? != value.record().raw() {
+            return Err(Error::NonCanonicalRecord);
+        }
+        match (value.tag(), fields.as_slice()) {
+            (0, []) => Ok(Self::ClientClockTooFarAhead),
+            (1, []) => Ok(Self::AuthorizationDenied),
+            (2, []) => Ok(Self::ExclusiveConflict),
+            (3, []) => Ok(Self::CausalityViolation),
+            (4, [root]) => Ok(Self::Cascade {
+                root: tx_id_from_value(root.clone()).map_err(|_| Error::NonCanonicalRecord)?,
+            }),
+            (5, [Value::String(message)]) => Ok(Self::MalformedCommit(message.clone())),
+            _ => Err(Error::NonCanonicalRecord),
+        }
+    }
+}
+
 /// Highest durability tier this node has observed for a transaction.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
@@ -900,7 +987,22 @@ pub struct PredicateRead {
     pub binding_id: BindingId,
     /// Binding values carried so validators do not need a prior binding registration.
     pub binding_values: BTreeMap<String, Value>,
+    /// The result an aggregate read observed, present exactly when `shape`
+    /// carries an aggregate (garden-co/jazz#3768). The authority re-runs the
+    /// aggregate as the transaction's permission subject and conflicts iff
+    /// the result differs; the aggregate's input rows are not recorded.
+    pub aggregate_result: Option<AggregateReadResult>,
 }
+
+/// Canonical `jazz.aggregate-read-result.v1` bytes: the complete result of
+/// one exclusive aggregate read, one entry per output group.
+///
+/// The bytes are opaque at this layer; the node layer owns the encoder and the
+/// canonical decoder (`jazz::node::aggregate_read_result`). Two results are
+/// equal exactly when their bytes are equal, so the encoder is the only
+/// producer of comparable values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub struct AggregateReadResult(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
 groove::define_record! {
     struct HistoryRowRecord {
@@ -922,10 +1024,8 @@ groove::define_record! {
         1 => node_id: u64,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: RejectionReasonTag,
-        5 => cascade_root: Option<Value>,
-        6 => reason_detail: Option<String>,
-        7 => user_metadata: Option<String>,
+        4 => rejection_reason: groove::records::EnumValue,
+        5 => user_metadata: Option<String>,
     }
 }
 
@@ -938,25 +1038,6 @@ groove::define_record! {
         .. user_cells,
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RejectionReasonTag {
-    ClientClockTooFarAhead,
-    AuthorizationDenied,
-    ExclusiveConflict,
-    CausalityViolation,
-    Cascade,
-    MalformedCommit,
-}
-
-groove::impl_record_field_enum!(RejectionReasonTag {
-    RejectionReasonTag::ClientClockTooFarAhead = 0,
-    RejectionReasonTag::AuthorizationDenied = 1,
-    RejectionReasonTag::ExclusiveConflict = 2,
-    RejectionReasonTag::CausalityViolation = 3,
-    RejectionReasonTag::Cascade = 4,
-    RejectionReasonTag::MalformedCommit = 5,
-});
 
 fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, &'static str> {
     match value {
@@ -994,41 +1075,76 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
     }
 }
 
-fn nullable_tx_id_value(value: Value) -> Result<Option<TxId>, &'static str> {
-    match value {
-        Value::Nullable(None) => Ok(None),
-        Value::Nullable(Some(value)) => tx_id_from_value(*value).map(Some),
-        _ => Err("tx id nullable"),
-    }
-}
-
 fn rejection_reason_from_rejected_record(
     record: groove::records::BorrowedRecord<'_>,
 ) -> Result<RejectionReason, &'static str> {
-    let tag = record
-        .get_enum(RejectedTransactionRowRecord::FIELD_REJECTION_REASON_IDX)
-        .map_err(|_| "reason")?;
-    match tag {
-        0 => Ok(RejectionReason::ClientClockTooFarAhead),
-        1 => Ok(RejectionReason::AuthorizationDenied),
-        2 => Ok(RejectionReason::ExclusiveConflict),
-        3 => Ok(RejectionReason::CausalityViolation),
-        4 => Ok(RejectionReason::Cascade {
-            root: nullable_tx_id_value(
-                record
-                    .get_idx(RejectedTransactionRowRecord::FIELD_CASCADE_ROOT_IDX)
-                    .map_err(|_| "cascade root")?,
-            )?
-            .ok_or("cascade root")?,
-        }),
-        5 => Ok(RejectionReason::MalformedCommit(
-            record
-                .get_nullable_string(RejectedTransactionRowRecord::FIELD_REASON_DETAIL_IDX)
-                .map_err(|_| "reason detail")?
-                .unwrap_or_default()
-                .to_owned(),
-        )),
-        _ => Err("reason"),
+    RejectionReason::from_storage_value(
+        record
+            .get_idx(RejectedTransactionRowRecord::FIELD_REJECTION_REASON_IDX)
+            .map_err(|_| "reason")?,
+    )
+    .map_err(|_| "reason")
+}
+
+#[cfg(test)]
+mod rejection_storage_tests {
+    use super::*;
+    use groove::records::{EnumValue, RecordDescriptor, ValueType};
+
+    /// Alice's rejection keeps its exact case payload across storage.
+    /// Codec-level coverage is needed to construct invalid bytes unavailable
+    /// through the transaction API.
+    #[test]
+    fn rejection_storage_round_trips_all_cases_and_rejects_wrong_payloads() {
+        let root = TxId::new(TxTime(42), NodeUuid::from_bytes([7; 16]));
+        for (reason, expected) in [
+            (RejectionReason::ClientClockTooFarAhead, vec![0]),
+            (RejectionReason::AuthorizationDenied, vec![1]),
+            (RejectionReason::ExclusiveConflict, vec![2]),
+            (RejectionReason::CausalityViolation, vec![3]),
+            (
+                RejectionReason::Cascade { root },
+                [vec![4, 0, 0, 0, 0, 0, 0, 0, 42], vec![7; 16]].concat(),
+            ),
+            (
+                RejectionReason::MalformedCommit("invalid parent".into()),
+                b"\x05\x00invalid parent".to_vec(),
+            ),
+            (RejectionReason::MalformedCommit(String::new()), vec![5, 0]),
+        ] {
+            let descriptor =
+                RecordDescriptor::new([("reason", RejectionReason::storage_value_type())]);
+            let bytes = descriptor
+                .create(&[reason.to_storage_value().unwrap()])
+                .unwrap();
+            assert_eq!(bytes, expected);
+            let stored = descriptor.bind(&bytes).get_idx(0).unwrap();
+            assert_eq!(RejectionReason::from_storage_value(stored).unwrap(), reason);
+            if !matches!(reason, RejectionReason::MalformedCommit(_)) {
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                assert!(
+                    descriptor
+                        .bind(&trailing)
+                        .get_idx(0)
+                        .and_then(RejectionReason::from_storage_value)
+                        .is_err()
+                );
+            }
+        }
+
+        for tag in [4, 5, 6] {
+            let missing =
+                Value::Enum(EnumValue::create(tag, RecordDescriptor::default(), &[]).unwrap());
+            assert!(RejectionReason::from_storage_value(missing).is_err());
+        }
+        let unexpected = RecordDescriptor::new([("unexpected", ValueType::U64)]);
+        for tag in 0..4 {
+            let unrelated =
+                Value::Enum(EnumValue::create(tag, unexpected, &[Value::U64(1)]).unwrap());
+            assert!(RejectionReason::from_storage_value(unrelated).is_err());
+        }
+        assert!(RejectionReason::from_storage_value(Value::EnumTag(0)).is_err());
     }
 }
 

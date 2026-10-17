@@ -28,6 +28,25 @@ pub(super) struct TopBySortPart {
     pub(super) direction: TopByDirection,
 }
 
+impl TopBySortPart {
+    /// Bytes of the sort value, for state footprints.
+    pub(super) fn encoded_len(&self) -> usize {
+        match &self.key {
+            TopBySortKey::Null => 0,
+            TopBySortKey::U8(_) | TopBySortKey::Bool(_) | TopBySortKey::EnumTag(_) => 1,
+            TopBySortKey::U16(_) => 2,
+            TopBySortKey::U32(_) | TopBySortKey::I32(_) => 4,
+            TopBySortKey::U64(_)
+            | TopBySortKey::U48(_)
+            | TopBySortKey::I64(_)
+            | TopBySortKey::F64(_) => 8,
+            TopBySortKey::String(value) => value.len(),
+            TopBySortKey::Bytes(value) => value.len(),
+            TopBySortKey::Uuid(_) => 16,
+        }
+    }
+}
+
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let ordering = self.key.cmp(&other.key);
@@ -1487,7 +1506,7 @@ fn encode_identity_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmR
                 key.extend(edit.utf16_offset.to_be_bytes());
                 key.extend(edit.delete_utf16_length.to_be_bytes());
                 key.extend(edit.insert_utf16_length.to_be_bytes());
-                encode_runtime_ordered_bytes(key, &edit.insert_bytes);
+                encode_ordered_bytes(key, &edit.insert_bytes);
             }
         }
         value => encode_runtime_primary_key_part(key, value)?,
@@ -1512,58 +1531,6 @@ fn encode_runtime_primary_key_part(
     value: &Value,
 ) -> Result<(), IvmRuntimeError> {
     match value {
-        Value::U8(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::U16(value) => {
-            key.push(1);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            key.push(2);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            key.push(3);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U48(value) => {
-            key.push(16);
-            key.extend(records::u48_be_bytes(*value)?);
-        }
-        Value::I32(value) => {
-            key.push(14);
-            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
-        }
-        Value::I64(value) => {
-            key.push(13);
-            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
-        }
-        Value::F64(value) => {
-            key.push(4);
-            key.extend(ordered_f64_key(*value).to_be_bytes());
-        }
-        Value::Bool(value) => {
-            key.push(5);
-            key.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            key.push(6);
-            encode_runtime_ordered_bytes(key, value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::Bytes(value) => {
-            key.push(7);
-            encode_runtime_ordered_bytes(key, value);
-        }
-        Value::Uuid(value) => {
-            key.push(10);
-            key.extend_from_slice(value.as_bytes());
-        }
         Value::Tuple(values) => {
             key.push(11);
             for value in values {
@@ -1586,35 +1553,12 @@ fn encode_runtime_primary_key_part(
             // This is not the durable arrangement/primary-key codec.
             key.push(15);
             let descriptor = records::encode_record_descriptor(record.descriptor())?;
-            encode_runtime_ordered_bytes(key, &descriptor);
-            encode_runtime_ordered_bytes(key, record.raw());
+            encode_ordered_bytes(key, &descriptor);
+            encode_ordered_bytes(key, record.raw());
         }
-        Value::Array(_) | Value::Enum(_) | Value::Large(_) => {
-            return Err(IvmRuntimeError::UnsupportedJoinKey);
-        }
+        value => encode_scalar_key_part(key, value)?,
     }
     Ok(())
-}
-
-fn ordered_f64_key(value: f64) -> u64 {
-    let bits = value.to_bits();
-    if bits & (1 << 63) == 0 {
-        bits ^ (1 << 63)
-    } else {
-        !bits
-    }
-}
-
-fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
-    for byte in value {
-        if *byte == 0 {
-            key.extend([0, 0xff]);
-        } else {
-            key.push(*byte);
-        }
-    }
-    key.push(0);
-    key.push(0);
 }
 
 #[cfg(test)]

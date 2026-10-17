@@ -33,10 +33,6 @@ pub use crate::model::public_schema_convert::SchemaConversionError;
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
 
-/// Retired cursor store, reserved only to discard legacy entries on open.
-pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
-/// Retired scope store, reserved only to discard legacy entries on open.
-pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
@@ -47,10 +43,30 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// Retired: the scope relay's row-version repair ledger. Nothing writes or
-/// reads it since the repair lane was removed; it stays registered so stores
-/// that already hold it still open.
-pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
+/// The Groove dictionary that every stored author column is interned into
+/// (`groove.dictionary.v1`): transaction records' `made_by` and the row
+/// images' `created_by`/`updated_by` store a node-local 4-byte code, while
+/// every read, query, policy and the wire see the full [`RowAuthor`].
+///
+/// [`RowAuthor`]: crate::ids::RowAuthor
+pub const AUTHORS_DICTIONARY: &str = "authors";
+
+/// The stored type of an author column: a [`RowAuthor`] interned into
+/// [`AUTHORS_DICTIONARY`].
+///
+/// [`RowAuthor`]: crate::ids::RowAuthor
+pub fn interned_author_type() -> ValueType {
+    ValueType::interned(AUTHORS_DICTIONARY, crate::ids::RowAuthor::value_type())
+}
+
+/// The fate authority's superseded-writes markers (SPEC 4 §4.6): per row
+/// (keyed by physical table id, which a table rename keeps) and writer node,
+/// the newest transaction time of that node's writes to the row that Core
+/// passed over when it decided a later write of the node chained on a
+/// predecessor it holds no decision for (unknown, or stored Pending). A write
+/// of that node at or before the time arriving afterwards is late
+/// (`INV-HIST-23`).
+pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue
@@ -473,7 +489,7 @@ impl RuntimeSchema {
     /// Return the required RocksDB column-family names.
     pub fn column_families(&self) -> Vec<String> {
         let lowered = self.lower_to_groove();
-        StorageLayout::jazz_class_v2().physical_column_families(
+        StorageLayout::jazz_class_v3().physical_column_families(
             lowered
                 .column_families()
                 .into_iter()
@@ -498,21 +514,18 @@ impl RuntimeSchema {
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
-            catalogue_pointer_table(),
             transactions_table(),
+            pending_transactions_table(),
+            tx_provenance_table(),
             tx_touched_rows_table(),
             rejected_transactions_table(),
+            history_horizon_table(),
         ]
     }
 
     /// Return the version-independent metadata tables used by staged catalogue open.
     pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
-        vec![
-            nodes_table(),
-            schema_versions_table(),
-            catalogue_table(),
-            catalogue_pointer_table(),
-        ]
+        vec![nodes_table(), schema_versions_table(), catalogue_table()]
     }
 
     /// Return the canonical byte encoding used to address this schema version.
@@ -535,6 +548,10 @@ impl RuntimeSchema {
         // claims remain in the collision-checked directory value, never in
         // an ordered B-tree key.
         schema
+            .with_dictionary(groove::schema::DictionarySchema::new(
+                AUTHORS_DICTIONARY,
+                crate::ids::RowAuthor::value_type(),
+            ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 AUTHORITY_POLICY_BINDINGS_STORE,
                 RecordDescriptor::new([("policy_binding_digest", ValueType::Bytes)]),
@@ -546,39 +563,6 @@ impl RuntimeSchema {
                         ),
                     ),
                 ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                KNOWN_STATE_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([
-                    ("settled_through", ValueType::U64),
-                    ("authorization_progress", ValueType::U64),
-                    // A nonzero generation proves the persisted program
-                    // facts are an exact CoveredInput closure. It is
-                    // deliberately distinct from the live authority receipt.
-                    ("source_closure_generation", ValueType::U64),
-                ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SETTLED_PROGRAM_FACTS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                    // Canonical source closure facts are addressed by digest.
-                    // Their exact source roles and version references remain
-                    // in the validated record body.
-                    ("fact_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([("fact", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SUBSCRIPTION_WATERMARKS_STORE,
@@ -595,24 +579,14 @@ impl RuntimeSchema {
                 local_availability_record_descriptor(),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
-                SCOPE_RELAY_REPAIR_LEDGER_STORE,
+                SUPERSEDED_WRITES_STORE,
                 RecordDescriptor::new([
-                    ("scope_digest", ValueType::Bytes),
                     ("physical_table_id", ValueType::U64),
-                    ("row_id", ValueType::Uuid),
-                    ("tx_time", ValueType::U64),
-                    ("tx_node", ValueType::Uuid),
+                    ("branch_key", ValueType::Bytes),
+                    ("row", ValueType::Uuid),
+                    ("node", ValueType::Uuid),
                 ]),
-                // Full scope components are values so host supplied strings
-                // never enter a backend's bounded ordered-key space.
-                RecordDescriptor::new([
-                    ("format_version", ValueType::U64),
-                    ("storage_owner", ValueType::String),
-                    (
-                        "admitted_subject",
-                        ValueType::Nullable(Box::new(ValueType::String)),
-                    ),
-                ]),
+                RecordDescriptor::new([("superseded_through", ValueType::U64)]),
             ))
     }
 }
@@ -1054,14 +1028,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            // Null when the image's `updated_by` is the `made_by` of the
-            // transaction named by this record's key: the node reads it from
-            // that `jazz_transactions` record instead of storing the author
-            // in every image. Set only when the merge kept an earlier
-            // writer's provenance (SPEC 2 §2.7.1).
-            column("updated_by", crate::ids::RowAuthor::value_type().nullable()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
@@ -1088,7 +1057,10 @@ impl TableSchema {
         // The write's base: the settled seq its writer's image rested on and
         // the writer's own pending predecessor to this row.
         columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
-        columns.push(column(BASE_PENDING_FIELD, tx_id_column().nullable()));
+        columns.push(column(
+            BASE_PENDING_FIELD,
+            history_base_pending_storage_type(),
+        ));
 
         // Accepted writes are keyed by seq, so "the row at seq S" is a point
         // read and "the row's writes after S" a range read. A write without
@@ -1115,9 +1087,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
@@ -1175,9 +1147,9 @@ impl TableSchema {
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
             column("schema_version", GrooveColumnType::U64),
-            column("created_by", crate::ids::RowAuthor::value_type()),
+            column("created_by", interned_author_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            column("updated_by", interned_author_type()),
             column("updated_at", GrooveColumnType::U64),
             column("global_time", GrooveColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
@@ -1311,17 +1283,6 @@ fn catalogue_table() -> GrooveTableSchema {
     ]))
 }
 
-fn catalogue_pointer_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_catalogue_pointer",
-        [
-            column("revision", GrooveColumnType::U64),
-            column("schema", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
-}
-
 /// Policy-shape constructors.
 #[cfg(test)]
 pub struct Policy;
@@ -1357,25 +1318,11 @@ fn deletion_column() -> GrooveColumnType {
 }
 
 fn rejection_reason_column() -> GrooveColumnType {
-    storage_enum(
-        "jazz_rejection_reason",
-        &[
-            "client_clock_too_far_ahead",
-            "authorization_denied",
-            "exclusive_conflict",
-            "causality_violation",
-            "cascade",
-            "malformed_commit",
-        ],
-    )
+    crate::tx::RejectionReason::storage_value_type()
 }
 
 fn durability_column() -> GrooveColumnType {
     storage_enum("jazz_durability", &["none", "local", "global"])
-}
-
-fn tx_id_column() -> GrooveColumnType {
-    GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
 }
 
 /// History field holding a write's accepted seq (0 while unfated).
@@ -1389,6 +1336,18 @@ pub const BASE_SEQ_FIELD: &str = "base_seq";
 /// History field holding the pending predecessor of a write's base.
 #[doc(hidden)]
 pub const BASE_PENDING_FIELD: &str = "base_pending";
+
+/// Physical type of the history `base_pending` field: a nullable record of the
+/// predecessor's `(time, node)`. A record is variable-width, so the common
+/// null costs a null byte and an offset instead of a reserved 25-byte tuple.
+#[doc(hidden)]
+pub fn history_base_pending_storage_type() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("time", GrooveColumnType::U64),
+        ("node", GrooveColumnType::Uuid),
+    ])))
+    .nullable()
+}
 
 /// History field carrying the sign bits of a patch's counter ops: bit `i`
 /// (least significant first) belongs to the table's `i`-th counter column in
@@ -1448,6 +1407,19 @@ fn nodes_table() -> GrooveTableSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
 }
 
+/// `jazz_transactions` (`jazz.tx-record.v2`): the permanent record of one
+/// transaction, keyed `(time, node_id)`. It holds only what every node needs
+/// for as long as it keeps the transaction: its identity, kind, author,
+/// cardinality, fate, seq and durability. Everything else lives beside it
+/// (SPEC 2 §2.8):
+///
+/// - fields needed only until the transaction has a seq or a rejection
+///   (`permission_subject` and the exclusive read evidence) in
+///   `jazz_pending_transactions`, deleted by the batch that settles it;
+/// - calculated-merge and branch-write provenance, which grows with the number
+///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
+/// - the rejection reason in one nullable record that costs a byte on every
+///   transaction that was not rejected.
 fn transactions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_transactions",
@@ -1455,31 +1427,29 @@ fn transactions_table() -> GrooveTableSchema {
             column("time", GrooveColumnType::U64),
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
+            // Bit 0: `n_total_writes` is only the view-redacted cardinality.
+            // Bit 1: a `jazz_tx_provenance` record exists.
+            // Bit 2: the permission subject is the author itself. Other bits
+            // are reserved and refused on read.
+            column("flags", GrooveColumnType::U8),
             column("n_total_writes", GrooveColumnType::U32),
-            column("made_by", crate::ids::RowAuthor::value_type()),
-            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
-            column("row_read_set", GrooveColumnType::Bytes.nullable()),
-            column("absent_read_set", GrooveColumnType::Bytes.nullable()),
-            column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
-            column("user_metadata", GrooveColumnType::String.nullable()),
-            column("contribution_merge", contribution_merge_column()),
-            column(
-                "permission_subject",
-                crate::ids::AuthorSubject::value_type().nullable(),
-            ),
-            column("merge_strategy", GrooveColumnType::String.nullable()),
+            column("made_by", interned_author_type()),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.
             column("global_time", GrooveColumnType::U64.nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("rejection_reason", rejection_reason_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("cascade_root", tx_id_column().nullable()),
-            // upstream-decided: written only by rejection/state application.
-            column("reason_detail", GrooveColumnType::String.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
+            column("user_metadata", GrooveColumnType::String.nullable()),
+            // upstream-decided: set exactly when `fate` is rejected.
+            column("rejection", rejection_reason_column().nullable()),
+            // The identity the writes were authorized as when it is not the
+            // author (flag bit 2 covers that case). Replayed units carry it,
+            // so it is kept for the transaction's whole life.
+            column(
+                "permission_subject",
+                crate::ids::AuthorSubject::value_type().nullable(),
+            ),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1487,6 +1457,70 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+/// The rejection reason of a rejected transaction: its reason tag, the
+/// transaction whose rejection cascaded to it, and a diagnostic detail.
+/// `jazz_pending_transactions`: what a transaction needs only until it has a
+/// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
+/// record. A record exists only for an unsettled transaction that has
+/// something to keep here; the batch that stores its seq or rejection deletes
+/// it. Slots 2 to 5 hold its exclusive read evidence
+/// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
+fn pending_transactions_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_pending_transactions",
+        [
+            column("time", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U64),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
+            column("row_read_set", GrooveColumnType::Bytes.nullable()),
+            column("absent_read_set", GrooveColumnType::Bytes.nullable()),
+            column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+    ]))
+}
+
+/// `jazz_tx_provenance`: a transaction's calculated-merge and branch-write
+/// provenance (`ContributionMergeProvenance`), keyed `(time, node_id)`. It
+/// grows with the transaction's writes, so it is kept apart from the
+/// `jazz_transactions` record that fate, seq and durability reads load; a
+/// record exists exactly when that record's flags say so (garden-co/jazz#4012).
+fn tx_provenance_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        TX_PROVENANCE_TABLE,
+        [
+            column("time", GrooveColumnType::U64),
+            column("node_id", GrooveColumnType::U64),
+            column("contribution_merge", contribution_merge_column()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
+    ]))
+}
+
+const TX_PROVENANCE_TABLE: &str = "jazz_tx_provenance";
+
+/// `jazz_history_horizon`: the seq at or below which this node may have
+/// truncated history (SPEC 2 §2.8). At most one record, keyed `id = 0`; no
+/// record means the horizon is 0 and history is complete. This release never
+/// truncates and refuses to open a store whose horizon is above 0, so a later
+/// release can truncate below a horizon without another format change.
+fn history_horizon_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_history_horizon",
+        [
+            column("id", GrooveColumnType::U8),
+            column("horizon", GrooveColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U8))
 }
 
 /// `jazz_tx_touched_rows`: node-local bookkeeping, one record per transaction
@@ -1686,15 +1720,25 @@ fn contribution_merge_column() -> GrooveColumnType {
             .array_of(),
         ),
     ])))
-    .nullable()
+}
+
+/// Bound physical type of `jazz_transactions.rejection`, with the registry
+/// paths of the real column.
+pub fn transaction_rejection_storage_type() -> GrooveColumnType {
+    transactions_table()
+        .columns
+        .into_iter()
+        .find(|column| column.name == "rejection")
+        .expect("transaction rejection storage column")
+        .column_type
 }
 
 /// Bound physical type used by the transaction codec. Constructing the
 /// single-column table applies the same durable registry paths as the real
-/// `jazz_transactions.contribution_merge` column.
+/// `jazz_tx_provenance.contribution_merge` column.
 pub fn contribution_merge_storage_type() -> GrooveColumnType {
     GrooveTableSchema::new(
-        "jazz_transactions",
+        TX_PROVENANCE_TABLE,
         [column("contribution_merge", contribution_merge_column())],
     )
     .columns
@@ -1875,10 +1919,8 @@ fn rejected_transactions_table() -> GrooveTableSchema {
             column("time", GrooveColumnType::U64),
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
-            column("made_by", crate::ids::RowAuthor::value_type()),
+            column("made_by", interned_author_type()),
             column("rejection_reason", rejection_reason_column()),
-            column("cascade_root", tx_id_column().nullable()),
-            column("reason_detail", GrooveColumnType::String.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
         ],
     )
@@ -2181,13 +2223,9 @@ mod tests {
 
         for table in [&history, global_current, ahead_current] {
             for name in ["created_by", "updated_by"] {
-                // History omits `updated_by` when it is the transaction's
-                // own author; current carriers always store it.
-                let expected = if std::ptr::eq(table, &history) && name == "updated_by" {
-                    crate::ids::RowAuthor::value_type().nullable()
-                } else {
-                    crate::ids::RowAuthor::value_type()
-                };
+                // Every carrier stores both authors, interned into the
+                // authors dictionary.
+                let expected = interned_author_type();
                 assert_eq!(
                     table
                         .columns
@@ -2195,7 +2233,7 @@ mod tests {
                         .find(|column| column.name == name)
                         .map(|column| &column.column_type),
                     Some(&expected),
-                    "{name} must use the structured author record in {}",
+                    "{name} must store an interned author record in {}",
                     table.name
                 );
             }
@@ -2226,6 +2264,31 @@ mod tests {
                 .iter()
                 .any(|column| column.name == "durability")
         );
+        for table in [transactions, &rejected_transactions_table()] {
+            assert_eq!(
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == "made_by")
+                    .map(|column| &column.column_type),
+                Some(&interned_author_type()),
+                "made_by must store an interned author record in {}",
+                table.name
+            );
+        }
+        // Both open stages declare the dictionary: a rebuild may not declare
+        // one the first stage did not load.
+        for lowered in [
+            schema.lower_catalogue_meta_to_groove(),
+            schema.lower_to_groove(),
+        ] {
+            assert_eq!(
+                lowered
+                    .dictionary(AUTHORS_DICTIONARY)
+                    .map(|dictionary| &dictionary.value_type),
+                Some(&crate::ids::RowAuthor::value_type())
+            );
+        }
         for table in [&history, global_current, ahead_current] {
             assert!(
                 table
@@ -2253,16 +2316,22 @@ mod tests {
     fn contribution_merge_uses_native_nested_records_and_groove_enums() {
         // Internal storage-shape coverage is necessary here because the public
         // transaction API intentionally hides Groove's durable descriptor.
-        let transactions = transactions_table();
-        let column = transactions
+        // Provenance lives beside the transaction record (garden-co/jazz#4012):
+        // a `jazz_tx_provenance` record exists exactly when there is some, so
+        // its column is not nullable and the transaction record has none.
+        assert!(
+            transactions_table()
+                .columns
+                .iter()
+                .all(|column| column.name != "contribution_merge")
+        );
+        let provenance_table = tx_provenance_table();
+        let column = provenance_table
             .columns
             .iter()
             .find(|column| column.name == "contribution_merge")
             .unwrap();
-        let GrooveColumnType::Nullable(provenance) = &column.column_type else {
-            panic!("contribution provenance must be nullable");
-        };
-        let GrooveColumnType::Record(provenance) = provenance.as_ref() else {
+        let GrooveColumnType::Record(provenance) = &column.column_type else {
             panic!("contribution provenance must be a native record");
         };
         assert_eq!(

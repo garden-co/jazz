@@ -93,41 +93,32 @@ impl<S: OrderedKvStorage> NodeState<S> {
             else {
                 continue;
             };
-            let transactions = BTreeSet::from([tx_id]);
-            let mut carriers = Vec::new();
-            for tx in transactions {
-                let versions = self
-                    .query_versions_for_tx(tx)
-                    .await?
-                    .into_iter()
-                    .filter(|version| {
-                        version.row_uuid() == coordinate.row
-                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
-                    })
-                    .collect::<Vec<_>>();
-                // Default root only: a branch-qualified row requires a future explicit contract.
-                if versions.is_empty()
-                    || versions
-                        .iter()
-                        .any(|version| !version.branch_key().values.is_empty())
-                {
-                    carriers.clear();
-                    break;
-                }
-                let stored = self
-                    .query_transaction(tx)
-                    .await?
-                    .ok_or(Error::MissingTransaction(tx))?;
-                let mut bundle = self
-                    .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
-                    .await?;
-                bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
-                carriers.push(VersionCarrier::Bundle(bundle));
-            }
-            if !carriers.is_empty() {
-                receipt.outcomes[index] = CurrentRowOutcome::Readable;
-                receipt.version_carriers.extend(carriers);
-            }
+            // Default root only: a branch-qualified row requires a future
+            // explicit contract. The winner is one exact history point read.
+            let stored = self
+                .query_transaction(tx_id)
+                .await?
+                .ok_or(Error::MissingTransaction(tx_id))?;
+            let Some(version) = self
+                .query_tx_version_at(
+                    tx_id,
+                    &stored,
+                    table_id,
+                    &BranchKey::default().canonical_bytes(),
+                    coordinate.row,
+                )
+                .await?
+            else {
+                continue;
+            };
+            let mut bundle = self
+                .version_bundle_for_maintained_view_versions_with_tx(&stored, &[version])
+                .await?;
+            bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
+            receipt.outcomes[index] = CurrentRowOutcome::Readable;
+            receipt
+                .version_carriers
+                .push(VersionCarrier::Bundle(bundle));
         }
         Ok(receipt)
     }

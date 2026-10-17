@@ -74,6 +74,7 @@ import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import { nativeCoreErrorCode } from "./native-error-code.js";
+import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -94,9 +95,11 @@ import {
   encodeNativeColumnValue,
   encodeNativeNullValue,
   logicalStorageColumns,
+  namedValues,
   nativeFixedValueSize,
   storageColumnTypeToValueType,
   storageColumnValueType,
+  withValuesByColumn,
   writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
@@ -634,6 +637,13 @@ type NativeRowFieldPlan = {
 const textDecoder = new Utf8Decoder({ fatal: true });
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
+/**
+ * Open a persistent native store. A store written in a storage format this
+ * build does not read is refused by the binding with code
+ * `unsupported_storage_codecs`; it is rethrown as an
+ * `UnsupportedStorageCodecsError` so callers can match the class as well as
+ * the code.
+ */
 function openPersistentDb(
   Runtime: NativeDbConstructor,
   dataPath: string,
@@ -641,6 +651,28 @@ function openPersistentDb(
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   backendMode = false,
+): NativeDb {
+  try {
+    return openPersistentNativeDb(
+      Runtime,
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof,
+      backendMode,
+    );
+  } catch (error) {
+    throw asUnsupportedStorageCodecsError(error);
+  }
+}
+
+function openPersistentNativeDb(
+  Runtime: NativeDbConstructor,
+  dataPath: string,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof: NativeSelfSignedClientProof | undefined,
+  backendMode: boolean,
 ): NativeDb {
   if (selfSignedClientProof && backendMode) {
     throw new Error("A native runtime cannot be both self-signed and backend-scoped");
@@ -6198,15 +6230,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
   });
 }
 
-function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
-}
-
 export function decodeSubscriptionDelta(
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
@@ -6309,14 +6332,14 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
@@ -6447,22 +6470,14 @@ export function decodeNestedRowBytes(
             ),
       );
     }
-    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
-      id,
-      values: columns.map(
-        (column) =>
-          valuesByColumn.get(column.name) ??
-          (column.column_type.type === "Array"
-            ? ({ type: "Array", value: [] } satisfies Value)
-            : ({ type: "Null" } satisfies Value)),
-      ),
-    };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
+    const values = columns.map(
+      (column) =>
+        valuesByColumn.get(column.name) ??
+        (column.column_type.type === "Array"
+          ? ({ type: "Array", value: [] } satisfies Value)
+          : ({ type: "Null" } satisfies Value)),
+    );
+    return withValuesByColumn({ id, values }, valuesByColumn);
   }
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
@@ -6688,12 +6703,7 @@ function runtimeSubscriptionRow(
   const values = valuesForNativeFrame(row, columns).map((value, index) =>
     runtimeSubscriptionValue(value, columns[index]!.column_type),
   );
-  const result: WasmRow = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
@@ -6735,12 +6745,7 @@ function runtimeSubscriptionNestedRow(
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
     return runtimeSubscriptionValue(resolved, column.column_type);
   });
-  const result = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[]): Value[] {

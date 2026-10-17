@@ -315,16 +315,16 @@ where
                     self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::Reserved14(retired) | SyncMessage::Reserved15(retired) => {
+                SyncMessage::Reserved14(retired)
+                | SyncMessage::Reserved15(retired)
+                | SyncMessage::Reserved29(retired) => {
                     match retired {}
                 }
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
                     "catalogue snapshot requires a trusted upstream link",
                 )),
-                // Only the uploading link acts on a retry-later answer; it
-                // changes nothing in a node's state.
-                SyncMessage::RetryLater { .. } => Err(Error::UnsupportedSyncMessage(
-                    "retry-later answers are handled by the uploading link",
+                SyncMessage::ReadBarrier { .. } => Err(Error::UnsupportedSyncMessage(
+                    "read barriers are handled by the receiving link",
                 )),
                 SyncMessage::Subscribe(subscribe) => {
                     self.apply_subscribe(subscribe)?;
@@ -712,7 +712,7 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             let rebuild_cold_runtime = mode == CatalogueActivationMode::ColdOpen
-                || self.database.runtime_stats().active_subscriptions == 0;
+                || self.database.active_subscription_count() == 0;
             if rebuild_cold_runtime && self.rebuild_database_slot().await.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
