@@ -4,6 +4,7 @@
  * current native binding transport's discriminator 0. No indirect value is
  * admitted here. The hand-authored equality corpus pins the complete grammar.
  */
+import { Utf8Decoder } from "../runtime/utf8.js";
 import type { ColumnDescriptor, ColumnType, Value } from "../drivers/types.js";
 import {
   decodeNativeRowValues,
@@ -63,7 +64,7 @@ function value(type: ColumnType, bytes: Uint8Array, from: number, to: number): v
     case "EnumPayload": {
       const length = u32(bytes, 0);
       if (length > bytes.length - 4) throw new Error("Invalid E2EE value v1 enum name");
-      const name = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(4, 4 + length));
+      const name = new Utf8Decoder({ fatal: true }).decode(bytes.subarray(4, 4 + length));
       const variant = type.cases.find((entry) => entry.name === name);
       if (!variant) throw new Error("Unknown E2EE value v1 enum case");
       nested(variant.fields, bytes.subarray(4 + length), from, to);
