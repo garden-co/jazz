@@ -87,10 +87,17 @@ preparation cannot supply it, an online client falls back to reconciliation;
 an explicitly disconnected client reports the local result. A callback that has
 already started is never replayed through that fallback.
 
-An online local-cache use schedules background reconciliation. Explicit
-reconnection also schedules it for spaces encountered by this client instance.
-Concurrent background attempts for the same space are coalesced. This does not
-scan every persisted space or cover every automatic transport-recovery event.
+Before decrypting a batch, its cell epoch identifiers must be present in the
+verified local history. A missing epoch triggers online history preparation
+before any cell callback starts. A valid newer ciphertext is not corruption
+merely because a reopened client retained an older epoch. Refreshed history
+must still establish current membership before exposing any historical key.
+
+An online local-cache use schedules background reconciliation. A confirmed
+transition to a connected server, including automatic transport recovery, also
+schedules it for spaces encountered by this client instance. Concurrent
+background attempts for the same space are coalesced. This does not scan every
+persisted space or make an offline write wait for the network.
 Background failure does not fail the completed local operation; a later use or
 explicit reconnect can retry, and explicit explanation exposes maintenance state.
 

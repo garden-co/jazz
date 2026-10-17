@@ -1524,6 +1524,7 @@ export class Spaces {
       keyRoot,
       successor,
       epochPosition,
+      usedEpochs,
       direct,
       groupRecipients,
       ...state,
@@ -1545,6 +1546,7 @@ export class Spaces {
     includeHistory = false,
     prepareOnline?: () => Promise<void>,
     forWrite = false,
+    requiredEpochs?: ReadonlySet<string>,
   ): Promise<SpaceState> {
     let used = false;
     const localUse = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
@@ -1561,6 +1563,7 @@ export class Spaces {
         0,
         true,
         forWrite && this.staleWrites === "warn",
+        requiredEpochs,
       );
       // A coherent local write decision does not depend on transport state.
       // Reconciliation may advance the epoch, but must not gate this preparation.
@@ -1606,6 +1609,7 @@ export class Spaces {
     conflicts = 0,
     localOnly = false,
     allowStaleWrite = false,
+    requiredEpochs?: ReadonlySet<string>,
   ): Promise<SpaceState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
@@ -1680,6 +1684,15 @@ export class Spaces {
         return { state: "maintenance-required", reason: "group-epoch-stale" };
       if (offline && state.rotationRequired && !allowStaleWrite)
         return { state: "maintenance-required", reason: "recipient-removed" };
+      // A row may arrive before its successor history, especially after reopening
+      // persistent storage. Refresh that history before invoking the caller:
+      // neither a decryption callback nor a one-shot write may be replayed.
+      if (localOnly && requiredEpochs?.size) {
+        for (const epoch of requiredEpochs) {
+          if (!state.usedEpochs.has(epoch))
+            return { state: "unavailable", reason: "space-epoch-not-observed" };
+        }
+      }
       secret = await this.openSnapshotKey(snapshot, state, device);
       if (!secret) return { state: "unavailable", reason: "space-key-not-delivered" };
       try {

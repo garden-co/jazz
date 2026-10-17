@@ -5,8 +5,12 @@
 Reuse authenticated accepted-only encryption history for disconnected operations
 and persistent reopening. Pending metadata cannot hide an accepted change;
 optional cache persistence cannot turn an accepted commit or verified read into
-a rejection. Apply configured stale-write policy and reconcile on explicit
-reconnection without claiming unseen offline revocations are detectable.
+a rejection. Apply configured stale-write policy and reconcile when transport
+connectivity returns without claiming unseen offline revocations are detectable.
+
+Refresh accepted history before decrypting cells whose epochs are absent from
+the retained snapshot. Persistent reopening after rotation reads valid newer
+data and checks refreshed membership instead of reporting false corruption.
 
 Validate retained membership snapshots independently of background online device
 responder failures, including persisted equality-query reopening without an
