@@ -117,7 +117,7 @@ export class DeviceApproval {
           for (const row of rows) {
             if (this.responding.has(row.id)) continue;
             const response = this.startResponse(row.id);
-            response.promise.catch((error: unknown) => {
+            this.respond(row.id).catch((error: unknown) => {
               if (!response.foreground) this.backgroundError = error;
             });
           }
@@ -768,9 +768,11 @@ export class DeviceApproval {
         challenge.deviceId === this.deviceId &&
         !this.responding.has(challenge.id) &&
         !snapshot.proofs.some((proof) => proof.id === challenge.id)
-      )
-        // This call already holds the accepted challenge and proof predicates.
+      ) {
+        // This call owns the accepted predicates and observes response failure.
+        this.startResponse(challenge.id, snapshot).foreground = true;
         await this.respond(challenge.id, snapshot);
+      }
     }
     const active = new Set(snapshot.successor ? [] : snapshot.baseMembers);
     const eligible = await this.eligibleApprovals(snapshot);
@@ -798,11 +800,9 @@ export class DeviceApproval {
   }
 
   private respond(challengeId: string, preparedSnapshot?: EpochSnapshot): Promise<void> {
-    const response = this.startResponse(challengeId, preparedSnapshot);
-    // The waiting foreground operation owns rejection. Do not also leave that
-    // same failure pending for its next retry as an unobserved background error.
-    response.foreground = true;
-    return response.promise;
+    // Both background and foreground enrolment use this response entry point.
+    // Foreground callers claim failure ownership before joining its work.
+    return this.startResponse(challengeId, preparedSnapshot).promise;
   }
 
   private startResponse(challengeId: string, preparedSnapshot?: EpochSnapshot) {
@@ -1247,6 +1247,7 @@ export class DeviceApproval {
           { id: challenge.id },
         )
         .wait({ tier: "global" });
+      this.startResponse(challenge.id).foreground = true;
       await this.respond(challenge.id);
       const proved = await this.currentSnapshot();
       const proof = proved.proofs.find((row) => row.id === challenge.id);
