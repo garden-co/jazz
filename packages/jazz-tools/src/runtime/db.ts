@@ -1565,7 +1565,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
+          const begin = () =>
+            ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
+          const prerequisite = transactionAdmission.get(this);
+          if (prerequisite) withTransactionAdmission(ownerClient, prerequisite, begin);
+          else begin();
           binding.begun = true;
         }),
       );
@@ -1960,7 +1964,7 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
-const transactionAdmission = new WeakMap<Db, () => Promise<void>>();
+const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
 
 /** @internal The compiler opts in before staging any operations. */
 export function beginDbTransactionAfter(
@@ -2995,12 +2999,16 @@ export class Db {
       );
     }
     const prerequisite = transactionAdmission.get(this);
-    if (prerequisite && ownerClient)
-      return withTransactionAdmission(
+    if (prerequisite && ownerClient) {
+      const transaction = withTransactionAdmission(
         ownerClient,
         prerequisite,
         () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
       );
+      // Owner preparation can postpone opening beyond the synchronous admission scope.
+      transactionAdmission.set(transaction, prerequisite);
+      return transaction;
+    }
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
