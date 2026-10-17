@@ -12,6 +12,7 @@ where
             .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())))
     }
 
+    #[track_caller]
     pub(super) fn table_in_schema(
         &self,
         table: &str,
@@ -20,11 +21,13 @@ where
         self.table_in_schema_ref(table, schema_version).cloned()
     }
 
+    #[track_caller]
     pub(super) fn table_in_schema_ref(
         &self,
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<&TableSchema, Error> {
+        let missing_at = std::panic::Location::caller();
         if schema_version == self.catalogue.active_schema.schema {
             return self
                 .catalogue
@@ -33,7 +36,7 @@ where
                 .tables
                 .iter()
                 .find(|candidate| candidate.name == table)
-                .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())));
+                .ok_or_else(|| Error::TableNotFound(format!("{table} [caller={missing_at} schema={schema_version:?} write={:?} local={:?}]", self.catalogue.active_schema.schema, self.catalogue.local_schema_version_id)));
         }
         self.catalogue
             .catalogue_schemas
@@ -50,7 +53,7 @@ where
                     .then(|| self.table(table).ok())
                     .flatten()
             })
-            .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())))
+            .ok_or_else(|| Error::TableNotFound(format!("{table} [caller={missing_at} schema={schema_version:?} write={:?} local={:?}]", self.catalogue.active_schema.schema, self.catalogue.local_schema_version_id)))
     }
 
     pub(super) fn shortest_lens_path_cached(
