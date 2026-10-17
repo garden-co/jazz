@@ -194,8 +194,12 @@ mod tests {
     #[test]
     fn epoch_one_and_two_node_roots_refuse_each_other() {
         let (source, target) = node_storage_open_specs().unwrap();
-        let source = manifest(&source.codec_profile).with_open_spec(&source).unwrap();
-        let target = manifest(&target.codec_profile).with_open_spec(&target).unwrap();
+        let source = manifest(&source.codec_profile)
+            .with_open_spec(&source)
+            .unwrap();
+        let target = manifest(&target.codec_profile)
+            .with_open_spec(&target)
+            .unwrap();
         assert!(source.admit_existing(&target.encode().unwrap()).is_err());
         assert!(target.admit_existing(&source.encode().unwrap()).is_err());
     }
