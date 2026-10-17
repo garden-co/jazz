@@ -636,71 +636,40 @@ function buildRenameTableMap(
   return map;
 }
 
-function buildAddedTableSet(
-  createTables: Record<string, true> | undefined,
-  fromDefinition: Record<string, TableDefinition>,
-  toDefinition: Record<string, TableDefinition>,
-  renameTableMap: ReadonlyMap<string, string>,
+// createTables names target-only tables and dropTables source-only ones; neither
+// may also be part of a rename.
+function buildMarkedTableSet(
+  kind: "createTables" | "dropTables",
+  markers: Record<string, true> | undefined,
+  present: Record<string, TableDefinition>,
+  absent: Record<string, TableDefinition>,
+  renamed: { has(tableName: string): boolean },
 ): Set<string> {
+  const create = kind === "createTables";
   const set = new Set<string>();
-
-  if (!createTables) {
-    return set;
-  }
-
-  for (const [tableName, marker] of Object.entries(createTables)) {
+  for (const [tableName, marker] of Object.entries(markers ?? {})) {
     if (marker !== true) {
-      throw new Error(`createTables.${tableName} must be true.`);
+      throw new Error(`${kind}.${tableName} must be true.`);
     }
-    if (!(tableName in toDefinition)) {
-      throw new Error(`createTables references unknown target table ${tableName}.`);
-    }
-    if (tableName in fromDefinition) {
+    if (!(tableName in present)) {
       throw new Error(
-        `createTables only supports target-only tables; ${tableName} already exists in the source schema.`,
+        `${kind} references unknown ${create ? "target" : "source"} table ${tableName}.`,
       );
     }
-    if (renameTableMap.has(tableName)) {
-      throw new Error(`Table ${tableName} cannot be both added and renamed.`);
-    }
-
-    set.add(tableName);
-  }
-
-  return set;
-}
-
-function buildRemovedTableSet(
-  dropTables: Record<string, true> | undefined,
-  fromDefinition: Record<string, TableDefinition>,
-  toDefinition: Record<string, TableDefinition>,
-  renamedSources: ReadonlySet<string>,
-): Set<string> {
-  const set = new Set<string>();
-
-  if (!dropTables) {
-    return set;
-  }
-
-  for (const [tableName, marker] of Object.entries(dropTables)) {
-    if (marker !== true) {
-      throw new Error(`dropTables.${tableName} must be true.`);
-    }
-    if (!(tableName in fromDefinition)) {
-      throw new Error(`dropTables references unknown source table ${tableName}.`);
-    }
-    if (tableName in toDefinition) {
+    if (tableName in absent) {
       throw new Error(
-        `dropTables only supports source-only tables; ${tableName} still exists in the target schema.`,
+        create
+          ? `createTables only supports target-only tables; ${tableName} already exists in the source schema.`
+          : `dropTables only supports source-only tables; ${tableName} still exists in the target schema.`,
       );
     }
-    if (renamedSources.has(tableName)) {
-      throw new Error(`Table ${tableName} cannot be both removed and renamed.`);
+    if (renamed.has(tableName)) {
+      throw new Error(
+        `Table ${tableName} cannot be both ${create ? "added" : "removed"} and renamed.`,
+      );
     }
-
     set.add(tableName);
   }
-
   return set;
 }
 
@@ -870,22 +839,26 @@ function buildForwardLenses<
   fromDefinition: NormalizedSchema<TFrom>,
   toDefinition: NormalizedSchema<TTo>,
 ): Lens[] {
+  const from = fromDefinition as Record<string, TableDefinition>;
+  const to = toDefinition as Record<string, TableDefinition>;
   const renameTableMap = buildRenameTableMap(
     renameTables as Record<string, RenameTableFromOp<string>> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    from,
+    to,
   );
   const renamedSources = new Set(renameTableMap.values());
-  const addedTableSet = buildAddedTableSet(
+  const addedTableSet = buildMarkedTableSet(
+    "createTables",
     createTables as Record<string, true> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    to,
+    from,
     renameTableMap,
   );
-  const removedTableSet = buildRemovedTableSet(
+  const removedTableSet = buildMarkedTableSet(
+    "dropTables",
     dropTables as Record<string, true> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    from,
+    to,
     renamedSources,
   );
 

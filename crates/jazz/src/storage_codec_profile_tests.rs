@@ -270,19 +270,12 @@ mod tests {
         assert_eq!(
             profile.codec_ids().collect::<Vec<_>>(),
             vec![
-                "groove.large-value.v1",
-                "groove.ordered-chunk-storage.v1",
+                "groove.dictionary.v1",
+                "groove.durable-index.v2",
+                "groove.large-value.v2",
+                "groove.ordered-chunk-storage.v2",
                 "groove.ordered-kv.v1",
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.subscription-program-fact-key.v1",
-                "jazz.transaction-durability.v2",
+                "jazz.node-storage.v2",
             ]
         );
     }
@@ -300,7 +293,7 @@ mod tests {
         let manifest = legacy
             .with_open_spec(&node_storage_open_specs().unwrap().1)
             .unwrap();
-        let expected = b"JSM1\0\x02\0\x01\x06memory\x0e\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.exclusive-read-evidence.v1\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x02\0\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v3\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().unwrap(), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected).unwrap(),
@@ -323,7 +316,7 @@ mod tests {
             &epoch_1_storage_codec_profile().expect("valid fixed profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0d\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().expect("canonical manifest"), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected)
@@ -423,43 +416,8 @@ mod tests {
             }
             block_on(db.close()).expect("close fixture node");
             drop(db);
-            // The current public writer must obey E2 admission. Convert only
-            // this closed fixture to exact legacy form: no evidence in any of
-            // slots 5–8, immutable E1 profile, and no admission receipt.
-            let storage = block_on(open_node_storage(
-                &RocksDbStorageFactory::default(),
-                path.to_path_buf(),
-                families.clone(),
-            ))
-            .expect("reopen fixture for legacy conversion");
-            let mut database = block_on(Database::new_with_storage_layout(
-                schema.lower_to_groove(),
-                storage,
-                StorageLayout::jazz_class_v1(),
-            ))
-            .expect("open fixture records");
-            let rows = block_on(database.primary_key_scan_raw("jazz_transactions", &[]))
-                .expect("scan fixture transactions")
-                .into_iter()
-                .map(|row| {
-                    let mut values = row.record().to_values().expect("fixture transaction");
-                    for value in &mut values[5..=8] {
-                        *value = Value::Nullable(None);
-                    }
-                    values
-                })
-                .collect::<Vec<_>>();
-            let mut batch = database.open_batch();
-            for values in rows {
-                batch.update("jazz_transactions", values);
-            }
-            let applied =
-                block_on(database.apply_batch(batch)).expect("stage legacy evidence slots");
-            database
-                .finish_persistence(block_on(applied.persist()))
-                .expect("persist legacy evidence slots");
-            block_on(database.close()).expect("close fixture conversion");
-            drop(database);
+            // Convert the closed root's metadata to source epoch one. Its
+            // mergeable writes have no proof side records in either version.
             let options = rocksdb::Options::default();
             let cfs = rocksdb::DB::list_cf(&options, path).expect("fixture families");
             let raw =
@@ -497,36 +455,38 @@ mod tests {
         seed(valid.path());
         drop(open_normally(valid.path()).expect("normal Jazz open must admit valid E1 rows"));
 
-        for slot in 5..=8 {
+        for slot in 2..=5 {
             let directory = tempfile::tempdir().expect("create reserved-slot fixture");
             seed(directory.path());
             {
                 let mut database = block_on(Database::new_with_storage_layout(
                     schema.lower_to_groove(),
                     open_legacy(directory.path()),
-                    StorageLayout::jazz_class_v1(),
+                    StorageLayout::jazz_class_v3(),
                 ))
                 .expect("open legacy records for fixture corruption");
                 let transactions =
                     block_on(database.primary_key_scan_raw("jazz_transactions", &[]))
                         .expect("scan seeded transaction records");
-                let mut values = transactions
+                let header = transactions
                     .first()
-                    .expect("public insert persisted a transaction")
+                    .expect("persisted transaction")
                     .record()
                     .to_values()
-                    .expect("decode otherwise valid transaction");
-                assert!(
-                    values[5..=8]
-                        .iter()
-                        .all(|value| matches!(value, Value::Nullable(None))),
-                    "legacy mergeable fixture must start without exclusive evidence"
-                );
+                    .unwrap();
+                let mut values = vec![
+                    header[0].clone(),
+                    header[1].clone(),
+                    Value::Nullable(None),
+                    Value::Nullable(None),
+                    Value::Nullable(None),
+                    Value::Nullable(None),
+                ];
                 values[slot] = Value::Nullable(Some(Box::new(Value::Bytes(
                     b"unexpected legacy reserved bytes".to_vec(),
                 ))));
                 let mut batch = database.open_batch();
-                batch.update("jazz_transactions", values);
+                batch.update("jazz_pending_transactions", values);
                 let applied =
                     block_on(database.apply_batch(batch)).expect("stage fixture mutation");
                 let persisted = block_on(applied.persist());

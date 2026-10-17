@@ -28,6 +28,9 @@ use jazz_model::{model, query, schema, tx};
 use jazz_types::account_registry;
 use jazz_types::{debug_env, ids, object, postcard_exact, time};
 
+/// Canonical aggregate observations shared by admission and node evaluation.
+#[doc(hidden)]
+pub mod aggregate_read_result;
 pub mod authorization_scope;
 /// Canonical durable exclusive-transaction evidence.
 #[doc(hidden)]

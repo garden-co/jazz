@@ -275,15 +275,49 @@ pub struct RelationColumnRef {
     pub column: String,
 }
 
+impl RelationColumnRef {
+    /// A column of the active relation scope.
+    pub fn unscoped(column: impl Into<String>) -> Self {
+        Self {
+            scope: None,
+            column: column.into(),
+        }
+    }
+}
+
+impl From<String> for RelationColumnRef {
+    fn from(column: String) -> Self {
+        Self::unscoped(column)
+    }
+}
+
+impl From<&str> for RelationColumnRef {
+    fn from(column: &str) -> Self {
+        Self::unscoped(column)
+    }
+}
+
 #[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelationValueRef {
+    /// A literal in its JSON form: a bare JSON value from query builders, or
+    /// the typed `{"type", "value"}` envelope of a public
+    /// [`crate::model::public_schema::Value`].
     Literal(serde_json::Value),
     Param(String),
     SessionRef(Vec<String>),
     OuterColumn(RelationColumnRef),
     FrontierColumn(RelationColumnRef),
     RowId(RelationRowIdRef),
+}
+
+impl RelationValueRef {
+    /// A typed public value literal.
+    pub fn literal(value: crate::model::public_schema::Value) -> Self {
+        Self::Literal(
+            serde_json::to_value(value).expect("public values serialize to JSON"),
+        )
+    }
 }
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]

@@ -1,12 +1,19 @@
-//! `jazz.exclusive-read-evidence.v1`: an exclusive transaction's snapshot and
-//! read sets, kept in `jazz_transactions` slots 5-8 across settlement.
+//! `jazz.exclusive-read-evidence.v2`: an exclusive transaction's snapshot and
+//! read sets, kept in `jazz_pending_transactions` slots 2-5 across settlement.
 //!
 //! Outbox and relay recovery rebuild commit units from storage. Without the
 //! evidence, a unit that was in flight at a restart would reach the authority
 //! with no read proof and be rejected as a conflict (garden-co/jazz#3663).
 //! Each slot holds the Groove typed-record v1 bytes of one fixed descriptor
-//! with a leading `format_v1 = 1`; nested query and binding bytes reuse the
+//! with a leading format byte; nested query and binding bytes reuse the
 //! pinned native query Postcard codec and canonical `jazz-binding-v0` bytes.
+//!
+//! v2 changes only the predicate-read slot, whose format byte is now `2`:
+//! each read carries the canonical `jazz.aggregate-read-result.v1` bytes of
+//! the result an aggregate read observed, null for any other read
+//! (garden-co/jazz#3768). The snapshot, row-read and absent-read slots keep
+//! their v1 bytes and `format_v1 = 1`. A v1 predicate-read slot is refused:
+//! it cannot say what an aggregate read returned.
 //! See SPEC 2 §2.8 and `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.
 
 use crate::ids::{NodeUuid, RowUuid};
@@ -15,7 +22,9 @@ use crate::query::{
     canonical_binding_bytes_for_values,
 };
 use crate::time::{GlobalTime, TxTime};
-use crate::tx::{AbsentRead, PredicateRead, RowRead, Snapshot, Transaction, TxId, TxKind};
+use crate::tx::{
+    AbsentRead, AggregateReadResult, PredicateRead, RowRead, Snapshot, Transaction, TxId, TxKind,
+};
 use groove::records::{OwnedRecord, Record, RecordDescriptor, Value, ValueType};
 
 /// Errors from the canonical exclusive transaction evidence codec.
@@ -34,23 +43,21 @@ pub fn validate_epoch_one_transaction_record(
     record: groove::records::BorrowedRecord<'_>,
 ) -> Result<(), Error> {
     let slots = [
+        record.get_nullable_bytes(2)?,
+        record.get_nullable_bytes(3)?,
+        record.get_nullable_bytes(4)?,
         record.get_nullable_bytes(5)?,
-        record.get_nullable_bytes(6)?,
-        record.get_nullable_bytes(7)?,
-        record.get_nullable_bytes(8)?,
     ];
-    if slots.iter().any(Option::is_some)
-        && (slots.iter().any(Option::is_none) || record.get_enum(2)? != 1)
-    {
-        return Err(Error::InvalidStoredValue(
-            "incomplete or nonexclusive stored read evidence",
-        ));
+    if slots.iter().any(Option::is_some) && slots.iter().any(Option::is_none) {
+        return Err(Error::InvalidStoredValue("incomplete stored read evidence"));
     }
     decode_evidence_slots(slots[0], slots[1], slots[2], slots[3])?;
     Ok(())
 }
 
 const FORMAT_V1: u8 = 1;
+/// Format byte of the predicate-read slot, which carries aggregate results.
+const PREDICATE_READS_FORMAT_V2: u8 = 2;
 
 pub fn is_absent(tx: &Transaction) -> bool {
     tx.base_snapshot.is_none()
@@ -121,6 +128,10 @@ fn predicate_read_descriptor() -> RecordDescriptor {
         ("query", ValueType::Bytes),
         ("binding_id", ValueType::Uuid),
         ("bindings", ValueType::Bytes),
+        (
+            "aggregate_result",
+            ValueType::Nullable(Box::new(ValueType::Bytes)),
+        ),
     ])
 }
 
@@ -155,9 +166,15 @@ pub fn absent_reads_descriptor() -> RecordDescriptor {
     reads_descriptor(absent_read_descriptor())
 }
 
-/// `jazz_exclusive_predicate_reads_v1`
+/// `jazz_exclusive_predicate_reads_v2`
 pub fn predicate_reads_descriptor() -> RecordDescriptor {
-    reads_descriptor(predicate_read_descriptor())
+    RecordDescriptor::new([
+        ("format_v2", ValueType::U8),
+        (
+            "reads",
+            ValueType::Record(Box::new(predicate_read_descriptor())).array_of(),
+        ),
+    ])
 }
 
 fn nested(descriptor: &RecordDescriptor, values: &[Value]) -> Result<Value, Error> {
@@ -194,6 +211,7 @@ fn encode_base_snapshot(snapshot: &Snapshot) -> Result<Vec<u8>, Error> {
 
 fn encode_reads(
     descriptor: RecordDescriptor,
+    format: u8,
     item: &RecordDescriptor,
     reads: Vec<Vec<Value>>,
 ) -> Result<Vec<u8>, Error> {
@@ -201,12 +219,13 @@ fn encode_reads(
         .iter()
         .map(|values| nested(item, values))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(descriptor.create(&[Value::U8(FORMAT_V1), Value::Array(reads)])?)
+    Ok(descriptor.create(&[Value::U8(format), Value::Array(reads)])?)
 }
 
 fn encode_row_reads(reads: &[RowRead]) -> Result<Vec<u8>, Error> {
     encode_reads(
         row_reads_descriptor(),
+        FORMAT_V1,
         &row_read_descriptor(),
         reads
             .iter()
@@ -225,6 +244,7 @@ fn encode_row_reads(reads: &[RowRead]) -> Result<Vec<u8>, Error> {
 fn encode_absent_reads(reads: &[AbsentRead]) -> Result<Vec<u8>, Error> {
     encode_reads(
         absent_reads_descriptor(),
+        FORMAT_V1,
         &absent_read_descriptor(),
         reads
             .iter()
@@ -238,7 +258,7 @@ fn encode_absent_reads(reads: &[AbsentRead]) -> Result<Vec<u8>, Error> {
     )
 }
 
-/// `None` when a predicate read cannot be represented in v1 (for example a
+/// `None` when a predicate read cannot be represented in v2 (for example a
 /// record-valued binding, which `jazz-binding-v0` cannot be decoded back
 /// from). The caller then stores no evidence at all.
 fn encode_predicate_reads(reads: &[PredicateRead]) -> Result<Option<Vec<u8>>, Error> {
@@ -260,10 +280,12 @@ fn encode_predicate_reads(reads: &[PredicateRead]) -> Result<Option<Vec<u8>>, Er
             Value::Bytes(query),
             Value::Uuid(read.binding_id.0),
             Value::Bytes(bindings),
+            aggregate_result_value(read.aggregate_result.as_ref()),
         ]);
     }
     encode_reads(
         predicate_reads_descriptor(),
+        PREDICATE_READS_FORMAT_V2,
         &predicate_read_descriptor(),
         items,
     )
@@ -345,15 +367,23 @@ fn canonical_values(
     Ok(values)
 }
 
+fn aggregate_result_value(result: Option<&AggregateReadResult>) -> Value {
+    Value::Nullable(result.map(|result| Box::new(Value::Bytes(result.0.clone()))))
+}
+
 fn versioned_reads(
     descriptor: &RecordDescriptor,
+    format: u8,
     bytes: &[u8],
     what: &'static str,
 ) -> Result<Vec<Vec<Value>>, Error> {
     let values = canonical_values(descriptor, bytes, what)?;
-    let [Value::U8(FORMAT_V1), Value::Array(reads)] = values.as_slice() else {
+    let [Value::U8(found), Value::Array(reads)] = values.as_slice() else {
         return Err(invalid(what));
     };
+    if *found != format {
+        return Err(invalid(what));
+    }
     reads
         .iter()
         .map(|read| match read {
@@ -411,7 +441,7 @@ fn decode_base_snapshot(bytes: &[u8]) -> Result<Snapshot, Error> {
 
 fn decode_row_reads(bytes: &[u8]) -> Result<Vec<RowRead>, Error> {
     let what = "invalid exclusive row reads v1";
-    versioned_reads(&row_reads_descriptor(), bytes, what)?
+    versioned_reads(&row_reads_descriptor(), FORMAT_V1, bytes, what)?
         .into_iter()
         .map(|read| match read.as_slice() {
             [
@@ -431,7 +461,7 @@ fn decode_row_reads(bytes: &[u8]) -> Result<Vec<RowRead>, Error> {
 
 fn decode_absent_reads(bytes: &[u8]) -> Result<Vec<AbsentRead>, Error> {
     let what = "invalid exclusive absent reads v1";
-    versioned_reads(&absent_reads_descriptor(), bytes, what)?
+    versioned_reads(&absent_reads_descriptor(), FORMAT_V1, bytes, what)?
         .into_iter()
         .map(|read| match read.as_slice() {
             [Value::String(table), Value::Uuid(row)] => Ok(AbsentRead {
@@ -444,35 +474,53 @@ fn decode_absent_reads(bytes: &[u8]) -> Result<Vec<AbsentRead>, Error> {
 }
 
 fn decode_predicate_reads(bytes: &[u8]) -> Result<Vec<PredicateRead>, Error> {
-    let what = "invalid exclusive predicate reads v1";
-    versioned_reads(&predicate_reads_descriptor(), bytes, what)?
-        .into_iter()
-        .map(|read| match read.as_slice() {
-            [
-                Value::String(table),
-                Value::Uuid(shape_id),
-                Value::Bytes(query),
-                Value::Uuid(binding_id),
-                Value::Bytes(bindings),
-            ] => {
-                let binding_values =
-                    binding_values_from_canonical_bytes(bindings).map_err(|_| invalid(what))?;
-                if BindingId(uuid::Uuid::new_v5(&crate::query::QUERY_NAMESPACE, bindings))
-                    != BindingId(*binding_id)
-                {
-                    return Err(invalid("exclusive predicate binding id mismatch"));
-                }
-                Ok(PredicateRead {
-                    table: table.clone(),
-                    shape_id: ShapeId(*shape_id),
-                    shape: decode_query(query)?,
-                    binding_id: BindingId(*binding_id),
-                    binding_values,
-                })
+    let what = "invalid exclusive predicate reads v2";
+    versioned_reads(
+        &predicate_reads_descriptor(),
+        PREDICATE_READS_FORMAT_V2,
+        bytes,
+        what,
+    )?
+    .into_iter()
+    .map(|read| match read.as_slice() {
+        [
+            Value::String(table),
+            Value::Uuid(shape_id),
+            Value::Bytes(query),
+            Value::Uuid(binding_id),
+            Value::Bytes(bindings),
+            Value::Nullable(aggregate_result),
+        ] => {
+            let binding_values =
+                binding_values_from_canonical_bytes(bindings).map_err(|_| invalid(what))?;
+            if BindingId(uuid::Uuid::new_v5(&crate::query::QUERY_NAMESPACE, bindings))
+                != BindingId(*binding_id)
+            {
+                return Err(invalid("exclusive predicate binding id mismatch"));
             }
-            _ => Err(invalid(what)),
-        })
-        .collect()
+            let aggregate_result = match aggregate_result.as_deref() {
+                None => None,
+                Some(Value::Bytes(bytes)) => Some(AggregateReadResult(bytes.clone())),
+                Some(_) => return Err(invalid(what)),
+            };
+            let read = PredicateRead {
+                table: table.clone(),
+                shape_id: ShapeId(*shape_id),
+                shape: decode_query(query)?,
+                binding_id: BindingId(*binding_id),
+                binding_values,
+                aggregate_result,
+            };
+            // The result is canonical and matches the shape, or the
+            // stored evidence is corrupt.
+            if super::aggregate_read_result::aggregate_read_malformation(&read).is_some() {
+                return Err(invalid("invalid exclusive aggregate read result"));
+            }
+            Ok(read)
+        }
+        _ => Err(invalid(what)),
+    })
+    .collect()
 }
 
 /// Decoded slots 5-8. A null slot is valid and means "no evidence".
@@ -534,6 +582,28 @@ mod tests {
             shape: Query::from("todos"),
             binding_id: binding_id_for_values(&binding_values).unwrap(),
             binding_values,
+            aggregate_result: None,
+        }
+    }
+
+    /// `count(*)` over `todos` that observed `count = 3`.
+    fn aggregate_read() -> PredicateRead {
+        let binding_values = BTreeMap::new();
+        PredicateRead {
+            table: "todos".to_owned(),
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x66; 16])),
+            shape: Query::from("todos").count(),
+            binding_id: binding_id_for_values(&binding_values).unwrap(),
+            binding_values,
+            aggregate_result: Some(
+                crate::aggregate_read_result::encode_aggregate_result_groups(vec![vec![
+                    crate::aggregate_read_result::AggregateResultCell {
+                        name: "count".to_owned(),
+                        value: Some((ValueType::U64, Value::U64(3))),
+                    },
+                ]])
+                .unwrap(),
+            ),
         }
     }
 
@@ -565,7 +635,7 @@ mod tests {
                 table: "todos".to_owned(),
                 row_uuid: row(0x33),
             }]),
-            predicate_read_set: Some(vec![predicate_read()]),
+            predicate_read_set: Some(vec![predicate_read(), aggregate_read()]),
             user_metadata_json: None,
             contribution_merge: None,
         }
@@ -600,14 +670,16 @@ mod tests {
     }
 
     const BASE_SNAPSHOT_V1_HEX: &str = "010101010101010101010101010101010103000000000000000000300000000000020000002000000000002800000000000101010101010101010101010101010100002c000000000002020202020202020202020202020202";
-    const ROW_READS_V1_HEX: &str = "01010000002222222222222222222222222222222200002800000000000101010101010101010101010101010102746f646f73";
-    const ABSENT_READS_V1_HEX: &str = "01010000003333333333333333333333333333333302746f646f73";
-    const PREDICATE_READS_V1_HEX: &str = "010100000044444444444444444444444444444444d327cd149e8f531dbb3fd829eba589f22e0000004300000002746f646f730205746f646f730000000000000000000000000000026a617a7a2d62696e64696e672d763000000000000000010000000000000004646f6e650601";
+    const ROW_READS_V1_HEX: &str = "01010000002222222222222222222222222222222200002800000000000101010101010101010101010101010100746f646f73";
+    const ABSENT_READS_V1_HEX: &str = "01010000003333333333333333333333333333333300746f646f73";
+    const PREDICATE_READS_V2_HEX: &str = "02020000007600000044444444444444444444444444444444d327cd149e8f531dbb3fd829eba589f232000000470000006d00000000746f646f730005746f646f730000000000000000000000000000006a617a7a2d62696e64696e672d763000000000000000010000000000000004646f6e6506010066666666666666666666666666666666174cabfb8e53551b800edfb67ee4514f32000000510000006900000000746f646f730005746f646f73000000000000000000000101000005636f756e7400000000006a617a7a2d62696e64696e672d7630000000000000000001000101000000010000000a00000000636f756e7401001e000000000300000011000000180000000001000000010176616c756505000300000000000000";
 
-    /// `jazz.exclusive-read-evidence.v1` bytes are pinned: a change here is a
-    /// storage format change and needs a new format version.
+    /// `jazz.exclusive-read-evidence.v2` bytes are pinned: a change here is a
+    /// storage format change and needs a new format version. The snapshot,
+    /// row-read and absent-read slots keep their v1 bytes; the predicate-read
+    /// slot is v2 and carries the aggregate read's `count = 3` result.
     #[test]
-    fn exclusive_read_evidence_v1_bytes_are_pinned() {
+    fn exclusive_read_evidence_v2_bytes_are_pinned() {
         let tx = fixture();
         let slots = encoded(&tx);
         let actual = slots.each_ref().map(|slot| hex(slot.as_deref().unwrap()));
@@ -617,7 +689,7 @@ mod tests {
                 BASE_SNAPSHOT_V1_HEX,
                 ROW_READS_V1_HEX,
                 ABSENT_READS_V1_HEX,
-                PREDICATE_READS_V1_HEX,
+                PREDICATE_READS_V2_HEX,
             ]
         );
         let decoded = decode(&slots).unwrap();
@@ -631,34 +703,14 @@ mod tests {
     /// transaction rows already contain the pinned modern four-slot proof.
     #[test]
     fn epoch_one_transaction_admits_modern_exclusive_evidence_and_rejects_corruption() {
-        use crate::ids::RowAuthor;
-
-        let mut tx = fixture();
-        tx.made_by = AuthorSubject::system_at(tx.tx_id.node);
-        let mut values = vec![
-            Value::U64(tx.tx_id.time.0),
-            Value::U64(1),
-            Value::String("exclusive".to_owned()),
-            Value::U32(1),
-            RowAuthor::from_persisted_subject(tx.made_by)
-                .unwrap()
-                .to_value(),
-        ];
+        let tx = fixture();
+        let mut values = vec![Value::U64(tx.tx_id.time.0), Value::U64(1)];
         values.extend(evidence_slot_values(&tx).unwrap());
-        values.extend([
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::String("pending".to_owned()),
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::Nullable(None),
-            Value::String("local".to_owned()),
-        ]);
         let schema = crate::schema::JazzSchema::empty().lower_to_groove();
-        let descriptor = schema.table("jazz_transactions").unwrap().record_schema();
+        let descriptor = schema
+            .table("jazz_pending_transactions")
+            .unwrap()
+            .record_schema();
         let validate = |values: &[Value]| {
             let bytes = descriptor.create(values).unwrap();
             validate_epoch_one_transaction_record(groove::records::BorrowedRecord::new(
@@ -666,7 +718,7 @@ mod tests {
                 &descriptor,
             ))
         };
-        let slots = values[5..9]
+        let slots = values[2..6]
             .iter()
             .map(|value| hex(&slot_bytes(value).unwrap()))
             .collect::<Vec<_>>();
@@ -676,16 +728,16 @@ mod tests {
                 BASE_SNAPSHOT_V1_HEX,
                 ROW_READS_V1_HEX,
                 ABSENT_READS_V1_HEX,
-                PREDICATE_READS_V1_HEX,
+                PREDICATE_READS_V2_HEX,
             ]
         );
         validate(&values).expect("canonical modern exclusive proof is admitted without conversion");
 
         let mut legacy = values.clone();
-        legacy[5..9].fill(Value::Nullable(None));
+        legacy[2..6].fill(Value::Nullable(None));
         validate(&legacy).expect("historical all-null evidence remains admissible");
 
-        for index in 5..9 {
+        for index in 2..6 {
             let mut partial = values.clone();
             partial[index] = Value::Nullable(None);
             assert!(matches!(
@@ -700,12 +752,9 @@ mod tests {
                 Err(Error::InvalidStoredValue(_))
             ));
         }
-        let mut wrong_kind = values;
-        wrong_kind[2] = Value::String("mergeable".to_owned());
-        assert!(matches!(
-            validate(&wrong_kind),
-            Err(Error::InvalidStoredValue(_))
-        ));
+        // The owner kind lives in the separate transaction header. The
+        // admission scanner and node corruption fixtures verify that only an
+        // exclusive header may own this proof side record.
     }
 
     /// A predicate read v1 cannot represent stores nothing, which fails closed
@@ -771,13 +820,22 @@ mod tests {
             trailing[index].as_mut().unwrap().push(0);
             rejects(trailing);
         }
-        for index in 0..4 {
+        for index in 0..3 {
             // Every record leads with `format_v1`; an unknown version is refused.
             let mut future = good.clone();
             let bytes = future[index].as_mut().unwrap();
             let format = bytes.iter().position(|byte| *byte == FORMAT_V1).unwrap();
             bytes[format] = 2;
             rejects(future);
+        }
+        // The predicate-read slot leads with format 2. A v1 slot, which
+        // cannot say what an aggregate read returned, and a later version are
+        // both refused.
+        assert_eq!(good[3].as_ref().unwrap()[0], PREDICATE_READS_FORMAT_V2);
+        for format in [FORMAT_V1, PREDICATE_READS_FORMAT_V2 + 1] {
+            let mut other = good.clone();
+            other[3].as_mut().unwrap()[0] = format;
+            rejects(other);
         }
 
         let mut orphaned = good.clone();
@@ -789,6 +847,7 @@ mod tests {
             slots[3] = Some(
                 encode_reads(
                     predicate_reads_descriptor(),
+                    PREDICATE_READS_FORMAT_V2,
                     &predicate_read_descriptor(),
                     vec![vec![
                         Value::String(read.table),
@@ -796,6 +855,7 @@ mod tests {
                         Value::Bytes(query),
                         Value::Uuid(read.binding_id.0),
                         Value::Bytes(bindings),
+                        aggregate_result_value(read.aggregate_result.as_ref()),
                     ]],
                 )
                 .unwrap(),
@@ -818,5 +878,32 @@ mod tests {
         let mut long_bindings = bindings;
         long_bindings.push(0);
         rejects(predicate(read, query, long_bindings));
+
+        // An aggregate read must carry a canonical result that matches its
+        // shape, and no other read may carry one.
+        let aggregate = aggregate_read();
+        let aggregate_query = postcard::to_allocvec(&aggregate.shape).unwrap();
+        let no_bindings = canonical_binding_bytes_for_values(&BTreeMap::new()).unwrap();
+        decode(&predicate(
+            aggregate.clone(),
+            aggregate_query.clone(),
+            no_bindings.clone(),
+        ))
+        .unwrap();
+        let mut missing = aggregate.clone();
+        missing.aggregate_result = None;
+        rejects(predicate(
+            missing,
+            aggregate_query.clone(),
+            no_bindings.clone(),
+        ));
+        let mut garbled = aggregate.clone();
+        garbled.aggregate_result.as_mut().unwrap().0.push(0);
+        rejects(predicate(garbled, aggregate_query, no_bindings));
+        let mut stray = predicate_read();
+        stray.aggregate_result = aggregate.aggregate_result;
+        let stray_query = postcard::to_allocvec(&stray.shape).unwrap();
+        let stray_bindings = canonical_binding_bytes_for_values(&stray.binding_values).unwrap();
+        rejects(predicate(stray, stray_query, stray_bindings));
     }
 }

@@ -349,6 +349,23 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
       throw JSError(runtime,
                     "Remote HTTP sessions require HTTPS; local development endpoints "
                     "remain supported.");
+    case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS: {
+      // Thrown as an Error carrying the stable code every platform uses, so
+      // the app can detect the refusal, delete the store and resync.
+      auto error = runtime.global()
+                       .getPropertyAsFunction(runtime, "Error")
+                       .callAsConstructor(
+                           runtime,
+                           facebook::jsi::String::createFromUtf8(
+                               runtime,
+                               std::string("Unsupported storage format: the local Jazz store was "
+                                           "written by an older version and cannot be opened "
+                                           "during ") +
+                                   operation + "; delete it and resync from Core"))
+                       .asObject(runtime);
+      error.setProperty(runtime, "code", "unsupported_storage_codecs");
+      throw JSError(runtime, Value(runtime, error));
+    }
     default:
       throw JSError(runtime, std::string("Jazz native foreground runtime failed during ") +
                                 operation);

@@ -323,6 +323,9 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
       if (!(capability instanceof Uint8Array) || capability.byteLength !== 32) {
         throw new Error("Jazz native foreground runtime requires a 32-byte admitted capability");
       }
+      // A relay store written in a storage format this build does not read
+      // is thrown unchanged as an Error with `code` "unsupported_storage_codecs",
+      // the stable code every platform uses for that refusal.
       const foreground = installed.openAttached(capability) as Partial<NativeForegroundRuntime>;
       if (
         !foreground ||

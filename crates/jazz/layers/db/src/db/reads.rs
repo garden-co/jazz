@@ -128,13 +128,6 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
-    /// Normalize relation syntax into the same prepared-query representation
-    /// used by every other read path.
-    #[doc(hidden)]
-    pub fn prepare_relation_query(&self, query: &RelationQuery) -> Result<PreparedQuery, Error> {
-        self.prepare_query(&relation_query_to_query(query)?)
-    }
-
     /// Prepare a query after asynchronously acquiring the node owner.
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
@@ -188,31 +181,7 @@ where
         };
         let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
-        let (local_plan, global_plan) =
-            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
-                (
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Local,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Global,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+        let [local_plan, global_plan] = prepared_plans(&mut node, &shape, &binding).await?;
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -407,17 +376,43 @@ where
                 }
             }),
         };
+        let mut settlements = Vec::new();
+        let result = self
+            .all_serialized_query_once(
+                query,
+                opts.clone(),
+                coverage_tier,
+                Some(open_tx),
+                request_scope.clone(),
+                author,
+                require_coverage,
+                &coverage_expired,
+                &release_coverage,
+                Some(&mut settlements),
+            )
+            .await?;
+        let SerializedReadResult::Rows(rows) = result else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        };
         let observed = if let Some(child) = child {
+            // Coverage belongs to the real parent read. This child is a
+            // private comparison at the captured accepted cut, which may be
+            // older than the authority's current completeness frontier.
+            let mut observation_opts = opts.clone();
+            observation_opts.tier = ReadTier::LocalOnly;
             let mut observed_settlements = Vec::new();
             let result = self
                 .all_serialized_query_once(
                     query,
-                    opts.clone(),
-                    coverage_tier,
+                    observation_opts,
+                    DurabilityTier::Local,
                     Some(child),
                     request_scope.clone(),
                     author,
-                    require_coverage,
+                    false,
                     &coverage_expired,
                     &release_coverage,
                     Some(&mut observed_settlements),
@@ -443,27 +438,6 @@ where
             Some((rows, observed_settlements))
         } else {
             None
-        };
-        let mut settlements = Vec::new();
-        let result = self
-            .all_serialized_query_once(
-                query,
-                opts,
-                coverage_tier,
-                Some(open_tx),
-                request_scope,
-                author,
-                require_coverage,
-                &coverage_expired,
-                &release_coverage,
-                Some(&mut settlements),
-            )
-            .await?;
-        let SerializedReadResult::Rows(rows) = result else {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "E2EE settlement reads require ordinary stored rows",
-            ));
         };
         if let Some((observed_rows, observed_settlements)) = observed {
             if rows.len() != settlements.len() {
@@ -825,56 +799,107 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
+        // Attach a query's coverage, released through `release_coverage` when
+        // the returned guard drops.
+        let attach_coverage =
+            async |query: &PreparedQuery, tier: DurabilityTier, tx: Option<OpenTransactionId>| {
+                let attachment = self
+                    .attach_query_with_coverage_async(query, opts.clone(), tier, tx, author)
+                    .await?;
+                Ok::<_, Error>(SerializedReadCoverage {
+                    attachment: Some(attachment),
+                    release: Some(release_coverage),
+                })
+            };
         // Read the maintained result itself, not just its coverage signal.
         // Dropping the subscription and re-evaluating below would retire its
         // exact request-scoped inputs before the one-shot consumes them.
         // Remote publication waits for settlement. A local foreground also
         // needs a fresh delivery from its durable owner, while the maintained
         // subscription drives the complete multi-hop input closure.
-        if require_coverage && is_relation {
+        //
+        // A strict (Global) client one-shot reads through its own fresh
+        // stream as well, as the native client's remote one-shot does.
+        // Attaching coverage first and then evaluating `Db::all` would read
+        // against an already-settled coverage, so no stream would run its
+        // first-settlement deletion reconciliation and a held row deleted at
+        // Core would survive locally (INV-SYNC-48).
+        let strict_client_one_shot = !is_relation
+            && open_tx.is_none()
+            && author.is_none()
+            && prepared.shape().query().array_subqueries.is_empty()
+            && coverage_tier >= DurabilityTier::Global
+            && opts.read_view.is_default()
+            && !opts.include_deleted;
+        if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
-                Some(SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &prepared,
-                            opts.clone(),
-                            coverage_tier,
-                            None,
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                })
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
             } else {
                 None
             };
             let mut stream = self
                 .subscribe_one_shot_with_coverage(&prepared, opts.clone(), author, coverage_tier)
                 .await?;
+            // The fresh stream opens settled when an earlier subscription
+            // already settled the same binding, so on its own it can answer
+            // from a coverage the authority has since moved past. A strict
+            // one-shot also waits for an authority receipt newer than its own
+            // open, as an attached remote read does. Attaching after the
+            // stream opened leaves its deletion reconciliation unchanged.
+            let strict_coverage = if strict_client_one_shot {
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
+            } else {
+                None
+            };
             let outcome = async {
-                let mut next = Box::pin(stream.next_event());
+                // A rejection cannot satisfy freshness. Observe terminal events
+                // while waiting, retaining the opening until its fresh authority
+                // coverage arrives before exposing any rows.
+                let mut opening = None;
                 let event = std::future::poll_fn(|cx| {
+                    loop {
+                        match Stream::poll_next(Pin::new(&mut stream), cx) {
+                            Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. }))
+                            | Poll::Ready(Some(event @ SubscriptionEvent::Closed)) => {
+                                return Poll::Ready(Ok(Some(event)));
+                            }
+                            Poll::Ready(None) => return Poll::Ready(Ok(None)),
+                            Poll::Ready(Some(
+                                event @ SubscriptionEvent::Delta { reset: true, .. },
+                            )) => {
+                                opening = Some(event);
+                            }
+                            Poll::Ready(Some(event @ SubscriptionEvent::Delta { .. })) => {
+                                if opening.is_none() {
+                                    return Poll::Ready(Ok(Some(event)));
+                                }
+                            }
+                            Poll::Pending => break,
+                        }
+                    }
                     if coverage_expired() {
                         return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
                             "Timed out waiting for query coverage",
                         )));
                     }
-                    if local_coverage.as_ref().is_some_and(|coverage| {
-                        !self.query_attachment_is_covered(
-                            coverage
-                                .attachment
-                                .as_ref()
-                                .expect("live local read coverage"),
-                        )
-                    }) {
+                    if local_coverage
+                        .iter()
+                        .chain(strict_coverage.iter())
+                        .any(|coverage| {
+                            !self.query_attachment_is_covered(
+                                coverage.attachment.as_ref().expect("live read coverage"),
+                            )
+                        })
+                    {
                         return Poll::Pending;
                     }
-                    std::future::Future::poll(next.as_mut(), cx).map(Ok)
+                    match opening.take() {
+                        Some(event) => Poll::Ready(Ok(Some(event))),
+                        None => Poll::Pending,
+                    }
                 })
                 .await?;
-                drop(next);
                 match event {
                     Some(SubscriptionEvent::Delta { reset: true, .. }) => {
                         let mut snapshot = stream.settled_receiver_local_snapshot()?;
@@ -947,19 +972,7 @@ where
         let mut coverage = None;
         let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
-            let hydration = SerializedReadCoverage {
-                attachment: Some(
-                    self.attach_query_with_coverage_async(
-                        &prepared,
-                        opts.clone(),
-                        DurabilityTier::Global,
-                        open_tx,
-                        author,
-                    )
-                    .await?,
-                ),
-                release: Some(release_coverage),
-            };
+            let hydration = attach_coverage(&prepared, DurabilityTier::Global, open_tx).await?;
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
             match self.race_remote_answer(epoch, None, covered).await {
                 Some(result) => {
@@ -972,19 +985,7 @@ where
             }
         }
         if coverage.is_none() && require_coverage {
-            let attachment = self
-                .attach_query_with_coverage_async(
-                    &prepared,
-                    opts.clone(),
-                    coverage_tier,
-                    open_tx,
-                    author,
-                )
-                .await?;
-            let required = SerializedReadCoverage {
-                attachment: Some(attachment),
-                release: Some(release_coverage),
-            };
+            let required = attach_coverage(&prepared, coverage_tier, open_tx).await?;
             self.wait_for_serialized_read_coverage(&required, coverage_expired)
                 .await?;
             coverage = Some(required);
@@ -999,19 +1000,8 @@ where
                     break;
                 };
                 let source_query = self.prepare_query_async(&query).await?;
-                let hydration = SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &source_query,
-                            opts.clone(),
-                            DurabilityTier::Global,
-                            Some(open_tx),
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                };
+                let hydration =
+                    attach_coverage(&source_query, DurabilityTier::Global, Some(open_tx)).await?;
                 let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
                 match self.race_remote_answer(epoch, None, covered).await {
                     Some(result) => {
@@ -1110,28 +1100,10 @@ where
         self.ensure_open_schema_admitted()?;
         let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
-        let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self.node.node.borrow().uses_schema_projected_read(&shape)
-        {
-            let mut node = self.node.node.borrow_mut();
-            (
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Local,
-                    AuthorSubject::SYSTEM,
-                ))?),
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    AuthorSubject::SYSTEM,
-                ))?),
-            )
-        } else {
-            (None, None)
-        };
-        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
+        let mut node = self.node.node.borrow_mut();
+        let [local_plan, global_plan] =
+            super::block_on(prepared_plans(&mut node, &shape, &binding))?;
+        let groove_runtime_token = node.groove_runtime_token();
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -1661,28 +1633,26 @@ where
             edges: Vec::new(),
         })
     }
+}
 
-    /// Tier-gated one-shot output-changing relation read evaluated as `author`.
-    pub async fn all_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
-            .await?;
-        ensure_default_read_view(&opts)?;
-        let prepared = self.prepare_relation_query_async(query).await?;
-        // The relation terminal already emits the requested aliases and row
-        // identity. Re-projecting those rows against the physical source
-        // schema would reinterpret alias positions as source columns.
-        let rows = self.all_for_identity(&prepared, opts, author).await?;
-        Ok(RelationSnapshot {
-            root_count: rows.len(),
-            rows,
-            edges: Vec::new(),
-        })
+/// Install the `[local, global]` system plans a prepared query reuses, unless
+/// its shape is not worth preparing or reads through a schema projection.
+async fn prepared_plans<S: OrderedKvStorage>(
+    node: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> Result<[Option<PreparedQueryPlanHandle>; 2], Error> {
+    if !should_install_prepared_plan(shape) || node.uses_schema_projected_read(shape) {
+        return Ok([None, None]);
     }
+    let mut plan = async |tier| {
+        node.prepared_query_plan(shape, binding, tier, AuthorSubject::SYSTEM)
+            .await
+    };
+    Ok([
+        Some(plan(DurabilityTier::Local).await?),
+        Some(plan(DurabilityTier::Global).await?),
+    ])
 }
 
 /// The descriptor on a terminal operation describes its root record. Nested

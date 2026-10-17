@@ -2674,7 +2674,7 @@ export class Spaces {
         return await readAcceptedHistory(
           this.db,
           JSON.stringify(["space", address.scopeId, address.identifier]),
-          (tx, initialRecipients) => this.readSnapshot(tx, address, id, initialRecipients),
+          (tx) => this.readSnapshot(tx, address, id),
           localOnly,
         );
       } catch (error) {

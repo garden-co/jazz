@@ -17,6 +17,7 @@ import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
 import { shortSchemaHash } from "./catalogue.js";
+import { toError } from "../runtime/util.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -26,10 +27,6 @@ const LOG_PREFIX = "[jazz]";
 
 function isSchemaPushNetworkError(error: unknown): boolean {
   return error instanceof TypeError && error.message === "fetch failed";
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function warnInitialSchemaPushSkipped(opts: {
@@ -42,9 +39,7 @@ function warnInitialSchemaPushSkipped(opts: {
       ? "remove the remote server URL option"
       : `comment out ${opts.envServerUrlKey}`;
   console.warn(
-    `${LOG_PREFIX} schema auto-push skipped because ${opts.serverUrl} is unreachable (${errorMessage(
-      opts.error,
-    )}). The dev server will keep using this app and server URL. To use a local Jazz dev server while offline, ${fallback}. Save schema.ts/permissions.ts or restart after reconnecting to publish again.`,
+    `${LOG_PREFIX} schema auto-push skipped because ${opts.serverUrl} is unreachable (${toError(opts.error).message}). The dev server will keep using this app and server URL. To use a local Jazz dev server while offline, ${fallback}. Save schema.ts/permissions.ts or restart after reconnecting to publish again.`,
   );
 }
 
@@ -214,20 +209,24 @@ const defaultEnvFileOperations: EnvFileOperations = {
   fsync: fsyncSync,
 };
 
-function assertRegularEnvPath(envPath: string): void {
+/** lstat `envPath`, refusing anything but a regular file; undefined when it is absent. */
+function regularEnvPathMetadata(envPath: string): ReturnType<typeof lstatSync> | undefined {
+  let metadata;
   try {
-    const metadata = lstatSync(envPath);
-    if (metadata.isSymbolicLink()) {
-      throw new Error(
-        `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
-      );
-    }
-    if (!metadata.isFile()) {
-      throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
-    }
+    metadata = lstatSync(envPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
+  if (metadata.isSymbolicLink()) {
+    throw new Error(
+      `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
+    );
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
+  }
+  return metadata;
 }
 
 /**
@@ -236,23 +235,8 @@ function assertRegularEnvPath(envPath: string): void {
  * to an unlinked file while reporting success for the replacement at envPath.
  */
 function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): void {
-  let pathMetadata;
-  try {
-    pathMetadata = lstatSync(envPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new EnvPathReplacedError();
-    }
-    throw error;
-  }
-  if (pathMetadata.isSymbolicLink()) {
-    throw new Error(
-      `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
-    );
-  }
-  if (!pathMetadata.isFile()) {
-    throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
-  }
+  const pathMetadata = regularEnvPathMetadata(envPath);
+  if (!pathMetadata) throw new EnvPathReplacedError();
 
   const descriptorMetadata = fstatSync(descriptor);
   if (
@@ -265,7 +249,7 @@ function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): vo
 }
 
 function openEnvForAppend(envPath: string, afterOpen?: (descriptor: number) => void): number {
-  assertRegularEnvPath(envPath);
+  regularEnvPathMetadata(envPath);
   const descriptor = openSync(
     envPath,
     constants.O_CREAT | constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW,
@@ -392,7 +376,20 @@ export class ManagedDevRuntime {
   private previousBackendSecret: string | undefined;
   private hadPreviousBackendSecret = false;
   private injectedBackendSecret: string | undefined;
-  constructor(private envKeys: ManagedRuntimeEnvKeys) {}
+  constructor(readonly envKeys: ManagedRuntimeEnvKeys) {}
+
+  /** The public client env for `runtime` under this runtime's keys; telemetry only when set. */
+  clientEnv(
+    runtime: Pick<ManagedRuntime, "appId" | "serverUrl" | "telemetryCollectorUrl">,
+  ): Record<string, string> {
+    return {
+      [this.envKeys.appId]: runtime.appId,
+      [this.envKeys.serverUrl]: runtime.serverUrl,
+      ...(runtime.telemetryCollectorUrl
+        ? { [this.envKeys.telemetryCollectorUrl]: runtime.telemetryCollectorUrl }
+        : {}),
+    };
+  }
 
   prepareEnv(options: InitializeOptions): string | null {
     const serverOpt = options.server ?? true;
@@ -678,11 +675,7 @@ export class ManagedDevRuntime {
           this.injectedBackendSecret = backendSecret;
         }
 
-        process.env[this.envKeys.appId] = appId;
-        process.env[this.envKeys.serverUrl] = serverUrl;
-        if (telemetryCollectorUrl) {
-          process.env[this.envKeys.telemetryCollectorUrl] = telemetryCollectorUrl;
-        }
+        Object.assign(process.env, this.clientEnv({ appId, serverUrl, telemetryCollectorUrl }));
 
         this.runtime = { appId, serverUrl, adminSecret, backendSecret, telemetryCollectorUrl };
         this.runtimeConfigSignature = this.serializeConfig(this.getManagedRuntimeConfig(options));

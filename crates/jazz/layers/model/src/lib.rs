@@ -39,3 +39,6 @@ pub mod tx;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
 pub mod test_public_schema;
+
+#[cfg(test)]
+mod gather_agreement_tests;

@@ -225,44 +225,17 @@ impl CorrelationParent {
 /// `predicate` with every binding parameter replaced by its bound value, so a
 /// narrowed read needs no binding of its own. `None` if a value is missing.
 fn bind_predicate(predicate: &Predicate, values: &BTreeMap<String, Value>) -> Option<Predicate> {
-    let operand = |operand: &Operand| -> Option<Operand> {
-        Some(match operand {
-            Operand::Param(name) => Operand::Literal(values.get(name)?.clone()),
-            other => other.clone(),
-        })
-    };
-    let all = |predicates: &[Predicate]| -> Option<Vec<Predicate>> {
-        predicates
-            .iter()
-            .map(|predicate| bind_predicate(predicate, values))
-            .collect()
-    };
-    Some(match predicate {
-        Predicate::All(predicates) => Predicate::All(all(predicates)?),
-        Predicate::Any(predicates) => Predicate::Any(all(predicates)?),
-        Predicate::Not(inner) => Predicate::Not(Box::new(bind_predicate(inner, values)?)),
-        Predicate::Eq(left, right) => Predicate::Eq(operand(left)?, operand(right)?),
-        Predicate::Ne(left, right) => Predicate::Ne(operand(left)?, operand(right)?),
-        Predicate::In(left, list) => Predicate::In(
-            operand(left)?,
-            list.iter().map(operand).collect::<Option<Vec<_>>>()?,
-        ),
-        Predicate::Gt(left, right) => Predicate::Gt(operand(left)?, operand(right)?),
-        Predicate::Gte(left, right) => Predicate::Gte(operand(left)?, operand(right)?),
-        Predicate::Lt(left, right) => Predicate::Lt(operand(left)?, operand(right)?),
-        Predicate::Lte(left, right) => Predicate::Lte(operand(left)?, operand(right)?),
-        Predicate::Contains(left, right) => Predicate::Contains(operand(left)?, operand(right)?),
-        Predicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => Predicate::EnumMatch {
-            column: column.clone(),
-            case: case.clone(),
-            payload: Box::new(bind_predicate(payload, values)?),
-        },
-        Predicate::IsNull(inner) => Predicate::IsNull(operand(inner)?),
-    })
+    let mut bound = predicate.clone();
+    let mut complete = true;
+    bound.for_each_operand_mut(&mut |operand| {
+        if let Operand::Param(name) = operand {
+            match values.get(name) {
+                Some(value) => *operand = Operand::Literal(value.clone()),
+                None => complete = false,
+            }
+        }
+    });
+    complete.then_some(bound)
 }
 
 fn bind_predicates(

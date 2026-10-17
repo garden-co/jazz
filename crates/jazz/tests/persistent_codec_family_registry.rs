@@ -4,7 +4,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use jazz::storage_codec_profile::JAZZ_EPOCH_1_STORAGE_CODECS;
+use jazz::storage_codec_profile::{
+    JAZZ_ACCOUNT_STORAGE_CODECS, JAZZ_CATALOGUE_STORAGE_CODECS, JAZZ_NODE_STORAGE_CODECS,
+};
 use serde::Deserialize;
 
 const REGISTRY_PATH: &str = concat!(
@@ -124,19 +126,29 @@ fn expected_profile_ids() -> BTreeMap<&'static str, Vec<String>> {
     BTreeMap::from([
         ("groove-root", groove_profile),
         (
-            "jazz-root",
-            JAZZ_EPOCH_1_STORAGE_CODECS
+            "account-root",
+            JAZZ_ACCOUNT_STORAGE_CODECS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
+        ),
+        (
+            "jazz-node-root",
+            JAZZ_NODE_STORAGE_CODECS
                 .iter()
                 .map(|id| (*id).to_owned())
                 .collect(),
         ),
         (
             "jazz-epoch-2-additions",
-            vec!["jazz.exclusive-read-evidence.v1".to_owned()],
+            vec!["jazz.node-storage.v3".to_owned()],
         ),
         (
             "server-catalogue-root",
-            vec!["jazz.server-catalogue-entry.v1".to_owned()],
+            JAZZ_CATALOGUE_STORAGE_CODECS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
         ),
     ])
 }
@@ -161,7 +173,11 @@ fn validate_registry_with_profiles(
         if !matches!(
             family.profile.as_deref(),
             None | Some(
-                "groove-root" | "jazz-root" | "jazz-epoch-2-additions" | "server-catalogue-root"
+                "groove-root"
+                    | "account-root"
+                    | "jazz-node-root"
+                    | "jazz-epoch-2-additions"
+                    | "server-catalogue-root"
             )
         ) {
             return Err(format!("{} has an unknown codec profile", family.id));
@@ -201,13 +217,29 @@ fn validate_registry_with_profiles(
     // ensure that a later registry edit cannot quietly lose a boundary that is
     // authoritative despite not being a top-level manifest codec ID.
     for required in [
+        "jazz.branch-key.v1",
+        "jazz.catalogue.activation.v1",
+        "jazz.catalogue.bootstrap-ready.v1",
+        "jazz.catalogue.lens.v1",
+        "jazz.catalogue.lineage.v1",
+        "jazz.catalogue.physical-mapping.v1",
+        "jazz.catalogue.schema.v1",
+        "jazz.catalogue.write-pointer.v1",
+        "jazz.server-catalogue-entry.v1",
+        "jazz.transaction-durability.v2",
+        "jazz.tx-record.v2",
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
+        "groove.jazz-physical-class.v3",
+        "groove.durable-index.v2",
+        "groove.dictionary.v1",
+        // Linear row-state history retired `jazz.history-version-current.v1`,
+        // `jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`; the
+        // touched-rows transaction record retired `...v2` (history `by_tx`),
+        // and the node-local touched-row list retired `...v3`.
+        "jazz.history-version-current.v4",
+        "jazz.subscription-watermark.v1",
         "groove.storage-admission-receipt.v1",
-        "groove.jazz-physical-class.v1",
-        "jazz.history-version-current.v1",
-        "jazz.contribution-provenance.v1",
-        "jazz.merge-heads.v1",
         "jazz.idb-page.v1",
         "jazz.wire-frame.v1",
         "jazz.binding-abi.v1",
@@ -230,16 +262,17 @@ fn authoritative_persistent_codec_family_registry_is_complete_and_current() {
 }
 
 #[test]
-fn epoch_two_profile_composes_frozen_epoch_one_with_registered_additions() {
+fn epoch_two_profile_replaces_node_layout_marker_and_preserves_other_codecs() {
     let registry = registry();
     let mut registered = profile_ids(&registry, "groove-root");
-    registered.extend(profile_ids(&registry, "jazz-root"));
+    registered.extend(profile_ids(&registry, "jazz-node-root"));
     let legacy = jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap();
     registered.sort();
     assert_eq!(
         registered,
         legacy.codec_ids().map(str::to_owned).collect::<Vec<_>>()
     );
+    registered.retain(|id| id != "jazz.node-storage.v2");
     registered.extend(profile_ids(&registry, "jazz-epoch-2-additions"));
     registered.sort();
     assert_eq!(
@@ -257,10 +290,10 @@ fn registry_verifier_rejects_a_planted_known_profile_omission() {
     let mut registry = registry();
     registry
         .families
-        .retain(|family| family.id != "jazz.branch-key.v1");
+        .retain(|family| family.id != "jazz.node-storage.v2");
     let error = validate_registry(&registry).expect_err("a missing profile family must fail CI");
     assert!(
-        error.contains("jazz-root profile registry drifted"),
+        error.contains("jazz-node-root profile registry drifted"),
         "{error}"
     );
 }
@@ -269,13 +302,13 @@ fn registry_verifier_rejects_a_planted_known_profile_omission() {
 fn registry_verifier_rejects_a_planted_future_profile_addition() {
     let mut profiles = expected_profile_ids();
     profiles
-        .get_mut("jazz-root")
+        .get_mut("jazz-node-root")
         .expect("known Jazz profile")
         .push("jazz.future-codec.v2".to_owned());
     let error = validate_registry_with_profiles(&registry(), profiles)
         .expect_err("a future profile family needs a reviewed registry row");
     assert!(
-        error.contains("jazz-root profile registry drifted"),
+        error.contains("jazz-node-root profile registry drifted"),
         "{error}"
     );
 }

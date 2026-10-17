@@ -5,7 +5,7 @@
 
 use crate::ids::{AuthorSubject, SchemaVersionId};
 use crate::model::transaction::OpenTransactionId;
-use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
+use crate::node::{Error, MergeableCommit, NodeState};
 use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
@@ -23,10 +23,6 @@ pub trait SettledNodeTestExt {
         &mut self,
         commits: Vec<MergeableCommit>,
     ) -> Result<TxId, Error>;
-    fn merge_branch_contributions_settled(
-        &mut self,
-        request: ContributionMergeRequest,
-    ) -> Result<Option<TxId>, Error>;
     fn commit_mergeable_in_schema_settled(
         &mut self,
         schema: SchemaVersionId,
@@ -109,20 +105,6 @@ where
         crate::local_executor::block_on(async {
             let published = self.commit_mergeable_many(commits).await?;
             self.persist_and_settle_transaction(published).await
-        })
-    }
-
-    fn merge_branch_contributions_settled(
-        &mut self,
-        request: ContributionMergeRequest,
-    ) -> Result<Option<TxId>, Error> {
-        crate::local_executor::block_on(async {
-            let Some(published) = self.merge_branch_contributions(request).await? else {
-                return Ok(None);
-            };
-            self.persist_and_settle_transaction(published)
-                .await
-                .map(Some)
         })
     }
 

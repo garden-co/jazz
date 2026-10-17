@@ -987,6 +987,19 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 truncate_at_max_iters.hash(&mut hasher);
             }
             GraphBuilder::RecursiveStepWitness { recursive } => child!(recursive).hash(&mut hasher),
+            GraphBuilder::Lookup {
+                keys,
+                keys_on,
+                table,
+                scan,
+                variant_projection,
+            } => {
+                child!(keys).hash(&mut hasher);
+                keys_on.hash(&mut hasher);
+                table.hash(&mut hasher);
+                scan.hash(&mut hasher);
+                variant_projection.hash(&mut hasher);
+            }
             GraphBuilder::Filter {
                 input,
                 predicate,
@@ -1257,6 +1270,22 @@ pub(crate) fn graph_builders_equal_with(
                 GraphBuilder::RecursiveStepWitness { recursive: a },
                 GraphBuilder::RecursiveStepWitness { recursive: b },
             ) => pending.push((a.as_ref(), b.as_ref())),
+            (
+                GraphBuilder::Lookup {
+                    keys: a,
+                    keys_on: b,
+                    table: c,
+                    scan: d,
+                    variant_projection: e,
+                },
+                GraphBuilder::Lookup {
+                    keys: x,
+                    keys_on: y,
+                    table: z,
+                    scan: w,
+                    variant_projection: v,
+                },
+            ) if b == y && c == z && d == w && e == v => pending.push((a.as_ref(), x.as_ref())),
             (
                 GraphBuilder::Filter {
                     input: a,
@@ -2326,7 +2355,8 @@ fn lift_literal_filter_node(
         }
         GraphBuilder::CollectBy { .. }
         | GraphBuilder::TemplateInput { .. }
-        | GraphBuilder::TypedTemplate { .. } => Ok(None),
+        | GraphBuilder::TypedTemplate { .. }
+        | GraphBuilder::Lookup { .. } => Ok(None),
         GraphBuilder::Aggregate {
             input,
             group_cols,
@@ -2660,6 +2690,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
             GraphBuilder::Union { inputs } => inputs.iter().any(|input| child!(input)),
             GraphBuilder::Table { .. }
             | GraphBuilder::Index { .. }
+            | GraphBuilder::Lookup { .. }
             | GraphBuilder::VariantProject { .. } => false,
         };
         outputs.insert(node_ptr, output);
@@ -2818,7 +2849,8 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::Union { .. }
         | GraphBuilder::StreamingChecksum { .. }
         | GraphBuilder::VariantProject { .. }
-        | GraphBuilder::RecursiveStepWitness { .. } => None,
+        | GraphBuilder::RecursiveStepWitness { .. }
+        | GraphBuilder::Lookup { .. } => None,
     }
 }
 
@@ -3797,6 +3829,13 @@ impl IvmRuntime {
         let mut terminals = terminals.into_iter().collect::<Vec<_>>();
         terminals.sort_by(|left, right| left.sink.cmp(&right.sink));
         let key: SharedShapeKey = (shape.clone(), terminals.clone());
+        // A shared shape whose last receiver was dropped is still listed
+        // until the next prune, and binding prunes before it hydrates.
+        // Prune first so that shape retires now rather than between this
+        // caller's prepare and bind, which would leave the caller holding
+        // a retired shape id.
+        self.prune_dropped_subscriptions_with_storage(storage)
+            .await?;
         if let Some(shape_id) = self.shared_prepared_shapes.get(&key).copied()
             && self
                 .prepared_shapes
@@ -4513,9 +4552,10 @@ impl IvmRuntime {
     }
 
     /// Remove a caller-owned prepared shape after all of its bindings have
-    /// been unsubscribed. Binding-source entries are intentionally retained:
-    /// multiple prepared shapes may share the same source descriptor, while
-    /// their graph retainers are owned by this exact shape id.
+    /// been unsubscribed. Several prepared shapes may read one binding source,
+    /// while their graph retainers are owned by this exact shape id, so the
+    /// source's entry goes only with the last shape that reads it, and only
+    /// once no binding remains in it.
     pub fn retire_prepared_shape(
         &mut self,
         shape_id: PreparedShapeId,
@@ -4548,6 +4588,20 @@ impl IvmRuntime {
             );
         }
         self.collect_unretained_ephemeral_nodes();
+        if !self
+            .prepared_shapes
+            .values()
+            .any(|other| other.shape == shape.shape)
+        {
+            let key = BindingSourceKey::prepared(shape.shape);
+            if self
+                .binding_sources
+                .get(&key)
+                .is_some_and(|source| source.refcounts.is_empty())
+            {
+                self.binding_sources.remove(&key);
+            }
+        }
         Ok(())
     }
 
@@ -4675,7 +4729,7 @@ impl IvmRuntime {
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
-    pub(super) fn infer_builder_output_cached(
+    pub(crate) fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
@@ -4739,35 +4793,15 @@ impl IvmRuntime {
                 table,
                 variant_projection,
                 ..
+            } => self.table_source_output(table, variant_projection.as_deref()),
+            GraphBuilder::Lookup {
+                keys,
+                table,
+                variant_projection,
+                ..
             } => {
-                if let Some(target) = variant_projection {
-                    return self
-                        .variant_projections
-                        .get(&VariantProjectionKey {
-                            table: table.clone(),
-                            target: VariantProjectionTarget::Named(target.clone()),
-                        })
-                        .map(|projection| projection.output)
-                        .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
-                            table: table.clone(),
-                            target: target.clone(),
-                        });
-                }
-                let table_schema = self
-                    .schema
-                    .table(table)
-                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
-                if table_schema.has_variants() {
-                    return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
-                }
-                // The runtime keeps this descriptor current with the schema
-                // (registration and registry evolution); building and
-                // interning it again for every inference is pure overhead.
-                Ok(self
-                    .table_descriptors
-                    .get(table)
-                    .copied()
-                    .unwrap_or_else(|| table_schema.record_schema()))
+                self.infer_builder_output_cached(keys, output_memo)?;
+                self.table_source_output(table, variant_projection.as_deref())
             }
             GraphBuilder::InlineRecords { output, .. }
             | GraphBuilder::InputSource { output, .. } => Ok(*output),
@@ -4928,6 +4962,43 @@ impl IvmRuntime {
                 self.infer_builder_output_cached(step_witness, output_memo)
             }
         }
+    }
+
+    /// The output of a table source, plain or through a named variant
+    /// projection.
+    fn table_source_output(
+        &self,
+        table: &str,
+        variant_projection: Option<&str>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        if let Some(target) = variant_projection {
+            return self
+                .variant_projections
+                .get(&VariantProjectionKey {
+                    table: table.to_owned(),
+                    target: VariantProjectionTarget::Named(target.to_owned()),
+                })
+                .map(|projection| projection.output)
+                .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                    table: table.to_owned(),
+                    target: target.to_owned(),
+                });
+        }
+        let table_schema = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        if table_schema.has_variants() {
+            return Err(IvmRuntimeError::VariantProjectionRequired(table.to_owned()));
+        }
+        // The runtime keeps this descriptor current with the schema
+        // (registration and registry evolution); building and
+        // interning it again for every inference is pure overhead.
+        Ok(self
+            .table_descriptors
+            .get(table)
+            .copied()
+            .unwrap_or_else(|| table_schema.record_schema()))
     }
 
     pub(super) fn next_subscription_id(&mut self) -> SubscriptionId {

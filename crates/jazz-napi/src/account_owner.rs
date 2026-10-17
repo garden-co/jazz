@@ -164,7 +164,7 @@ fn open_owner(
     identity: CoreDbIdentity,
     storage_owner: String,
     cached_catalogue: Option<Uint8Array>,
-) -> napi::Result<NapiDb> {
+) -> std::result::Result<NapiDb, PersistentOpenError> {
     validate_storage_owner(&storage_owner, identity.author)?;
     let expected = encode_marker(&storage_owner, identity.author.canonical())?;
     let root = Path::new(&data_path);
@@ -183,7 +183,7 @@ fn open_owner(
     core_block_on(unsafe { db.restore_initialization_owner_pending_uploads() })
         .map_err(napi_error)?;
     Ok(NapiDb {
-        inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+        inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
             db,
         ))))),
         owns_runtime: true,
@@ -201,6 +201,7 @@ impl NapiDb {
     #[napi(factory, js_name = "openPersistentAccountOwnerWithSelfSignedProof")]
     #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
     pub fn open_persistent_account_owner_with_self_signed_proof(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
@@ -210,43 +211,36 @@ impl NapiDb {
         claimed_author: String,
         cached_catalogue: Option<Uint8Array>,
     ) -> js::Result<Self> {
-        let (schema, config) = decode_core_open_args(&schema, &config)?;
-        let proof = CoreSelfSignedClientProof {
-            token,
-            app_id,
-            claimed_author,
-        };
-        // The serialized config has the existing untrusted placeholder. Native
-        // proof verification checks the actual host claim before root admission.
-        let identity = core_open_identity(&config, Some(&proof))?;
-        Ok(open_owner(
+        Self::try_open_persistent_account_owner_with_self_signed_proof(
             data_path,
             schema,
             config,
-            identity,
             storage_owner,
+            token,
+            app_id,
+            claimed_author,
             cached_catalogue,
-        )?)
+        )
+        .map_err(|error| error.throw(&env))
     }
 
     #[napi(factory, js_name = "openPersistentAccountOwner")]
     pub fn open_persistent_account_owner(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
         storage_owner: String,
         cached_catalogue: Option<Uint8Array>,
     ) -> js::Result<Self> {
-        let (schema, config) = decode_core_open_args(&schema, &config)?;
-        let identity = core_open_identity(&config, None)?;
-        Ok(open_owner(
+        Self::try_open_persistent_account_owner(
             data_path,
             schema,
             config,
-            identity,
             storage_owner,
             cached_catalogue,
-        )?)
+        )
+        .map_err(|error| error.throw(&env))
     }
 }
 
@@ -275,5 +269,58 @@ mod tests {
         assert!(install_marker(&temporary, &marker, directory.path()).is_err());
         assert_eq!(std::fs::read(marker).unwrap(), b"authoritative owner");
         assert_eq!(std::fs::read(temporary).unwrap(), b"different owner");
+    }
+}
+
+impl NapiDb {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_open_persistent_account_owner_with_self_signed_proof(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        storage_owner: String,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+        cached_catalogue: Option<Uint8Array>,
+    ) -> std::result::Result<Self, PersistentOpenError> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        // The serialized config has the existing untrusted placeholder. Native
+        // proof verification checks the actual host claim before root admission.
+        let identity = core_open_identity(&config, Some(&proof))?;
+        open_owner(
+            data_path,
+            schema,
+            config,
+            identity,
+            storage_owner,
+            cached_catalogue,
+        )
+    }
+}
+
+impl NapiDb {
+    pub(crate) fn try_open_persistent_account_owner(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        storage_owner: String,
+        cached_catalogue: Option<Uint8Array>,
+    ) -> std::result::Result<Self, PersistentOpenError> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
+        open_owner(
+            data_path,
+            schema,
+            config,
+            identity,
+            storage_owner,
+            cached_catalogue,
+        )
     }
 }

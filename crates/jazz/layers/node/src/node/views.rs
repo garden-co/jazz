@@ -12,9 +12,8 @@ use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef, SupportingRow,
-    VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
-    build_version_carriers_from_singletons,
+    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, SupportingRow, VersionBundle,
+    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn apply_covered_input_closure_admission_delta(
@@ -43,10 +42,7 @@ fn maintained_view_tx_versions_contain_winner(
     winner: &VersionRow,
 ) -> bool {
     tx_versions.iter().any(|candidate| {
-        candidate.table() == winner.table()
-            && candidate.row_uuid() == winner.row_uuid()
-            && candidate.layer() == winner.layer()
-            && candidate.deletion() == winner.deletion()
+        candidate.table() == winner.table() && candidate.row_uuid() == winner.row_uuid()
     })
 }
 
@@ -212,6 +208,16 @@ fn version_bundle_record_key(
     )
 }
 
+/// Where a version sits in its transaction: its authored identity, or for
+/// Core's post-image of a write, the physical row it addresses. A post-image
+/// is laid out in the row's newest schema version, which need not be the one
+/// (or name the table as) the patch it replaces was authored in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BundleRecordKey {
+    Authored((String, BranchKey, RowUuid, SchemaVersionId, bool)),
+    PostImage(PhysicalTableId, BranchKey, RowUuid, bool),
+}
+
 fn content_row_members_for_bundle(
     members: &[ResultMemberEntry],
     context: &'static str,
@@ -235,6 +241,13 @@ fn content_row_members_for_bundle(
 
 #[doc(hidden)]
 pub fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
+    !query.filters.is_empty() && single_table_scalar_query(query)
+}
+
+/// One unprojected table with only scalar filters (possibly none): its
+/// authority input rows are exactly its result roots.
+#[doc(hidden)]
+pub fn single_table_scalar_query(query: &crate::query::Query) -> bool {
     use crate::query::{Operand, Predicate};
     fn scalar(operand: &Operand) -> bool {
         !matches!(operand, Operand::Column(name) if name.contains('.') || name.starts_with('$'))
@@ -255,8 +268,7 @@ pub fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
             Predicate::EnumMatch { .. } => false,
         }
     }
-    !query.filters.is_empty()
-        && query.filters.iter().all(predicate)
+    query.filters.iter().all(predicate)
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()
@@ -293,6 +305,10 @@ pub struct MaintainedViewBundleInputs<'a> {
     pub peer_complete_tx_payloads: BTreeSet<TxId>,
     /// Optional fast known-state declaration for this served subscription.
     pub known_state: Option<KnownStateDeclaration>,
+    /// The receiver's watermark, kept even when its declaration is dropped
+    /// for a full resend: rows that moved past it and left the set still
+    /// ship their current image so the receiver's copy stops matching.
+    pub leave_scan_after: Option<GlobalTime>,
     /// Ship complete accepted exclusive transaction payloads so the receiver can
     /// use refreshed rows as a write base for later exclusive transactions.
     pub complete_exclusive_payloads: bool,
@@ -331,6 +347,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn bundle_record_key(
+        &self,
+        version: &VersionRecord,
+        post_image: bool,
+    ) -> Result<BundleRecordKey, Error> {
+        if !post_image {
+            return Ok(BundleRecordKey::Authored(version_bundle_record_key(
+                version,
+            )));
+        }
+        Ok(BundleRecordKey::PostImage(
+            self.physical_table_id_for_schema(version.schema_version(), version.table())?,
+            version.branch_key().clone(),
+            version.row_uuid(),
+            version.deletion().is_some(),
+        ))
+    }
+
     /// Recover the deletion-register winner currently visible at the
     /// subscription tier for an optimized scalar root. Result membership tells
     /// us that the row is visible, but not whether that visibility is due to a
@@ -339,22 +373,33 @@ where
     async fn storage_backed_maintained_deletion_winner(
         &mut self,
         table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
         row_uuid: RowUuid,
         tier: DurabilityTier,
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        let global = self
-            .visible_global_layer_tx_id_for_physical_table_now(
-                table_id,
-                row_uuid,
-                VersionLayer::Deletion,
-            )
-            .await;
+        self.storage_backed_current_image(table, physical_table, row_uuid, tier, context, true)
+            .await
+    }
+
+    /// The row's current image from storage; with `deletion_only`, only an
+    /// image that carries a deletion event.
+    async fn storage_backed_current_image(
+        &mut self,
+        table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
+        row_uuid: RowUuid,
+        tier: DurabilityTier,
+        context: &mut ViewEvaluationContext,
+        deletion_only: bool,
+    ) -> Result<Option<VersionRow>, Error> {
+        let table_id = self.physical_table_alias_for_identity(physical_table)?;
         let tx_id = match tier {
             // Global current storage already represents the settled winner.
-            DurabilityTier::Global => global,
+            DurabilityTier::Global => {
+                self.visible_global_tx_id_for_physical_table_now(table_id, row_uuid)
+                    .await
+            }
             // Local reads select the greatest global/ahead register winner.
             DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
             // No-tier reads do not have a settled maintained source.
@@ -372,7 +417,7 @@ where
             .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted_row)
             .await?
             .into_iter()
-            .find(|version| version.deletion().is_some()))
+            .find(|version| !deletion_only || version.deletion().is_some()))
     }
 
     async fn preflight_view_bundle_conflicts(
@@ -401,27 +446,50 @@ where
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
-            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
+            // An accepted, Core-sequenced bundle carries Core's post-images,
+            // which replace a locally stored authored unit: this node's own
+            // patch, or, on a client relay (a browser worker), the patch it
+            // relayed upstream for its downstream originator. The relay may
+            // apply the accepted fate before the post-image arrives, so a
+            // copy at the same sequence position is still that patch. Any
+            // other node holds only upstream post-images, where a differing
+            // copy is a genuine conflict.
+            let carries_post_images = matches!(bundle.fate, Fate::Accepted)
+                && bundle.global_time.is_some()
+                && (tx_id.node == self.node_uuid
+                    || (self.client_relay_scope().is_some()
+                        && (stored.global_time.is_none()
+                            || stored.global_time == bundle.global_time)));
+            // A settled transaction's stored versions are read at the
+            // bundle's coordinates; the checks below compare row for row.
+            let stored_versions = self
+                .stored_versions_for_tx_at(*tx_id, &stored, &bundle.versions)
+                .await?;
             let mut stored_by_key = BTreeMap::new();
             for stored_version in &stored_versions {
                 let version = self.version_record_from_row(stored_version)?;
-                stored_by_key.insert(version_bundle_record_key(&version), version);
+                stored_by_key.insert(
+                    self.bundle_record_key(&version, carries_post_images)?,
+                    version,
+                );
             }
-            let incoming_by_key = bundle
-                .versions
-                .iter()
-                .cloned()
-                .map(|version| (version_bundle_record_key(&version), version))
-                .collect::<BTreeMap<_, _>>();
+            let mut incoming_by_key = BTreeMap::new();
+            for version in &bundle.versions {
+                incoming_by_key.insert(
+                    self.bundle_record_key(version, carries_post_images)?,
+                    version.clone(),
+                );
+            }
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming
+                    && !carries_post_images
                 {
                     return Err(Error::ConflictingCommitUnit(*tx_id));
                 }
             }
             use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
-            match (stored.view_scoped_cardinality, bundle.scope) {
+            match (stored.is_partial, bundle.scope) {
                 (false, CompleteTransaction) => {
                     if stored.tx.n_total_writes != bundle.tx.n_total_writes
                         || stored_by_key.len() != incoming_by_key.len()
@@ -642,6 +710,7 @@ where
                 result_member_removes,
                 peer_complete_tx_payloads,
                 known_state: None,
+                leave_scan_after: None,
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 identity,
@@ -727,6 +796,42 @@ where
         if revision == [0; 16] {
             return Err(invalid());
         }
+        if let SupportingRowsUpdate::CatchUp {
+            predecessor,
+            revision,
+            changed,
+            left,
+        } = wire
+        {
+            // Resolve the watermark catch-up against the set this receiver
+            // installed as `predecessor` into the complete set it describes:
+            // coordinates that moved are replaced or dropped, the rest are
+            // held here already. From then on it is an ordinary snapshot.
+            let Some(state) = self.query.authority_results.get(&key).filter(|state| {
+                !revisions.contains_key(&key) && state.supporting_revision == Some(*predecessor)
+            }) else {
+                return Err(invalid());
+            };
+            let moved = changed
+                .iter()
+                .chain(left)
+                .map(CoveredInputCoordinate::from)
+                .collect::<BTreeSet<_>>();
+            let mut rows = state
+                .covered_input_versions
+                .iter()
+                .filter(|(coordinate, _)| !moved.contains(*coordinate))
+                .map(|(_, row)| row.clone())
+                .collect::<Vec<_>>();
+            rows.extend(changed.iter().cloned());
+            update.wire_rows = Some(SupportingRowsUpdate::Snapshot {
+                revision: *revision,
+                rows,
+            });
+        }
+        let Some(wire) = update.wire_rows.as_ref() else {
+            return Ok(None);
+        };
         if let SupportingRowsUpdate::Delta { predecessor, .. } = wire {
             let current = revisions.get(&key).copied().or_else(|| {
                 self.query
@@ -812,6 +917,7 @@ where
             settled_through,
             peer_complete_tx_payloads,
             known_state,
+            leave_scan_after,
             complete_exclusive_payloads,
             previous_result_set: _previous_result_set,
             result_member_adds,
@@ -852,19 +958,11 @@ where
         let known_state_position = match &known_state {
             Some(
                 KnownStateDeclaration::Fast { position, .. }
-                | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. },
+                | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. }
+                | KnownStateDeclaration::Watermark { position, .. },
             ) => Some(*position),
-            Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
-        };
-        let known_state_exact_refs = match &known_state {
-            Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
-                versions.iter().cloned().collect::<BTreeSet<_>>()
-            }
-            Some(
-                KnownStateDeclaration::Fast { .. }
-                | KnownStateDeclaration::FastWithAuthorizationProgress { .. },
-            )
-            | None => BTreeSet::new(),
+            Some(KnownStateDeclaration::Reserved2(retired)) => match *retired {},
+            None => None,
         };
         let skipped_known_state_rows = result_member_adds
             .iter()
@@ -875,13 +973,6 @@ where
                     && position <= declared
                 {
                     return Some((row.table.to_string(), row.row_uuid));
-                }
-                if let Some(tx_id) = row.content_tx {
-                    let version_ref =
-                        RowVersionRef::new(row.table.to_string(), row.row_uuid, tx_id);
-                    if known_state_exact_refs.contains(&version_ref) {
-                        return Some((row.table.to_string(), row.row_uuid));
-                    }
                 }
                 None
             })
@@ -904,6 +995,24 @@ where
                 by_tx
             },
         );
+        // A member that leaves and re-enters naming the same content
+        // transaction was re-settled: once Core sequences a unit, this node
+        // stores Core's post-image in place of the authored patch the peer may
+        // have received (always so for the downstream that authored it), and
+        // the supporting-row identity, keyed by transaction, cannot show that.
+        // Ship the settled payload again so the peer replaces its copy.
+        let resettled_rows = row_result_removes
+            .iter()
+            .map(|(table, row, tx)| (table.to_string(), *row, *tx))
+            .collect::<BTreeSet<_>>();
+        for (table, row_uuid, tx_id) in &row_result_adds {
+            if resettled_rows.contains(&(table.to_string(), *row_uuid, *tx_id)) {
+                wanted_add_rows_by_tx
+                    .entry(*tx_id)
+                    .or_default()
+                    .insert((table.to_string(), *row_uuid));
+            }
+        }
         // Scalar publication can retract only its covered root source;
         // the receiver derives result removal from that source delta.
         let exit_candidates = row_result_removes
@@ -975,11 +1084,7 @@ where
                 tx_versions_cache
                     .entry(tx_id)
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
-                    .extend(
-                        versions
-                            .into_iter()
-                            .filter(|version| version.deletion().is_none()),
-                    );
+                    .extend(versions.into_iter().filter(|version| !version.is_deleted()));
                 wanted_add_rows_by_tx
                     .entry(tx_id)
                     .or_default()
@@ -1008,13 +1113,11 @@ where
             .map(|(table, row, tx)| (table.as_str(), *row, *tx))
             .collect::<BTreeSet<_>>();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
-            // Scope membership and immutable-body availability are independent.
-            // A resumed physical snapshot still declares every input, while a
-            // cursor/exact inventory may omit its already-held native bodies.
-            // An inaccurate availability claim is handled by scoped row repair.
-            if wanted_rows.iter().all(|(table, row)| {
-                known_state_exact_refs.contains(&RowVersionRef::new(table.clone(), *row, *tx_id))
-            }) || if let Some(position) = known_state_position {
+            // Scope membership and body availability are independent. A
+            // resumed snapshot still declares every input, while rows the
+            // receiver holds through its watermark ship no body. A receiver
+            // that lost one asks again without known state.
+            if if let Some(position) = known_state_position {
                 self.query_transaction_memo(*tx_id, &mut context)
                     .await?
                     .and_then(|tx| tx.global_time)
@@ -1041,7 +1144,7 @@ where
             // multiple versions/layers for a coordinate).
             let mut content_coordinates = tx_versions
                 .iter()
-                .filter(|version| version.deletion().is_none())
+                .filter(|version| !version.is_deleted())
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
@@ -1053,7 +1156,7 @@ where
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
                 if let Some(content_winner) = content_winner {
                     if self.version_tx_id(&content_winner)? == *tx_id {
-                        if content_winner.deletion().is_none() {
+                        if !content_winner.is_deleted() {
                             content_coordinates.insert((
                                 content_winner.table().to_owned(),
                                 content_winner.row_uuid(),
@@ -1101,6 +1204,12 @@ where
                             None if allow_storage_witness_fallback => {
                                 self.storage_backed_maintained_deletion_winner(
                                     entry_table,
+                                    *maintained_facts
+                                        .physical_tables
+                                        .get(&groove::Intern::new(entry_table.to_owned()))
+                                        .ok_or(Error::InvalidStoredValue(
+                                            "maintained source physical identity missing",
+                                        ))?,
                                     *row_uuid,
                                     tier,
                                     &mut context,
@@ -1208,6 +1317,11 @@ where
                     None if allow_storage_witness_fallback => {
                         self.storage_backed_maintained_deletion_winner(
                             entry_table,
+                            *maintained_facts.physical_tables.get(entry_table).ok_or(
+                                Error::InvalidStoredValue(
+                                    "maintained source physical identity missing",
+                                ),
+                            )?,
                             *row_uuid,
                             tier,
                             &mut context,
@@ -1231,21 +1345,176 @@ where
                 "add result row missing deletion replacement witness",
             ));
         }
-        for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
+        let mut storage_deletion_txs = BTreeSet::<TxId>::new();
+        // Rows that left the result or its covered sources. A deleted row
+        // simply leaves; its deleted image is shipped so the reader's store
+        // learns the deletion.
+        let mut removed_row_candidates = row_result_removes
+            .iter()
+            .map(|(table, row, tx)| (table.to_string(), *row, Some(*tx), true))
+            .chain(
+                // A catch-up's leaving rows name their current image, which
+                // is exactly what must ship; the cursor scan below adds them.
+                if matches!(
+                    supporting_update,
+                    crate::protocol::SupportingRowsUpdate::CatchUp { .. }
+                ) {
+                    Default::default()
+                } else {
+                    supporting_update.removed_rows()
+                }
+                .iter()
+                .filter_map(|row| {
+                    let table = *logical_tables.get(&row.physical_table)?;
+                    Some((table.to_owned(), row.row, Some(row.version.tx), false))
+                }),
+            )
+            .fold(
+                BTreeMap::<(String, RowUuid), (Option<TxId>, bool)>::new(),
+                |mut acc, (table, row, tx, is_member)| {
+                    let entry = acc.entry((table, row)).or_insert((tx, is_member));
+                    entry.1 |= is_member;
+                    acc
+                },
+            );
+        // A joined occurrence leaves when one of its joined rows is deleted,
+        // while its root row stays live. Nothing else names that joined row,
+        // so offer it as a candidate: the storage probe below ships its
+        // deleted image, and skips it when it is still live.
+        let joined_tables = logical_tables
+            .values()
+            .copied()
+            .filter(|table| *table != shape.query().table)
+            .collect::<BTreeSet<_>>();
+        if !joined_tables.is_empty() {
+            for member in &result_member_removes {
+                let Some(row) = member.as_real_row() else {
+                    continue;
+                };
+                let Some(occurrence) = &row.occurrence_id else {
+                    continue;
+                };
+                for joined in occurrence.joined_sources() {
+                    let row_uuid = RowUuid(*joined.uuid());
+                    for table in &joined_tables {
+                        removed_row_candidates
+                            .entry(((*table).to_owned(), row_uuid))
+                            .or_insert((None, false));
+                    }
+                }
+            }
+        }
+        // A reset from a known cursor cannot name the rows the reader holds,
+        // so every source row that changed after the cursor is a candidate.
+        // One that is not in the new set left it: like a catch-up's leaving
+        // row, it ships its current image so the reader's copy stops matching.
+        let supporting_now = supporting_update
+            .added_rows()
+            .iter()
+            .filter_map(|row| {
+                let table = *logical_tables.get(&row.physical_table)?;
+                Some((table.to_owned(), row.row))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut cursor_left = BTreeSet::new();
+        if let (
+            crate::protocol::SupportingRowsUpdate::Snapshot { .. }
+            | crate::protocol::SupportingRowsUpdate::CatchUp { .. },
+            Some(position),
+        ) = (
+            &supporting_update,
+            known_state_position.or(leave_scan_after),
+        ) {
+            for (physical_table, table) in &logical_tables {
+                for row_uuid in self
+                    .global_rows_changed_after(*physical_table, position)
+                    .await?
+                {
+                    let key = ((*table).to_owned(), row_uuid);
+                    if !supporting_now.contains(&key) {
+                        cursor_left.insert(key.clone());
+                    }
+                    removed_row_candidates.entry(key).or_insert((None, false));
+                }
+            }
+        }
+        // Rows leaving by catch-up ship their current image, deleted or not,
+        // so the receiver's copy stops matching the query.
+        let mut catch_up_left = match &supporting_update {
+            crate::protocol::SupportingRowsUpdate::CatchUp { left, .. } => left
+                .iter()
+                .filter_map(|row| {
+                    let table = *logical_tables.get(&row.physical_table)?;
+                    Some((table.to_owned(), row.row))
+                })
+                .collect::<BTreeSet<_>>(),
+            _ => BTreeSet::new(),
+        };
+        catch_up_left.extend(cursor_left);
+        // A leaving row's live image is disclosed only when this reader may
+        // still read it; otherwise only a deletion ships.
+        let mut unreadable_left = BTreeSet::new();
+        for (table, row_uuid) in &catch_up_left {
+            // A table added after this node opened may exist only in the
+            // admitted active schema. Skip this local-schema shortcut there;
+            // the ordinary covered read below resolves the active schema.
+            if self.table(table).is_ok_and(|table| {
+                table
+                    .read_policy
+                    .as_ref()
+                    .is_none_or(crate::peer::read_policy_admits_every_row)
+            }) {
+                continue;
+            }
+            let (read_shape, read_binding) = self.whole_table_shape_binding(table)?;
+            let readable = self
+                .query_rows_for_link_physical_row(
+                    &read_shape,
+                    &read_binding,
+                    tier,
+                    identity,
+                    *row_uuid,
+                )
+                .await?
+                .iter()
+                .any(|row| row.row_uuid() == *row_uuid);
+            if !readable {
+                unreadable_left.insert((table.clone(), *row_uuid));
+            }
+        }
+        catch_up_left.retain(|key| !unreadable_left.contains(key));
+        for ((entry_table, row_uuid), (old_tx_id, is_member)) in &removed_row_candidates {
+            let entry_table = entry_table.as_str();
             let (content_winner, retained_deletion_winner) =
                 maintained_facts.replacement_for(entry_table, *row_uuid);
+            let content_winner = content_winner.filter(|_| *is_member);
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback => {
-                    self.storage_backed_maintained_deletion_winner(
-                        entry_table,
-                        *row_uuid,
-                        tier,
-                        &mut context,
-                    )
-                    .await?
+                None => {
+                    let leaves = catch_up_left.contains(&(entry_table.to_owned(), *row_uuid));
+                    let winner = self
+                        .storage_backed_current_image(
+                            entry_table,
+                            *maintained_facts
+                                .physical_tables
+                                .get(&groove::Intern::new(entry_table.to_owned()))
+                                .ok_or(Error::InvalidStoredValue(
+                                    "maintained source physical identity missing",
+                                ))?,
+                            *row_uuid,
+                            tier,
+                            &mut context,
+                            !leaves,
+                        )
+                        .await?;
+                    let winner = winner.filter(|winner| {
+                        leaves || winner.deletion() == Some(crate::tx::DeletionEvent::Deleted)
+                    });
+                    if let Some(winner) = &winner {
+                        storage_deletion_txs.insert(self.version_tx_id(winner)?);
+                    }
+                    winner
                 }
-                None => None,
             };
             for (version, missing_witness) in [
                 (
@@ -1261,7 +1530,7 @@ where
                     continue;
                 };
                 let tx_id = self.version_tx_id(version)?;
-                if tx_id == *old_tx_id || emitted_versions.contains(&tx_id) {
+                if Some(tx_id) == *old_tx_id || emitted_versions.contains(&tx_id) {
                     continue;
                 }
                 replacement_winners_by_tx.entry(tx_id).or_default().push((
@@ -1292,7 +1561,7 @@ where
             if winners.iter().any(|(_, _, winner, _)| {
                 !maintained_view_tx_versions_contain_winner(tx_versions, winner)
             }) {
-                if !allow_storage_witness_fallback {
+                if !allow_storage_witness_fallback && !storage_deletion_txs.contains(&tx_id) {
                     let (_, _, _, missing_witness) = winners
                         .iter()
                         .find(|(_, _, winner, _)| {
@@ -1564,9 +1833,6 @@ where
             for version in &bundle.versions {
                 self.ensure_schema_version_alias(version.schema_version())
                     .await?;
-                for parent in version.parents() {
-                    self.ensure_node_alias(parent.node).await?;
-                }
             }
         }
         let mut receiver_batch = self.database.open_batch();
@@ -1593,15 +1859,10 @@ where
                 deferred_bundles.push(bundle);
             }
         }
-        self.write_merge_heads_for_bulk_content_versions(
-            &mut receiver_batch,
-            &receiver_batch_content_versions,
-        )
-        .await?;
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
-            let applied = self.database.apply_batch(receiver_batch).await?;
+            let applied = self.apply_node_batch(receiver_batch).await?;
             let persisted = self.database.persist_with_progress(&applied).await;
             self.database.finish_persistence(persisted)?;
             for rejected in receiver_batch_rejections {
@@ -1612,11 +1873,9 @@ where
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }
-            for global_time in receiver_batch_global_times {
-                self.record_applied_global_time(global_time);
+            for (global_time, tx_id) in receiver_batch_global_times {
+                self.record_applied_global_time(global_time, tx_id);
             }
-            self.settle_completed_parent_batch(&receiver_batch_tx_ids)
-                .await?;
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
         preloaded_tx_ids.extend(receiver_batch_tx_ids);
@@ -1918,11 +2177,6 @@ where
                         bundle.tx.tx_id,
                         version.table().to_owned(),
                         version.row_uuid(),
-                        if version.deletion().is_some() {
-                            crate::protocol::ResultRowLayer::Deletion
-                        } else {
-                            crate::protocol::ResultRowLayer::Content
-                        },
                         version.branch_key().canonical_bytes(),
                     )
                 })
@@ -1933,17 +2187,20 @@ where
         // to a same-frame body: the receiver already admitted that complete
         // immutable transaction on this link. Re-read its stored bodies before
         // accepting a source coordinate, rather than trusting the sender's
-        // declaration alone.
+        // declaration alone. A settled transaction whose list was released
+        // is checked per coordinate below, by the resident-body point read.
         for tx_id in &referenced_complete_payloads {
-            for version in self.query_versions_for_tx(*tx_id).await? {
+            let Some(stored) = self.query_transaction(*tx_id).await? else {
+                continue;
+            };
+            let Some(listed) = self.query_listed_versions_for_tx(*tx_id, &stored).await? else {
+                continue;
+            };
+            for version in listed {
                 admitted_versions.insert((
                     *tx_id,
                     version.table().to_owned(),
                     version.row_uuid(),
-                    match version.layer() {
-                        VersionLayer::Content => crate::protocol::ResultRowLayer::Content,
-                        VersionLayer::Deletion => crate::protocol::ResultRowLayer::Deletion,
-                    },
                     version.branch_key().canonical_bytes(),
                 ));
             }
@@ -1955,7 +2212,6 @@ where
                     input.version.tx,
                     input.version_table.to_string(),
                     input.row,
-                    input.version.layer,
                     input.version.branch_or_prefix.clone().unwrap_or_default(),
                 );
                 let staged_body_witness = admitted_versions.contains(&coordinate);
@@ -2016,15 +2272,16 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
             return Ok(None);
         };
-        let layer = match input.version.layer {
-            crate::protocol::ResultRowLayer::Content => VersionLayer::Content,
-            crate::protocol::ResultRowLayer::Deletion => VersionLayer::Deletion,
+        // Content and deletion witnesses name the same stored row image.
+        match input.version.layer {
+            crate::protocol::ResultRowLayer::Content
+            | crate::protocol::ResultRowLayer::Deletion => {}
             crate::protocol::ResultRowLayer::ContentOrDeletion => {
                 return Err(Error::InvalidStoredValue(
                     "covered input must name one concrete version layer",
                 ));
             }
-        };
+        }
         let branch_key = input
             .version
             .branch_or_prefix
@@ -2040,7 +2297,6 @@ where
                     .as_str(),
                 &branch_key,
                 input.row,
-                layer,
                 input.version.tx.time,
                 tx_node_alias,
             )
@@ -2091,6 +2347,13 @@ where
             }
             Some(crate::protocol::SupportingRowsUpdate::Delta { adds, removes, .. }) => {
                 (adds, removes)
+            }
+            // Normalization turns a catch-up into an exact delta first.
+            Some(crate::protocol::SupportingRowsUpdate::CatchUp { .. }) => {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription,
+                    transition: "catch-up without an installed predecessor".to_owned(),
+                });
             }
             None => (Vec::new(), Vec::new()),
         };
@@ -2356,16 +2619,38 @@ where
         // Only this fully admitted in-process update establishes a predecessor.
         // Neither membership nor transport revisions survive process restart.
         if !defer_settlement && !opening_pending {
-            if let Some(state) = self.query.authority_results.get_mut(&authority_result_key)
-                && matches!(
-                    state.source_closure,
-                    crate::node::AuthoritySourceClosure::Claimed { .. }
-                )
-            {
+            let claimed = self
+                .query
+                .authority_results
+                .get(&authority_result_key)
+                .filter(|state| {
+                    matches!(
+                        state.source_closure,
+                        crate::node::AuthoritySourceClosure::Claimed { .. }
+                    )
+                })
+                .map(|state| state.settled_through);
+            if let Some(settled_through) = claimed {
+                // Record the watermark before installing it in memory: a
+                // cancelled write then leaves no in-process revision behind.
+                if let (Some(settled_through), Some(revision)) =
+                    (settled_through, normalized_snapshot)
+                    && let Some(shape) = self.registered_shape(subscription.shape_id)
+                    && self.watermark_catch_up_view(&shape)
+                {
+                    self.persist_subscription_watermark(
+                        &authority_result_key,
+                        settled_through,
+                        revision,
+                    )
+                    .await?;
+                }
                 // Only this exact successfully applied frame can install its
                 // normalized predecessor. Legacy/deferred/opening frames do
                 // not preserve an earlier frame's cache accidentally.
-                state.supporting_revision = normalized_snapshot;
+                if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+                    state.supporting_revision = normalized_snapshot;
+                }
             }
         }
         Ok(())
@@ -2427,9 +2712,7 @@ where
             // so a relay can serve it onward. Further authorized siblings from
             // that same view-scoped transaction must extend that projection;
             // fragments first learned outside such a reset remain history-only.
-            let extend_current_view = stored_tx
-                .as_ref()
-                .is_some_and(|stored| stored.view_scoped_cardinality);
+            let extend_current_view = stored_tx.as_ref().is_some_and(|stored| stored.is_partial);
             let mut known_keys = if stored_tx.is_some() {
                 self.query_versions_for_tx(tx_id)
                     .await?
@@ -2490,9 +2773,14 @@ where
         if is_tx_complete {
             let mut complete_versions = Vec::with_capacity(complete_len);
             let mut complete_keys = BTreeSet::new();
-            for version in stored_versions
-                .drain(..)
-                .chain(bundle.versions.iter().cloned())
+            // The delivered versions come first: for an accepted transaction
+            // they are the authority's post-images, which replace this node's
+            // own copy (for the originator, its patch or its local merge).
+            for version in bundle
+                .versions
+                .iter()
+                .cloned()
+                .chain(stored_versions.drain(..))
             {
                 if complete_keys.insert(view_version_key(&version)) {
                     complete_versions.push(version);
@@ -2523,7 +2811,7 @@ where
         batch: &mut DatabaseBatch,
         bundle: &VersionBundle,
         staged_tx_ids: &mut BTreeSet<TxId>,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_content_versions: &mut Vec<VersionRow>,
         staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<bool, Error> {
@@ -2746,7 +3034,7 @@ where
         // view-scoped bundle. Its stored cardinality then describes that
         // fragment, so matching it to the selected versions does not prove
         // that the complete transaction is known.
-        let scope = if !stored_tx.view_scoped_cardinality
+        let scope = if !stored_tx.is_partial
             && usize::try_from(n_total_writes).ok() == Some(versions.len())
         {
             crate::protocol::VersionBundleScope::CompleteTransaction
@@ -2820,20 +3108,31 @@ where
             })
             .collect::<BTreeSet<_>>();
         let witness_tx_id = self.version_tx_id(version)?;
+        let witness_branch = version.branch_key().canonical_bytes();
         let physical_candidates = if logical_candidates.len() == 1 {
             logical_candidates
         } else {
-            self.query_versions_for_tx(witness_tx_id)
-                .await?
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.row_uuid() == version.row_uuid()
-                        && candidate.branch_key() == version.branch_key()
-                        && candidate.layer() == version.layer()
-                })
-                .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
-                .filter(|table_id| logical_candidates.contains(table_id))
-                .collect::<BTreeSet<_>>()
+            // Keep the candidate tables that hold this row for the witness's
+            // transaction: one exact point read per candidate.
+            let mut holding = BTreeSet::new();
+            if let Some(stored_tx) = self.query_transaction(witness_tx_id).await? {
+                for table_id in logical_candidates {
+                    if self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        holding.insert(table_id);
+                    }
+                }
+            }
+            holding
         };
         let [projected_table_id] = physical_candidates.iter().copied().collect::<Vec<_>>()[..]
         else {
@@ -2857,18 +3156,16 @@ where
                 // physical table, branch, row, transaction, and layer. This is the
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
-                if let Some(canonical) = self
-                    .query_versions_for_tx(witness_tx_id)
-                    .await?
-                    .into_iter()
-                    .find(|candidate| {
-                        candidate.row_uuid() == version.row_uuid()
-                            && candidate.branch_key() == version.branch_key()
-                            && candidate.layer() == version.layer()
-                            && self
-                                .physical_table_id_for_version(candidate)
-                                .is_ok_and(|table_id| table_id == projected_table_id)
-                    })
+                if let Some(stored_tx) = self.query_transaction(witness_tx_id).await?
+                    && let Some(canonical) = self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            projected_table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
                 {
                     return Ok(canonical);
                 }
@@ -2883,9 +3180,7 @@ where
         // descriptor can be identical to history storage while selected-out
         // cells are still typed nulls, so first prefer its immutable stored
         // history identity even when the descriptors match.
-        for storage_table in
-            self.version_storage_sources_for_layer(version.table(), version.layer())?
-        {
+        for storage_table in self.version_storage_sources(version.table())? {
             let Some(canonical) = self
                 .query_version_by_alias_with_storage_in_schema(
                     authored_schema,
@@ -2917,19 +3212,16 @@ where
         // Only synthetic rows need a reconstructed descriptor. Ordinary rows
         // returned above already carry the immutable store's authored layout.
         let authored_table = self.table_in_schema_ref(version.table(), authored_schema)?;
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
+        let authored_descriptor = authored_table.history_storage_table().record_schema();
         let has_authored_layout = version.record.descriptor() == &authored_descriptor;
         let has_complete_authored_payload = has_authored_layout
-            && (version.layer() == VersionLayer::Deletion
+            && (version.deletion().is_some()
                 || match self.authored_columns_for_version(version)? {
                     Some(authored) => authored.iter().all(|column| {
-                        version
-                            .cell(&authored_table, column)
-                            .is_ok_and(|value| value.is_some())
+                        column == DELETION_COLUMN_NAME
+                            || version
+                                .cell(&authored_table, column)
+                                .is_ok_and(|value| value.is_some())
                     }),
                     // Legacy complete rows predate authored-column metadata.
                     None => true,
@@ -2943,11 +3235,10 @@ where
     }
 }
 
-fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid, VersionLayer) {
+fn view_version_key(version: &VersionRecord) -> (String, BranchKey, RowUuid) {
     (
         version.table().to_owned(),
         version.branch_key().clone(),
         version.row_uuid(),
-        VersionLayer::for_record(version),
     )
 }

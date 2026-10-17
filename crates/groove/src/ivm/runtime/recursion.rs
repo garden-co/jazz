@@ -137,6 +137,7 @@ pub(super) enum RecursiveDeltaProgress {
 
 pub(super) struct HydrationRecomputeContext<'a> {
     pub(super) schema: &'a crate::schema::DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     /// `Some` routes source reads through the session request registry; `None`
@@ -472,6 +473,7 @@ impl HydrationTraversal {
             remaining -= 1;
             let mut evaluator = HydrationEvaluator {
                 schema: context.schema,
+                dictionaries: context.dictionaries,
                 graph: context.graph,
                 variant_projections: context.variant_projections,
                 table_deltas: context.table_deltas,
@@ -727,6 +729,7 @@ pub(super) async fn recursive_delta(
             recursive_state,
             HydrationRecomputeContext {
                 schema: runtime.schema,
+                dictionaries: runtime.dictionaries,
                 graph: runtime.graph,
                 variant_projections: runtime.variant_projections,
                 inputs: runtime.evaluation_inputs.as_deref_mut(),
@@ -789,13 +792,20 @@ pub(super) async fn recursive_delta(
         let full_table_deltas = match runtime.evaluation_inputs.as_deref_mut() {
             Some(inputs) => snapshot_table_deltas_from_inputs(
                 runtime.schema,
+                runtime.dictionaries,
                 runtime.graph,
                 inputs,
                 nodes.seed,
             )?,
             None => {
-                snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, nodes.seed)
-                    .await?
+                snapshot_table_deltas(
+                    runtime.schema,
+                    runtime.dictionaries,
+                    runtime.graph,
+                    runtime.storage,
+                    nodes.seed,
+                )
+                .await?
             }
         };
         runtime
@@ -1224,7 +1234,14 @@ pub(super) async fn hydrate_recursive_arrangements(
     let full_table_deltas = if runtime.evaluation_inputs.is_some() {
         Vec::new()
     } else {
-        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step).await?
+        snapshot_table_deltas(
+            runtime.schema,
+            runtime.dictionaries,
+            runtime.graph,
+            runtime.storage,
+            step,
+        )
+        .await?
     };
     if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
         let records = full_table_deltas
@@ -1258,6 +1275,7 @@ pub(super) async fn hydrate_recursive_arrangements(
 
 pub(super) async fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
+    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     storage: &dyn OrderedKvStorage,
     root: NodeId,
@@ -1269,7 +1287,7 @@ pub(super) async fn snapshot_table_deltas(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = table_schema.storage_record_schema();
         let store = super::record_store_for_table(storage, table_schema, &storage_descriptor);
         let mut cursor = match &source.scan {
             None => Some(store.scan(ScanBounds::Prefix(Vec::new())).await?),
@@ -1289,39 +1307,18 @@ pub(super) async fn snapshot_table_deltas(
                 stored_records.extend(batch.into_iter().map(|(_, record)| record));
             }
         }
-        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: source.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            by_variant
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        output.extend(
-            by_variant
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: source.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                }),
-        );
+        output.extend(NodeState::group_source_rows(
+            table_schema,
+            dictionaries,
+            stored_records.iter().map(Vec::as_slice),
+        )?);
     }
     Ok(output)
 }
 
 fn snapshot_table_deltas_from_inputs(
     schema: &crate::schema::DatabaseSchema,
+    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     inputs: &mut EvaluationInputs,
     root: NodeId,
@@ -1348,33 +1345,11 @@ fn snapshot_table_deltas_from_inputs(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: source.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            by_variant
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        output.extend(
-            by_variant
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: source.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                }),
-        );
+        output.extend(NodeState::group_source_rows(
+            table_schema,
+            dictionaries,
+            stored_records,
+        )?);
     }
     Ok(output)
 }
@@ -1578,6 +1553,7 @@ pub(super) fn hydrated_arg_by_winners(
 /// Full-snapshot evaluator used by recursive recompute fallback.
 struct HydrationEvaluator<'a> {
     schema: &'a crate::schema::DatabaseSchema,
+    dictionaries: &'a crate::dictionary::SharedDictionaries,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: Option<&'a [TableDelta]>,
@@ -1607,6 +1583,7 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => NodeState::update_table_source_from_inputs(
                         table,
                         self.schema,
+                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1626,6 +1603,7 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => super::NodeState::update_index_source_from_inputs(
                         index,
                         self.schema,
+                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1677,6 +1655,11 @@ impl HydrationEvaluator<'_> {
                     }
                 }
                 OpType::Arrange(_) => self.eval_unary_input(graph_node, node).await,
+                // A lookup's storage probes are driven by evaluation
+                // sessions, which this recursive step evaluator is not.
+                OpType::Lookup(_) => Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup cannot run in a recursive step",
+                )),
                 OpType::Filter(filter) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     NodeState::update_filter(filter, output_desc, &input)
@@ -1901,39 +1884,18 @@ impl HydrationEvaluator<'_> {
             .schema
             .table(&table.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = table_schema.storage_record_schema();
         let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
         let mut scan = store.scan(ScanBounds::Prefix(Vec::new())).await?;
         let mut stored_records = Vec::<Vec<u8>>::new();
         while let Some(batch) = scan.next_batch().await? {
             stored_records.extend(batch.into_iter().map(|(_, record)| record));
         }
-        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: table.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            grouped
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        let table_deltas = grouped
-            .into_iter()
-            .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                table: table.table.clone(),
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-            .collect::<Vec<_>>();
+        let table_deltas = NodeState::group_source_rows(
+            table_schema,
+            self.dictionaries,
+            stored_records.iter().map(Vec::as_slice),
+        )?;
         NodeState::update_table_source(
             table,
             self.schema,

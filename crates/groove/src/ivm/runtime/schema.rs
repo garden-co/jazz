@@ -100,8 +100,9 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
+        self.schema.validate_table_interning(&table)?;
         self.table_storage_descriptors
-            .insert(table.name.clone(), table.record_schema());
+            .insert(table.name.clone(), table.storage_record_schema());
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
@@ -128,6 +129,16 @@ impl IvmRuntime {
         columns: Vec<crate::schema::ColumnSchema>,
         variant_tag: crate::schema::TableVariant,
     ) -> Result<(), IvmRuntimeError> {
+        {
+            let mut candidate = self
+                .schema
+                .table(table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+                .clone();
+            candidate.columns.extend(columns.iter().cloned());
+            candidate.variants.push(variant_tag.clone());
+            self.schema.validate_table_interning(&candidate)?;
+        }
         let table_schema = self
             .schema
             .tables
@@ -161,7 +172,7 @@ impl IvmRuntime {
         }
         table_schema.variants.push(variant_tag);
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
         let descriptor = table_schema
             .record_schema_for_variant(version)
             .expect("the newly registered variant exists");
@@ -243,7 +254,7 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
         if !table_schema.has_variants() {
             // Registry evolution changes column types; the plain-table
             // descriptor must follow, as registration keeps it.
@@ -299,6 +310,9 @@ impl IvmRuntime {
             .indices
             .push(index.clone());
         let table_schema = self.schema.tables[table_position].clone();
+        // A runtime (re)creation always backfills under a fresh durable id:
+        // entries a dropped incarnation left behind are never read.
+        self.index_ids.borrow_mut().retire(table, &index.name);
         if table_schema.has_variants() {
             let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
             self.define_variant_projection_target(
@@ -326,14 +340,19 @@ impl IvmRuntime {
         let snapshot = self
             .hydration_snapshot(input, storage, HydrationMode::Ordinary)
             .await?;
-        apply_persist_delta(
+        // The new index's id registration becomes durable in the same atomic
+        // write as its backfilled entries, never after them.
+        let registrations = self.index_ids.borrow().pending();
+        persist::apply_persist_delta_with(
             storage,
             &persist_op.storage,
             &persist_op.key_fields,
             persist_op.unique,
             &snapshot,
+            registrations.operations().to_vec(),
         )
         .await?;
+        self.index_ids.borrow_mut().mark_persisted(&registrations);
         Ok(())
     }
 

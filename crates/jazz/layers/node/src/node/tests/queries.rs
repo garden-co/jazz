@@ -1,4 +1,4 @@
-use crate::query::{in_list, is_null};
+use crate::query::is_null;
 
 fn access_path_schema() -> JazzSchema {
     build_public_test_schema(
@@ -654,7 +654,11 @@ fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
         let (optional_rows, optional_metrics) =
             query_rows_by_uuid(&mut core, optional.clone(), tier);
         assert_eq!(optional_rows, vec![matching_optional]);
-        assert_eq!(optional_metrics.source_index_probes, 1);
+        // A Local read also probes the local delta; its mask over origin is
+        // the delta's presence (read whole or by origin's candidates), not an
+        // index probe.
+        let probes = if tier == DurabilityTier::Local { 2 } else { 1 };
+        assert_eq!(optional_metrics.source_index_probes, probes);
         let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
         assert_eq!(required_rows, vec![matching_required]);
         let (null_rows, _) = query_rows_by_uuid(&mut core, explicit_null.clone(), tier);
@@ -742,11 +746,11 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_primary_key_scans, 0);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 1);
-    assert_eq!(
-        local_metrics.source_full_scans, 1,
-        "Local index reads must scan ahead candidates because a newer winner can change owner"
-    );
+    // Origin and local-delta index probes; a newer pending winner that
+    // changed owner masks its origin image through the delta's presence,
+    // not an index probe.
+    assert_eq!(local_metrics.source_index_probes, 2);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -815,8 +819,234 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
         local.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([moved_in, duplicate])
     );
-    assert_eq!(metrics.source_index_probes, 1);
-    assert_eq!(metrics.source_full_scans, 1);
+    // Origin and the local delta each probe the index once.
+    assert_eq!(metrics.source_index_probes, 2);
+    assert_eq!(metrics.source_full_scans, 0);
+}
+
+/// The local delta masks origin under an index by its presence, read whole
+/// or by origin's candidates, whichever reads fewer rows. Both regimes stay
+/// exact for a pending edit that moved a row out of the prefix, and a node
+/// whose delta dwarfs origin's candidates (a local-only node: everything
+/// pending, nothing settled) reads the delta's rows under the prefix only,
+/// not the whole delta.
+///
+/// ```text
+/// settled owner_a: moved_out (+ `extra` more settled owner_a rows)
+/// pending:         moved_out -> owner_b, plus 12 new owner_b rows, plus kept@owner_a
+/// Local owner_a ─► {kept, extra..}   (never moved_out)
+/// ```
+#[test]
+fn local_indexed_read_masks_origin_by_the_cheaper_presence_read() {
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let moved_out = row(0x31);
+    let kept = row(0x32);
+    let new_rows = (0..12).map(|i| row(0x40 + i)).collect::<Vec<_>>();
+    // 0 extra settled rows: 1 settled candidate < 14 pending rows, so the
+    // delta is looked up by the candidates. 20: 21 >= 14, read whole.
+    for extra in [0_u8, 20] {
+        let (_core_dir, mut core) = open_node_with_schema(node(9), access_path_schema());
+        let extra_rows = (0..extra).map(|i| row(0x80 + i)).collect::<Vec<_>>();
+        for (tx_time, row_uuid) in std::iter::once(moved_out)
+            .chain(extra_rows.iter().copied())
+            .enumerate()
+        {
+            let tx_id = core
+                .commit_mergeable_settled(
+                    MergeableCommit::new("docs", row_uuid, 10 + tx_time as u64)
+                        .cells(access_path_doc_cells(owner_a, "open", "settled")),
+                )
+                .unwrap();
+            let global_time = core.allocate_global_time_for_test();
+            core.apply_fate_update(
+                tx_id,
+                Fate::Accepted,
+                Some(global_time),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        core.commit_mergeable_settled(MergeableCommit::new("docs", moved_out, 100).cells(
+            access_path_doc_cells(owner_b, "open", "pending owner change"),
+        ))
+        .unwrap();
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", kept, 101)
+                .cells(access_path_doc_cells(owner_a, "open", "pending")),
+        )
+        .unwrap();
+        for (offset, row_uuid) in new_rows.iter().copied().enumerate() {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("docs", row_uuid, 102 + offset as u64)
+                    .cells(access_path_doc_cells(owner_b, "open", "pending")),
+            )
+            .unwrap();
+        }
+
+        let query =
+            Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))));
+        core.reset_storage_read_metrics();
+        let (local, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+        let reads = core.take_storage_read_metrics();
+
+        assert_eq!(
+            local.into_iter().collect::<BTreeSet<_>>(),
+            std::iter::once(kept).chain(extra_rows).collect::<BTreeSet<_>>(),
+            "extra = {extra}"
+        );
+        assert_eq!(metrics.source_index_probes, 2, "extra = {extra}");
+        assert_eq!(metrics.source_full_scans, 0, "extra = {extra}");
+        let ahead = (
+            reads.ahead_current_rows.reads,
+            reads.ahead_current_rows.ranges,
+        );
+        if extra == 0 {
+            // `kept` under the prefix (one range), and `moved_out` looked up
+            // by the one settled candidate (one probe); never the twelve
+            // unrelated pending rows.
+            assert_eq!(ahead, (2, 2), "lookup arm: {reads:?}");
+        } else {
+            // The whole delta is the cheaper read here: `kept` under the
+            // prefix, then all fourteen pending rows in one range.
+            assert_eq!(ahead, (15, 2), "whole arm: {reads:?}");
+        }
+        assert_eq!(metrics.local_mask_count_fallbacks, 0, "extra = {extra}");
+    }
+}
+
+fn branched_access_path_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .branch_by("branch_id")
+                .index_only(["owner"]),
+        ),
+    )
+}
+
+/// The local delta's whole presence is read only under the read's own
+/// branch keys, so the choice of mask counts only their pending rows. A
+/// synced node holding a large local draft branch reads `main`, where
+/// little is pending and origin holds many candidates: the delta is read
+/// whole, exactly as if the draft did not exist, never looked up once per
+/// origin candidate because the draft's rows inflated the pending count.
+///
+/// ```text
+/// main,  settled: 20 owner_a rows (candidates), moved_out among them
+/// main,  pending: moved_out -> owner_b, kept@owner_a        (P = 2)
+/// draft, pending: `draft_rows` owner_a rows                 (0 or 40)
+/// Local owner_a on main ─► settled - moved_out + kept, same reads either way
+/// ```
+#[test]
+fn local_mask_choice_counts_only_the_read_branch_pending_rows() {
+    let schema = branched_access_path_schema();
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let kept = row(0x32);
+    let settled_rows = (0..20).map(|i| row(0x80 + i)).collect::<Vec<_>>();
+    let moved_out = settled_rows[0];
+    let main = branch_selector(0x01);
+    let draft = branch_selector(0xd7);
+    let mut measured = Vec::new();
+    for draft_rows in [0_u8, 40] {
+        let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+        for (tx_time, row_uuid) in settled_rows.iter().copied().enumerate() {
+            let tx_id = core
+                .commit_mergeable_settled(
+                    MergeableCommit::new("docs", row_uuid, 10 + tx_time as u64)
+                        .branch(main.clone())
+                        .cells(access_path_doc_cells(owner_a, "open", "settled")),
+                )
+                .unwrap();
+            let global_time = core.allocate_global_time_for_test();
+            core.apply_fate_update(
+                tx_id,
+                Fate::Accepted,
+                Some(global_time),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", moved_out, 100)
+                .branch(main.clone())
+                .cells(access_path_doc_cells(owner_b, "open", "pending owner change")),
+        )
+        .unwrap();
+        core.commit_mergeable_settled(
+            MergeableCommit::new("docs", kept, 101)
+                .branch(main.clone())
+                .cells(access_path_doc_cells(owner_a, "open", "pending")),
+        )
+        .unwrap();
+        for offset in 0..draft_rows {
+            core.commit_mergeable_settled(
+                MergeableCommit::new("docs", row(0x40 + offset), 102 + u64::from(offset))
+                    .branch(draft.clone())
+                    .cells(access_path_doc_cells(owner_a, "open", "draft")),
+            )
+            .unwrap();
+        }
+
+        let shape = Query::from("docs")
+            .filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::BranchView {
+                head: main.clone(),
+                base: None,
+            },
+        };
+        core.reset_query_engine_read_metrics();
+        core.reset_storage_read_metrics();
+        let snapshot = core
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &read_view,
+            )
+            .unwrap();
+        let reads = core.take_storage_read_metrics();
+        let metrics = core.query_engine_read_metrics().clone();
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .take(snapshot.root_count)
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            settled_rows[1..]
+                .iter()
+                .copied()
+                .chain([kept])
+                .collect::<BTreeSet<_>>(),
+            "draft_rows = {draft_rows}"
+        );
+        assert_eq!(metrics.source_full_scans, 0, "draft_rows = {draft_rows}");
+        assert_eq!(metrics.local_mask_count_fallbacks, 0);
+        // Origin's 20 candidates under the prefix, plus counting them only
+        // up to main's two pending rows. Counted against every branch's
+        // pending rows (42), the count would read all 20 and pick a lookup.
+        assert_eq!(
+            reads.global_current_indexes.reads, 22,
+            "draft_rows = {draft_rows}: {reads:?}"
+        );
+        measured.push(reads);
+    }
+    assert_eq!(
+        measured[0], measured[1],
+        "a draft branch's pending rows may not change a read of main's cost"
+    );
 }
 
 #[test]
@@ -1056,8 +1286,9 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 2);
-    assert_eq!(local_metrics.source_full_scans, 1);
+    // Origin and the local delta each probe both indexes.
+    assert_eq!(local_metrics.source_index_probes, 4);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -1130,7 +1361,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
     let mut oracle = Oracle::new();
     let row = row(7);
 
-    let base = commit_and_oracle(
+    let _base = commit_and_oracle(
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
@@ -1147,11 +1378,10 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
     );
     assert_current_rows_match_oracle(&mut node, &oracle);
 
-    let child = commit_and_oracle(
+    let _child = commit_and_oracle(
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 11)
-            .parents(vec![base])
             .cells(title_cells("child")),
     );
     assert_current_rows_match_oracle(&mut node, &oracle);
@@ -1167,7 +1397,6 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 13)
-            .parents(vec![child])
             .cells(BTreeMap::from([(
                 "title".to_owned(),
                 "delete-concurrent update".to_owned(),
@@ -1184,7 +1413,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
 }
 
 #[test]
-fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
+fn local_current_from_ahead_index_matches_pending_fold_for_seeded_commits() {
     for seed in 0..16_u64 {
         let (_temp_dir, mut node) = open_node();
         let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
@@ -1197,15 +1426,6 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             let action = (rng >> 48) % 9;
             let deletion = matches!(action, 0..=3);
             let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-            if let Some(parent) =
-                parents.get(&row_uuid).and_then(
-                    |(content, deletion_parent)| {
-                        if deletion { *deletion_parent } else { *content }
-                    },
-                )
-            {
-                commit = commit.parents(vec![parent]);
-            }
             commit = match action {
                 0 | 1 => commit.deletion(DeletionEvent::Deleted),
                 2 | 3 => commit.deletion(DeletionEvent::Restored),
@@ -1281,41 +1501,83 @@ fn history_argmax_current_rows(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let table = node.table("todos").unwrap().clone();
     let versions = node.query_table_versions("todos").unwrap();
-    let mut content = BTreeMap::<RowUuid, &VersionRow>::new();
-    let mut registers = BTreeMap::<RowUuid, &VersionRow>::new();
+    // The local row is the synced image (the newest accepted post-image) with
+    // the row's still-pending patches folded on top in tx order. A pending
+    // patch stores a full image but replaces only the columns it authors.
+    let mut synced = BTreeMap::<RowUuid, (GlobalTime, &VersionRow)>::new();
+    let mut pending =
+        BTreeMap::<RowUuid, Vec<(TxId, &VersionRow, Option<BTreeSet<String>>)>>::new();
     for version in &versions {
-        let winners = match version.layer() {
-            VersionLayer::Content => &mut content,
-            VersionLayer::Deletion => &mut registers,
-        };
-        if winners.get(&version.row_uuid()).is_none_or(|current| {
-            (version.tx_time(), version.tx_node_alias())
-                > (current.tx_time(), current.tx_node_alias())
-        }) {
-            winners.insert(version.row_uuid(), version);
+        let tx_id = node.version_tx_id(version).unwrap();
+        match node.transaction_state_settled(tx_id) {
+            Some((Fate::Accepted, Some(global_time), _)) => {
+                if synced
+                    .get(&version.row_uuid())
+                    .is_none_or(|(current, _)| global_time > *current)
+                {
+                    synced.insert(version.row_uuid(), (global_time, version));
+                }
+            }
+            Some((Fate::Pending, None, _)) => {
+                let authored = node.authored_columns_for_version(version).unwrap();
+                pending
+                    .entry(version.row_uuid())
+                    .or_default()
+                    .push((tx_id, version, authored))
+            }
+            _ => {}
         }
     }
-    content
-        .into_iter()
-        .filter_map(|(row_uuid, version)| {
-            let deleted = registers
+    let cells_of = |version: &VersionRow| {
+        table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                version
+                    .cell(&table, &column.name)
+                    .unwrap()
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let rows = synced
+        .keys()
+        .chain(pending.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    rows.into_iter()
+        .filter_map(|row_uuid| {
+            let mut image = synced
                 .get(&row_uuid)
-                .and_then(|register| register.deletion())
-                == Some(DeletionEvent::Deleted);
-            if deleted {
-                return None;
+                .map(|(_, version)| (cells_of(version), version.is_deleted()));
+            let mut patches = pending.remove(&row_uuid).unwrap_or_default();
+            patches.sort_by_key(|(tx_id, _, _)| *tx_id);
+            for (_, patch, authored) in patches {
+                let authors =
+                    |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+                image = Some(match image {
+                    Some((mut cells, deleted)) => {
+                        let patch_cells = cells_of(patch);
+                        for column in &table.columns {
+                            if authors(&column.name) {
+                                match patch_cells.get(&column.name) {
+                                    Some(value) => cells.insert(column.name.clone(), value.clone()),
+                                    None => cells.remove(&column.name),
+                                };
+                            }
+                        }
+                        let deleted = if authors(crate::node::DELETION_COLUMN_NAME) {
+                            patch.is_deleted()
+                        } else {
+                            deleted
+                        };
+                        (cells, deleted)
+                    }
+                    None => (cells_of(patch), patch.is_deleted()),
+                });
             }
-            let cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    version
-                        .cell(&table, &column.name)
-                        .unwrap()
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            Some((row_uuid, cells))
+            let (cells, deleted) = image?;
+            (!deleted).then_some((row_uuid, cells))
         })
         .collect()
 }
@@ -3115,6 +3377,300 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     assert!(rows[0].is_deleted());
 }
 
+/// A trusted include-deleted read of the documents team `t1` reaches
+/// through `kind = unit` edges selects the edge table's `kind` index inside
+/// the recursive step. At `Local` the step must still see alice's pending
+/// edit that changed a settled edge's kind: the local delta masks that
+/// edge's origin image inside the recursion, so the walk stops at `t2`.
+/// Internal because only the node's trusted include-deleted read hands an
+/// index access path to a recursive step source.
+///
+/// ```text
+/// origin: t1 -unit-> t2 -unit-> t3 ; d1@t1 d2@t2 d3@t3
+/// local:  edge t2->t3 kind -> other
+/// read reachable from t1 via unit edges ──Global──► {d1, d2, d3}
+///                                        ──Local───► {d1, d2}
+/// ```
+#[test]
+fn include_deleted_reachable_indexed_step_masks_origin_by_pending_edges() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("team_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("kind", PublicColumnType::Text)
+                    .index_only(["kind"]),
+            ),
+    );
+    let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
+    let mut tx_time = 10;
+    let mut settle = |node: &mut NodeState, table: &str, row_uuid: RowUuid, cells| {
+        tx_time += 1;
+        let tx_id = node
+            .commit_mergeable_settled(MergeableCommit::new(table, row_uuid, tx_time).cells(cells))
+            .unwrap();
+        let global_time = node.allocate_global_time_for_test();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    };
+    let text = |value: &str| Value::String(value.to_owned());
+    let (t1, t2, t3) = (row(0x71), row(0x72), row(0x73));
+    let (d1, d2, d3) = (row(0x81), row(0x82), row(0x83));
+    let edge_23 = row(0x92);
+    for team in [t1, t2, t3] {
+        settle(&mut node, "teams", team, BTreeMap::from([("name".to_owned(), text("team"))]));
+    }
+    for (doc, team, access) in [(d1, t1, row(0xa1)), (d2, t2, row(0xa2)), (d3, t3, row(0xa3))] {
+        settle(&mut node, "docs", doc, BTreeMap::from([("title".to_owned(), text("doc"))]));
+        settle(
+            &mut node,
+            "team_access",
+            access,
+            BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ]),
+        );
+    }
+    for (edge, member, parent) in [(row(0x91), t1, t2), (edge_23, t2, t3)] {
+        settle(
+            &mut node,
+            "team_edges",
+            edge,
+            BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(member.0)),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+                ("kind".to_owned(), text("unit")),
+            ]),
+        );
+    }
+    node.commit_mergeable_settled(
+        MergeableCommit::new("team_edges", edge_23, 100)
+            .cells(BTreeMap::from([("kind".to_owned(), text("other"))])),
+    )
+    .unwrap();
+    let shape = Query::from("docs")
+        .reachable_via(
+            "team_access",
+            "doc",
+            "team",
+            lit(Value::Uuid(t1.0)),
+            "team_edges",
+            "member",
+            "parent",
+            [eq(col("kind"), lit("unit"))],
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut read = |tier| {
+        node.reset_query_engine_read_metrics();
+        let rows = node
+            .query_rows_including_deleted_in_authorization_mode(
+                &shape,
+                &binding,
+                tier,
+                None,
+                AuthorSubject::SYSTEM,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        let probes = node.query_engine_read_metrics().source_index_probes;
+        let rows = rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        (rows, probes)
+    };
+    assert_eq!(
+        read(DurabilityTier::Global),
+        (BTreeSet::from([d1, d2, d3]), 1)
+    );
+    // Origin and the local delta are each read under the step's `kind`
+    // prefix; inside the recursion the delta masks origin by its whole
+    // presence, since a keyed lookup cannot run in a recursive step.
+    assert_eq!(read(DurabilityTier::Local), (BTreeSet::from([d1, d2]), 2));
+}
+
+/// A trusted include-deleted read of the documents team `t1` reaches
+/// through `kind = unit` edges, over alice's draft branch of the edge table
+/// on top of main, selects the edge table's `kind` index inside the
+/// recursive step. The step must still mask main by the draft's presence
+/// (the draft's edit that changed `t2 -> t3`'s kind hides main's image) and
+/// apply main's deletion registers (main deleted `t1 -> t4`), although a
+/// keyed lookup cannot run inside a recursive step. Internal because only
+/// the node's trusted include-deleted read hands an index access path to a
+/// recursive step source.
+///
+/// ```text
+/// main (settled): t1 -unit-> t2 -unit-> t3 ; t1 -unit-> t4 (deleted)
+///                 d1@t1 d2@t2 d3@t3 d4@t4
+/// draft:          edge t2->t3 kind -> other
+/// read reachable from t1 via unit edges, draft over main ──► {d1, d2}
+/// ```
+#[test]
+fn include_deleted_reachable_indexed_step_over_branch_view_masks_base() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("team_access")
+                    .fk_column("doc", "docs")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("team_edges")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams")
+                    .column("kind", PublicColumnType::Text)
+                    .branch_by("branch_id")
+                    .index_only(["kind"]),
+            ),
+    );
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x0a), schema.clone());
+    let branch = |byte: u8| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let (main, draft) = (branch(0xe0), branch(0xe1));
+    let mut tx_time = 10;
+    let mut settle = |node: &mut NodeState, commit: MergeableCommit| {
+        tx_time += 1;
+        let tx_id = node
+            .commit_mergeable_settled(MergeableCommit { now_ms: tx_time, ..commit })
+            .unwrap();
+        let global_time = node.allocate_global_time_for_test();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    };
+    let text = |value: &str| Value::String(value.to_owned());
+    let (t1, t2, t3, t4) = (row(0x71), row(0x72), row(0x73), row(0x74));
+    let (d1, d2, d3, d4) = (row(0x81), row(0x82), row(0x83), row(0x84));
+    let (edge_23, edge_14) = (row(0x92), row(0x93));
+    for team in [t1, t2, t3, t4] {
+        settle(
+            &mut node,
+            MergeableCommit::new("teams", team, 0)
+                .cells(BTreeMap::from([("name".to_owned(), text("team"))])),
+        );
+    }
+    for (doc, team, access) in [
+        (d1, t1, row(0xa1)),
+        (d2, t2, row(0xa2)),
+        (d3, t3, row(0xa3)),
+        (d4, t4, row(0xa4)),
+    ] {
+        settle(
+            &mut node,
+            MergeableCommit::new("docs", doc, 0)
+                .cells(BTreeMap::from([("title".to_owned(), text("doc"))])),
+        );
+        settle(
+            &mut node,
+            MergeableCommit::new("team_access", access, 0).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    for (edge, member, parent) in [(row(0x91), t1, t2), (edge_23, t2, t3), (edge_14, t1, t4)] {
+        settle(
+            &mut node,
+            MergeableCommit::new("team_edges", edge, 0)
+                .branch(main.clone())
+                .cells(BTreeMap::from([
+                    ("member".to_owned(), Value::Uuid(member.0)),
+                    ("parent".to_owned(), Value::Uuid(parent.0)),
+                    ("kind".to_owned(), text("unit")),
+                ])),
+        );
+    }
+    settle(
+        &mut node,
+        MergeableCommit::new("team_edges", edge_14, 0)
+            .branch(main.clone())
+            .deletion(DeletionEvent::Deleted),
+    );
+    node.commit_mergeable_settled(
+        MergeableCommit::new("team_edges", edge_23, 100)
+            .branch(draft.clone())
+            .cells(BTreeMap::from([
+                ("member".to_owned(), Value::Uuid(t2.0)),
+                ("parent".to_owned(), Value::Uuid(t3.0)),
+                ("kind".to_owned(), text("other")),
+            ])),
+    )
+    .unwrap();
+    let shape = Query::from("docs")
+        .reachable_via(
+            "team_access",
+            "doc",
+            "team",
+            lit(Value::Uuid(t1.0)),
+            "team_edges",
+            "member",
+            "parent",
+            [eq(col("kind"), lit("unit"))],
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_view = crate::protocol::ReadViewSpec {
+        source: crate::protocol::ReadViewSourceSpec::BranchView {
+            head: draft,
+            base: Some(crate::protocol::BranchViewBase::Current(main)),
+        },
+    };
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        node.reset_query_engine_read_metrics();
+        let rows = node
+            .query_rows_including_deleted_with_query_engine(
+                &shape,
+                &binding,
+                tier,
+                AuthorSubject::SYSTEM,
+                QueryAuthorizationMode::TrustedServing,
+                &read_view,
+            )
+            .unwrap();
+        assert!(
+            node.query_engine_read_metrics().source_index_probes > 0,
+            "the step's edge source reads its `kind` index prefix"
+        );
+        let rows = rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        let expected = if tier == DurabilityTier::Local {
+            BTreeSet::from([d1, d2])
+        } else {
+            // The draft's edit is not settled, so at Global main's image
+            // stands.
+            BTreeSet::from([d1, d2, d3])
+        };
+        assert_eq!(rows, expected, "{tier:?}");
+    }
+}
+
 #[test]
 fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let schema = include_deleted_reachable_schema();
@@ -3406,7 +3962,7 @@ fn cached_subscription_programs_preserve_identity_claims_and_query_inputs() {
 
 #[test]
 fn compiled_subscription_cache_excludes_branch_read_views() {
-    let schema = merge_head_branch_schema();
+    let schema = branch_commit_unit_schema();
     let (_dir, mut core) = open_history_complete_node_with_schema(node(0xd5), schema);
     for index in [1, 2] {
         core.commit_mergeable_settled(

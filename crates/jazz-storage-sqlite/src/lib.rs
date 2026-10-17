@@ -336,11 +336,42 @@ impl SqliteStorage {
             connection: RefCell::new(Some(connection)),
             write_flush_cadence: RefCell::new(None),
         };
+        // Refuse retired codec inventories with their structured error before
+        // the admission decoder requires this build's mandatory codecs.
+        let raw_manifest: Vec<u8> = storage
+            .connection
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [EPOCH_MANIFEST_KEY],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        match (
+            source.admit_existing(&raw_manifest),
+            target.admit_existing(&raw_manifest),
+        ) {
+            (Ok(_), _) | (_, Ok(_)) => {}
+            // This error identifies the matching epoch. Preserve its
+            // inventory instead of an epoch mismatch from the other spec.
+            (_, Err(error @ Error::UnsupportedStorageCodecs { .. })) => return Err(error),
+            (Err(error), _) => return Err(error),
+        }
         let StorageAdmission::Durable(admission) = storage.admission()? else {
             unreachable!()
         };
         let manifest = admission.manifest();
         if manifest != &source && manifest != &target {
+            // Preserve the typed codec-inventory refusal before reporting
+            // a receipt/layout mismatch at an otherwise known epoch.
+            let expected = if manifest.epoch() == source.epoch() {
+                &source
+            } else {
+                &target
+            };
+            expected.admit_existing(&manifest.encode()?)?;
             return Err(Error::InvalidStorageLayout(
                 "unsupported SQLite node manifest".into(),
             ));

@@ -10,18 +10,6 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
-        self.apply_fate_update_with_cascade(tx_id, fate, global_time, durability, true)
-            .await
-    }
-
-    async fn apply_fate_update_with_cascade(
-        &mut self,
-        tx_id: TxId,
-        fate: Fate,
-        global_time: Option<GlobalTime>,
-        durability: Option<DurabilityTier>,
-        cascade_descendants: bool,
-    ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         debug_assert!(
             global_time.is_none() || durability == Some(DurabilityTier::Global),
@@ -35,7 +23,6 @@ where
                 global_time,
                 durability,
                 &mut terminal_fate_persisted,
-                cascade_descendants,
             )
             .await;
         if terminal_fate_persisted {
@@ -51,7 +38,6 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
         terminal_fate_persisted: &mut bool,
-        cascade_descendants: bool,
     ) -> Result<(), Error> {
         if !matches!(fate, Fate::Pending) || global_time.is_some() {
             self.open_tx.pending_foreign_transactions.remove(&tx_id);
@@ -67,14 +53,14 @@ where
         let advanced_global_times = if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
-            self.record_applied_global_time(global_time)
+            self.record_applied_global_time(global_time, tx_id)
         } else {
             Vec::new()
         };
 
         if already_accepted
             && stored.tx.kind == TxKind::Mergeable
-            && !stored.view_scoped_cardinality
+            && !stored.is_partial
             && stored.global_time.is_some()
             && stored.global_time == previous_global_time
             && stored.durability == previous_durability
@@ -88,97 +74,84 @@ where
             // validation. Exclusive fragments deliberately defer current
             // installation and must still run the ordinary repair path below,
             // even when their fate metadata is unchanged.
-            #[cfg(test)]
-            {
-                let tx_versions = self.query_versions_for_tx(tx_id).await?;
-                let missing = self
-                    .global_current_updates_for_versions(tx_id, &tx_versions)
-                    .await?;
-                assert!(
-                    missing.is_empty(),
-                    "skipped accepted receipt for {tx_id:?} whose versions lack global current: {missing:?}"
-                );
-            }
             *terminal_fate_persisted = true;
-            self.rejections.child_txs_by_parent.remove(&tx_id);
-            self.prune_child_edges(tx_id);
             return Ok(());
         }
 
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let tx_versions = self.query_versions_for_tx(tx_id).await?;
-        #[cfg(test)]
-        let content_versions = tx_versions
-            .iter()
-            .filter(|version| version.layer() == VersionLayer::Content)
-            .cloned()
-            .collect::<Vec<_>>();
-        if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
+        // A released list means the transaction settled in an earlier
+        // batch: its rows already moved to their seq and own no overlay.
+        let tx_versions = self
+            .query_listed_versions_for_tx(tx_id, &stored)
+            .await?
+            .unwrap_or_default();
+        if matches!(stored.fate, Fate::Accepted)
+            && let Some(global_time) = stored.global_time
+        {
             global_current_updates = self
-                .global_current_updates_for_versions(tx_id, &tx_versions)
+                .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        if let Some(child_alias) = self.node_aliases.get(&tx_id.node).copied() {
-            for raw in self
-                .database
-                .primary_key_scan_raw(
-                    "jazz_pending_edges",
-                    &[Value::U64(tx_id.time.0), Value::U64(child_alias.0)],
-                )
-                .await?
-            {
-                let record = raw.record();
-                let parent_alias =
-                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-                let parent = TxId::new(
-                    TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                    self.node_for_alias(parent_alias)
-                        .ok_or(Error::InvalidStoredValue(
-                            "pending edge parent alias must exist",
-                        ))?,
-                );
-                let coordinate = pending_edge_coordinate_from_record(record)?;
-                batch.delete(
-                    "jazz_pending_edges",
-                    pending_edge_primary_key(
-                        child_alias,
-                        tx_id,
-                        parent_alias,
-                        parent,
-                        &coordinate,
-                    )?,
-                );
-            }
-        }
-        let contribution_merge =
-            self.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())?;
-        batch.update(
-            "jazz_transactions",
-            transaction_values_with_cardinality_scope(
-                stored.node_alias,
-                &stored.tx,
+        self.stage_tx_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
-                stored.view_scoped_cardinality,
-                contribution_merge,
-            )?,
-        );
-        // Pending and accepted content versions both participate in local
-        // merge-head state. Ingest already installed this transaction's
-        // versions while it was pending, so advancing the fate must not replay
-        // reachability maintenance over its history. Besides being redundant,
-        // fate updates can arrive newest-first and turn that replay into a
-        // quadratic walk of one row's causal chain.
-        //
-        // Rejections are handled by `remove_rejected_local_versions`, which
-        // rebuilds the affected derived state after removing the rows.
+            )
+            .view_scoped(stored.is_partial),
+        )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
+                // History holds the row's post-image at this seq, which is
+                // what peers receive for this transaction.
+                self.write_history_post_image(&mut batch, version)?;
             }
+            let mut moved = !global_current_updates.is_empty();
+            if matches!(stored.fate, Fate::Accepted) {
+                // Every pending record of an accepted write moves to its
+                // seq, also when the row's image here did not change.
+                // A post-image may be laid out in another schema version than
+                // the write, naming a renamed table differently: match rows
+                // by physical table.
+                let updated_rows = global_current_updates
+                    .iter()
+                    .map(|update| {
+                        Ok((
+                            self.physical_table_id_for_version(update)?,
+                            update.branch_key(),
+                            update.row_uuid(),
+                        ))
+                    })
+                    .collect::<Result<BTreeSet<_>, Error>>()?;
+                for version in &tx_versions {
+                    let updated = updated_rows.contains(&(
+                        self.physical_table_id_for_version(version)?,
+                        version.branch_key(),
+                        version.row_uuid(),
+                    ));
+                    if !updated && version.seq()? == GlobalTime(0) {
+                        let at_seq = version.with_seq(global_time)?;
+                        self.write_history_post_image(&mut batch, &at_seq)?;
+                        moved = true;
+                    }
+                }
+            }
+            if moved {
+                self.invalidate_tx_version_tables_cache(tx_id);
+            }
+            self.rebase_ahead_overlays(
+                &mut batch,
+                &global_current_updates,
+                &BTreeSet::from([tx_id]),
+            )
+            .await?;
         }
         #[cfg(test)]
         let global_current_update_versions = stored
@@ -192,7 +165,8 @@ where
             })
             .unwrap_or_default();
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
-            self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
+            self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)
+                .await?;
         }
         for global_time in advanced_global_times
             .iter()
@@ -208,24 +182,12 @@ where
         } else {
             None
         };
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         #[cfg(test)]
         {
-            let rows = content_versions
-                .iter()
-                .map(|version| {
-                    (
-                        version.table().to_owned(),
-                        version.branch_key().clone(),
-                        version.row_uuid(),
-                    )
-                })
-                .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)
-                .await?;
             self.assert_global_current_updates_match_history_for_test(
                 &global_current_update_versions,
             )
@@ -237,40 +199,6 @@ where
                 .rejected_transactions
                 .insert(tx_id, rejected_payload);
         }
-        let accepted_final = matches!(stored.fate, Fate::Accepted);
-        let rejected_root = rejected_root_for(&stored.fate, tx_id);
-        if accepted_final {
-            self.rejections.child_txs_by_parent.remove(&tx_id);
-            self.prune_child_edges(tx_id);
-        } else if let Some(root) = rejected_root {
-            self.prune_child_edges(tx_id);
-            if !cascade_descendants {
-                self.rejections.child_txs_by_parent.remove(&tx_id);
-                return Ok(());
-            }
-            let cascades = self.local_cascade_descendants(tx_id, root).await?;
-            for descendant in cascades {
-                // Authority-side parking resolves parents before children, so
-                // a locally cascaded descendant should still be speculative.
-                let descendant_fate = self.query_transaction(descendant).await?.map(|tx| tx.fate);
-                debug_assert!(
-                    matches!(descendant_fate.as_ref(), Some(Fate::Pending))
-                        || matches!(
-                            descendant_fate.as_ref(),
-                            Some(Fate::Rejected(RejectionReason::Cascade { root: existing }))
-                                if *existing == root
-                        )
-                );
-                Box::pin(self.apply_fate_update_with_cascade(
-                    descendant,
-                    Fate::Rejected(RejectionReason::Cascade { root }),
-                    None,
-                    None,
-                    false,
-                ))
-                .await?;
-            }
-        }
         Ok(())
     }
 
@@ -280,7 +208,7 @@ where
         tx: &Transaction,
         versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        let (Some(base_snapshot), Some(row_reads), Some(absent_reads), Some(predicate_reads)) = (
+        let (Some(base_snapshot), Some(row_reads), Some(absent_reads), Some(_predicate_reads)) = (
             &tx.base_snapshot,
             tx.row_read_set.as_deref(),
             tx.absent_read_set.as_deref(),
@@ -319,20 +247,18 @@ where
             }
             read_schemas.insert(table, schema);
         }
-        // Read sets validate the visible row state (a current deletion hides
-        // content); write CAS validates only the register being written.
+        // Read sets and write CAS both validate the current row image, whose
+        // deletion state is one of its cells.
         let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
-        let mut visible_layer_memo =
-            BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
-        for read in row_reads {
-            let current = self
-                .visible_global_row_tx_id_now_memoized(
-                    read_schemas[read.table.as_str()],
-                    &read.table,
-                    read.row_uuid,
-                    &mut visible_row_memo,
-                )
-                .await;
+        let mut visible_row_winner_memo =
+            BTreeMap::<(PhysicalTableId, RowUuid), Option<TxId>>::new();
+        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
+            let current = self.visible_global_row_tx_id_now_memoized(
+                read_schemas[read.table.as_str()],
+                &read.table,
+                read.row_uuid,
+                &mut visible_row_memo,
+            ).await;
             if current != Some(read.version) {
                 return Ok(false);
             }
@@ -364,7 +290,13 @@ where
                 .insert(read.row_uuid);
         }
         let no_rows = BTreeSet::new();
-        for predicate in predicate_reads {
+        for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
+            if predicate.shape.aggregate.is_some() {
+                if self.aggregate_read_result_differs(predicate, identity).await? {
+                    return Ok(false);
+                }
+                continue;
+            }
             let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
             if self
                 .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
@@ -377,21 +309,15 @@ where
             self.table_in_schema_ref(version.table(), version.schema_version())?;
             let table_id =
                 self.physical_table_id_for_schema(version.schema_version(), version.table())?;
-            let current = self
-                .visible_global_layer_tx_id_now_memoized(
-                    table_id,
-                    version.row_uuid(),
-                    VersionLayer::for_record(version),
-                    &mut visible_layer_memo,
-                )
-                .await;
-            let parents = version.parents();
-            let parent = match parents.as_slice() {
-                [] => None,
-                [parent] => Some(*parent),
-                _ => return Ok(false),
-            };
-            if current != parent {
+            let current = self.visible_global_tx_id_now_memoized(
+                table_id,
+                version.row_uuid(),
+                &mut visible_row_winner_memo,).await;
+            // First committer wins: the written register must be unchanged
+            // since the transaction's base snapshot.
+            if let Some(current) = current
+                && !Box::pin(self.snapshot_covers(current, base_snapshot)).await
+            {
                 return Ok(false);
             }
         }
@@ -415,20 +341,19 @@ where
         current
     }
 
-    async fn visible_global_layer_tx_id_now_memoized(
+    async fn visible_global_tx_id_now_memoized(
         &mut self,
         table_id: PhysicalTableId,
         row_uuid: RowUuid,
-        layer: VersionLayer,
-        memo: &mut BTreeMap<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>,
+        memo: &mut BTreeMap<(PhysicalTableId, RowUuid), Option<TxId>>,
     ) -> Option<TxId> {
-        if let Some(current) = memo.get(&(table_id, row_uuid, layer)) {
+        if let Some(current) = memo.get(&(table_id, row_uuid)) {
             return *current;
         }
         let current = self
-            .visible_global_layer_tx_id_for_physical_table_now(table_id, row_uuid, layer)
+            .visible_global_tx_id_for_physical_table_now(table_id, row_uuid)
             .await;
-        memo.insert((table_id, row_uuid, layer), current);
+        memo.insert((table_id, row_uuid), current);
         current
     }
 
@@ -451,7 +376,8 @@ where
     /// it read; otherwise a row appeared or changed into the result since. A
     /// proved row the predicate returned at the base snapshot but no longer
     /// returns left the result through another row (a join or policy
-    /// source). An aggregate read is validated through the rows it consumed.
+    /// source). Aggregate reads are validated by
+    /// [`Self::aggregate_read_result_differs`] instead.
     ///
     /// A client that recorded no row proofs for its predicate reads (before
     /// alpha.58) conflicts whenever such a read returned rows.
@@ -489,9 +415,40 @@ where
             .any(|(row, _)| proven.contains(&row) && !now.contains(&row)))
     }
 
+    /// Whether an exclusive aggregate read no longer returns the result the
+    /// transaction recorded (garden-co/jazz#3768). The authority re-runs the
+    /// aggregate as the transaction's permission subject over its current
+    /// global state and compares the canonical `jazz.aggregate-read-result.v1`
+    /// bytes exactly. Rewrites of consumed rows that leave the result
+    /// unchanged do not conflict; a reader that lacked rows computed another
+    /// result and does. Ingest rejects an aggregate read without a well-formed
+    /// result as a malformed commit before validation; one that still reaches
+    /// here, or whose shape is unknown, conflicts.
+    async fn aggregate_read_result_differs(
+        &mut self,
+        predicate: &PredicateRead,
+        identity: AuthorSubject,
+    ) -> Result<bool, Error> {
+        let Some(recorded) = &predicate.aggregate_result else {
+            return Ok(true);
+        };
+        let Some((shape, binding)) = self.predicate_read_validation_shape(predicate)? else {
+            return Ok(true);
+        };
+        let now = self
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                None,
+                identity,
+            )
+            .await?;
+        Ok(crate::node::aggregate_read_result::aggregate_read_result_from_rows(&now)? != *recorded)
+    }
+
     /// The shape and binding an authority evaluates to validate a predicate
-    /// read: the read's own shape, or for an aggregate the rows it consumed.
-    /// `None` when the read no longer names a known shape and binding.
+    /// read. `None` when the read no longer names a known shape and binding.
     fn predicate_read_validation_shape(
         &self,
         predicate: &PredicateRead,
@@ -511,21 +468,15 @@ where
                     .validate(schema)
                     .ok()
                     .filter(|shape| shape.shape_id() == predicate.shape_id)
-                    .map(|shape| (shape, schema))
             });
-        let Some((shape, schema)) = validated else {
+        let Some(shape) = validated else {
             return Ok(None);
         };
         let binding = shape.bind(predicate.binding_values.clone())?;
         if binding.binding_id() != predicate.binding_id {
             return Ok(None);
         }
-        let Some(input) = shape.query().aggregate_input() else {
-            return Ok(Some((shape, binding)));
-        };
-        let input = input.validate(schema)?;
-        let binding = input.bind(predicate.binding_values.clone())?;
-        Ok(Some((input, binding)))
+        Ok(Some((shape, binding)))
     }
 
     #[cfg(test)]
@@ -710,43 +661,17 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Option<RejectionReason>, Error> {
-        if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
-            return Ok(None);
-        }
-        let permission_subject = match ingest_context {
-            Some(context) => {
-                if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
-                    return Ok(Some(RejectionReason::AuthorizationDenied));
-                }
-                match context.trust {
-                    CommitUnitTrust::Session => context.identity,
-                    // Relay transport has no permission subject. A relayed
-                    // write must reach a serving authority through its
-                    // topology-owned admission path; it cannot borrow SYSTEM
-                    // or the transport identity here.
-                    CommitUnitTrust::Relay => {
-                        if self
-                            .active_session_claims
-                            .as_ref()
-                            .is_none_or(|(identity, _)| *identity != context.identity)
-                        {
-                            return Ok(Some(RejectionReason::AuthorizationDenied));
-                        }
-                        context.identity
-                    }
-                    CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
-                        tx.permission_subject.unwrap_or(tx.made_by)
-                    }
-                    CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
-                }
-            }
-            None => tx.permission_subject.unwrap_or(tx.made_by),
+        let permission_subject = match commit_unit_admission_subject(
+            tx,
+            ingest_context,
+            self.active_session_claims
+                .as_ref()
+                .map(|(identity, _)| *identity),
+        ) {
+            Err(reason) => return Ok(Some(reason)),
+            Ok(None) => return Ok(None),
+            Ok(Some(subject)) => subject,
         };
-        // Gate the effective permission subject so relayed anonymous sessions
-        // stay read-only without changing trusted-backend attribution.
-        if permission_subject.is_anonymous() {
-            return Ok(Some(RejectionReason::AuthorizationDenied));
-        }
         // Non-root branch writes have mandatory canonical operation intent.
         // Do not treat an absent descriptor as an ordinary insert: that would
         // let a raw sender relabel an inherited first-head overlay and bypass
@@ -806,42 +731,25 @@ where
                 }
                 match &intent.operation {
                     crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
-                        if matching_versions.iter().any(|version| {
-                            !version.parents().is_empty()
-                                || version.deletion() == Some(DeletionEvent::Deleted)
-                        }) || !self
-                            .branch_view_copy_satisfies_read_for_write_visibility(
-                                evidence,
-                                intent.authored_schema,
-                                permission_subject,
-                                Some(tx.tx_id),
-                            )
-                            .await?
-                        {
-                            return Ok(Some(RejectionReason::AuthorizationDenied));
-                        }
-                    }
-                    crate::tx::BranchWriteOperation::ExactHeadInsert => {
-                        // This classifies the author's parentless write, not
-                        // an absence precondition at admission. Independent
-                        // offline inserts into the same head merge normally.
-                        // The ordinary policy checks below still require read
-                        // and update permission if an existing head is known.
                         if matching_versions
                             .iter()
-                            .any(|version| !version.parents().is_empty())
+                            .any(|version| version.deletion() == Some(DeletionEvent::Deleted))
+                            || !self
+                                .branch_view_copy_satisfies_read_for_write_visibility(
+                                    evidence,
+                                    intent.authored_schema,
+                                    permission_subject,
+                                    Some(tx.tx_id),
+                                )
+                                .await?
                         {
                             return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
                     }
-                    crate::tx::BranchWriteOperation::ExactHeadUpdate => {
-                        if matching_versions
-                            .iter()
-                            .any(|version| version.parents().is_empty())
-                        {
-                            return Ok(Some(RejectionReason::AuthorizationDenied));
-                        }
-                    }
+                    // Linear history: insert vs update is Core's current
+                    // row, which the ordinary policy checks below evaluate.
+                    crate::tx::BranchWriteOperation::ExactHeadInsert
+                    | crate::tx::BranchWriteOperation::ExactHeadUpdate => {}
                 }
             }
         }
@@ -874,79 +782,6 @@ where
         )
     }
 
-
-    pub(super) async fn cascade_root_for_versions(
-        &mut self,
-        versions: &[VersionRecord],
-    ) -> Option<TxId> {
-        for parent in versions.iter().flat_map(|version| version.parents()) {
-            if let Some(root) = self.cascade_root_for_tx(parent).await {
-                return Some(root);
-            }
-        }
-        None
-    }
-
-    pub(super) async fn park_commit_unit_if_missing_parents_with_mode(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        now_ms: u64,
-        memo: &mut IngestMemo,
-        mode: CommitUnitParkMode,
-    ) -> Result<bool, Error> {
-        let missing_parents = !self
-            .missing_parent_refs_memo(versions, memo)
-            .await?
-            .is_empty();
-        let session_claim_binding = match mode.ingress_role {
-            ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
-            ParkedIngressRole::Relay => None,
-        };
-        if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
-            if existing.tx != *tx || existing.versions != versions {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            if !CommitUnitIngestContext::same_parked_authority(
-                existing.ingest_context,
-                mode.ingest_context,
-            ) || (existing.ingress_role == ParkedIngressRole::Authority
-                && mode.ingress_role == ParkedIngressRole::Authority
-                && existing.session_claim_binding.as_ref() != session_claim_binding)
-            {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
-            }
-            if let (Some(existing), Some(resent)) =
-                (existing.ingest_context.as_mut(), mode.ingest_context)
-            {
-                existing.version_receipts_validated &= resent.version_receipts_validated;
-            }
-            if existing.ingress_role == ParkedIngressRole::Relay
-                && mode.ingress_role == ParkedIngressRole::Authority
-            {
-                existing.session_claim_binding = session_claim_binding.cloned();
-            }
-            existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
-            return Ok(true);
-        }
-        if !missing_parents {
-            return Ok(false);
-        }
-        self.sync_metrics.parked_orphans += 1;
-        self.parking.parked_commit_units.insert(
-            tx.tx_id,
-            ParkedCommitUnit {
-                tx: tx.clone(),
-                versions: versions.to_vec(),
-                now_ms,
-                ingest_context: mode.ingest_context,
-                ingress_role: mode.ingress_role,
-                session_claim_binding: session_claim_binding.cloned(),
-            },
-        );
-        Ok(true)
-    }
-
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
         &mut self,
         tx: &Transaction,
@@ -954,12 +789,19 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        let missing_schema = versions.iter().any(|version| {
-            !self
-                .catalogue
+        let schemas_known = versions.iter().all(|version| {
+            self.catalogue
                 .catalogue_schemas
                 .contains_key(&version.schema_version())
         });
+        // A write chained on a predecessor parked here waits behind it, so
+        // the authority still decides one node's writes in their order
+        // (SPEC 4 §4.6). The lookup is in memory.
+        let behind_parked_predecessor = mode.ingress_role == ParkedIngressRole::Authority
+            && self.has_parked_same_node_predecessor(tx, versions);
+        if schemas_known && !behind_parked_predecessor {
+            return Ok(false);
+        }
         let session_claim_binding = match mode.ingress_role {
             ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
             ParkedIngressRole::Relay => None,
@@ -990,12 +832,11 @@ where
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
-        if !missing_schema {
-            return Ok(false);
-        }
         self.sync_metrics.parked_orphans += 1;
-        self.sync_metrics.parked_catalogue_orphans += 1;
-        self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        if !schemas_known {
+            self.sync_metrics.parked_catalogue_orphans += 1;
+            self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        }
         self.parking.parked_commit_units.insert(
             tx.tx_id,
             ParkedCommitUnit {
@@ -1010,46 +851,49 @@ where
         Ok(true)
     }
 
-    pub(super) async fn missing_parent_refs(
-        &mut self,
-        versions: &[VersionRecord],
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let mut memo = IngestMemo::default();
-        self.missing_parent_refs_memo(versions, &mut memo).await
-    }
-
-    pub(super) async fn missing_parent_refs_memo(
-        &mut self,
-        versions: &[VersionRecord],
-        memo: &mut IngestMemo,
-    ) -> Result<BTreeSet<TxId>, Error> {
-        let mut missing = BTreeSet::new();
-        for parent in versions.iter().flat_map(|version| version.parents()) {
-            if !self.transaction_exists_memo(parent, memo).await? {
-                missing.insert(parent);
-            }
-        }
-        Ok(missing)
-    }
-
-    pub(super) async fn commit_unit_satisfies_clock_condition(
-        &mut self,
+    /// Whether a version of the unit names, as its pending predecessor, an
+    /// older write of the unit's own node that is parked here for the
+    /// authority, and has been for less than
+    /// [`PARKED_PREDECESSOR_WAIT_MS`].
+    ///
+    /// The wait is bounded: a predecessor whose schema has not arrived by
+    /// then stops holding its writer's later writes back, and the next
+    /// authority ingest decides them as written over the row's current image
+    /// (the predecessor is treated as never arriving, `INV-HIST-20`). Should
+    /// its schema arrive after all, the predecessor is then late and refused
+    /// (`INV-HIST-23`), so one write whose schema never arrives costs itself,
+    /// not the rest of its writer's chain.
+    ///
+    /// The wait is measured on the authority's ingest clock, the newest
+    /// `now_ms` any commit ingest has seen, and nothing else drives it:
+    /// - No timer runs it out. On an idle Core the chained write stays
+    ///   parked past the wait until the next commit ingest (of any writer)
+    ///   advances the clock, or the predecessor's schema arrives.
+    /// - The clock is wall time, never moved back. A forward jump of Core's
+    ///   clock runs out every parked wait at the next ingest; a backward
+    ///   jump only lengthens them until wall time catches up.
+    /// - The clock and the parked units are in memory. A restart drops both,
+    ///   so a writer resends its pending writes in order and the wait starts
+    ///   again from their new arrival.
+    fn has_parked_same_node_predecessor(
+        &self,
         tx: &Transaction,
         versions: &[VersionRecord],
-        memo: &mut IngestMemo,
-    ) -> Result<bool, Error> {
-        for version in versions {
-            for parent in version.parents() {
-                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo).await?
-                else {
-                    return Ok(false);
-                };
-                if tx.tx_id.time <= parent_made_at {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
+    ) -> bool {
+        versions.iter().any(|version| {
+            version.base().pending.is_some_and(|predecessor| {
+                pending_predecessor_refusal(predecessor, tx.tx_id).is_none()
+                    && self
+                        .parking
+                        .parked_commit_units
+                        .get(&predecessor)
+                        .is_some_and(|unit| {
+                            unit.ingress_role == ParkedIngressRole::Authority
+                                && unit.now_ms.saturating_add(PARKED_PREDECESSOR_WAIT_MS)
+                                    > self.parking.newest_ingest_ms
+                        })
+            })
+        })
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -1060,24 +904,22 @@ where
     {
         let mut updates = PublicationOutcome::settled(Vec::new());
         loop {
-            let parked = self
+            let ready = self
                 .parking
                 .parked_commit_units
                 .iter()
-                .filter(|(_, unit)| unit.ingress_role != ParkedIngressRole::Relay)
-                .map(|(tx_id, unit)| (*tx_id, unit.versions.clone()))
+                .filter(|(_, unit)| {
+                    unit.ingress_role != ParkedIngressRole::Relay
+                        && unit.versions.iter().all(|version| {
+                            self.catalogue
+                                .catalogue_schemas
+                                .contains_key(&version.schema_version())
+                        })
+                        // Its parked predecessor goes first, on a later pass.
+                        && !self.has_parked_same_node_predecessor(&unit.tx, &unit.versions)
+                })
+                .map(|(tx_id, _)| *tx_id)
                 .collect::<Vec<_>>();
-            let mut ready = Vec::new();
-            for (tx_id, versions) in parked {
-                if versions.iter().all(|version| {
-                    self.catalogue
-                        .catalogue_schemas
-                        .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions).await?.is_empty()
-                {
-                    ready.push(tx_id);
-                }
-            }
             if ready.is_empty() {
                 break;
             }
@@ -1122,8 +964,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions).await?.is_empty()
-                {
+                }) {
                     ready.push(tx_id);
                 }
             }
@@ -1158,54 +999,6 @@ where
         Ok(())
     }
 
-    pub(super) async fn cascade_root_for_tx(&mut self, tx_id: TxId) -> Option<TxId> {
-        let mut stack = vec![tx_id];
-        let mut seen = BTreeSet::new();
-        while let Some(current) = stack.pop() {
-            if !seen.insert(current) {
-                continue;
-            }
-            if let Ok(Some(tx)) = self.query_transaction(current).await
-                && let Some(root) = rejected_root_for(&tx.fate, current)
-            {
-                return Some(root);
-            }
-            if let Ok(Some(tx)) = self.query_transaction(current).await
-                && matches!(tx.fate, Fate::Accepted)
-            {
-                continue;
-            }
-            let Ok(versions) = self.query_versions_for_tx(current).await else {
-                return None;
-            };
-            stack.extend(versions.iter().flat_map(|version| version.parents()));
-        }
-        None
-    }
-
-    pub(super) async fn cascade_rejections_from(
-        &mut self,
-        rejected: TxId,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        let Some(root) = self.cascade_root_for_tx(rejected).await.or(Some(rejected)) else {
-            return Ok(Vec::new());
-        };
-        let descendants = self.local_cascade_descendants(rejected, root).await?;
-        let mut updates = Vec::new();
-        for descendant in descendants {
-            let fate = Fate::Rejected(RejectionReason::Cascade { root });
-            self.apply_fate_update_with_cascade(descendant, fate.clone(), None, None, false)
-                .await?;
-            updates.push(SyncMessage::FateUpdate {
-                tx_id: descendant,
-                fate,
-                global_time: None,
-                durability: None,
-            });
-        }
-        Ok(updates)
-    }
-
     #[cfg(test)]
     #[doc(hidden)]
     pub async fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
@@ -1228,42 +1021,6 @@ where
         Ok(tx_ids)
     }
 
-    pub(super) async fn local_cascade_descendants(
-        &mut self,
-        rejected: TxId,
-        root: TxId,
-    ) -> Result<Vec<TxId>, Error> {
-        let mut descendants = BTreeSet::new();
-        let mut stack = self
-            .rejections
-            .child_txs_by_parent
-            .remove(&rejected)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut seen = BTreeSet::new();
-        while let Some(tx_id) = stack.pop() {
-            if !seen.insert(tx_id) {
-                continue;
-            }
-            let Some(tx) = self.query_transaction(tx_id).await? else {
-                continue;
-            };
-            let eligible = !matches!(tx.fate, Fate::Rejected(_))
-                || matches!(
-                    tx.fate,
-                    Fate::Rejected(RejectionReason::Cascade { root: existing }) if existing == root
-                );
-            if eligible {
-                descendants.insert(tx_id);
-                if let Some(children) = self.rejections.child_txs_by_parent.get(&tx_id) {
-                    stack.extend(children.iter().copied());
-                }
-            }
-        }
-        Ok(descendants.into_iter().collect())
-    }
-
     pub(super) async fn remove_rejected_local_versions(
         &mut self,
         tx_id: TxId,
@@ -1274,23 +1031,10 @@ where
         if rejected.is_empty() {
             return Ok(None);
         }
-        self.clear_content_version_reachability_cache();
         let affected = rejected
             .iter()
-            .map(|version| (version.table, version.row_uuid(), version.layer()))
+            .map(|version| (version.table, version.row_uuid()))
             .collect::<BTreeSet<_>>();
-        let affected_content_rows = rejected
-            .iter()
-            .filter(|version| version.layer() == VersionLayer::Content)
-            .map(|version| {
-                Ok((
-                    self.physical_table_id_for_version(version)?,
-                    version.table().to_owned(),
-                    version.branch_key().clone(),
-                    version.row_uuid(),
-                ))
-            })
-            .collect::<Result<BTreeSet<_>, Error>>()?;
         let mut rejected_payload = None;
         if tx_id.node == self.node_uuid
             && let Fate::Rejected(reason) = &tx.fate
@@ -1343,27 +1087,72 @@ where
             ));
         }
         for version in &rejected {
-            self.write_ahead_current_delete(batch, version)?;
+            if self.write_ahead_current_delete(batch, version)? {
+                self.restore_ahead_overlay_after_reject(batch, version).await?;
+            }
             let history_table = self.version_storage_table_for_row(version)?;
             batch.delete(
                 history_table.as_ref(),
                 self.version_storage_primary_key(version)?,
             );
         }
-        for (table_id, table, branch_key, row_uuid) in affected_content_rows {
-            self.rewrite_merge_heads_excluding_tx(
-                batch,
-                table_id,
-                &table,
-                &branch_key,
-                row_uuid,
-                tx_id,
-            )
-            .await?;
-        }
-        self.clear_content_version_reachability_cache();
+        // The rejected images are gone, so is the list naming them.
+        batch.delete(
+            TX_TOUCHED_ROWS_TABLE,
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(tx_id.time.0),
+                PrimaryKeyValue::U64(tx.node_alias.0),
+            ]),
+        );
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)
     }
 }
+
+/// The cheap identity part of commit-unit admission: the permission subject
+/// write policies evaluate, or the refusal when the connection may not make
+/// the unit at all. `Ok(None)` means no policy evaluation is owed (a trusted
+/// admin, or a relay whose connection already proved the write). It reads
+/// no storage, so the fate authority runs it before holding a unit.
+pub(super) fn commit_unit_admission_subject(
+    tx: &Transaction,
+    ingest_context: Option<CommitUnitIngestContext>,
+    active_claims_identity: Option<AuthorSubject>,
+) -> Result<Option<AuthorSubject>, RejectionReason> {
+    let permission_subject = match ingest_context {
+        Some(context) => {
+            if context.trust == CommitUnitTrust::TrustedAdmin {
+                return Ok(None);
+            }
+            if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
+                return Err(RejectionReason::AuthorizationDenied);
+            }
+            match context.trust {
+                CommitUnitTrust::Session => context.identity,
+                // Relay transport has no permission subject. A relayed
+                // write must reach a serving authority through its
+                // topology-owned admission path; it cannot borrow SYSTEM
+                // or the transport identity here.
+                CommitUnitTrust::Relay => {
+                    if active_claims_identity != Some(context.identity) {
+                        return Err(RejectionReason::AuthorizationDenied);
+                    }
+                    context.identity
+                }
+                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                    tx.permission_subject.unwrap_or(tx.made_by)
+                }
+                CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
+            }
+        }
+        None => tx.permission_subject.unwrap_or(tx.made_by),
+    };
+    // Gate the effective permission subject so relayed anonymous sessions
+    // stay read-only without changing trusted-backend attribution.
+    if permission_subject.is_anonymous() {
+        return Err(RejectionReason::AuthorizationDenied);
+    }
+    Ok(Some(permission_subject))
+}
+

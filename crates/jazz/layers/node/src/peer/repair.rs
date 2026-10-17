@@ -35,25 +35,14 @@ impl PeerState {
             .count() as u64;
     }
 
-
-    fn record_outgoing_view_update<S: OrderedKvStorage>(
-        &mut self,
-        _node: &NodeState<S>,
-        _schema: crate::ids::SchemaVersionId,
-        update: &SyncMessage,
-    ) -> Result<(), Error> {
+    fn record_outgoing_view_update(&mut self, update: &SyncMessage) {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
-            let state = self
-                .publication_states
+            self.publication_states
                 .entry(view.subscription)
-                .or_default();
-            state.supporting_revision = Some(view.supporting_rows.revision());
-            if let Some(maintained) = &mut state.maintained_subscription_view {
-                maintained.maintained.acknowledge_peer_source_closure();
-            }
+                .or_default()
+                .acknowledge_published(view.supporting_rows.revision());
         }
-        Ok(())
     }
 
     fn apply_outgoing_view_delta(

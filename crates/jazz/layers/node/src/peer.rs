@@ -19,10 +19,7 @@ use groove::storage::OrderedKvStorage;
 use web_time::Instant;
 
 use crate::ids::AuthorSubject;
-use crate::node::maintained_subscription_view::{
-    MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
-    ResultTransitions,
-};
+use crate::node::maintained_subscription_view::ResultTransitions;
 use crate::node::{Error, NodeState};
 #[cfg(test)]
 use crate::protocol::KnownStateCompleteness;
@@ -30,10 +27,9 @@ use crate::protocol::KnownStateCompleteness;
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, expand_version_carriers,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, expand_version_carriers,
 };
-use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;
@@ -151,38 +147,7 @@ pub struct PeerMetrics {
 }
 
 /// On-demand maintained subscription view index sizes for one subscription.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MaintainedSubscriptionViewMetricsFootprint {
-    /// Active result-current rows in the maintained index.
-    pub result_rows: usize,
-    /// Result weight map entries, including non-positive transient entries.
-    pub result_weights: usize,
-    /// Result payload map entries retained for projected/synthetic output.
-    pub result_payloads: usize,
-    /// Active readable version identities retained by full record identity.
-    pub version_identities: usize,
-    /// Entries reachable through the version-by-transaction index.
-    pub version_tx_entries: usize,
-    /// Active replacement winner entries across content and deletion maps.
-    pub replacement_entries: usize,
-    /// Active recursive app-row roots retained for structured array output.
-    pub structured_app_rows: usize,
-    /// Approximate heap bytes retained by result_weights.
-    pub result_weights_bytes: usize,
-    /// Approximate heap bytes retained by result_payloads.
-    pub result_payloads_bytes: usize,
-    /// Approximate heap bytes retained by WeightedVersionIndex.
-    pub versions_bytes: usize,
-    /// Approximate heap bytes retained by the physical support frontier and journal.
-    pub supporting_frontier_bytes: usize,
-    /// Approximate heap bytes retained by ReplacementIndex.
-    pub replacements_bytes: usize,
-    /// Approximate heap bytes retained by recursive app-row roots.
-    pub structured_app_rows_bytes: usize,
-    /// Approximate heap bytes retained by maintained-view indexes.
-    pub total_heap_bytes: usize,
-}
-
+pub use crate::node::maintained_subscription_view::MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewMetricsFootprint;
 /// Observable maintained subscription view metrics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaintainedSubscriptionViewMetrics {
@@ -233,27 +198,6 @@ impl FullDiffFallbackMetrics {
         self.query_reopens += other.query_reopens;
         self.authorization_support_reopens += other.authorization_support_reopens;
         self.runtime_resets += other.runtime_resets;
-    }
-}
-
-impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionViewMetricsFootprint {
-    fn from(footprint: MaintainedSubscriptionViewIndexFootprint) -> Self {
-        Self {
-            result_rows: footprint.result_rows,
-            result_weights: footprint.result_weights,
-            result_payloads: footprint.result_payloads,
-            version_identities: footprint.version_identities,
-            version_tx_entries: footprint.version_tx_entries,
-            replacement_entries: footprint.replacement_entries,
-            structured_app_rows: footprint.structured_app_rows,
-            result_weights_bytes: footprint.result_weights_bytes,
-            result_payloads_bytes: footprint.result_payloads_bytes,
-            versions_bytes: footprint.versions_bytes,
-            supporting_frontier_bytes: footprint.supporting_frontier_bytes,
-            replacements_bytes: footprint.replacements_bytes,
-            structured_app_rows_bytes: footprint.structured_app_rows_bytes,
-            total_heap_bytes: footprint.total_heap_bytes,
-        }
     }
 }
 

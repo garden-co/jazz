@@ -22,6 +22,7 @@ import { serializeClientConfig } from "../runtime/client-config-key.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
+import { toError } from "../runtime/util.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
@@ -98,7 +99,7 @@ export const JazzClientProvider = defineComponent({
               return;
             }
 
-            errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
+            errorRef.value = toError(reason);
           });
       },
       { immediate: true },
@@ -186,7 +187,7 @@ export const LegacyJazzProvider = defineComponent({
             // Failed requests may be retried with an equivalent config. Stale
             // failures must preserve the identity of a newer pending request.
             lastRequestedConfigKey = noConfigKey;
-            errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
+            errorRef.value = toError(reason);
           }
         });
     };

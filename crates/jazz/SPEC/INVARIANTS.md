@@ -39,6 +39,16 @@ The removed server-edge acceptance and topology contracts `INV-EDGE-8` and
 `INV-EDGE-12` are retired; their identifiers must not be reused. Core now
 authorizes every ordinary client write as specified in chapter 9.
 
+Retired with the version DAG when linear Core-sequenced history replaced it:
+`INV-HIST-5` (Core mints merge versions over concurrent heads), `INV-HIST-7`
+(a merge version's time follows its heads), `INV-HIST-16` (divergent merge
+versions re-fold their raw head sets) and `INV-HIST-19` (the durable
+merge-head helper). Their IDs must not be reused. Core now merges every
+accepted write into the row's post-image as it sequences it, so there are no
+merge heads, merge versions or merge-head rows; the surviving user-visible
+guarantees are `INV-HIST-8`, `INV-HIST-10`, `INV-HIST-15` and `INV-EDGE-16`
+(ch. 4 §4.3).
+
 ## Open Questions
 
 None.

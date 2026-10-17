@@ -211,84 +211,47 @@ type TableSuggestion = {
   properties: string[];
 };
 
-function renderArrayElementExpression(columnType: WasmColumnType): string {
-  return baseBuilderExpression(columnType);
-}
-
-function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
-  switch (column.column_type.type) {
-    case "Text":
-      return `m.add.string({ default: ${defaultExpression} })`;
-    case "Boolean":
-      return `m.add.boolean({ default: ${defaultExpression} })`;
-    case "Integer":
-      return `m.add.int({ default: ${defaultExpression} })`;
-    case "Double":
-      return `m.add.float({ default: ${defaultExpression} })`;
-    case "Timestamp":
-      return `m.add.timestamp({ default: ${defaultExpression} })`;
-    case "Bytea":
-      return `m.add.bytes({ default: ${defaultExpression} })`;
-    case "Json":
-      return column.column_type.schema
-        ? `m.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `m.add.json({ default: ${defaultExpression} })`;
-    case "Enum":
-      return `m.add.enum(${column.column_type.variants
-        .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { default: ${defaultExpression} })`;
-    case "EnumPayload":
-      throw new Error("Migration stub generation does not yet support payload enums.");
-    case "Uuid":
-      if (column.references) {
-        return `m.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
-      }
-      return `m.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
-    case "Array":
-      return `m.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
-    case "BigInt":
-      return `m.add.bigint({ default: ${defaultExpression} })`;
-    case "Row":
-      throw new Error("Migration stub generation does not yet support row-valued columns.");
-  }
-}
-
-function renderDropOperationExpression(
+/**
+ * Render a migration column operation such as `m.add.string({ default: null })`.
+ * `drop` operations carry their default under `backwardsDefault`.
+ */
+function renderColumnOperationExpression(
+  operation: "add" | "drop",
   column: ColumnDescriptor,
   defaultExpression: string,
 ): string {
-  switch (column.column_type.type) {
+  const m = `m.${operation}`;
+  const defaultEntry = `${operation === "add" ? "default" : "backwardsDefault"}: ${defaultExpression}`;
+  const columnType = column.column_type;
+  switch (columnType.type) {
     case "Text":
-      return `m.drop.string({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.string({ ${defaultEntry} })`;
     case "Boolean":
-      return `m.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.boolean({ ${defaultEntry} })`;
     case "Integer":
-      return `m.drop.int({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.int({ ${defaultEntry} })`;
     case "Double":
-      return `m.drop.float({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.float({ ${defaultEntry} })`;
     case "Timestamp":
-      return `m.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.timestamp({ ${defaultEntry} })`;
     case "Bytea":
-      return `m.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.bytes({ ${defaultEntry} })`;
     case "Json":
-      return column.column_type.schema
-        ? `m.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `m.drop.json({ backwardsDefault: ${defaultExpression} })`;
+      return columnType.schema
+        ? `${m}.json({ ${defaultEntry}, schema: ${jsonSchemaExpression(columnType.schema)} })`
+        : `${m}.json({ ${defaultEntry} })`;
     case "Enum":
-      return `m.drop.enum(${column.column_type.variants
+      return `${m}.enum(${columnType.variants
         .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
+        .join(", ")}, { ${defaultEntry} })`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      if (column.references) {
-        return `m.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
-      }
-      return `m.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
+      return `${m}.ref(${column.references ? JSON.stringify(column.references) : '"TODO_TABLE"'}, { ${defaultEntry} })`;
     case "Array":
-      return `m.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
+      return `${m}.array({ of: ${baseBuilderExpression(columnType.element)}, ${defaultEntry} })`;
     case "BigInt":
-      return `m.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.bigint({ ${defaultEntry} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -325,7 +288,7 @@ function inferTableSuggestions(
     const column = toColumns.get(columnName)!;
     if (column.nullable) {
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderAddOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, "null")},`,
       );
     } else {
       comments.push(
@@ -338,7 +301,7 @@ function inferTableSuggestions(
     const column = fromColumns.get(columnName)!;
     if (column.nullable) {
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderDropOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, "null")},`,
       );
     } else {
       comments.push(
