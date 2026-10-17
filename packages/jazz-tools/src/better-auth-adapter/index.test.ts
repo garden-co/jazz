@@ -5,7 +5,6 @@ import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth"
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
-  deploy as deployFixture,
   startTestJwtIssuer,
   deploy as deployFixture,
   type LocalJazzServerHandle,
