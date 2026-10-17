@@ -19,7 +19,7 @@ test("the browser test server uses an available port independently of developmen
   const previous = process.env.WEB_PORT;
   delete process.env.WEB_PORT;
   try {
-    const { default: config } = await import("../playwright.config.ts");
+    const { default: config } = await import("../playwright.config.js");
     const url = new URL(config.use!.baseURL!);
     const port = Number(url.port);
     assert.ok(Number.isInteger(port) && port > 0 && port !== 3000);
