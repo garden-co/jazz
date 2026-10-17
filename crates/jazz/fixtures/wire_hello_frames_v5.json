@@ -17,34 +17,34 @@
       "name": "client_with_authority",
       "min_protocol_version": 5,
       "max_protocol_version": 5,
-      "features": 1,
+      "features": 0,
       "role": 0,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000505010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AAUFAQABEF5eXl5eXl5eXl5eXl5eXl6sAg=="
+      "frame_hex": "000505000001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AAUFAAABEF5eXl5eXl5eXl5eXl5eXl6sAg=="
     },
     {
       "name": "core_without_authority",
       "min_protocol_version": 5,
       "max_protocol_version": 5,
-      "features": 4,
+      "features": 0,
       "role": 1,
       "authority_node_hex": null,
       "authority_epoch": null,
-      "frame_hex": "000505040100",
-      "frame_base64": "AAUFBAEA"
+      "frame_hex": "000505000100",
+      "frame_base64": "AAUFAAEA"
     },
     {
       "name": "core_with_authority",
       "min_protocol_version": 5,
       "max_protocol_version": 5,
-      "features": 501,
+      "features": 400,
       "role": 1,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000505f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AAUF9QMBARBeXl5eXl5eXl5eXl5eXl5erAI="
+      "frame_hex": "00050590030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AAUFkAMBARBeXl5eXl5eXl5eXl5eXl5erAI="
     },
     {
       "name": "core_with_max_u64_authority_epoch",

@@ -47,7 +47,10 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
 
 mod memory;
 
-pub use memory::{RocksDbMemoryUsage, process_memory_usage};
+pub use memory::{
+    RocksDbMemoryBudget, RocksDbMemoryUsage, configure_process_memory_budget,
+    process_memory_budget, process_memory_usage,
+};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
@@ -338,7 +341,8 @@ impl RocksDbStorage {
             }
         }
         let families = families.into_iter().collect::<BTreeSet<_>>();
-        let cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let shared_memory = memory::shared_memory();
+        let cache = shared_memory.block_cache.clone();
         let buffers =
             WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
         let mut options = rocksdb_options(&cache, &buffers);
@@ -361,7 +365,7 @@ impl RocksDbStorage {
         write_options.set_sync(matches!(durability, Durability::FullSync));
         let db = Arc::new(db);
         let storage = Self {
-            _memory_registration: memory::Registration::new(&db, &cache),
+            _memory_registration: memory::Registration::new(&db),
             column_families: families
                 .into_iter()
                 .filter(|cf| cf != ROCKSDB_INTERNAL_CF)
@@ -413,6 +417,14 @@ impl RocksDbStorage {
                 })));
             }
             if manifest != &target {
+                // Preserve the typed codec-inventory refusal before reporting
+                // a receipt/layout mismatch at an otherwise known epoch.
+                let expected = if manifest.epoch() == source.epoch() {
+                    &source
+                } else {
+                    &target
+                };
+                expected.admit_existing(&manifest.encode()?)?;
                 return Err(Error::InvalidStorageLayout(
                     "unsupported RocksDB node manifest".into(),
                 ));
@@ -490,11 +502,11 @@ impl RocksDbStorage {
                 "RocksDB internal column family name is reserved".to_owned(),
             ));
         }
-        // Share one 256MB block cache and one bounded write-buffer budget across
-        // all column families opened by this storage instance.
-        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
-        let write_buffer_manager =
-            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        // Every store in the process shares one block cache and one
+        // write-buffer budget (see `RocksDbMemoryBudget`).
+        let shared_memory = memory::shared_memory();
+        let block_cache = &shared_memory.block_cache;
+        let write_buffer_manager = &shared_memory.write_buffer_manager;
         let requested_column_families = column_families
             .iter()
             .map(|name| (*name).to_owned())
@@ -516,7 +528,7 @@ impl RocksDbStorage {
         }
         opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
 
-        let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
+        let mut final_options = rocksdb_options(block_cache, write_buffer_manager);
         final_options.create_if_missing(true);
         // An existing store must pass its epoch check before we add any
         // requested families. Open it once with exactly its existing layout,
@@ -541,7 +553,7 @@ impl RocksDbStorage {
             .map(|name| {
                 ColumnFamilyDescriptor::new(
                     name,
-                    rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
+                    rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
                 )
             });
         let mut db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
@@ -558,7 +570,7 @@ impl RocksDbStorage {
             {
                 db.create_cf(
                     family,
-                    &rocksdb_options_for_cf(family, &block_cache, &write_buffer_manager),
+                    &rocksdb_options_for_cf(family, block_cache, write_buffer_manager),
                 )
                 .storage()?;
             }
@@ -586,7 +598,7 @@ impl RocksDbStorage {
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
                 .collect(),
-            _memory_registration: memory::Registration::new(&db, &block_cache),
+            _memory_registration: memory::Registration::new(&db),
             db,
             write_options,
             mutation_gate: Mutex::new(()),
@@ -904,6 +916,12 @@ fn rocksdb_options_for_profile(
     }
     block_options.set_block_size(profile.block_size());
     block_options.set_block_cache(block_cache);
+    // Charge index and filter blocks to the shared cache so table-reader
+    // memory stays inside the budget as SST files accumulate. Pinning L0 and
+    // giving them high priority keeps the hot ones resident.
+    block_options.set_cache_index_and_filter_blocks(true);
+    block_options.set_cache_index_and_filter_blocks_with_high_priority(true);
+    block_options.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
     let mut options = Options::default();
     options.set_block_based_table_factory(&block_options);
@@ -974,26 +992,24 @@ impl ReopenableStorage for RocksDbStorage {
             }
             // Expand the admitted handle without re-entering the epoch-one
             // opener or resetting its durability policy and pending WAL debt.
-            let buffers = WriteBufferManager::new_write_buffer_manager(
-                ROCKSDB_WRITE_BUFFER_MANAGER_BYTES,
-                false,
-            );
-            self._memory_registration
-                .with_db_mut(&mut self.db, |db, cache| {
-                    for name in column_families {
-                        if name == ROCKSDB_INTERNAL_CF {
-                            return Err(Error::InvalidStorageLayout(
-                                "reserved RocksDB internal family".into(),
-                            ));
-                        }
-                        if !self.column_families.contains(&name) {
-                            db.create_cf(&name, &rocksdb_options_for_cf(&name, cache, &buffers))
-                                .storage()?;
-                            self.column_families.insert(name);
-                        }
+            let shared_memory = memory::shared_memory();
+            let cache = &shared_memory.block_cache;
+            let buffers = &shared_memory.write_buffer_manager;
+            self._memory_registration.with_db_mut(&mut self.db, |db| {
+                for name in column_families {
+                    if name == ROCKSDB_INTERNAL_CF {
+                        return Err(Error::InvalidStorageLayout(
+                            "reserved RocksDB internal family".into(),
+                        ));
                     }
-                    Ok(())
-                })?;
+                    if !self.column_families.contains(&name) {
+                        db.create_cf(&name, &rocksdb_options_for_cf(&name, cache, buffers))
+                            .storage()?;
+                        self.column_families.insert(name);
+                    }
+                }
+                Ok(())
+            })?;
             Ok(self)
         })
     }
@@ -2570,6 +2586,35 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn stores_share_one_process_memory_budget() {
+        use groove::storage::OrderedKvStorage;
+
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = RocksDbStorage::open(first_dir.path(), &["records"]).unwrap();
+        let second = RocksDbStorage::open(second_dir.path(), &["records"]).unwrap();
+        ready(first.set("records".into(), b"a".to_vec(), vec![1; 64 * 1024])).unwrap();
+        ready(second.set("records".into(), b"b".to_vec(), vec![2; 64 * 1024])).unwrap();
+
+        // The budget is fixed once the shared cache exists: re-asserting it is
+        // fine, and a different budget reports the one in force.
+        let budget = crate::process_memory_budget();
+        assert_eq!(crate::configure_process_memory_budget(budget), Ok(()));
+        let other = crate::RocksDbMemoryBudget {
+            block_cache_bytes: budget.block_cache_bytes / 2,
+            ..budget
+        };
+        assert_eq!(crate::configure_process_memory_budget(other), Err(budget));
+
+        let usage = crate::process_memory_usage().expect("rocksdb reports memory usage");
+        assert!(
+            usage.block_cache_bytes <= budget.block_cache_bytes as u64,
+            "two stores must stay inside one shared cache budget: usage={usage:?}, budget={budget:?}"
+        );
+        drop((first, second));
     }
 
     #[test]

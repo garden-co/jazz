@@ -33,18 +33,6 @@ pub enum QueryAuthorizationMode {
     ClientLocal,
 }
 
-/// Normalizes every public query surface into the same row-set shape algebra.
-pub trait RowSetNormalizer {
-    /// Normalize ordinary table-rooted Jazz queries.
-    fn normalize_query(&self, query: &Query) -> CapabilityResult<NormalizedRowSetShape>;
-
-    /// Normalize output-changing relation queries such as `hopTo`/`gather`.
-    fn normalize_relation_query(
-        &self,
-        query: &RelationQuery,
-    ) -> CapabilityResult<NormalizedRowSetShape>;
-}
-
 /// Normalized row-set query plus this caller's binding values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowSetProgramInput {
@@ -579,6 +567,60 @@ pub enum PredicateExpr {
     Or(Vec<PredicateExpr>),
     /// Boolean negation.
     Not(Box<PredicateExpr>),
+}
+
+/// Defines a [`PredicateExpr`] walker that calls `f` on every value in order,
+/// descending through `And`, `Or`, `Not` and `EnumMatch` payloads, and stops
+/// at the first error; `mut` gives the walker mutable access.
+macro_rules! predicate_value_walker {
+    ($(#[$doc:meta])* $name:ident $(, $mut_:tt)?) => {
+        $(#[$doc])*
+        pub fn $name<E>(
+            &$($mut_)? self,
+            f: &mut impl FnMut(&$($mut_)? NormalizedValueRef) -> Result<(), E>,
+        ) -> Result<(), E> {
+            match self {
+                Self::True | Self::False => {}
+                Self::Compare { left, right, .. }
+                | Self::ArrayContains { value: left, needle: right }
+                | Self::TextContains { value: left, needle: right } => {
+                    f(left)?;
+                    f(right)?;
+                }
+                Self::In { value, options } => {
+                    f(value)?;
+                    for option in options {
+                        f(option)?;
+                    }
+                }
+                Self::IsNull(value) | Self::IsNotNull(value) => f(value)?,
+                Self::EnumMatch { value, payload, .. } => {
+                    f(value)?;
+                    payload.$name(f)?;
+                }
+                Self::And(children) | Self::Or(children) => {
+                    for child in children {
+                        child.$name(f)?;
+                    }
+                }
+                Self::Not(child) => child.$name(f)?,
+            }
+            Ok(())
+        }
+    };
+}
+
+impl PredicateExpr {
+    predicate_value_walker!(
+        /// Calls `f` on every value in order, descending through `And`, `Or`,
+        /// `Not` and `EnumMatch` payloads, and stops at the first error.
+        try_for_each_value
+    );
+    predicate_value_walker!(
+        /// [`Self::try_for_each_value`] with mutable access to each value.
+        try_for_each_value_mut,
+        mut
+    );
 }
 
 /// Comparison operator.

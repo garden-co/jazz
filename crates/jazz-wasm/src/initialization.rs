@@ -19,13 +19,11 @@ impl WasmDb {
         let lifecycle = Rc::clone(&self.inner);
         Ok(future_to_promise(async move {
             let observation = async {
-                match inner {
-                    WasmDbInner::Memory(db) => db.has_authenticated_catalogue().await,
-                    #[cfg(target_arch = "wasm32")]
-                    WasmDbInner::Browser(db) => db.has_authenticated_catalogue().await,
-                    WasmDbInner::Closed => unreachable!("open_inner rejects closed runtimes"),
-                }
-                .map_err(to_js_error)
+                inner
+                    .db
+                    .has_authenticated_catalogue()
+                    .await
+                    .map_err(to_js_error)
             };
             let mut observation = std::pin::pin!(observation);
             let state = std::future::poll_fn(|context| {
@@ -50,13 +48,11 @@ impl WasmDb {
         let lifecycle = Rc::clone(&self.inner);
         Ok(future_to_promise(async move {
             let observation = async {
-                match inner {
-                    WasmDbInner::Memory(db) => db.take_authenticated_catalogue_state().await,
-                    #[cfg(target_arch = "wasm32")]
-                    WasmDbInner::Browser(db) => db.take_authenticated_catalogue_state().await,
-                    WasmDbInner::Closed => unreachable!("open_inner rejects closed runtimes"),
-                }
-                .map_err(to_js_error)
+                inner
+                    .db
+                    .take_authenticated_catalogue_state()
+                    .await
+                    .map_err(to_js_error)
             };
             let mut observation = std::pin::pin!(observation);
             let state = std::future::poll_fn(|context| {
@@ -110,13 +106,7 @@ impl WasmDb {
                         .map_err(to_js_error)?
                 }};
             }
-            let seal = match &inner {
-                WasmDbInner::Memory(db) => seal!(db, true),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => seal!(db, false),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
+            let seal = seal!(&inner.db, inner.drives_mutations_inline).map_err(to_js_error)?;
             if lifecycle.borrow().is_none() {
                 return Err(JsValue::from_str(
                     "WasmDb closed during initialization sealing",
@@ -148,25 +138,13 @@ impl WasmDb {
                 )
             })?;
         Ok(future_to_promise(async move {
-            let write = match inner {
-                WasmDbInner::Memory(db) => {
-                    let write = db
-                        .publish_initialization_transaction(seal)
-                        .await
-                        .map_err(to_js_error)?;
-                    db.drive_queued_mutation_once();
-                    wasm_write_memory(db, write)?
-                }
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    let write = db
-                        .publish_initialization_transaction(seal)
-                        .await
-                        .map_err(to_js_error)?;
-                    wasm_write_browser(db, write)?
-                }
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            };
+            let write = inner
+                .db
+                .publish_initialization_transaction(seal)
+                .await
+                .map_err(to_js_error)?;
+            inner.after_enqueue();
+            let write = wasm_write(inner.db, write)?;
             Ok(write.into())
         }))
     }
@@ -187,13 +165,11 @@ impl WasmDb {
                 )
             })?;
         Ok(future_to_promise(async move {
-            match inner {
-                WasmDbInner::Memory(db) => db.cancel_initialization_transaction(seal).await,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db.cancel_initialization_transaction(seal).await,
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
+            inner
+                .db
+                .cancel_initialization_transaction(seal)
+                .await
+                .map_err(to_js_error)?;
             Ok(JsValue::UNDEFINED)
         }))
     }
@@ -232,13 +208,7 @@ impl WasmDb {
                         .map_err(to_js_error)?
                 }};
             }
-            match &inner {
-                WasmDbInner::Memory(db) => prepare!(db, true),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => prepare!(db, false),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
+            prepare!(&inner.db, inner.drives_mutations_inline).map_err(to_js_error)?;
             Ok(JsValue::UNDEFINED)
         }))
     }
@@ -260,13 +230,11 @@ impl WasmDb {
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_js_error)?;
         Ok(future_to_promise(async move {
-            let statuses = match inner {
-                WasmDbInner::Memory(db) => db.initialization_transaction_status(&ids).await,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db.initialization_transaction_status(&ids).await,
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
+            let statuses = inner
+                .db
+                .initialization_transaction_status(&ids)
+                .await
+                .map_err(to_js_error)?;
             Ok(
                 jazz::binding_codec::encode_initialization_statuses(&ids, &statuses)
                     .map_err(to_js_error)?
@@ -307,10 +275,10 @@ where
         return open_db(schema, storage, config).await;
     };
     if config.history_complete {
-        return Err(Error {
-            code: ErrorCode::Protocol,
-            message: "cached catalogue cannot establish history completeness".into(),
-        });
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "cached catalogue cannot establish history completeness",
+        ));
     }
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {

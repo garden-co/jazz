@@ -1,9 +1,12 @@
 import { setAccountSelectionBarrier } from "./selection-durability.js";
 import {
   createAccountManagerWithRuntime,
+  isRetainedAccountAssignment,
+  retainedAccountAssignment,
   type BackendAccountHost,
   type JWTAuth,
   type FounderOwnership,
+  type RetainedAccountAssignment,
 } from "./enrollment.js";
 import type { AccountHandle, AccountManager } from "./state.js";
 import { localFirstFactory } from "./local-first.js";
@@ -33,6 +36,7 @@ interface StoredAccounts {
   format: "jazz-account-selection-v3";
   roots: string[];
   selected: number | null;
+  assignment?: RetainedAccountAssignment | null;
   generatedHere: string[];
   founderEligibleRoots: string[];
   founders: FounderClaim[];
@@ -62,6 +66,15 @@ function decode(value: string | null): StoredAccounts {
     throw new Error("Invalid persisted account selection");
   }
   for (const root of parsed.roots) parseAuthSecret(root);
+  // Older writers omit the assignment; an invalid one is ignored, never trusted.
+  const assignment =
+    parsed.selected === null && isRetainedAccountAssignment(parsed.assignment)
+      ? {
+          account: parsed.assignment.account,
+          issuer: parsed.assignment.issuer,
+          subject: parsed.assignment.subject,
+        }
+      : null;
   // A v1 inventory never proves local creation, even if an unknown extension
   // claims otherwise. Migration retains its selection and every secret root.
   const generatedHere = parsed.format === "jazz-account-selection-v1" ? [] : parsed.generatedHere;
@@ -115,6 +128,7 @@ function decode(value: string | null): StoredAccounts {
     format: "jazz-account-selection-v3",
     roots: [...parsed.roots],
     selected: parsed.selected,
+    assignment,
     generatedHere: [...generatedHere],
     founderEligibleRoots: [...founderEligibleRoots],
     founders,
@@ -222,8 +236,16 @@ export async function prepareAccountManager(options: {
   generateSecret?(): string;
   fetch?: typeof fetch;
   backend?: BackendAccountHost;
+  /**
+   * Retain the selected external account's assignment so the next start
+   * reopens it before the provider answers, and re-admit it in place on a
+   * same-identity login. Hosts opt in once their runtime can open an account
+   * context before its first credential.
+   */
+  retainAccountAssignment?: boolean;
 }) {
   const stored = decode(await options.store.read());
+  if (!options.retainAccountAssignment) stored.assignment = null;
   let writes = Promise.resolve();
   let adoptingSecret: string | undefined;
   const save = () => {
@@ -231,6 +253,7 @@ export async function prepareAccountManager(options: {
     const generatedHere = [...stored.generatedHere];
     const founderEligibleRoots = [...stored.founderEligibleRoots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
+    const assignment = selected === null ? (stored.assignment ?? null) : null;
     // Serialize snapshots even for an asynchronous native secure store. A
     // rejected save does not prevent a later explicit selection from retrying.
     writes = writes
@@ -247,6 +270,7 @@ export async function prepareAccountManager(options: {
           }
           latest.generatedHere = [...new Set([...latest.generatedHere, ...generatedHere])];
           latest.selected = selected === null ? null : latest.roots.indexOf(selected);
+          latest.assignment = assignment;
           return JSON.stringify(latest);
         }),
       );
@@ -258,6 +282,8 @@ export async function prepareAccountManager(options: {
     fetch: options.fetch,
     backend: options.backend,
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
+    restoredAccount: stored.selected === null ? (stored.assignment ?? undefined) : undefined,
+    revalidateInPlace: options.retainAccountAssignment === true,
     localFirst: localFirstFactory({
       appId: options.appId,
       mintToken: options.mintToken,
@@ -268,6 +294,7 @@ export async function prepareAccountManager(options: {
       founderOwnership: (secret, assertValid, retained) =>
         founderOwnership(options.store, secret, assertValid, retained),
       retainSecret(secret, generatedHere) {
+        stored.assignment = null;
         if (generatedHere) {
           stored.generatedHere = [...new Set([...stored.generatedHere, secret])];
           if (!stored.roots.includes(secret)) stored.founderEligibleRoots.push(secret);
@@ -284,10 +311,18 @@ export async function prepareAccountManager(options: {
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
         stored.selected = index;
-        return save();
+        // Suppress only the one retention callback caused by adoption. Any
+        // re-entrant explicit selection must retain and persist normally.
+        if (adoptingSecret !== secret) return save();
+        adoptingSecret = undefined;
       },
     }),
   });
+  const superseded = async (): Promise<never> => {
+    stored.selected = null;
+    await save();
+    throw new Error("Automatic local-first startup was superseded");
+  };
   automaticInitializers.set(manager, async () => {
     let changed = false;
     let previous = manager.getSnapshot();
@@ -322,6 +357,7 @@ export async function prepareAccountManager(options: {
                 latest.generatedHere.push(candidate);
                 latest.founderEligibleRoots.push(candidate);
               }
+              latest.assignment = null;
               winner = candidate;
             } else {
               winner = selected;
@@ -330,13 +366,7 @@ export async function prepareAccountManager(options: {
           }),
         );
       await writes;
-      if (changed) {
-        const current = manager.getLoggedIn();
-        if (current) return current;
-        stored.selected = null;
-        await save();
-        throw new Error("Automatic local-first startup was superseded");
-      }
+      if (changed) return manager.getLoggedIn() ?? (await superseded());
       if (winner === undefined)
         throw new Error("Automatic local-first selection was not committed");
       // Adoption only hydrates the manager; suppress its one retention callback.
@@ -346,11 +376,7 @@ export async function prepareAccountManager(options: {
       } finally {
         if (adoptingSecret === winner) adoptingSecret = undefined;
       }
-      const current = manager.getLoggedIn();
-      if (current) return current;
-      stored.selected = null;
-      await save();
-      throw new Error("Automatic local-first startup was superseded");
+      return manager.getLoggedIn() ?? (await superseded());
     } finally {
       unsubscribe();
     }
@@ -364,6 +390,9 @@ export async function prepareAccountManager(options: {
     // External credentials are owned by the provider and never serialized here.
     if (next?.identity.issuer === "urn:jazz:local-first") return;
     stored.selected = null;
+    // Keep only the assignment of a provider-admitted account, never its token.
+    stored.assignment =
+      next && options.retainAccountAssignment ? (retainedAccountAssignment(next) ?? null) : null;
     void save().catch((error) => manager.reportPersistenceError(error));
   });
   setAccountSelectionBarrier(manager, (retry) => (retry ? writes.catch(() => save()) : writes));

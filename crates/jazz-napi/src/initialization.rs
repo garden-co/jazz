@@ -163,10 +163,7 @@ impl NapiDb {
                 }) as LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>
             }};
         }
-        let future = match inner {
-            NapiDbInnerStorage::Memory(db) => observe!(db),
-            NapiDbInnerStorage::Persistent(db) => observe!(db),
-        };
+        let future = observe!(&inner.core);
         let pending = PendingNativeCatalogueState {
             future: RefCell::new(Some(future)),
             lifecycle: Rc::clone(&self.streaming),
@@ -208,10 +205,7 @@ impl NapiDb {
                 }) as LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>
             }};
         }
-        let future = match inner {
-            NapiDbInnerStorage::Memory(db) => observe!(db),
-            NapiDbInnerStorage::Persistent(db) => observe!(db),
-        };
+        let future = observe!(&inner.core);
         let pending = PendingNativeCatalogueState {
             future: RefCell::new(Some(future)),
             lifecycle: Rc::clone(&self.streaming),
@@ -261,10 +255,7 @@ impl NapiDb {
                 (receiver, cleanup)
             }};
         }
-        let (receiver, cleanup) = match inner {
-            NapiDbInnerStorage::Memory(db) => seal!(db, true),
-            NapiDbInnerStorage::Persistent(db) => seal!(db, false),
-        };
+        let (receiver, cleanup) = seal!(&inner.core, inner.drives_mutations_inline);
         let seals = Rc::clone(&self.initialization_seals);
         let streaming = Rc::clone(&self.streaming);
         let view_id = self.view_id;
@@ -302,19 +293,10 @@ impl NapiDb {
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match inner {
-            NapiDbInnerStorage::Memory(db) => {
-                let write = core_block_on(db.publish_initialization_transaction(seal))
-                    .map_err(napi_error)?;
-                db.drive_queued_mutation_once();
-                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let write = core_block_on(db.publish_initialization_transaction(seal))
-                    .map_err(napi_error)?;
-                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
-            }
-        }
+        let write = core_block_on(inner.core.publish_initialization_transaction(seal))
+            .map_err(napi_error)?;
+        inner.after_enqueue();
+        core_write(Rc::clone(&inner.core), write).map_err(BindingError::from)
     }
 
     #[napi(js_name = "cancelInitializationTransaction")]
@@ -324,16 +306,9 @@ impl NapiDb {
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match inner {
-            NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.cancel_initialization_transaction(seal))
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.cancel_initialization_transaction(seal))
-            }
-        }
-        .map_err(napi_error)
-        .map_err(BindingError::from)
+        core_block_on(inner.core.cancel_initialization_transaction(seal))
+            .map_err(napi_error)
+            .map_err(BindingError::from)
     }
 
     #[napi(js_name = "recordInitializationInsertAbsence")]
@@ -377,11 +352,7 @@ impl NapiDb {
                 }))
             }};
         }
-        match inner {
-            NapiDbInnerStorage::Memory(db) => prepare!(db, true),
-            NapiDbInnerStorage::Persistent(db) => prepare!(db, false),
-        }
-        .map_err(BindingError::from)
+        prepare!(&inner.core, inner.drives_mutations_inline).map_err(BindingError::from)
     }
 
     #[napi(js_name = "initializationTransactionStatus")]
@@ -421,11 +392,7 @@ impl NapiDb {
                 }))
             }};
         }
-        match inner {
-            NapiDbInnerStorage::Memory(db) => status!(db),
-            NapiDbInnerStorage::Persistent(db) => status!(db),
-        }
-        .map_err(BindingError::from)
+        status!(&inner.core).map_err(BindingError::from)
     }
 }
 

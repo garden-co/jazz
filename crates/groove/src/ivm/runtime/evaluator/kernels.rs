@@ -9,6 +9,24 @@ impl TickEvaluator<'_> {
         node: NodeId,
         inputs: &[Arc<RecordDeltas>],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        // Consumers of stored arrangements read only buckets loaded for them.
+        let stored = self.prefetch_stored_inputs_now(node)?;
+        // A miss counts only within this operator's own evaluation.
+        for key in &stored {
+            if let Some(state) = self.arrangement_states.get(key) {
+                state.value().take_probe_miss();
+            }
+        }
+        let output = self.compute_operator_batch(node, inputs)?;
+        self.check_stored_reads(&stored)?;
+        Ok(output)
+    }
+
+    fn compute_operator_batch(
+        &mut self,
+        node: NodeId,
+        inputs: &[Arc<RecordDeltas>],
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         let graph_node = self
             .graph
             .node(node)
@@ -25,6 +43,7 @@ impl TickEvaluator<'_> {
                 NodeState::update_table_source_from_inputs(
                     input,
                     self.schema,
+                    self.dictionaries,
                     self.variant_projections,
                     &output_desc,
                     self.evaluation_inputs
@@ -46,6 +65,7 @@ impl TickEvaluator<'_> {
                 NodeState::update_index_source_from_inputs(
                     input,
                     self.schema,
+                    self.dictionaries,
                     self.variant_projections,
                     &output_desc,
                     self.evaluation_inputs
@@ -88,7 +108,10 @@ impl TickEvaluator<'_> {
                     let stamp = self.arrangement_sub_tick(&key);
                     #[cfg(feature = "cold-settle-attribution")]
                     self.trace_arrangement_snapshot(&key, &input.deltas);
-                    let mut state = self.arrangement_states.remove(&key).unwrap_or_default();
+                    let mut state = match self.arrangement_states.remove(&key) {
+                        Some(state) => state,
+                        None => self.new_arrangement_state(&key),
+                    };
                     super::join::prepare_arrangement(
                         &mut state,
                         &output_desc,
@@ -350,6 +373,13 @@ impl TickEvaluator<'_> {
                     &right,
                 )
             }
+            OpType::Lookup(lookup) => {
+                let input = inputs
+                    .first()
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
+                self.update_lookup(node, lookup, output_desc, &input)
+            }
             OpType::RecursiveStepWitness(_) => {
                 let [recursive] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
@@ -376,7 +406,8 @@ fn operator_phase_span(operator: &OpType) -> tracing::Span {
         | OpType::IndexSource(_)
         | OpType::BindingSource(_)
         | OpType::FrontierSource(_)
-        | OpType::InlineRecords(_) => tracing::trace_span!("cold.phase.op_source"),
+        | OpType::InlineRecords(_)
+        | OpType::Lookup(_) => tracing::trace_span!("cold.phase.op_source"),
         OpType::Arrange(_) => tracing::trace_span!("cold.phase.op_arrange"),
         OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_) => {
             tracing::trace_span!("cold.phase.op_join")

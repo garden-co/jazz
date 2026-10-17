@@ -264,6 +264,10 @@ where
         }
     }
 
+    /// Apply `operation` and return `written`, unless `settled` maps the
+    /// current value at the operation's key to an outcome. A generation
+    /// conflict reloads the tree and repeats the check, so the condition and
+    /// the write always observe the same durable tree.
     async fn write_many_replaying_generation_conflicts(
         &self,
         operations: &[OwnedWriteOperation],

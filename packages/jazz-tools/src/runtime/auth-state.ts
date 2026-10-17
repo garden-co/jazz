@@ -69,6 +69,45 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
     }
   };
 
+  const setState = (nextState: AuthState): AuthState => {
+    if (authStateEquals(state, nextState)) return state;
+    state = nextState;
+    emit();
+    return state;
+  };
+
+  const jwtInput = (jwtToken?: string, trustedReservedSession?: Session): ClientSessionInput => ({
+    ...currentInput,
+    jwtToken,
+    cookieSession: undefined,
+    trustedReservedSession,
+  });
+
+  const cookieInput = (cookieSession?: Session): ClientSessionInput => ({
+    ...currentInput,
+    jwtToken: undefined,
+    cookieSession,
+    trustedReservedSession: undefined,
+  });
+
+  /** Resolve `nextInput` and check it keeps the principal, without changing state. */
+  const validateInput = (nextInput: ClientSessionInput): boolean => {
+    if (options?.lockAuthenticatedState) return false;
+    assertSamePrincipal(resolveClientSessionStateSync(nextInput).session);
+    return true;
+  };
+
+  const applyInput = (nextInput: ClientSessionInput): AuthState => {
+    if (options?.lockAuthenticatedState) {
+      return state;
+    }
+
+    const resolved = resolveClientSessionStateSync(nextInput);
+    assertSamePrincipal(resolved.session);
+    currentInput = nextInput;
+    return setState({ authMode: initialAuthMode, session: resolved.session });
+  };
+
   return {
     getState(): AuthState {
       return state;
@@ -83,15 +122,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
     },
 
     markUnauthenticated(reason: AuthFailureReason): AuthState {
-      const nextState: AuthState = {
-        authMode: initialAuthMode,
-        session: state.session,
-        error: reason,
-      };
-      if (authStateEquals(state, nextState)) return state;
-      state = nextState;
-      emit();
-      return state;
+      return setState({ authMode: initialAuthMode, session: state.session, error: reason });
     },
 
     clearError(): AuthState {
@@ -103,80 +134,20 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
 
     /** Validate a prospective token update without changing state or notifying listeners. */
     validateJwtToken(jwtToken?: string, trustedReservedSession?: Session): boolean {
-      if (options?.lockAuthenticatedState) return false;
-      const resolved = resolveClientSessionStateSync({
-        ...currentInput,
-        jwtToken,
-        cookieSession: undefined,
-        trustedReservedSession,
-      });
-      assertSamePrincipal(resolved.session);
-      return true;
+      return validateInput(jwtInput(jwtToken, trustedReservedSession));
     },
 
     /** Validate a prospective cookie update without changing state or notifying listeners. */
     validateCookieSession(cookieSession?: Session): boolean {
-      if (options?.lockAuthenticatedState) return false;
-      const resolved = resolveClientSessionStateSync({
-        ...currentInput,
-        jwtToken: undefined,
-        cookieSession,
-        trustedReservedSession: undefined,
-      });
-      assertSamePrincipal(resolved.session);
-      return true;
+      return validateInput(cookieInput(cookieSession));
     },
 
     applyJwtToken(jwtToken?: string, trustedReservedSession?: Session): AuthState {
-      if (options?.lockAuthenticatedState) {
-        return state;
-      }
-
-      const nextInput: ClientSessionInput = {
-        ...currentInput,
-        jwtToken,
-        cookieSession: undefined,
-        trustedReservedSession,
-      };
-      const resolved = resolveClientSessionStateSync(nextInput);
-
-      assertSamePrincipal(resolved.session);
-      currentInput = nextInput;
-
-      const nextState: AuthState = {
-        authMode: initialAuthMode,
-        session: resolved.session,
-      };
-      if (authStateEquals(state, nextState)) return state;
-      state = nextState;
-      emit();
-      return state;
+      return applyInput(jwtInput(jwtToken, trustedReservedSession));
     },
 
     applyCookieSession(cookieSession?: Session): AuthState {
-      if (options?.lockAuthenticatedState) {
-        return state;
-      }
-
-      const nextInput: ClientSessionInput = {
-        ...currentInput,
-        jwtToken: undefined,
-        cookieSession,
-        trustedReservedSession: undefined,
-      };
-      const resolved = resolveClientSessionStateSync(nextInput);
-
-      assertSamePrincipal(resolved.session);
-      currentInput = nextInput;
-
-      const nextState: AuthState = {
-        authMode: initialAuthMode,
-        session: resolved.session,
-      };
-      if (authStateEquals(state, nextState)) return state;
-      state = nextState;
-      emit();
-      return state;
+      return applyInput(cookieInput(cookieSession));
     },
   };
 }

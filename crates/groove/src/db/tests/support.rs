@@ -1224,28 +1224,35 @@ pub(super) fn encoded_title_key_part(title: &str) -> Vec<u8> {
     bytes
 }
 
-pub(super) fn persisted_index_storage_key(index: &str, logical_key: &[u8]) -> Vec<u8> {
-    persisted_table_index_storage_key("albums", index, logical_key)
+/// The durable key prefix (numeric index id) of `table.index` in `database`.
+pub(super) fn index_prefix(database: &Database, table: &str, index: &str) -> Vec<u8> {
+    // An index not registered yet reports the id its registration receives.
+    let id = database
+        .ivm_runtime
+        .index_ids()
+        .borrow()
+        .id_or_next(table, index);
+    crate::ivm::runtime::durable_index_key_prefix(id)
 }
 
+pub(super) fn persisted_index_storage_key(
+    database: &Database,
+    index: &str,
+    logical_key: &[u8],
+) -> Vec<u8> {
+    persisted_table_index_storage_key(database, "albums", index, logical_key)
+}
+
+/// A durable index entry key: the index id followed directly by the ordered
+/// logical key (no second escaping).
 pub(super) fn persisted_table_index_storage_key(
+    database: &Database,
     table: &str,
     index: &str,
     logical_key: &[u8],
 ) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend(table.as_bytes());
-    bytes.push(0);
-    bytes.extend(index.as_bytes());
-    bytes.push(0);
-    bytes.extend(encoded_bytes_key_part(logical_key));
-    bytes
-}
-
-pub(super) fn encoded_bytes_key_part(value: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.push(7);
-    encode_ordered_bytes(&mut bytes, value);
+    let mut bytes = index_prefix(database, table, index);
+    bytes.extend(logical_key);
     bytes
 }
 
@@ -1266,15 +1273,10 @@ pub(super) fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.extend([0, 0]);
 }
 
-pub(super) fn persisted_index_value(record: &[u8]) -> Vec<u8> {
-    let descriptor = RecordDescriptor::new([
-        ("key", crate::records::ValueType::Bytes),
-        ("value", crate::records::ValueType::Bytes),
-    ]);
-    match descriptor.get(record, "value").unwrap() {
-        Value::Bytes(value) => value,
-        value => panic!("expected persisted index value bytes, got {value:?}"),
-    }
+/// A durable index entry's value is stored raw: empty for a non-unique
+/// index, the primary-key columns missing from the key for a unique one.
+pub(super) fn persisted_index_value(value: &[u8]) -> Vec<u8> {
+    value.to_vec()
 }
 
 // Shared payload-enum schema and values.

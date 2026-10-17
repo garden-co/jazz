@@ -6,7 +6,7 @@
 // producer here makes the semantic shape, backend profile, and reopen contract
 // executable beside the NodeState paths that actually write it.
 
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
 use jazz_storage_sqlite::{
@@ -46,7 +46,7 @@ fn open_native_corpus_storage(
     let source = manifest
         .with_open_spec(&StorageOpenSpec {
             epoch: 1,
-            codec_profile: epoch_1_storage_codec_profile().unwrap(),
+            codec_profile: crate::storage_codec_profile::epoch_1_storage_codec_profile().unwrap(),
         })
         .unwrap();
     admission
@@ -60,6 +60,15 @@ fn open_native_corpus_storage(
     YieldingStorage::wrap(storage)
 }
 
+fn incomplete_native_corpus_profile(factory: &dyn groove::storage::StorageFactory, path: &std::path::Path, families: Vec<String>) -> Result<YieldingStorage<BoxedStorage>, groove::storage::Error> {
+    let (source, mut target) = crate::storage_codec_profile::node_storage_open_specs()?;
+    target.codec_profile = groove::storage::StorageCodecProfile::groove_epoch_1();
+    match crate::local_executor::block_on(factory.open_staged(path.to_path_buf(), families, source, target))? {
+        groove::storage::StagedStorageOpen::Ready(storage) => Ok(YieldingStorage::wrap(storage)),
+        groove::storage::StagedStorageOpen::Guard(_) => panic!("current corpus unexpectedly needs admission"),
+    }
+}
+
 /// The storage families that the native settlement producer must prove before
 /// its logical pack can be promoted to a committed historical fixture.
 ///
@@ -69,16 +78,11 @@ fn open_native_corpus_storage(
 /// of a settled historical fixture merely to inflate this corpus.
 const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_catalogue",
-    "jazz_catalogue_pointer",
     "jazz_nodes",
     "jazz_schema_versions",
     "jazz_transactions",
-    "jazz_merge_heads",
-    "jazz_global_changes",
-    "jazz_deletion_history",
+    "jazz_tx_touched_rows",
     "jazz_authority_policy_bindings",
-    "jazz_known_state_facts",
-    "jazz_settled_program_facts",
     groove::db::LARGE_VALUE_METADATA_CF,
 ];
 const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
@@ -91,21 +95,27 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 // this records current fixture wiring and is not used to reinterpret the
 // committed historical binary stores.
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
-    include_str!("../../../../../fixtures/durability-v2-native-jazz-producer.pack.base64");
+    include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "0fd11980f141b467e0379baf57acf821cec08b909f24fb17317f46f54183fffc";
+    "cb082dbbf76311d0969abea96aafbe6cefee4c10d5be5e2caa2c7a7f992c9d6a";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "4b16ef3ff90b93c478057d3e9b73a1cdf6301ddbef230751e99b08c4fab813f4";
+    "f01f952c60bb3fc416a17608dbfe6d4335980c00761ca59d61f4cf18b6861ed2";
+// Pinned alongside the physical SQLite/RocksDB images below so their contents
+// are checked independently of a newly produced store.
+const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
+    include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
+const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
+    "cb082dbbf76311d0969abea96aafbe6cefee4c10d5be5e2caa2c7a7f992c9d6a";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "a3606d7045d477dab33d9bf0c60d3a1d1c1608dfd581f9e1bbf1c8abd6447c13";
+    "45ca448dcf57433e9e5a329652beb6bf3cbae60b6c508bb54c5a896dbf27199f";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "28902888353cf33af039811b82c45875a3c2f72a4176e06e3e5d50826b8734bd";
+    "6cc542586345ac3b3d1e7f3f1419c92683d83f504b0a28390fd4777fc1e1651c";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "21a6c49b90d83f33ba3deba2cfd7605db155e78deeec22f683158037c66d7ba7";
+    "da4bcb7c54b1ff5bf6266d70b7527a3911caf0a36827ad2b1d5029e283964030";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -163,18 +173,6 @@ fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
     pack
 }
 
-fn native_pack_without_derived_scope_entries(pack: &str) -> String {
-    // Subscription caches are explicitly invalidated on this format upgrade;
-    // every native family, its registry entry and every primary byte still match.
-    pack.lines()
-        .filter(|line| {
-            !line.starts_with("entry\tjazz_known_state_facts\t")
-                && !line.starts_with("entry\tjazz_settled_program_facts\t")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn epoch_1_native_corpus_pack() -> String {
     decode_native_corpus_pack(
         EPOCH_1_NATIVE_CORPUS_PACK_BASE64,
@@ -188,6 +186,14 @@ fn current_producer_native_corpus_pack() -> String {
         CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64,
         CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256,
         "current native corpus producer pack",
+    )
+}
+
+fn current_physical_native_corpus_pack() -> String {
+    decode_native_corpus_pack(
+        CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64,
+        CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256,
+        "committed physical native corpus pack",
     )
 }
 
@@ -951,16 +957,28 @@ where
                 });
             stores.extend([
                 physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
                 physical_global_current_table_name(table_id),
-                physical_register_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_register_ahead_current_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ]);
         }
     }
     stores
+}
+
+/// A subscription watermark v1 names the catch-up revision installed at its
+/// seq. That revision is a fresh random id minted per catch-up, so two
+/// producers (or two adapters) never agree on it. Pin the record's shape, key
+/// and seq, and replace only the nonce with a fixed non-nil placeholder.
+fn normalize_watermark_revision(values: &mut [Value]) {
+    match values {
+        [Value::U8(1), Value::U64(settled_through), Value::Bytes(revision)]
+            if *settled_through != 0 && revision.len() == 16 && revision.iter().any(|b| *b != 0) =>
+        {
+            *revision = vec![0x5e; 16];
+        }
+        other => panic!("corpus subscription watermark is not a v1 record: {other:?}"),
+    }
 }
 
 fn native_corpus_receipt<S>(node: &NodeState<S>, schema: &JazzSchema) -> NativeCorpusReceipt
@@ -993,20 +1011,24 @@ where
             .map(|entry| {
                 let key = postcard::to_allocvec(&entry.key)
                     .expect("corpus direct-store key has a canonical semantic fixture");
-                let values = entry
+                let mut values = entry
                     .value
                     .to_values()
                     .expect("corpus direct-store value decodes");
+                if store_name == crate::schema::SUBSCRIPTION_WATERMARKS_STORE {
+                    normalize_watermark_revision(&mut values);
+                }
                 let value = postcard::to_allocvec(&values)
                     .expect("corpus direct-store value has a canonical semantic fixture");
                 (key, value)
             })
             .collect::<Vec<_>>();
-        // The baseline corpus intentionally has no scope-isolated relay
-        // attachment. Keep its historical receipt focused on settled state;
-        // populated relay and local-availability stores have separate receipts.
-        if (store_name == crate::schema::SCOPE_RELAY_REPAIR_LEDGER_STORE
-            || store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE)
+        // Keep the baseline receipt focused on settled state; populated
+        // local-availability and superseded-writes stores have separate
+        // receipts (the latter in
+        // `superseded_writes_store_native_bytes_are_pinned`).
+        if (store_name == crate::schema::LOCAL_ROW_AVAILABILITY_STORE
+            || store_name == crate::schema::SUPERSEDED_WRITES_STORE)
             && rows.is_empty()
         {
             continue;
@@ -1072,9 +1094,7 @@ fn assert_native_corpus_has_required_families<S>(
         "jazz_nodes",
         "jazz_schema_versions",
         "jazz_transactions",
-        "jazz_merge_heads",
-        "jazz_global_changes",
-        "jazz_deletion_history",
+        "jazz_tx_touched_rows",
         groove::db::LARGE_VALUE_METADATA_CF,
     ] {
         assert!(
@@ -1206,7 +1226,6 @@ where
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 101)
                 .branch(branch)
-                .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("mixed-write predecessor")),
                     ("attachment".to_owned(), Value::Bytes(vec![3, 4, 5, 6])),
@@ -1428,10 +1447,22 @@ where
     // adapter manifest boundary.  Reopening the right profile immediately
     // afterwards proves that the failed admission did not reinterpret or
     // rewrite any producer bytes before reporting the incompatibility.
-    assert!(
-        open_with_incomplete_profile().is_err(),
-        "a native store must reject an incomplete codec profile before opening Jazz data"
-    );
+    match open_with_incomplete_profile().err() {
+        Some(groove::storage::Error::UnsupportedStorageCodecs {
+            epoch: 2,
+            missing,
+            unknown,
+        }) => {
+            assert!(missing.is_empty(), "{missing:?}");
+            assert!(
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v3")
+                    && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
+                "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
+            );
+        }
+        Some(other) => panic!("expected UnsupportedStorageCodecs for an incomplete profile, got {other}"),
+        None => panic!("a native store must reject an incomplete codec profile before opening Jazz data"),
+    }
     let unchanged_after_rejection =
         crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
             .expect("correct profile reopens after rejected admission");
@@ -1495,82 +1526,10 @@ fn verify_historical_native_corpus<S>(
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
-        // Only selection metadata changes during the startup upgrade. Validate
-        // those records explicitly, then compare every other historical byte.
-        let active = reader
-            .database
-            .primary_key_get_raw(
-                "jazz_catalogue",
-                &[
-                    Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
-                    Value::Uuid(uuid::Uuid::nil()),
-                ],
-            )
-            .unwrap()
-            .expect("opening persists the active selection");
         assert_eq!(
-            codec::decode_active_schema(
-                active
-                    .record()
-                    .get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX,)
-                    .unwrap()
-            )
-            .unwrap(),
-            reader.catalogue.active_schema
-        );
-        let mut upgraded_keys = vec![("jazz_catalogue", active.into_parts().0)];
-        for ready in reader
-            .database
-            .primary_key_scan_raw(
-                "jazz_catalogue",
-                &[Value::U64(codec::CatalogueRecordKind::BootstrapReady.key())],
-            )
-            .unwrap()
-        {
-            let marker = codec::decode_catalogue_bootstrap_ready(
-                ready
-                    .record()
-                    .get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                marker.current_write_schema,
-                reader.current_write_schema().unwrap()
-            );
-            assert_eq!(marker.active_catalogue_seq, reader.active_catalogue_seq());
-            upgraded_keys.push(("jazz_catalogue", ready.into_parts().0));
-        }
-        if reader.catalogue.active_schema.revision == 0 {
-            let pointer = reader
-                .database
-                .primary_key_get_raw("jazz_catalogue_pointer", &[Value::U64(0)])
-                .unwrap()
-                .expect("upgraded revision-zero pointer");
-            assert_eq!(
-                pointer
-                    .record()
-                    .get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)
-                    .unwrap(),
-                reader.catalogue.active_schema.schema.0
-            );
-            upgraded_keys.push(("jazz_catalogue_pointer", pointer.into_parts().0));
-        }
-        let prefixes = upgraded_keys
-            .into_iter()
-            .map(|(store, key)| format!("entry\t{store}\t{}\t", hex::encode(key)))
-            .collect::<Vec<_>>();
-        let historical = |pack: &str| {
-            native_pack_without_derived_scope_entries(pack)
-                .lines()
-                .filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        assert_eq!(
-            historical(&native_corpus_pack(&before_write)),
-            historical(&expected_pack()),
-            "current Jazz preserves every historical byte outside upgraded selection metadata"
+            native_corpus_pack(&before_write),
+            expected_pack(),
+            "opening the corpus preserves every stored byte"
         );
     }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
@@ -1624,6 +1583,9 @@ fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> Native
 fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let schema = native_corpus_schema();
     let snapshot = native_corpus_authority_snapshot(&schema);
+    // A root that stores Jazz rows opens with the node profile (epoch-one base
+    // plus the durable-index and linear row-history families).
+    let _profile = node_storage_codec_profile().expect("closed Jazz node profile");
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB corpus directory");
     let rocks_path = rocks_directory.path().to_path_buf();
@@ -1659,16 +1621,8 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             )
         },
         move || {
-            let families = rocks_wrong_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                &rocks_wrong_path,
-                &refs,
-                RocksDurability::FullSync,
-                &groove::storage::StorageCodecProfile::groove_epoch_1(),
-            )
-            .map(BoxedStorage::new)
-            .map(YieldingStorage::wrap)
+            incomplete_native_corpus_profile(&jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(RocksDurability::FullSync), &rocks_wrong_path, rocks_wrong_schema.column_families())
+
         },
         move || {
             assert_ne!(
@@ -1763,16 +1717,8 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             )
         },
         move || {
-            let families = sqlite_wrong_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &sqlite_wrong_path,
-                &refs,
-                SqliteDurability::FullSync,
-                &groove::storage::StorageCodecProfile::groove_epoch_1(),
-            )
-            .map(BoxedStorage::new)
-            .map(YieldingStorage::wrap)
+            incomplete_native_corpus_profile(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &sqlite_wrong_path, sqlite_wrong_schema.column_families())
+
         },
         move || {
             assert_ne!(
@@ -1866,75 +1812,14 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
 }
 
-// This internal physical-adapter check is needed to prove rejected admission
-// cannot rewrite historical data before a public Jazz handle exists.
-fn assert_rocksdb_profile_rejected_unchanged(path: &std::path::Path, schema: &JazzSchema) {
-    let raw = || {
-        let options = rocksdb::Options::default();
-        let families = rocksdb::DB::list_cf(&options, path).unwrap();
-        let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false).unwrap();
-        families
-            .into_iter()
-            .map(|family| {
-                let rows = db
-                    .iterator_cf(db.cf_handle(&family).unwrap(), rocksdb::IteratorMode::Start)
-                    .map(|entry| {
-                        let (key, value) = entry.unwrap();
-                        (key.to_vec(), value.to_vec())
-                    })
-                    .collect::<Vec<_>>();
-                (family, rows)
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let before = raw();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-        path,
-        &refs,
-        RocksDurability::FullSync,
-        &epoch_1_storage_codec_profile().unwrap(),
-    )
-    .err()
-    .expect("old durability profile must be rejected before Jazz opens");
-    assert!(
-        matches!(error, groove::storage::Error::InvalidStorageLayout(_)),
-        "{error}"
-    );
-    assert_eq!(
-        raw(),
-        before,
-        "rejected admission preserves every historical record"
-    );
-}
-
-fn assert_sqlite_profile_rejected_unchanged(path: &std::path::Path, schema: &JazzSchema) {
-    let before = std::fs::read(path).unwrap();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-        path,
-        &refs,
-        SqliteDurability::FullSync,
-        &epoch_1_storage_codec_profile().unwrap(),
-    )
-    .err()
-    .expect("old durability profile must be rejected before Jazz opens");
-    assert!(
-        matches!(error, groove::storage::Error::InvalidStorageLayout(_)),
-        "{error}"
-    );
-    assert_eq!(std::fs::read(path).unwrap(), before);
-}
-
 /// The committed SQLite and RocksDB byte fixtures are deliberately verified
 /// independently from the live producer above. This is the compatibility
-/// direction that matters after a breaking encoding change: current code must
-/// reject the pinned older profile without rewriting its records.
+/// direction that matters at a later epoch: current code must open a store
+/// created by the pinned producer, not merely agree with a store it just made.
 #[test]
-fn committed_native_jazz_physical_corpus_rejects_previous_durability_profile() {
+fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let schema = native_corpus_schema();
+    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite fixture directory");
     let sqlite_path = sqlite_directory.path().join("epoch-1-native-jazz.sqlite");
@@ -1960,7 +1845,16 @@ fn committed_native_jazz_physical_corpus_rejects_previous_durability_profile() {
             .expect("read committed SQLite key/value rows");
         assert!(rows > 0, "committed SQLite corpus contains durable rows");
     }
-    assert_sqlite_profile_rejected_unchanged(&sqlite_path, &schema);
+    let sqlite_schema = schema.clone();
+    let sqlite_profile = profile.clone();
+    let sqlite_open_path = sqlite_path.clone();
+    verify_historical_native_corpus(
+        sqlite_schema.clone(),
+        current_physical_native_corpus_pack,
+        move || {
+            open_native_corpus_storage(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &sqlite_open_path, sqlite_schema.column_families(), true)
+        },
+    );
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB fixture directory");
     let rocks_path = unpack_native_rocksdb_archive(
@@ -1996,7 +1890,15 @@ fn committed_native_jazz_physical_corpus_rejects_previous_durability_profile() {
             .sum::<usize>();
         assert!(rows > 0, "committed RocksDB corpus contains durable rows");
     }
-    assert_rocksdb_profile_rejected_unchanged(&rocks_path, &schema);
+    let rocks_schema = schema;
+    let rocks_open_path = rocks_path.clone();
+    verify_historical_native_corpus(
+        rocks_schema.clone(),
+        current_physical_native_corpus_pack,
+        move || {
+            open_native_corpus_storage(&jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(RocksDurability::FullSync), &rocks_open_path, rocks_schema.column_families(), true)
+        },
+    );
 }
 
 #[test]
@@ -2005,7 +1907,7 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     let historical = epoch_1_native_corpus_pack();
     assert!(historical.contains("store\tjazz_settled_result_members\n"));
     let schema = native_corpus_schema();
-    let profile = epoch_1_storage_codec_profile().unwrap();
+    let profile = node_storage_codec_profile().unwrap();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let sqlite_dir = tempfile::tempdir().unwrap();
@@ -2021,7 +1923,9 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     .err()
     .expect("retired SQLite profile must reject");
     assert!(
-        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("storage manifest is inconsistent")),
+        matches!(sqlite_error, groove::storage::Error::UnsupportedStorageCodecs { ref missing, ref unknown, .. }
+            if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                && unknown.iter().any(|codec| codec == "jazz.result-member-key.v1")),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
@@ -2338,9 +2242,10 @@ fn native_jazz_corpus_publication_creates_a_fresh_output_without_overwrite() {
 
 /// The regeneration verifier must not be able to fall back to the still-live
 /// producer.  This mirrors an export/stage workflow, removes the original
-/// source, and verifies profile rejection solely from the staged SQLite bytes.
+/// source, and then runs the full current-code historical receipt solely from
+/// the staged SQLite bytes.
 #[test]
-fn native_jazz_corpus_staged_historical_candidate_rejects_without_live_producer() {
+fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
     let source_root = tempfile::tempdir().expect("create live producer root");
     let source = source_root.path().join("live.sqlite");
     materialize_native_sqlite_fixture_with_hashes(
@@ -2364,7 +2269,14 @@ fn native_jazz_corpus_staged_historical_candidate_rejects_without_live_producer(
     inspect_native_sqlite_candidate(&verification_path)
         .expect("staged candidate remains physically valid after live source removal");
     let schema = native_corpus_schema();
-    assert_sqlite_profile_rejected_unchanged(&verification_path, &schema);
+    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
+    verify_historical_native_corpus(
+        schema.clone(),
+        current_physical_native_corpus_pack,
+        move || {
+            open_native_corpus_storage(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &verification_path, schema.column_families(), true)
+        },
+    );
 }
 
 /// Proves the frozen digest actually observes authored application content.
@@ -2425,11 +2337,24 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
     );
 }
 
-/// Current native storage rejects the older profile written by the actual npm
-/// alpha.54 binary. This internal adapter receipt is needed to inspect immutable
-/// history directly; application-level binding tests cannot expose that history.
+/// The root the published npm alpha.54 binary wrote (DAG history layout) is
+/// refused at manifest admission with the typed codec-inventory error when a
+/// current node opens it, and its bytes are left untouched.
+///
+/// Before linear history this receipt reopened and extended the alpha.54 root.
+/// The history codec is now `jazz.history-version-current.v4` and old roots
+/// are refused rather than migrated, so the receipt pins the refusal instead:
+/// the root lacks the dictionary, durable-index and node-storage markers and
+/// declares retired per-family Jazz markers.
+///
+/// ```text
+/// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                       missing [groove.dictionary.v1,
+///                                                groove.durable-index.v2,
+///                                                jazz.node-storage.v2]
+/// ```
 #[test]
-fn published_alpha54_native_corpus_rejects_previous_durability_profile() {
+fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
     let directory = tempfile::tempdir().unwrap();
     let archive = decode_native_physical_fixture(
         include_str!("../../../../../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
@@ -2438,20 +2363,97 @@ fn published_alpha54_native_corpus_rejects_previous_durability_profile() {
     )
     .unwrap();
     let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
-    let schema = build_public_test_schema(
-        PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
+    let before = rocksdb_family_entries(&path);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
+    ));
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_refused_as_pre_linear_root(
+        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            RocksDurability::FullSync,
+            &node_storage_codec_profile().unwrap(),
+        )
+        .map(drop),
+        "published alpha.54 RocksDB",
     );
-    assert_rocksdb_profile_rejected_unchanged(&path, &schema);
+    assert_eq!(
+        rocksdb_family_entries(&path),
+        before,
+        "the refused alpha.54 root is not mutated"
+    );
 }
 
-/// Current storage rejects the retired durability profile exactly as the actual
-/// npm alpha.56 binary wrote it. The fixture is the published client's own
-/// RocksDB root after an alpha.56 edge acknowledged a write that Core never
-/// saw; see `published-alpha56-legacy-edge-receipt.md` for how it was made.
-/// This internal adapter receipt proves rejection preserves the immutable records.
+/// Every RocksDB family's entries, read below Jazz and read-only.
+fn rocksdb_family_entries(
+    path: &std::path::Path,
+) -> BTreeMap<String, Vec<(Box<[u8]>, Box<[u8]>)>> {
+    let options = rocksdb::Options::default();
+    let families = rocksdb::DB::list_cf(&options, path).expect("list RocksDB families");
+    let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
+        .expect("open RocksDB root read-only");
+    families
+        .iter()
+        .map(|family| {
+            let handle = db.cf_handle(family).expect("listed family opens");
+            let entries = db
+                .iterator_cf(handle, rocksdb::IteratorMode::Start)
+                .map(|entry| entry.expect("read RocksDB entry"))
+                .collect();
+            (family.clone(), entries)
+        })
+        .collect()
+}
+
+/// A pre-linear (DAG layout, alpha.54 to alpha.59) node root is refused at
+/// manifest admission with the typed error naming the current root profile markers
+/// it lacks (durable index and node storage), and its retired per-family
+/// Jazz markers.
+fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>, store: &str) {
+    match result {
+        Err(groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(epoch, 1, "{store}");
+            assert_eq!(
+                missing,
+                vec![
+                    "groove.dictionary.v1".to_owned(),
+                    "groove.durable-index.v2".to_owned(),
+                    "groove.large-value.v2".to_owned(),
+                    "groove.ordered-chunk-storage.v2".to_owned(),
+                    "jazz.node-storage.v2".to_owned(),
+                ],
+                "{store}"
+            );
+            assert_eq!(unknown, ["groove.large-value.v1","groove.ordered-chunk-storage.v1","jazz.branch-key.v1","jazz.catalogue.activation.v1","jazz.catalogue.bootstrap-ready.v1","jazz.catalogue.lens.v1","jazz.catalogue.lineage.v1","jazz.catalogue.physical-mapping.v1","jazz.catalogue.schema.v1","jazz.catalogue.write-pointer.v1","jazz.subscription-program-fact-key.v1"], "{store}");
+        }
+        Err(other) => panic!("{store}: expected UnsupportedStorageCodecs, got {other}"),
+        Ok(()) => panic!("{store}: a pre-linear root must not open"),
+    }
+}
+
+/// The published npm alpha.56 client root holding an edge-accepted write that
+/// Core never saw is refused at manifest admission with the typed
+/// codec-inventory error, and its transaction records are left byte-for-byte
+/// unchanged.
+///
+/// Before linear history this receipt reopened the root and resent the
+/// unsynced write. Old roots are now refused rather than migrated, so an
+/// unsynced alpha.56 write cannot be recovered by this build; the receipt pins
+/// that the refusal happens before any record is decoded or rewritten.
+/// `published-alpha56-legacy-edge-receipt.md` records how the root was made.
+///
+/// ```text
+/// bob's alpha.56 root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                             (edge + core records unchanged)
+/// ```
 #[test]
-fn published_alpha56_legacy_edge_receipt_is_rejected_without_mutation() {
+fn published_alpha56_legacy_edge_receipt_is_refused_without_rewriting_its_records() {
     let provenance: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../fixtures/published-alpha56-legacy-edge-receipt.json"
     ))
@@ -2477,7 +2479,7 @@ fn published_alpha56_legacy_edge_receipt_is_rejected_without_mutation() {
     let core_key = hex_at("/transactionRecords/coreConfirmed/keyHex");
     let core_value = hex_at("/transactionRecords/coreConfirmed/valueHex");
     // Physical, read-only and below Jazz: the alpha.56 bytes are exactly the
-    // pinned transaction records, before and after current code reopens them.
+    // pinned transaction records, before and after the refused open.
     let stored_record = |key: &[u8]| {
         let options = rocksdb::Options::default();
         let families = rocksdb::DB::list_cf(&options, &path).unwrap();
@@ -2487,13 +2489,93 @@ fn published_alpha56_legacy_edge_receipt_is_rejected_without_mutation() {
     };
     assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
     assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+    let before = rocksdb_family_entries(&path);
 
-    let schema = build_public_test_schema(
-        PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+    ));
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_refused_as_pre_linear_root(
+        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            RocksDurability::FullSync,
+            &node_storage_codec_profile().unwrap(),
+        )
+        .map(drop),
+        "published alpha.56 RocksDB",
     );
-    assert_rocksdb_profile_rejected_unchanged(&path, &schema);
-    // Reopening only read the records; the alpha.56 bytes are unchanged.
     assert_eq!(stored_record(&edge_key).as_deref(), Some(edge_value.as_slice()));
     assert_eq!(stored_record(&core_key).as_deref(), Some(core_value.as_slice()));
+    assert_eq!(
+        rocksdb_family_entries(&path),
+        before,
+        "the refused alpha.56 root is not mutated"
+    );
+}
+
+/// The `jazz_superseded_writes_v1` direct store (SPEC 4 §4.6) is empty in
+/// the settlement corpus, so its native layout is frozen here instead: a
+/// marker Core records on the production RocksDB adapter, read back raw
+/// after the node closes. Key: physical table id (U64), branch key
+/// (Bytes), row (Uuid), writer node (Uuid), in Groove's ordered key
+/// encoding; value: one U64 transaction time in a typed record.
+#[test]
+fn superseded_writes_store_native_bytes_are_pinned() {
+    let target = row(0x9c);
+    let (_writers, core_dir, mut core) = core_with_seeded_todo(target, 1);
+    let (_frank_dir, mut frank) = open_node_with_schema(node(0x32), two_column_schema());
+    let (f1, _) = offline_edit(&mut frank, target, 100, &[("title", "f1")]);
+    let (f2, f2_unit) = offline_edit(&mut frank, target, 101, &[("body", "f2")]);
+    let answer = core.apply_sync_message_settled(f2_unit).unwrap();
+    assert_eq!(fate_for(&answer, f2), Some(&Fate::Accepted));
+    assert_eq!(superseded_marker(&core, target, f1.node), Some(f1.time));
+    let todos = core
+        .physical_table_id_for_schema(two_column_schema().version_id(), "todos")
+        .unwrap();
+    drop(core);
+
+    let schema = two_column_schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
+    // The class-CF layout stores the family in the shared meta class, each
+    // key framed by the family's u32 big-endian class table id.
+    let table_id =
+        groove::storage::class_table_id(crate::schema::SUPERSEDED_WRITES_STORE).unwrap();
+    let framed = table_id.to_be_bytes().to_vec();
+    let entries = crate::local_executor::block_on(async {
+        groove::storage::collect_scan(
+            storage
+                .scan(groove::storage::ScanRequest::prefix(
+                    "__groove_class_meta".to_owned(),
+                    framed.clone(),
+                ))
+                .await?,
+        )
+        .await
+    })
+    .unwrap();
+    assert_eq!(todos.0, 1, "the corpus's first physical table");
+    assert_eq!(f1.time, TxTime(100 << 18), "f1's hybrid time at 100 ms");
+    let mut expected_key = framed;
+    // Physical table id: U64 tag 3, eight big-endian bytes.
+    expected_key.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // Branch key: Bytes tag 7, the default branch's canonical bytes with each
+    // 0x00 escaped as 0x00 0xff, then the 0x00 0x00 terminator.
+    expected_key.extend_from_slice(&[7, 1, 0, 255, 0, 255, 0, 255, 0, 255, 0, 0]);
+    // Row and writer node: Uuid tag 10, sixteen raw bytes each.
+    expected_key.push(10);
+    expected_key.extend_from_slice(&[0x9c; 16]);
+    expected_key.push(10);
+    expected_key.extend_from_slice(&[0x32; 16]);
+    // Value: one little-endian U64 transaction time.
+    let expected_value = (100u64 << 18).to_le_bytes().to_vec();
+    assert_eq!(
+        BranchKey::default().canonical_bytes(),
+        vec![1, 0, 0, 0, 0],
+        "the branch-key encoding this receipt pins"
+    );
+    assert_eq!(entries, vec![(expected_key, expected_value)]);
 }

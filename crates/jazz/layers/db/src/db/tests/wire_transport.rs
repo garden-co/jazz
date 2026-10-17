@@ -204,8 +204,7 @@ fn logical_message_larger_than_frame_round_trips_in_channel_fifo() {
 fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_message() {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender
@@ -275,8 +274,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
 
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
     let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
     sender.send(message.clone()).unwrap();
@@ -330,7 +328,7 @@ fn channel_reordering_and_duplicate_extents_fail_closed() {
     for duplicate in [false, true] {
         let (left, right) = byte_duplex_raw();
         let staged = Rc::clone(&right.inbound);
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+        let features = 0;
         let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
         let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
         sender
@@ -359,63 +357,6 @@ fn channel_reordering_and_duplicate_extents_fail_closed() {
             receiver.try_recv_result().is_err(),
             "terminal state cannot skip ahead to later valid extents"
         );
-    }
-}
-
-#[test]
-fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION;
-    let fragment = |message_id, payload: u8| WireMessageFragment {
-        protocol_version: WIRE_PROTOCOL_VERSION,
-        features,
-        session: None,
-        message_id,
-        message_digest: [payload; 32],
-        total_len: 2,
-        offset: 0,
-        payload: vec![payload],
-    };
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(reassembler.push(fragment(1, 1), 0).unwrap(), None);
-    assert!(
-        reassembler
-            .push(fragment(1, 2), 0)
-            .unwrap_err()
-            .contains("disagree")
-    );
-    reassembler.discard(1);
-    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
-        assert_eq!(
-            reassembler
-                .push(fragment(message_id, message_id as u8), 0)
-                .unwrap(),
-            None
-        );
-    }
-    assert!(
-        reassembler
-            .push(fragment(MAX_INFLIGHT_LOGICAL_MESSAGES as u64, 9), 0)
-            .unwrap_err()
-            .contains("too many incomplete")
-    );
-}
-
-fn test_message_fragment(
-    message_id: u64,
-    message_digest: [u8; 32],
-    total_len: u64,
-    offset: u64,
-    payload: Vec<u8>,
-) -> WireMessageFragment {
-    WireMessageFragment {
-        protocol_version: WIRE_PROTOCOL_VERSION,
-        features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
-        session: None,
-        message_id,
-        message_digest,
-        total_len,
-        offset,
-        payload,
     }
 }
 
@@ -450,7 +391,7 @@ fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
             ]),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+        0,
         None,
     );
 
@@ -489,7 +430,7 @@ fn pending_outbound_backpressure_retains_a_bounded_fifo_queue() {
             .collect(),
         },
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        0,
         None,
     );
     for _ in 0..MAX_CHANNEL_QUEUED_MESSAGES {
@@ -503,327 +444,6 @@ fn pending_outbound_backpressure_retains_a_bounded_fifo_queue() {
         adapter.send(test_catalogue_ack()),
         Err(TransportError::Backpressure),
         "the producer retains only the message beyond the queue bound"
-    );
-}
-
-#[test]
-fn stale_near_limit_staged_bytes_are_reclaimed_and_duplicates_do_not_extend_expiry() {
-    let mut reassembler = LogicalMessageReassembler::with_staging_budget_for_test(8);
-    let stale = test_message_fragment(1, [1; 32], 8, 0, vec![1; 7]);
-
-    assert_eq!(reassembler.push(stale.clone(), 0).unwrap(), None);
-    assert_eq!(
-        reassembler
-            .push(stale, MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1)
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(2, [2; 32], 9, 0, vec![2; 8]),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        (
-            reassembler.incomplete.len(),
-            reassembler.staged_bytes,
-            reassembler.incomplete.contains_key(&2),
-        ),
-        (1, 8, true)
-    );
-}
-
-#[test]
-fn four_stale_tiny_incomplete_ids_are_reclaimed_before_admitting_another() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
-        assert_eq!(
-            reassembler
-                .push(
-                    test_message_fragment(message_id, [message_id as u8; 32], 2, 0, vec![1]),
-                    0,
-                )
-                .unwrap(),
-            None
-        );
-    }
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(
-                    MAX_INFLIGHT_LOGICAL_MESSAGES as u64,
-                    [9; 32],
-                    2,
-                    0,
-                    vec![9],
-                ),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        (
-            reassembler.incomplete.len(),
-            reassembler.staged_bytes,
-            reassembler
-                .incomplete
-                .contains_key(&(MAX_INFLIGHT_LOGICAL_MESSAGES as u64)),
-        ),
-        (1, 1, true)
-    );
-}
-
-#[test]
-fn actively_progressing_legal_fragmented_message_completes_before_maximum_age() {
-    let payload = b"legal fragmented message".to_vec();
-    let digest = *blake3::hash(&payload).as_bytes();
-    let total_len = payload.len() as u64;
-    let mut reassembler = LogicalMessageReassembler::default();
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(7, digest, total_len, 0, payload[..5].to_vec()),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(7, digest, total_len, 5, payload[5..11].to_vec()),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1,
-            )
-            .unwrap(),
-        None
-    );
-    let envelope = reassembler
-        .push(
-            test_message_fragment(7, digest, total_len, 11, payload[11..].to_vec()),
-            (MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1) * 2,
-        )
-        .unwrap()
-        .expect("novel extents refresh inactivity without exceeding maximum age");
-
-    assert_eq!(envelope.payload, payload);
-}
-
-#[test]
-fn steady_progress_cannot_retain_an_incomplete_message_beyond_maximum_age() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    let mut now_ms = 0;
-    let mut offset = 0;
-    while now_ms < MAX_FRAGMENT_REASSEMBLY_AGE_MS {
-        assert_eq!(
-            reassembler
-                .push(
-                    test_message_fragment(
-                        8,
-                        [8; 32],
-                        MAX_LOGICAL_MESSAGE_BYTES as u64,
-                        offset,
-                        vec![8],
-                    ),
-                    now_ms,
-                )
-                .unwrap(),
-            None
-        );
-        offset += 1;
-        now_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1);
-    }
-
-    reassembler.expire(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
-
-    assert_eq!(
-        (reassembler.incomplete.len(), reassembler.staged_bytes),
-        (0, 0)
-    );
-}
-
-#[test]
-fn active_reassembly_still_rejects_overlapping_extents() {
-    let payload = b"abcd";
-    let digest = *blake3::hash(payload).as_bytes();
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(9, digest, payload.len() as u64, 0, payload[..2].to_vec()),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-
-    let error = reassembler
-        .push(
-            test_message_fragment(9, digest, payload.len() as u64, 1, payload[1..3].to_vec()),
-            1,
-        )
-        .unwrap_err();
-
-    assert!(error.contains("overlapping logical message fragments"));
-}
-
-#[test]
-fn active_reassembly_still_rejects_a_completed_payload_with_the_wrong_digest() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(test_message_fragment(10, [0; 32], 2, 0, vec![1]), 0)
-            .unwrap(),
-        None
-    );
-
-    let error = reassembler
-        .push(test_message_fragment(10, [0; 32], 2, 1, vec![2]), 1)
-        .unwrap_err();
-
-    assert!(error.contains("logical message digest mismatch"));
-}
-
-/// Verifies that Alice can finish an older fragmented message after her later
-/// message completes first on a reordering transport.
-///
-/// ```text
-/// alice message 1 extent 0 ─┐
-/// alice message 2 complete ──┼──► receiver
-/// alice message 1 extent 1 ─┘
-/// ```
-#[test]
-fn active_lower_id_reassembly_completes_after_higher_id() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    let lower = b"ab";
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(
-                    1,
-                    *blake3::hash(lower).as_bytes(),
-                    lower.len() as u64,
-                    0,
-                    lower[..1].to_vec(),
-                ),
-                0,
-            )
-            .unwrap(),
-        None
-    );
-    let completed = vec![2];
-    assert!(
-        reassembler
-            .push(
-                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
-                1,
-            )
-            .unwrap()
-            .is_some()
-    );
-
-    let envelope = reassembler
-        .push(
-            test_message_fragment(
-                1,
-                *blake3::hash(lower).as_bytes(),
-                lower.len() as u64,
-                1,
-                lower[1..].to_vec(),
-            ),
-            1,
-        )
-        .unwrap()
-        .expect("the older message remains active after the later completion");
-    assert_eq!(envelope.payload, lower);
-}
-
-/// Verifies that Alice's expired lower message id can start fresh after her
-/// higher id completed while physical delivery was reordered.
-///
-/// ```text
-/// alice message 1 extent ─────► receiver ──idle expiry──► new message 1 extent
-/// alice message 2 complete ───► receiver
-/// ```
-#[test]
-fn expired_lower_id_restarts_after_higher_id_completion() {
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(
-        reassembler
-            .push(test_message_fragment(1, [1; 32], 2, 0, vec![1]), 0)
-            .unwrap(),
-        None
-    );
-    let completed = vec![2];
-    assert!(
-        reassembler
-            .push(
-                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
-                1,
-            )
-            .unwrap()
-            .is_some()
-    );
-
-    assert_eq!(
-        reassembler
-            .push(
-                test_message_fragment(1, [1; 32], 2, 0, vec![1]),
-                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-            )
-            .unwrap(),
-        None
-    );
-    assert!(reassembler.incomplete.contains_key(&1));
-}
-
-#[test]
-fn completed_replay_delivers_only_after_exact_recent_completion_eviction() {
-    fn complete(
-        reassembler: &mut LogicalMessageReassembler,
-        message_id: u64,
-    ) -> Option<WireEnvelope> {
-        let payload = vec![message_id as u8];
-        reassembler
-            .push(
-                test_message_fragment(
-                    message_id,
-                    *blake3::hash(&payload).as_bytes(),
-                    payload.len() as u64,
-                    0,
-                    payload,
-                ),
-                0,
-            )
-            .unwrap()
-    }
-
-    assert_eq!(RECENT_COMPLETED_LOGICAL_MESSAGES, 64);
-    let mut reassembler = LogicalMessageReassembler::default();
-    assert!(complete(&mut reassembler, 0).is_some());
-    for message_id in 1..RECENT_COMPLETED_LOGICAL_MESSAGES as u64 {
-        assert!(complete(&mut reassembler, message_id).is_some());
-    }
-
-    assert_eq!(
-        complete(&mut reassembler, 0),
-        None,
-        "the oldest completion remains deduplicated at the exact cache bound"
-    );
-    let first_message_after_horizon = RECENT_COMPLETED_LOGICAL_MESSAGES as u64;
-    assert!(
-        complete(&mut reassembler, first_message_after_horizon).is_some(),
-        "the next completion evicts the oldest retained completion"
-    );
-    assert!(
-        complete(&mut reassembler, 0).is_some(),
-        "an exact old replay may deliver again only after its completion is evicted"
     );
 }
 
@@ -959,8 +579,7 @@ fn pending_backpressure_admits_later_receipt_in_bounded_channel_queue() {
 
 #[test]
 fn reconnect_discards_missing_fragments_and_replays_the_logical_message() {
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let features = 0;
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x74; 16]),
         claims: BTreeMap::from([(
@@ -999,19 +618,13 @@ pub(super) fn byte_duplex_with_session(
         Box::new(WireTransportAdapter::new(
             left,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            0,
             Some(session.clone()),
         )),
         Box::new(WireTransportAdapter::new(
             right,
             WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD
-                | crate::wire::FEATURE_SESSION_FRAME
-                | FEATURE_STRUCTURED_ERRORS
-                | FEATURE_MESSAGE_FRAGMENTATION,
+            0,
             Some(session),
         )),
     )
@@ -1037,9 +650,7 @@ fn test_catalogue_ack() -> SyncMessage {
 fn encode_test_message_frame(session: Option<WireSession>) -> Vec<u8> {
     let (left, right) = byte_duplex_raw();
     let staged = Rc::clone(&right.inbound);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, session);
     sender.send(test_catalogue_ack()).unwrap();
     staged.borrow_mut().pop_front().unwrap()
@@ -1077,7 +688,7 @@ fn wire_transport_adapter_carries_only_admitted_session_context() {
             epoch: 19,
         }),
         link_identity: AuthorSubject::for_test_bytes([0x83; 16]),
-        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
     };
     let adapter = WireTransportAdapter::new_with_session_context(
         left,
@@ -1140,14 +751,7 @@ fn wire_transport_adapter_accepts_matching_session() {
         .borrow_mut()
         .push_back(encode_test_message_frame(Some(session.clone())));
 
-    let mut adapter = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
-        Some(session),
-    );
+    let mut adapter = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, Some(session));
 
     assert_eq!(adapter.try_recv(), Some(test_catalogue_ack()));
     while let Some(bytes) = right.try_recv_frame() {
@@ -1169,9 +773,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -1183,9 +785,7 @@ fn wire_transport_adapter_rejects_missing_session_without_emitting_sync_message(
 fn channel_authentication_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
     let expected_identity = AuthorSubject::for_test_bytes([0xa5; 16]);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
-        | crate::wire::FEATURE_SESSION_FRAME
-        | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(Some(test_wire_session(
         AuthorSubject::for_test_bytes([0xb5; 16]),
         3,
@@ -1217,7 +817,7 @@ fn channel_authentication_precedes_payload_admission() {
 #[test]
 fn channel_negotiation_validation_precedes_payload_admission() {
     let (left, mut right) = byte_duplex_raw();
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    let features = 0;
     let mut frame = decode_frame(&encode_test_message_frame(None)).unwrap();
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
@@ -1258,9 +858,7 @@ fn wire_transport_adapter_rejects_wrong_identity_without_emitting_sync_message()
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(expected_identity, 3)),
     );
 
@@ -1281,9 +879,7 @@ fn wire_transport_adapter_rejects_stale_epoch_without_emitting_sync_message() {
     let mut adapter = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD
-            | crate::wire::FEATURE_SESSION_FRAME
-            | FEATURE_STRUCTURED_ERRORS,
+        0,
         Some(test_wire_session(identity, 3)),
     );
 
@@ -1320,13 +916,13 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4,
+        crate::wire::FEATURE_PAYLOAD_LZ4,
         None,
     );
     let message = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -1380,7 +976,7 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
         .expect("deterministic message encodes")
         .len();
     assert!(logical_len <= MAX_LOGICAL_MESSAGE_BYTES);
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_LZ4;
+    let features = crate::wire::FEATURE_PAYLOAD_LZ4;
     let (left, right) = byte_duplex_raw();
     let attempts = Rc::new(RefCell::new(Vec::new()));
     let mut sender = WireTransportAdapter::new(
@@ -1423,52 +1019,6 @@ fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
     assert!(receiver.try_recv_result().unwrap().is_none());
 }
 
-#[cfg(feature = "transport-compression-lz4")]
-#[test]
-fn lz4_fragmentation_rejects_encoded_payload_over_encoded_cap_before_admitting() {
-    const EXPECTED_MAX_ENCODED_MESSAGE_BYTES: usize =
-        MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
-    // Reassembly is the private pre-allocation resource seam: use a one-byte
-    // synthetic extent so this rejection proves no over-cap payload is staged
-    // without allocating a payload near the encoded cap.
-    let mut reassembler = LogicalMessageReassembler::default();
-    let error = reassembler
-        .push(
-            WireMessageFragment {
-                protocol_version: WIRE_PROTOCOL_VERSION,
-                features: FEATURE_SYNC_MESSAGE_PAYLOAD
-                    | crate::wire::FEATURE_PAYLOAD_LZ4
-                    | FEATURE_MESSAGE_FRAGMENTATION,
-                session: None,
-                message_id: 91,
-                message_digest: [9; 32],
-                total_len: (EXPECTED_MAX_ENCODED_MESSAGE_BYTES + 1) as u64,
-                offset: 0,
-                payload: vec![9],
-            },
-            0,
-        )
-        .expect_err("encoded payload over the encoded cap must be rejected");
-    assert!(error.contains("encoded message payload"));
-    assert!(reassembler.incomplete.is_empty());
-    assert_eq!(reassembler.staged_bytes, 0);
-}
-
-#[cfg(feature = "transport-compression-lz4")]
-#[test]
-fn lz4_decoder_rejects_decompressed_payload_over_logical_limit() {
-    let mut decoder =
-        WireStreamDecoder::new(crate::wire::FEATURE_PAYLOAD_LZ4).expect("lz4 decoder");
-    let mut decompression_bomb = (MAX_LOGICAL_MESSAGE_BYTES as u32 + 1)
-        .to_le_bytes()
-        .to_vec();
-    decompression_bomb.push(0);
-    let error = decoder
-        .decode_message(&decompression_bomb, crate::wire::FEATURE_PAYLOAD_LZ4)
-        .expect_err("receiver must retain the decompressed-output bound");
-    assert!(error.contains("exceeds max"));
-}
-
 #[cfg(feature = "transport-compression-zstd")]
 #[test]
 fn wire_transport_adapter_zstd_stream_preserves_message_order() {
@@ -1476,13 +1026,13 @@ fn wire_transport_adapter_zstd_stream_preserves_message_order() {
     let mut sender = WireTransportAdapter::new(
         left,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let mut receiver = WireTransportAdapter::new(
         right,
         WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        crate::wire::FEATURE_PAYLOAD_ZSTD,
         None,
     );
     let first = SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
@@ -1722,7 +1272,7 @@ fn channel_encoded_budget_is_enforced_independently_of_decoded_bytes() {
     use crate::wire::channels::{ChannelClass, ChannelFrame, MAX_CHANNEL_FRAME_PAYLOAD};
     const EXPECTED_ENCODED_CAP: usize =
         MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_PAYLOAD_ZSTD;
+    let features = crate::wire::FEATURE_PAYLOAD_ZSTD;
     let (left, right) = byte_duplex_raw();
     let inbound = Rc::clone(&right.inbound);
     let mut bob = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
@@ -1786,7 +1336,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     let WireFrame::Channel(envelope) = &mut frame else {
         panic!("channel fixture")
     };
-    envelope.features = FEATURE_SYNC_MESSAGE_PAYLOAD;
+    envelope.features = 0;
     envelope.extent.message_len = MAX_LOGICAL_MESSAGE_BYTES as u32 + 1;
     envelope.extent.payload = vec![0xff];
     // Bypass the semantic sender's admission to model a malicious physical
@@ -1794,12 +1344,7 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
     left.inbound
         .borrow_mut()
         .push_back(encode_frame(&frame).unwrap());
-    let mut bob = WireTransportAdapter::new(
-        left,
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD,
-        None,
-    );
+    let mut bob = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, 0, None);
     let error = bob.try_recv_result().unwrap_err();
     assert!(format!("{error:?}").contains("logical size limit"));
     assert!(bob.try_recv_result().is_err());
@@ -1810,9 +1355,20 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
 // reveal whether an admitted trusted link redundantly revalidates every receipt.
 #[test]
 fn channel_adapter_propagates_locally_admitted_trusted_decoder_context() {
-    let message = SyncMessage::RowVersionPayloads {
-        version_bundles: transport_version_bundles(2),
-    };
+    let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+            read_view: Default::default(),
+        },
+        settled_through: crate::time::GlobalTime(500),
+        version_carriers: transport_version_bundles(2)
+            .into_iter()
+            .map(VersionCarrier::Bundle)
+            .collect(),
+        peer_payload_inventory: PeerPayloadInventory::default(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+    });
     for trusted in [false, true, false] {
         let (left, right) = byte_duplex_raw();
         let mut sender = WireTransportAdapter::current(left);
@@ -1891,7 +1447,6 @@ fn transport_version_bundles(count: usize) -> Vec<crate::protocol::VersionBundle
                         &table,
                         schema_version,
                         RowUuid::from_bytes([index as u8; 16]),
-                        Vec::new(),
                         author,
                         1_000 + index as u64,
                         author,
@@ -1984,7 +1539,7 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
             self.inner.try_recv_frame()
         }
     }
-    let reply = |byte| SyncMessage::PermissionAdviceResponse {
+    let reply = |byte| SyncMessage::AuthorizationScopeDecision {
         request_id: crate::protocol::PermissionAdviceRequestId([byte; 16]),
         advice: crate::protocol::PermissionAdvice::Unknown,
     };
@@ -2027,17 +1582,7 @@ fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
     real_client_reordered_delivery_and_fate(false, false);
 }
 
-#[test]
-fn repaired_wire_view_keeps_lease_and_defers_dependent_fate() {
-    real_client_reordered_delivery_and_fate(true, false);
-}
-
-#[test]
-fn disconnect_releases_retained_wire_repair_and_fate() {
-    real_client_reordered_delivery_and_fate(true, true);
-}
-
-fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
+fn real_client_reordered_delivery_and_fate(repair: bool, _detach: bool) {
     struct Tap {
         inner: WireTransportAdapter<ByteDuplexTransport>,
         sent: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2120,19 +1665,7 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
     let inbound = Rc::clone(&client_bytes.inbound);
     let sent = Rc::new(RefCell::new(Vec::new()));
     let client_adapter = WireTransportAdapter::current(client_bytes);
-    let receiver_credits = client_adapter
-        .shared_auxiliary_endpoint()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .channel_credits();
     let server_adapter = WireTransportAdapter::current(server_bytes);
-    let sender_credits = server_adapter
-        .shared_auxiliary_endpoint()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .channel_credits();
     let upstream = block_on(client.connect_upstream(Box::new(client_adapter)));
     let subscriber = server.accept_subscriber(
         Box::new(Tap {
@@ -2208,70 +1741,6 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
     block_on(async { upstream.lock().await.tick().await })
         .expect("fate cannot run before its snapshot introduces the transaction");
     client.tick().unwrap();
-    if repair {
-        {
-            let upstream = upstream.borrow();
-            let ConnectionLink::Upstream(state) = &upstream.link else {
-                unreachable!()
-            };
-            assert_eq!(state.pending_row_version_repairs.len(), 1);
-            assert!(
-                state.pending_row_version_repairs[0].lease.is_some(),
-                "retained view owns its reservation"
-            );
-            assert_eq!(state.deferred_repair_fates.len(), 1);
-            assert!(
-                state.deferred_repair_fates[0].lease.is_some(),
-                "deferred fate owns its reservation"
-            );
-        }
-        if detach {
-            assert!(client.detach_connection(&upstream));
-            let upstream = upstream.borrow();
-            let ConnectionLink::Upstream(state) = &upstream.link else {
-                unreachable!()
-            };
-            assert!(state.pending_row_version_repairs.is_empty());
-            assert!(state.deferred_repair_fates.is_empty());
-            assert!(upstream.staged_inbound.is_empty());
-            return;
-        }
-        // Model another retained bulk view without allocating D bytes. The
-        // real repair below exceeds one extent and must use progress capacity.
-        use crate::wire::channel_credit::ChannelCredits;
-        use crate::wire::channels::ChannelClass;
-        let held_bulk = ChannelCredits::receive_message(
-            &receiver_credits,
-            ChannelClass::Delivery,
-            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
-        )
-        .unwrap();
-        sender_credits.lock().unwrap().reserve_message(
-            ChannelClass::Delivery,
-            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
-        );
-        for _ in 0..32 {
-            subscriber.borrow_mut().tick().unwrap();
-            client.tick().unwrap();
-        }
-        assert!(
-            sent.borrow().iter().any(|message| matches!(
-                message,
-                SyncMessage::RowVersionPayloads { .. }
-            ) && crate::wire::encode_sync_message(message)
-                .unwrap()
-                .len()
-                > crate::wire::channels::CHANNEL_CHUNK_BYTES),
-            "repair genuinely needs bulk-sized progress capacity"
-        );
-        drop(held_bulk);
-        let upstream = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &upstream.link else {
-            unreachable!()
-        };
-        assert!(state.pending_row_version_repairs.is_empty());
-        assert!(state.deferred_repair_fates.is_empty());
-    }
     assert_eq!(
         row_ids(&prepared_read(&client, &Query::from("todos"))),
         if repair {
@@ -2281,241 +1750,6 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
         }
     );
 }
-#[test]
-fn deferred_view_retains_fate_dependency() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut introduced = None;
-    let mut introduced_time = None;
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..2 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::ViewUpdate(payload) => {
-                        introduced_time = mark_carriers_pending_for_fate_test(payload);
-                        introduced = payload
-                            .supporting_rows
-                            .added_rows()
-                            .first()
-                            .map(|row| row.version.tx);
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    responses.borrow_mut().push_back(SyncMessage::FateUpdate {
-        tx_id: introduced.expect("later delta introduces transaction"),
-        fate: Fate::Accepted,
-        global_time: introduced_time,
-        durability: Some(DurabilityTier::Global),
-    });
-    client
-        .tick()
-        .expect("fate following an admitted but body-deferred view must remain valid");
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued == 2,
-        "snapshot and all dependent deltas must remain ordered: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("1".to_owned()))
-    );
-}
-#[test]
-fn superseded_view_keeps_deferred_fate_dependency() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut introduced = None;
-    let mut introduced_time = None;
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..2 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::ViewUpdate(payload) => {
-                        introduced_time = mark_carriers_pending_for_fate_test(payload);
-                        introduced = payload
-                            .supporting_rows
-                            .added_rows()
-                            .first()
-                            .map(|row| row.version.tx);
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    responses.borrow_mut().push_back(SyncMessage::FateUpdate {
-        tx_id: introduced.expect("later delta introduces transaction"),
-        fate: Fate::Accepted,
-        global_time: introduced_time,
-        durability: Some(DurabilityTier::Global),
-    });
-    client
-        .tick()
-        .expect("fate following an admitted but body-deferred view must remain valid");
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued == 2,
-        "snapshot and all dependent deltas must remain ordered: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    // A newer complete snapshot normally supersedes an unsent old delta.
-    // The old delta is also the only carrier of the deferred fate's transaction.
-    server
-        .update(
-            "todos",
-            row,
-            BTreeMap::from([("title".to_owned(), Value::String("2".to_owned()))]),
-        )
-        .unwrap();
-    for _ in 0..8 {
-        subscriber.borrow_mut().tick().unwrap();
-    }
-    let mut fresh_snapshot = false;
-    for message in responses.borrow_mut().iter_mut() {
-        if let SyncMessage::ViewUpdate(payload) = message {
-            assert_eq!(payload.supporting_rows.added_rows().len(), 1);
-            payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(
-                payload.supporting_rows.added_rows().to_vec(),
-            );
-            fresh_snapshot = true;
-        }
-    }
-    assert!(fresh_snapshot, "new complete recovery snapshot emitted");
-    client
-        .tick()
-        .expect("superseding snapshot applies while old body remains held");
-    {
-        let upstream = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &upstream.link else {
-            unreachable!()
-        };
-        assert_eq!(
-            state.pending_row_version_repairs.len(),
-            1,
-            "only active obsolete repair remains"
-        );
-        assert_eq!(state.deferred_repair_fates.len(), 1);
-    }
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    let settled = client.write_state(introduced.unwrap()).unwrap();
-    assert_eq!(settled.fate, Fate::Accepted);
-    assert_eq!(settled.durability, DurabilityTier::Global);
-    assert_eq!(settled.global_time, introduced_time);
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("2".to_owned()))
-    );
-}
-
 // Focused repair fixtures retain real carrier identities while controlling
 // settlement timing; the separate producer-driven test checks observer routing.
 fn mark_carriers_pending_for_fate_test(
@@ -3373,4 +2607,274 @@ fn publishing_settlement_refuses_accepted_dot_position_advanced_after_begin() {
     );
     db.abandon_transaction_handle(parent).unwrap();
     db.tick().unwrap();
+}
+
+/// A snapshot update whose `rows` bundles each carry a `title_bytes` title, so
+/// the whole update can be made larger than a lowered routed payload limit.
+fn bulky_view_update(rows: u16, title_bytes: usize) -> crate::protocol::ViewUpdatePayload {
+    use crate::protocol::{
+        PeerPayloadInventory, ResultRowLayer, RowVersionRefEntry, SupportingRow,
+        SupportingRowsUpdate, VersionBundle, VersionRecord, ViewUpdatePayload,
+    };
+    use crate::schema::ColumnSchema;
+    use crate::time::{GlobalTime, TxTime};
+    use crate::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
+    use groove::schema::ColumnType;
+    let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+    let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+    let node = NodeUuid::from_bytes([0x11; 16]);
+    let author = AuthorSubject::for_test_bytes([0x55; 16]);
+    let row_id = |index: u16| {
+        let mut bytes = [0x66; 16];
+        bytes[..2].copy_from_slice(&index.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    };
+    let mut supporting = Vec::new();
+    let mut bundles = Vec::new();
+    for index in 0..rows {
+        let tx_id = TxId::new(TxTime(1_000 + u64::from(index)), node);
+        let row = row_id(index);
+        supporting.push(SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x71; 16])),
+            version_table: "todos".to_owned().into(),
+            row,
+            version: RowVersionRefEntry {
+                tx: tx_id,
+                schema_version: Some(schema_version),
+                layer: ResultRowLayer::Content,
+                batch: Some(tx_id),
+                branch_or_prefix: Some(Vec::new()),
+                row_digest: None,
+            },
+        });
+        bundles.push(VersionBundle {
+            tx: Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![
+                VersionRecord::from_cells(
+                    &table,
+                    schema_version,
+                    row,
+                    author,
+                    1_000 + u64::from(index),
+                    author,
+                    1_000 + u64::from(index),
+                    &BTreeMap::from([(
+                        "title".to_owned(),
+                        format!("{index:05}-{}", "x".repeat(title_bytes)),
+                    )]),
+                    None,
+                )
+                .unwrap(),
+            ],
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(10_000 + u64::from(index))),
+            durability: DurabilityTier::Global,
+        });
+    }
+    ViewUpdatePayload {
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+            read_view: Default::default(),
+        },
+        settled_through: GlobalTime(20_000),
+        version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
+        peer_payload_inventory: PeerPayloadInventory {
+            complete_tx_payloads: Vec::new(),
+            authorization_progress: Some(7),
+            opening_pending: false,
+        },
+        supporting_rows: SupportingRowsUpdate::snapshot(supporting),
+    }
+}
+
+/// Compare two updates by meaning: carrier packing (one run or several) is a
+/// transport encoding, so compare the expanded bundle sequence instead.
+fn assert_same_view_update(
+    actual: &crate::protocol::ViewUpdatePayload,
+    expected: &crate::protocol::ViewUpdatePayload,
+) {
+    let bundles = |view: &crate::protocol::ViewUpdatePayload| {
+        crate::protocol::expand_version_carriers(&view.version_carriers).unwrap()
+    };
+    assert_eq!(bundles(actual), bundles(expected));
+    let without_carriers = |view: &crate::protocol::ViewUpdatePayload| {
+        let mut view = view.clone();
+        view.version_carriers.clear();
+        view
+    };
+    assert_eq!(without_carriers(actual), without_carriers(expected));
+}
+
+fn view_update_len(message: &SyncMessage) -> usize {
+    crate::wire::encoded_sync_message_len(message).unwrap()
+}
+
+/// Chunk boundaries: at every limit from just under the whole update down to
+/// a few rows per part, each part fits, decodes on its own under the
+/// untrusted decoder, only the last is an ordinary `ViewUpdate` with the real
+/// inventory, and the parts reassemble to the original update. Both lists of
+/// a delta split across part boundaries in order.
+#[test]
+fn oversized_view_update_splits_into_bounded_parts_that_reassemble() {
+    use crate::db::view_update_parts::{merge_view_update_parts, split_view_update};
+    use crate::protocol::SupportingRowsUpdate;
+    let snapshot = bulky_view_update(24, 2_000);
+    let mut delta = snapshot.clone();
+    let rows = delta.supporting_rows.added_rows().to_vec();
+    delta.supporting_rows = SupportingRowsUpdate::Delta {
+        predecessor: [0x51; 16],
+        revision: [0x52; 16],
+        adds: rows[..10].to_vec(),
+        removes: rows[10..].to_vec(),
+    };
+    for view in [snapshot, delta] {
+        let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+        for limit in [whole - 1, whole / 2, whole / 3, whole / 7, 8 * 1024] {
+            let parts = split_view_update(view.clone(), limit).unwrap();
+            assert!(parts.len() >= 2, "limit {limit} of {whole} must split");
+            let mut buffered = Vec::new();
+            let mut last = None;
+            for (index, part) in parts.into_iter().enumerate() {
+                assert!(
+                    view_update_len(&part) <= limit,
+                    "part {index} exceeds {limit}"
+                );
+                let bytes = crate::wire::encode_sync_message(&part).unwrap();
+                assert_eq!(crate::wire::decode_sync_message(&bytes).unwrap(), part);
+                match part {
+                    SyncMessage::ViewUpdatePart(payload) => {
+                        assert!(last.is_none(), "a part follows the final update");
+                        assert_eq!(
+                            payload.peer_payload_inventory,
+                            crate::protocol::PeerPayloadInventory::default()
+                        );
+                        buffered.push(payload);
+                    }
+                    SyncMessage::ViewUpdate(payload) => {
+                        assert!(last.replace(payload).is_none(), "one final update");
+                    }
+                    other => panic!("unexpected part {other:?}"),
+                }
+            }
+            let merged = merge_view_update_parts(buffered, last.unwrap()).unwrap();
+            assert_same_view_update(&merged, &view);
+        }
+    }
+}
+
+/// Splitting never divides a transaction bundle or the header: one that alone
+/// exceeds a part is an explicit typed refusal, and the adapter reports it as
+/// a send failure rather than sending anything.
+#[test]
+fn indivisible_oversized_view_update_units_are_unsupported() {
+    use crate::db::view_update_parts::{OversizedViewUpdate, split_view_update};
+    let view = bulky_view_update(4, 8_000);
+    assert!(matches!(
+        split_view_update(view.clone(), 4 * 1024),
+        Err(OversizedViewUpdate::VersionBundleExceedsLimit { .. })
+    ));
+    assert!(matches!(
+        split_view_update(view.clone(), 64),
+        Err(OversizedViewUpdate::HeaderExceedsLimit { .. })
+    ));
+
+    let _limit = RoutedPayloadLimitGuard::lower_to(4 * 1024);
+    let (left, right) = byte_duplex_raw();
+    let frames = Rc::clone(&right.inbound);
+    let mut sender = WireTransportAdapter::current(left);
+    let Err(TransportError::Failed(reason)) = sender.send(SyncMessage::ViewUpdate(view)) else {
+        panic!("an indivisible oversized row must be refused");
+    };
+    assert!(reason.contains("unsupported view update"), "{reason}");
+    sender.poll_flush().unwrap();
+    assert!(frames.borrow().is_empty(), "nothing of the update is sent");
+}
+
+/// The adapter sends an oversized update as parts on one delivery stream and
+/// the receiving adapter yields it once, whole, only after the final part.
+/// A message offered after it keeps its order behind the whole update.
+#[test]
+fn oversized_view_update_crosses_the_wire_whole() {
+    let view = bulky_view_update(24, 2_000);
+    let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+    let _limit = RoutedPayloadLimitGuard::lower_to(whole / 4);
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    let mut follow_up = view.clone();
+    follow_up.version_carriers.clear();
+    follow_up.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
+    sender
+        .send(SyncMessage::ViewUpdate(follow_up.clone()))
+        .unwrap();
+    let SyncMessage::ViewUpdate(received) = receive_after_pumping(&mut sender, &mut receiver)
+    else {
+        panic!("the receiver yields the reassembled update");
+    };
+    assert_same_view_update(&received, &view);
+    assert_eq!(receiver.view_update_parts_in_flight_for_test(), (0, 0));
+    assert_eq!(
+        receive_after_pumping(&mut sender, &mut receiver),
+        SyncMessage::ViewUpdate(follow_up)
+    );
+}
+
+/// Reconnect mid-sequence: the receiving adapter holds the parts it has, but
+/// the link drops before the final part. It never yields a partial update, the
+/// buffered parts go with the dropped adapter, and the update sent again on a
+/// fresh link arrives whole.
+#[test]
+fn view_update_parts_are_discarded_when_the_link_drops_mid_sequence() {
+    let view = bulky_view_update(24, 2_000);
+    let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+    let _limit = RoutedPayloadLimitGuard::lower_to(whole / 4);
+    let (left, right) = byte_duplex_raw();
+    let inbound = Rc::clone(&right.inbound);
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    for _ in 0..64 {
+        sender.poll_flush().unwrap();
+    }
+    assert_eq!(sender.view_update_parts_in_flight_for_test(), (0, 0));
+    let frames = inbound.borrow_mut().drain(..).collect::<Vec<_>>();
+    let (last, delivered) = frames.split_last().unwrap();
+    for frame in delivered {
+        inbound.borrow_mut().push_back(frame.clone());
+        assert!(
+            receiver.try_recv_result().unwrap().is_none(),
+            "no partial update is ever yielded"
+        );
+    }
+    let (buffered, _) = receiver.view_update_parts_in_flight_for_test();
+    assert!(
+        buffered >= 3,
+        "the non-final parts are buffered: {buffered}"
+    );
+    drop((sender, receiver, last));
+
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    let SyncMessage::ViewUpdate(received) = receive_after_pumping(&mut sender, &mut receiver)
+    else {
+        panic!("the resent update arrives whole");
+    };
+    assert_same_view_update(&received, &view);
 }

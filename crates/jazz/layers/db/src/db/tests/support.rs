@@ -117,6 +117,23 @@ impl WireTransport for ByteDuplexTransport {
     }
 }
 
+/// Restores the protocol routed-payload limit when a test that lowered it ends,
+/// including by panic, so later tests on a reused thread see the real limit.
+pub(super) struct RoutedPayloadLimitGuard;
+
+impl RoutedPayloadLimitGuard {
+    pub(super) fn lower_to(limit: usize) -> Self {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(Some(limit));
+        Self
+    }
+}
+
+impl Drop for RoutedPayloadLimitGuard {
+    fn drop(&mut self) {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(None);
+    }
+}
+
 pub(super) fn byte_duplex_raw() -> (ByteDuplexTransport, ByteDuplexTransport) {
     use std::collections::VecDeque;
     let left = Rc::new(RefCell::new(VecDeque::new()));
@@ -143,22 +160,20 @@ pub(super) fn byte_duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 
 pub(super) fn byte_duplex_uncompressed() -> (Box<dyn Transport>, Box<dyn Transport>) {
     let (left, right) = byte_duplex_raw();
-    let features =
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
-    (
-        Box::new(WireTransportAdapter::new(
-            left,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-        Box::new(WireTransportAdapter::new(
-            right,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-    )
+    (uncompressed_adapter(left), uncompressed_adapter(right))
+}
+
+/// A current-version adapter that never negotiates transport compression, so
+/// frame sizes on the link match encoded message sizes whichever compression
+/// features the build enables.
+pub(super) fn uncompressed_adapter(raw: ByteDuplexTransport) -> Box<dyn Transport> {
+    let features = 0;
+    Box::new(WireTransportAdapter::new(
+        raw,
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    ))
 }
 
 pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
@@ -171,7 +186,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
 
 pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let storage = rocks_storage(schema);
-    block_on(Db::open(DbConfig {
+    let db = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
         identity: DbIdentity {
@@ -180,7 +195,25 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
     }))
-    .unwrap()
+    .unwrap();
+    if let Some(budget) = query_cache_test_budget() {
+        db.set_stored_arrangements_enabled_for_test(true);
+        db.set_query_cache_budget_for_test(Some(budget));
+    }
+    db
+}
+
+/// `JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES` runs the suite with stored
+/// arrangements read by key and their cache bounded to that many bytes, so
+/// eviction runs under every permission, read and subscription test.
+pub(super) fn query_cache_test_budget() -> Option<usize> {
+    std::env::var("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES")
+        .ok()
+        .map(|bytes| {
+            bytes
+                .parse()
+                .expect("JAZZ_TEST_QUERY_CACHE_BUDGET_BYTES is a byte count")
+        })
 }
 
 /// Construct the explicit provider-side identity fixture used by DB tests.
@@ -589,16 +622,6 @@ where
         .count()
 }
 
-pub(super) fn decode_wire_message_payload(
-    decoder: &mut WireStreamDecoder,
-    envelope: &crate::wire::WireEnvelope,
-) -> SyncMessage {
-    let payload = decoder
-        .decode_message(&envelope.payload, envelope.features)
-        .unwrap();
-    decode_sync_message(&payload).unwrap()
-}
-
 pub(super) fn delta_rows(
     event: SubscriptionEvent,
 ) -> (Vec<CurrentRow>, Vec<CurrentRow>, Vec<RemovedRow>) {
@@ -909,9 +932,9 @@ pub(super) fn public_recursive_access_policy(
     let edge_alias = "recursive_edge";
     let target_alias = "recursive_target";
     let access_alias = "access";
-    let seed = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: seed_table.into(),
                 alias: Some(seed_alias.to_owned()),
             }),
@@ -940,19 +963,19 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             edge_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
-    let step = PublicRelExpr::Project {
-        input: Box::new(PublicRelExpr::Join {
-            left: Box::new(PublicRelExpr::Filter {
-                input: Box::new(PublicRelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: edge_table.into(),
                     alias: Some(edge_alias.to_owned()),
                 }),
                 predicate: PublicRelPredicateExpr::And(edge_predicates),
             }),
-            right: Box::new(PublicRelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(target_alias.to_owned()),
             }),
@@ -967,7 +990,7 @@ pub(super) fn public_recursive_access_policy(
             expr: PublicRelProjectExpr::Column(public_rel_column(target_alias, "id")),
         }],
     };
-    let reachable = PublicRelExpr::Gather {
+    let reachable = RelationExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
         frontier_key: PublicRelKeyRef::RowId(PublicRelRowIdRef::Current),
@@ -983,7 +1006,7 @@ pub(super) fn public_recursive_access_policy(
         public_rel_eq(
             access_alias,
             column,
-            PublicRelValueRef::Literal(value.clone()),
+            PublicRelValueRef::literal(value.clone()),
         )
     }));
     access_predicates.extend(access_in_filters.iter().map(|(column, values)| {
@@ -992,15 +1015,15 @@ pub(super) fn public_recursive_access_policy(
             values: values
                 .iter()
                 .cloned()
-                .map(PublicRelValueRef::Literal)
+                .map(PublicRelValueRef::literal)
                 .collect(),
         }
     }));
     PublicPolicyExpr::ExistsRel {
-        rel: PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
                 left: Box::new(reachable),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: access_table.into(),
                     alias: Some(access_alias.to_owned()),
                 }),
@@ -1965,6 +1988,10 @@ pub(super) fn open_core_with_claims(
     )
     .unwrap();
     node.set_test_provider_claims(author, claims);
+    if let Some(budget) = query_cache_test_budget() {
+        node.set_stored_arrangements_enabled_for_test(true);
+        node.set_query_cache_budget_for_test(Some(budget));
+    }
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),
@@ -2195,9 +2222,6 @@ impl CoreDb {
             .made_by(made_by)
             .permission_subject(self.author)
             .cells(cells);
-        if let Some(parent) = parent {
-            commit = commit.parents(vec![parent]);
-        }
         let published = block_on(node.borrow_mut().commit_mergeable(commit))?;
         let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published))?;
         let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id))?;

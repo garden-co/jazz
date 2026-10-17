@@ -769,7 +769,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         base.tables[0].history_storage_table().record_schema(),
     );
     assert_eq!(
-        core.version_storage_sources_for_layer("todos", VersionLayer::Content)
+        core.version_storage_sources("todos")
             .unwrap()
             .len(),
         1,

@@ -14,6 +14,12 @@ namespace {
 jbyteArray copy_response(JNIEnv *env, jazz_native_relay_bytes *output,
                          jazz_native_relay_status status,
                          const char *failure_message) {
+  if (status == JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS) {
+    env->ThrowNew(env->FindClass("com/jazzrn/JazzRelayUnsupportedStorageCodecsException"),
+                  "Unsupported storage format: the local Jazz store was written by an older "
+                  "version; delete it and resync from Core");
+    return nullptr;
+  }
   if (status != JAZZ_NATIVE_RELAY_OK) {
     env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), failure_message);
     return nullptr;

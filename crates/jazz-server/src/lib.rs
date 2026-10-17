@@ -3,6 +3,7 @@
 pub mod loopback;
 pub mod middleware;
 pub mod profiling;
+pub mod resources;
 pub mod server;
 mod tcp;
 
@@ -38,6 +39,7 @@ pub async fn run(
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     diagnostics.validate()?;
@@ -49,9 +51,53 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
+    match limits.memory_limit_bytes {
+        Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
+        None => info!("Memory limit: none detected"),
+    }
+    info!(
+        "WebSocket connection cap: {}",
+        limits.max_websocket_connections
+    );
+    if !in_memory {
+        let budget = limits.rocksdb_memory_budget();
+        jazz_storage_rocksdb::configure_process_memory_budget(budget).map_err(|current| {
+            format!("RocksDB memory budget was already fixed at {current:?} before startup")
+        })?;
+        info!(
+            "Storage cache budget: {} MiB",
+            budget.block_cache_bytes / (1024 * 1024)
+        );
+    }
+    // Before any runtime exists, so every runtime reads stored tables by key
+    // and records the buckets it uses from its first evaluation.
+    jazz::groove::ivm::set_process_stored_arrangements(limits.stored_arrangements);
+    let ceiling = limits.query_cache_ceiling_bytes();
+    jazz::groove::ivm::set_process_cache_budget(ceiling);
+    if !limits.stored_arrangements {
+        info!("Query cache: off, query indexes of stored tables are held in memory");
+    } else if let Some(ceiling) = ceiling {
+        info!(
+            "Query cache budget: {} MiB{}",
+            ceiling / (1024 * 1024),
+            if limits.memory_limit_bytes.is_some() {
+                ", lowered under memory pressure"
+            } else {
+                ""
+            }
+        );
+    }
+    // Serves until this function returns, and leaves the process unbounded
+    // again for a server started after it.
+    let _cache_budget = CacheBudgetGuard(
+        limits
+            .cache_budget_governor()
+            .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
+    );
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout);
+        .with_shutdown_timeout(shutdown_timeout)
+        .with_max_websocket_connections(limits.max_websocket_connections);
     if let Some(dump) = diagnostics.heap_profiler {
         builder = builder.with_heap_profiler(dump);
     }
@@ -134,6 +180,18 @@ pub async fn run(
                     ("memtables", usage.memtable_bytes),
                     ("table_readers", usage.table_reader_bytes),
                 ])
+            })
+        });
+    #[cfg(feature = "otel")]
+    let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
+                budget_bytes: jazz::groove::ivm::process_cache_budget().map(|bytes| bytes as u64),
+                resident_bytes: jazz::groove::ivm::process_cache_resident_bytes() as u64,
+                evicted_buckets: jazz::groove::ivm::process_cache_evicted_buckets(),
+                process_rss_bytes: resources::process_rss_bytes(),
             })
         });
     let shutdown_budget = shutdown_timeout
@@ -239,6 +297,63 @@ struct AbortOnDrop(JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Resets the process-wide query cache settings when its server stops.
+struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
+
+impl Drop for CacheBudgetGuard {
+    fn drop(&mut self) {
+        jazz::groove::ivm::set_process_cache_budget(None);
+        jazz::groove::ivm::set_process_stored_arrangements(false);
+    }
+}
+
+/// How often the query cache budget follows the resident set.
+const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keep the process-wide query cache budget in step with memory pressure.
+async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
+    use jazz::groove::ivm::{process_cache_resident_bytes, set_process_cache_budget};
+    let ceiling = governor.ceiling_bytes();
+    let floor = governor.floor_bytes();
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let Some(rss) = resources::process_rss_bytes() else {
+            return;
+        };
+        let current = governor.budget_bytes();
+        let next = governor.step(rss, process_cache_resident_bytes());
+        if next == current {
+            continue;
+        }
+        set_process_cache_budget(Some(next));
+        let rss_mib = rss / (1024 * 1024);
+        if current == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: query cache budget lowered, queries read more from storage"
+            );
+        } else if next == floor {
+            tracing::warn!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: query cache budget at its floor"
+            );
+        } else if next == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "query cache budget back at its ceiling"
+            );
+        } else {
+            tracing::debug!(rss_mib, budget_mib = mib(next), "query cache budget");
+        }
     }
 }
 

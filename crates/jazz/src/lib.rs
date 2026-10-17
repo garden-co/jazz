@@ -113,6 +113,7 @@ pub use groove;
 
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
+pub use jazz_db::binding_args;
 pub use jazz_db::binding_codec;
 #[cfg(feature = "cold-settle-attribution")]
 pub use jazz_db::cold_settle_attribution;

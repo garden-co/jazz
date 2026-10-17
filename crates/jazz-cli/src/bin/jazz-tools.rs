@@ -26,7 +26,7 @@ static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use jazz_cli::commands;
+use jazz::tools::AppId;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
@@ -186,6 +186,40 @@ enum Commands {
         )]
         shutdown_timeout_secs: u64,
 
+        /// Maximum live WebSocket connections. Upgrades beyond it get
+        /// `503 Service Unavailable` with `Retry-After`.
+        #[arg(
+            long,
+            env = "JAZZ_MAX_CONNECTIONS",
+            default_value_t = jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        )]
+        max_connections: usize,
+
+        /// Memory the server sizes its caches against, in bytes. Defaults to
+        /// the container's cgroup memory limit.
+        #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        memory_limit_bytes: Option<u64>,
+
+        /// Read the query indexes of stored tables from storage by key,
+        /// keeping only a bounded cache of them in memory. `0` holds them
+        /// all in memory instead.
+        #[arg(
+            long,
+            env = "JAZZ_STORED_ARRANGEMENTS",
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
+        stored_arrangements: bool,
+
+        /// Bytes the query cache may keep while memory is plentiful.
+        /// Defaults to a quarter of the memory limit; it is lowered under
+        /// memory pressure either way. `0` keeps nothing resident, so every
+        /// query reads the indexes of stored tables from storage.
+        #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
+        query_cache_budget_bytes: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -242,7 +276,8 @@ async fn run() {
     match cli.command {
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                commands::create::app(name);
+                let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
+                println!("{app_id}");
             }
         },
         Commands::Server {
@@ -260,6 +295,10 @@ async fn run() {
             backend_secret,
             admin_secret,
             shutdown_timeout_secs,
+            max_connections,
+            memory_limit_bytes,
+            stored_arrangements,
+            query_cache_budget_bytes,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -301,7 +340,7 @@ async fn run() {
                 admin_secret,
                 ..Default::default()
             };
-            if let Err(e) = commands::server::run(
+            if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,
@@ -316,6 +355,13 @@ async fn run() {
                     heap_profiler: None,
                     listen: diagnostics_listen,
                     token: diagnostics_token,
+                },
+                jazz_server::resources::ServerResourceLimits {
+                    max_websocket_connections: max_connections,
+                    memory_limit_bytes: memory_limit_bytes
+                        .or_else(jazz_server::resources::detect_memory_limit_bytes),
+                    stored_arrangements,
+                    query_cache_budget_bytes,
                 },
             )
             .await
@@ -620,6 +666,74 @@ mod tests {
         let error = validate_server_cli_options(&cli.command)
             .expect_err("external JWT verifier without audience must fail");
         assert!(error.contains("--jwt-audience"), "{error}");
+    }
+
+    #[test]
+    fn server_command_reads_query_cache_switches_from_env() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _stored_guard = EnvVarGuard::set("JAZZ_STORED_ARRANGEMENTS", "0");
+        let _budget_guard = EnvVarGuard::set("JAZZ_QUERY_CACHE_BUDGET_BYTES", "1048576");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert!(!stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, Some(1 << 20));
+            }
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_defaults_and_validates_max_connections() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env_guard = EnvVarGuard::remove("JAZZ_MAX_CONNECTIONS");
+        let _stored_guard = EnvVarGuard::remove("JAZZ_STORED_ARRANGEMENTS");
+        let _budget_guard = EnvVarGuard::remove("JAZZ_QUERY_CACHE_BUDGET_BYTES");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                max_connections,
+                memory_limit_bytes,
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    max_connections,
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
+                );
+                assert_eq!(memory_limit_bytes, None);
+                assert!(stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, None);
+            }
+            _ => panic!("expected server command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--max-connections",
+                "0",
+            ])
+            .is_err(),
+            "a zero connection cap would refuse every client"
+        );
     }
 
     #[test]

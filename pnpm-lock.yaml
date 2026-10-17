@@ -202,6 +202,18 @@ importers:
 
   crates/jazz-wasm: {}
 
+  dev/benchmarks/example-load-times:
+    devDependencies:
+      '@codspeed/vitest-plugin':
+        specifier: ^5.7.1
+        version: 5.7.1(tinybench@2.9.0)(vite@8.0.1(@types/node@25.6.0)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.1.0)
+      '@playwright/test':
+        specifier: ^1.58.2
+        version: 1.58.2
+      vitest:
+        specifier: catalog:default
+        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@28.1.0(@noble/hashes@2.3.0))(vite@8.0.1(@types/node@25.6.0)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+
   dev/local-telemetry/web:
     dependencies:
       '@tanstack/react-query':
