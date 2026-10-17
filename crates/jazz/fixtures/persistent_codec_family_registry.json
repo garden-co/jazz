@@ -633,7 +633,7 @@
         },
         {
           "path": "packages/jazz-tools/tests/browser/indexeddb-jazz-compat.test.ts",
-          "anchor": "rejects the pinned previous-durability corpus without rewriting it"
+          "anchor": "refuses the pre-linear catalogue/history/branch/large-value corpus through public WasmDb"
         }
       ]
     },

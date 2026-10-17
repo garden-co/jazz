@@ -732,8 +732,13 @@ where
         self.prepare_authored_schema_variants_for_commit(&versions)
             .await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.is_partial
+            // View receipts redact the complete proof. Author retransmission
+            // uses the stricter duplicate check; a receipt may match retained
+            // proof without replacing or erasing it.
+            if !(known_transaction_payload_matches(
+                &transaction_without_permission_subject(&existing.tx),
+                &transaction_without_permission_subject(&tx),
+            ) || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));

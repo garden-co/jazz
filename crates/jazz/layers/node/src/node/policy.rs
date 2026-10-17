@@ -302,6 +302,7 @@ enum SelectedWriteOperation {
     Insert,
     Update(CurrentRow),
     Delete(CurrentRow),
+    InsertThenDelete(CurrentRow),
     Denied,
 }
 
@@ -1125,6 +1126,15 @@ where
                     .await?
                 {
                     Some(current) => SelectedWriteOperation::Delete(current),
+                    None if !cells.is_empty() => SelectedWriteOperation::InsertThenDelete(
+                        current_row_from_cells_with_explicit_provenance(
+                            &table,
+                            version.row_uuid(),
+                            &cells,
+                            version_provenance(version),
+                            None,
+                        )?,
+                    ),
                     None => SelectedWriteOperation::Denied,
                 }
             }
@@ -1180,7 +1190,34 @@ where
                 )
                 .await
             }
-            SelectedWriteOperation::Delete(current) => {
+            SelectedWriteOperation::Delete(current)
+            | SelectedWriteOperation::InsertThenDelete(current) => {
+                if matches!(
+                    selected.operation,
+                    SelectedWriteOperation::InsertThenDelete(_)
+                ) {
+                    let Some(insert_policy) = &table.write_policies.insert_check else {
+                        return Ok(false);
+                    };
+                    if !self
+                        .write_policy_query_allows_candidate_in_proof_scope(
+                            selected.schema,
+                            table,
+                            insert_policy,
+                            selected.row,
+                            &selected.cells,
+                            author,
+                            true,
+                            selected.provenance,
+                            global_only,
+                            budget.as_deref_mut(),
+                            &TransactionWriteOverlay::accepted_state(),
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
                 let policy = table
                     .write_policies
                     .delete_using

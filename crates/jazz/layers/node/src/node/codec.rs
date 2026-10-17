@@ -3768,13 +3768,6 @@ pub(super) fn stage_transaction_record(
     status: &TransactionRecordStatus,
 ) -> Result<(), Error> {
     let header = transaction_record_values(node_alias, tx, status)?;
-    let key = || {
-        PrimaryKeyValue::Composite(vec![
-            PrimaryKeyValue::U64(tx.tx_id.time.0),
-            PrimaryKeyValue::U64(node_alias.0),
-        ])
-    };
-    let updating = matches!(write, TransactionRecordWrite::Update);
     match write {
         TransactionRecordWrite::Insert { provenance } => {
             if provenance.is_some() != tx.contribution_merge.is_some() {
@@ -3798,11 +3791,7 @@ pub(super) fn stage_transaction_record(
     }
     match pending_transaction_values(node_alias, tx, status)? {
         Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
-        // Only exclusive transactions keep read evidence, so a mergeable
-        // one never has a pending record to delete.
-        None if updating && tx.kind == TxKind::Exclusive => {
-            batch.delete(PENDING_TRANSACTIONS_TABLE, key());
-        }
+        // Redacted view receipts cannot erase a complete retained proof.
         None => {}
     }
     Ok(())
@@ -3985,9 +3974,8 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
     }
 }
 
-/// Compare a stored transaction with a redelivered one. The store drops a
-/// transaction's exclusive read evidence once it settles, so a stored copy
-/// without it still matches a redelivery that carries it.
+/// Compare immutable transaction payloads across a proof-redacting carrier.
+/// Complete retained proof must agree with any complete proof redelivered.
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
