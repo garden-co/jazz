@@ -68,7 +68,8 @@ enums, bytes, arrays, payload enums and top-level rename/default independence.
 
 ## Encrypted plaintext
 
-The plaintext is a Groove packed record containing one logical column named
+The plaintext uses Groove typed-record v1 with the `groove.large-value.v2`
+inline scalar encoding (SPEC 9), containing one logical column named
 `value`, encoded with `encodeNativeRowValues`. Decoding uses the same logical
 descriptor and `decodeNativeRowValues`, not the physical BYTEA descriptor.
 This retains the existing scalar, nullable, array and structured-value byte
@@ -76,27 +77,17 @@ representations instead of introducing JSON conversion for dates, bytes or
 large integers. Adapters do not choose the value representation.
 
 The public cell-format fixture pins `synthetic` to
-`0273796e746865746963` and bytes `de ad` to `02dead`, matching the existing
+`0073796e746865746963` and bytes `de ad` to `00dead`, matching the existing
 native row corpus. It checks these plaintext bytes alongside the complete
 stored record and the two-part authenticated transcript. Runtime-generated
 UUIDs remain variable: the scope, space, row and epoch are checked against the
 accepted rows, and column identities must be distinct UUIDs. The fixture also
 checks the logical type descriptor and that reads supply the same context to
 BYOC as writes. Other logical descriptors and packed-value representations are
-covered by the cell-type and native-row codec corpora respectively.
+covered by the cell-type and native-row codec corpora respectively. Equality
+inputs use the same codec directly after signed-zero normalisation;
+`packages/jazz-tools/src/e2ee/equality-values.test.ts` pins those plaintext bytes.
 
 The implementation clears temporary plaintext buffers after encryption or
 decoding, and transaction-owned initial epoch keys after submission failure,
 commit or rollback. This reduces lifetime; it does not promise VM-wide erasure.
-
-## Logical value encoding v1
-
-`jazz.e2ee.logical-value.v1` uses the native typed-record encoding for cell
-plaintext and canonical equality inputs. Variable-length text, JSON, enum names
-and byte strings use the inline discriminator `00`, including nullable, array
-and nested row values. The native codec specification defines the record framing;
-`packages/jazz-tools/src/e2ee/equality-values.test.ts` and
-`packages/jazz-tools/src/e2ee/encrypted-cell-format.test.ts` pin hand-authored
-plaintext bytes. Equality normalises signed zero before encoding; ordinary cell
-plaintext retains the original value. E2EE is unreleased: no alternate or legacy
-E2EE value encoding is supported.
