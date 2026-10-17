@@ -509,7 +509,14 @@ fn terminal_schema_routing_fields(
 
 #[doc(hidden)]
 pub fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
-    DeclaredOutputFields::default().of(graph).cloned()
+    let mut declared = DeclaredOutputFields::default();
+    declared.of(graph)?;
+    let fields = declared
+        .outputs
+        .remove(&std::ptr::from_ref(graph))
+        .expect("the graph root was derived")?;
+    drop(declared);
+    Some(std::rc::Rc::unwrap_or_clone(fields))
 }
 
 /// Declared output fields per builder node, memoized by node address so graphs
@@ -517,7 +524,7 @@ pub fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<Str
 /// The borrow keeps every memoized node alive, so an address is never reused.
 #[derive(Default)]
 struct DeclaredOutputFields<'g> {
-    outputs: std::collections::HashMap<*const GraphBuilder, Option<BTreeSet<String>>>,
+    outputs: std::collections::HashMap<*const GraphBuilder, Option<std::rc::Rc<BTreeSet<String>>>>,
     graphs: std::marker::PhantomData<&'g GraphBuilder>,
 }
 
@@ -533,45 +540,101 @@ impl<'g> DeclaredOutputFields<'g> {
         self.outputs
             .get(&std::ptr::from_ref(graph))
             .expect("the graph root was derived")
-            .as_ref()
+            .as_deref()
     }
 
     fn derive(&mut self, graph: &'g GraphBuilder) {
         let outputs = &mut self.outputs;
-        for node in graph_builder_postorder(graph) {
-            if outputs.contains_key(&std::ptr::from_ref(node)) {
+        let mut pending = vec![(graph, false)];
+        while let Some((node, expanded)) = pending.pop() {
+            let key = std::ptr::from_ref(node);
+            if outputs.contains_key(&key) {
+                continue;
+            }
+            if !expanded {
+                pending.push((node, true));
+                // Explicit projections and output contracts already declare
+                // their fields. Only operators that derive names from inputs
+                // need the corresponding input's field set, not its execution.
+                match node {
+                    GraphBuilder::Filter { input, .. }
+                    | GraphBuilder::UnwrapNullable { input, .. }
+                    | GraphBuilder::VariantProject { input, .. }
+                    | GraphBuilder::ArgMaxBy { input, .. }
+                    | GraphBuilder::ArgMinBy { input, .. }
+                    | GraphBuilder::TopBy { input, .. }
+                    | GraphBuilder::Unnest { input, .. }
+                    | GraphBuilder::StreamingChecksum { input, .. }
+                    | GraphBuilder::SemiJoin { left: input, .. }
+                    | GraphBuilder::AntiJoin { left: input, .. }
+                    | GraphBuilder::Recursive { seed: input, .. } => {
+                        pending.push((input, false));
+                    }
+                    GraphBuilder::RecursiveStepWitness { recursive } => {
+                        if let GraphBuilder::Recursive {
+                            step_witness: Some(witness),
+                            ..
+                        } = recursive.as_ref()
+                        {
+                            pending.push((witness, false));
+                        }
+                    }
+                    GraphBuilder::Union { inputs } => {
+                        pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
+                    }
+                    GraphBuilder::Join { left, right, .. } => {
+                        pending.push((right, false));
+                        pending.push((left, false));
+                    }
+                    GraphBuilder::TemplateInput { .. }
+                    | GraphBuilder::TypedTemplate { .. }
+                    | GraphBuilder::InlineRecords { .. }
+                    | GraphBuilder::FrontierSource { .. }
+                    | GraphBuilder::BindingSource { .. }
+                    | GraphBuilder::InputSource { .. }
+                    | GraphBuilder::Project { .. }
+                    | GraphBuilder::Aggregate { .. }
+                    | GraphBuilder::CollectBy { .. }
+                    | GraphBuilder::Table { .. }
+                    | GraphBuilder::Index { .. }
+                    | GraphBuilder::Lookup { .. } => {}
+                }
                 continue;
             }
             let fields = declared_node_fields(node, |child| {
                 outputs
                     .get(&std::ptr::from_ref(child))
-                    .expect("postorder visits graph children before their parent")
+                    .expect("field dependencies are derived before their parent")
                     .clone()
             });
-            outputs.insert(std::ptr::from_ref(node), fields);
+            outputs.insert(key, fields);
         }
     }
 }
 
 fn declared_node_fields(
     node: &GraphBuilder,
-    child_output: impl Fn(&GraphBuilder) -> Option<BTreeSet<String>>,
-) -> Option<BTreeSet<String>> {
+    child_output: impl Fn(&GraphBuilder) -> Option<std::rc::Rc<BTreeSet<String>>>,
+) -> Option<std::rc::Rc<BTreeSet<String>>> {
+    use std::rc::Rc;
+
     match node {
-        GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output),
+        GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output).map(Rc::new),
         GraphBuilder::TypedTemplate { program, .. } => {
-            descriptor_named_fields(&program.output_descriptor())
+            descriptor_named_fields(&program.output_descriptor()).map(Rc::new)
         }
         GraphBuilder::InlineRecords { output, .. }
         | GraphBuilder::FrontierSource { output, .. }
-        | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+        | GraphBuilder::BindingSource { output, .. } => {
+            descriptor_named_fields(output).map(Rc::new)
+        }
         GraphBuilder::InputSource { .. } => None,
-        GraphBuilder::Project { fields, .. } => Some(
+        GraphBuilder::Project { fields, .. } => Some(Rc::new(
             fields
                 .iter()
                 .map(|field| field.output_name.clone())
                 .collect(),
-        ),
+        )),
         GraphBuilder::StreamingChecksum {
             input,
             field,
@@ -579,8 +642,9 @@ fn declared_node_fields(
             ..
         } => child_output(input).and_then(|mut fields| match field {
             FieldRef::Name(field) | FieldRef::StoredName(field) => {
-                fields.remove(field);
-                fields.insert(output_field.clone());
+                let updated = Rc::make_mut(&mut fields);
+                updated.remove(field);
+                updated.insert(output_field.clone());
                 Some(fields)
             }
             FieldRef::Resolved(_) => None,
@@ -589,7 +653,7 @@ fn declared_node_fields(
             group_cols,
             aggregates,
             ..
-        } => Some(
+        } => Some(Rc::new(
             group_cols
                 .iter()
                 .map(|field| field.display_name())
@@ -600,15 +664,15 @@ fn declared_node_fields(
                         .unwrap_or_else(|| format!("aggregate_{index}"))
                 }))
                 .collect(),
-        ),
-        GraphBuilder::CollectBy { collect, .. } => Some(
+        )),
+        GraphBuilder::CollectBy { collect, .. } => Some(Rc::new(
             collect
                 .parent_fields
                 .iter()
                 .map(|field| field.output_name.clone())
                 .chain(std::iter::once(collect.collection_field.clone()))
                 .collect(),
-        ),
+        )),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -622,7 +686,7 @@ fn declared_node_fields(
             element_field,
             ..
         } => child_output(input).map(|mut fields| {
-            fields.insert(element_field.clone());
+            Rc::make_mut(&mut fields).insert(element_field.clone());
             fields
         }),
         GraphBuilder::Recursive { seed, .. } => child_output(seed),
@@ -636,10 +700,10 @@ fn declared_node_fields(
         GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
             let mut fields = child_output(first)?;
             for input in rest {
-                fields = fields
-                    .intersection(&child_output(input)?)
-                    .cloned()
-                    .collect();
+                let other = child_output(input)?;
+                if !Rc::ptr_eq(&fields, &other) {
+                    Rc::make_mut(&mut fields).retain(|field| other.contains(field));
+                }
             }
             Some(fields)
         }),
@@ -648,9 +712,9 @@ fn declared_node_fields(
                 .zip(child_output(right))
                 .map(|(left_fields, right_fields)| {
                     let mut fields = BTreeSet::new();
-                    fields.extend(left_fields.into_iter().map(|field| left_field(&field)));
-                    fields.extend(right_fields.into_iter().map(|field| right_field(&field)));
-                    fields
+                    fields.extend(left_fields.iter().map(|field| left_field(field)));
+                    fields.extend(right_fields.iter().map(|field| right_field(field)));
+                    Rc::new(fields)
                 })
         }
         GraphBuilder::Table { .. } | GraphBuilder::Index { .. } | GraphBuilder::Lookup { .. } => {
