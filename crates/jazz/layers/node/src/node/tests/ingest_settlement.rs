@@ -129,7 +129,7 @@ fn rejected_fragment_removes_all_pending_effects() {
             .unwrap()
             .is_empty()
     );
-    assert!(reader.query_versions_for_tx(id).unwrap().is_empty());
+    assert!(reader.stored_versions_for_tx_for_test(id).unwrap().is_empty());
 }
 
 #[test]

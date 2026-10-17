@@ -59,7 +59,7 @@ where
 
         if already_accepted
             && stored.tx.kind == TxKind::Mergeable
-            && !stored.view_scoped_cardinality
+            && !stored.is_partial
             && stored.global_time.is_some()
             && stored.global_time == previous_global_time
             && stored.durability == previous_durability
@@ -80,7 +80,12 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let tx_versions = self.query_versions_for_tx(tx_id).await?;
+        // A released list means the transaction settled in an earlier
+        // batch: its rows already moved to their seq and own no overlay.
+        let tx_versions = self
+            .query_listed_versions_for_tx(tx_id, &stored)
+            .await?
+            .unwrap_or_default();
         if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
@@ -88,41 +93,51 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        let contribution_merge = self.contribution_merge_storage_value(
-            stored.tx.contribution_merge.as_ref(),
-        )?;
-        batch.update(
-            "jazz_transactions",
-            transaction_values_with_cardinality_scope(
-                stored.node_alias,
-                &stored.tx,
+        self.stage_tx_record(
+            &mut batch,
+            TransactionRecordWrite::Update,
+            stored.node_alias,
+            &stored.tx,
+            &TransactionRecordStatus::new(
                 stored.fate.clone(),
                 stored.global_time,
                 stored.durability,
-                stored.view_scoped_cardinality,
-                contribution_merge,
-            )?,
-        );
+            )
+            .view_scoped(stored.is_partial),
+        )?;
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
                 // History holds the row's post-image at this seq, which is
                 // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
+                self.write_history_post_image(&mut batch, version)?;
             }
             let mut moved = !global_current_updates.is_empty();
             if matches!(stored.fate, Fate::Accepted) {
                 // Every pending record of an accepted write moves to its
                 // seq, also when the row's image here did not change.
+                // A post-image may be laid out in another schema version than
+                // the write, naming a renamed table differently: match rows
+                // by physical table.
+                let updated_rows = global_current_updates
+                    .iter()
+                    .map(|update| {
+                        Ok((
+                            self.physical_table_id_for_version(update)?,
+                            update.branch_key(),
+                            update.row_uuid(),
+                        ))
+                    })
+                    .collect::<Result<BTreeSet<_>, Error>>()?;
                 for version in &tx_versions {
-                    let updated = global_current_updates.iter().any(|update| {
-                        update.table() == version.table()
-                            && update.branch_key() == version.branch_key()
-                            && update.row_uuid() == version.row_uuid()
-                    });
+                    let updated = updated_rows.contains(&(
+                        self.physical_table_id_for_version(version)?,
+                        version.branch_key(),
+                        version.row_uuid(),
+                    ));
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
-                        self.write_history_post_image(&mut batch, &at_seq, stored.tx.made_by)?;
+                        self.write_history_post_image(&mut batch, &at_seq)?;
                         moved = true;
                     }
                 }
@@ -276,6 +291,12 @@ where
         }
         let no_rows = BTreeSet::new();
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
+            if predicate.shape.aggregate.is_some() {
+                if self.aggregate_read_result_differs(predicate, identity).await? {
+                    return Ok(false);
+                }
+                continue;
+            }
             let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
             if self
                 .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
@@ -355,7 +376,8 @@ where
     /// it read; otherwise a row appeared or changed into the result since. A
     /// proved row the predicate returned at the base snapshot but no longer
     /// returns left the result through another row (a join or policy
-    /// source). An aggregate read is validated through the rows it consumed.
+    /// source). Aggregate reads are validated by
+    /// [`Self::aggregate_read_result_differs`] instead.
     ///
     /// A client that recorded no row proofs for its predicate reads (before
     /// alpha.58) conflicts whenever such a read returned rows.
@@ -393,9 +415,40 @@ where
             .any(|(row, _)| proven.contains(&row) && !now.contains(&row)))
     }
 
+    /// Whether an exclusive aggregate read no longer returns the result the
+    /// transaction recorded (garden-co/jazz#3768). The authority re-runs the
+    /// aggregate as the transaction's permission subject over its current
+    /// global state and compares the canonical `jazz.aggregate-read-result.v1`
+    /// bytes exactly. Rewrites of consumed rows that leave the result
+    /// unchanged do not conflict; a reader that lacked rows computed another
+    /// result and does. Ingest rejects an aggregate read without a well-formed
+    /// result as a malformed commit before validation; one that still reaches
+    /// here, or whose shape is unknown, conflicts.
+    async fn aggregate_read_result_differs(
+        &mut self,
+        predicate: &PredicateRead,
+        identity: AuthorSubject,
+    ) -> Result<bool, Error> {
+        let Some(recorded) = &predicate.aggregate_result else {
+            return Ok(true);
+        };
+        let Some((shape, binding)) = self.predicate_read_validation_shape(predicate)? else {
+            return Ok(true);
+        };
+        let now = self
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                None,
+                identity,
+            )
+            .await?;
+        Ok(crate::node::aggregate_read_result::aggregate_read_result_from_rows(&now)? != *recorded)
+    }
+
     /// The shape and binding an authority evaluates to validate a predicate
-    /// read: the read's own shape, or for an aggregate the rows it consumed.
-    /// `None` when the read no longer names a known shape and binding.
+    /// read. `None` when the read no longer names a known shape and binding.
     fn predicate_read_validation_shape(
         &self,
         predicate: &PredicateRead,
@@ -415,21 +468,15 @@ where
                     .validate(schema)
                     .ok()
                     .filter(|shape| shape.shape_id() == predicate.shape_id)
-                    .map(|shape| (shape, schema))
             });
-        let Some((shape, schema)) = validated else {
+        let Some(shape) = validated else {
             return Ok(None);
         };
         let binding = shape.bind(predicate.binding_values.clone())?;
         if binding.binding_id() != predicate.binding_id {
             return Ok(None);
         }
-        let Some(input) = shape.query().aggregate_input() else {
-            return Ok(Some((shape, binding)));
-        };
-        let input = input.validate(schema)?;
-        let binding = input.bind(predicate.binding_values.clone())?;
-        Ok(Some((input, binding)))
+        Ok(Some((shape, binding)))
     }
 
     #[cfg(test)]
@@ -742,12 +789,19 @@ where
         now_ms: u64,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        let missing_schema = versions.iter().any(|version| {
-            !self
-                .catalogue
+        let schemas_known = versions.iter().all(|version| {
+            self.catalogue
                 .catalogue_schemas
                 .contains_key(&version.schema_version())
         });
+        // A write chained on a predecessor parked here waits behind it, so
+        // the authority still decides one node's writes in their order
+        // (SPEC 4 §4.6). The lookup is in memory.
+        let behind_parked_predecessor = mode.ingress_role == ParkedIngressRole::Authority
+            && self.has_parked_same_node_predecessor(tx, versions);
+        if schemas_known && !behind_parked_predecessor {
+            return Ok(false);
+        }
         let session_claim_binding = match mode.ingress_role {
             ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
             ParkedIngressRole::Relay => None,
@@ -778,12 +832,11 @@ where
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
         }
-        if !missing_schema {
-            return Ok(false);
-        }
         self.sync_metrics.parked_orphans += 1;
-        self.sync_metrics.parked_catalogue_orphans += 1;
-        self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        if !schemas_known {
+            self.sync_metrics.parked_catalogue_orphans += 1;
+            self.parking.parked_catalogue_commit_units.insert(tx.tx_id);
+        }
         self.parking.parked_commit_units.insert(
             tx.tx_id,
             ParkedCommitUnit {
@@ -798,33 +851,49 @@ where
         Ok(true)
     }
 
-    /// The pending predecessor a version of the unit names, of its own
-    /// writer and older than it, that has no fate here yet. The fate
-    /// authority answers such a unit with `RetryLater` and stores nothing
-    /// (SPEC 4 §4.6).
-    pub(super) async fn commit_unit_awaited_predecessor(
-        &mut self,
+    /// Whether a version of the unit names, as its pending predecessor, an
+    /// older write of the unit's own node that is parked here for the
+    /// authority, and has been for less than
+    /// [`PARKED_PREDECESSOR_WAIT_MS`].
+    ///
+    /// The wait is bounded: a predecessor whose schema has not arrived by
+    /// then stops holding its writer's later writes back, and the next
+    /// authority ingest decides them as written over the row's current image
+    /// (the predecessor is treated as never arriving, `INV-HIST-20`). Should
+    /// its schema arrive after all, the predecessor is then late and refused
+    /// (`INV-HIST-23`), so one write whose schema never arrives costs itself,
+    /// not the rest of its writer's chain.
+    ///
+    /// The wait is measured on the authority's ingest clock, the newest
+    /// `now_ms` any commit ingest has seen, and nothing else drives it:
+    /// - No timer runs it out. On an idle Core the chained write stays
+    ///   parked past the wait until the next commit ingest (of any writer)
+    ///   advances the clock, or the predecessor's schema arrives.
+    /// - The clock is wall time, never moved back. A forward jump of Core's
+    ///   clock runs out every parked wait at the next ingest; a backward
+    ///   jump only lengthens them until wall time catches up.
+    /// - The clock and the parked units are in memory. A restart drops both,
+    ///   so a writer resends its pending writes in order and the wait starts
+    ///   again from their new arrival.
+    fn has_parked_same_node_predecessor(
+        &self,
         tx: &Transaction,
         versions: &[VersionRecord],
-    ) -> Result<Option<TxId>, Error> {
-        for version in versions {
-            let Some(predecessor) = version.base().pending else {
-                continue;
-            };
-            // A predecessor Core would refuse is answered by validation,
-            // not waited for.
-            if pending_predecessor_refusal(predecessor, tx.tx_id).is_some() {
-                continue;
-            }
-            match self.query_transaction(predecessor).await? {
-                None => return Ok(Some(predecessor)),
-                Some(stored) if matches!(stored.fate, Fate::Pending) => {
-                    return Ok(Some(predecessor));
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(None)
+    ) -> bool {
+        versions.iter().any(|version| {
+            version.base().pending.is_some_and(|predecessor| {
+                pending_predecessor_refusal(predecessor, tx.tx_id).is_none()
+                    && self
+                        .parking
+                        .parked_commit_units
+                        .get(&predecessor)
+                        .is_some_and(|unit| {
+                            unit.ingress_role == ParkedIngressRole::Authority
+                                && unit.now_ms.saturating_add(PARKED_PREDECESSOR_WAIT_MS)
+                                    > self.parking.newest_ingest_ms
+                        })
+            })
+        })
     }
 
     pub(super) async fn drain_parked_commit_units(
@@ -846,6 +915,8 @@ where
                                 .catalogue_schemas
                                 .contains_key(&version.schema_version())
                         })
+                        // Its parked predecessor goes first, on a later pass.
+                        && !self.has_parked_same_node_predecessor(&unit.tx, &unit.versions)
                 })
                 .map(|(tx_id, _)| *tx_id)
                 .collect::<Vec<_>>();

@@ -748,17 +748,19 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         "the initial worker result is still pending"
     );
 
-    // FIFO makes the worker serve the subscription's initial empty view before
-    // it ingests and acknowledges the later commit in this same tick.
+    // The main thread uploads its commit ahead of the subscription, behind a
+    // read barrier, so the worker persists and acknowledges the commit before
+    // it serves the subscription's initial view, all in this same tick
+    // (SPEC 8 §8.2.1). The first view already holds the row.
     main_thread
         .tick()
         .expect("send subscription and optimistic commit to worker");
     worker
         .tick()
-        .expect("serve initial view, persist commit, and acknowledge it");
+        .expect("persist and acknowledge the commit, then serve the initial view");
     main_thread
         .tick()
-        .expect("apply stale initial view and Local acknowledgement");
+        .expect("apply Local acknowledgement and initial view");
     assert_eq!(
         main_thread
             .write_state(insert.mergeable_tx_id())
@@ -2820,14 +2822,6 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         core.tick().expect("accept authority rows");
         seeder.tick().expect("settle authority rows");
     }
-    let pending = receiver
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
-            Default::default(),
-        )
-        .expect("insert receiver-local pending row");
-
     let (receiver_transport, core_transport) = duplex();
     let (receiver_transport, _receiver_messages) = recording_transport(receiver_transport, true);
     let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
@@ -2857,6 +2851,17 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         strict.try_next_event().is_none(),
         "strict remote must wait for its fresh exact authority closure"
     );
+    // Put both reads on the wire before the pending write exists. A request
+    // sent after the write would wait for the authority to answer it (SPEC 8
+    // §8.2.1), and this link never delivers the write.
+    receiver.tick().expect("send both reads");
+    let pending = receiver
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
+            Default::default(),
+        )
+        .expect("insert receiver-local pending row");
     for _ in 0..12 {
         receiver.tick().expect("send exact usage sites");
         core.tick().expect("serve authority closures");

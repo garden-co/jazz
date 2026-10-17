@@ -480,3 +480,17 @@ async fn storage_extraction_flushes_multiple_queued_writes_in_order() {
         1
     );
 }
+
+/// A server turns stored arrangements on and caps their cache per database;
+/// a schema rebuild must not silently drop either setting.
+#[futures_test::test]
+async fn runtime_rebuild_keeps_query_cache_settings() {
+    let storage = TestStorage::new(&albums_schema().column_families());
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    database.set_stored_arrangements_enabled(true);
+    database.set_cache_memory_budget(Some(0));
+    database.prepare_for_storage_extraction().await.unwrap();
+    database.rebuild(albums_schema()).unwrap();
+    assert!(database.ivm_runtime.stored_arrangements_enabled());
+    assert_eq!(database.ivm_runtime.own_cache_memory_budget(), Some(0));
+}

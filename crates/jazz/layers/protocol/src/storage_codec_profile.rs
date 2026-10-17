@@ -1,277 +1,129 @@
-//! Jazz's closed epoch-one persistent-codec inventory.
+//! Closed storage profiles for independently persisted Jazz roots.
 //!
-//! This module owns only the names of Jazz byte families, not adapter opening
-//! or backend semantics. Groove composes the profile into a durable manifest
-//! as opaque identifiers; every adapter validates the same resulting set
-//! before it interprets or mutates a persistent Jazz root.
+//! Each Jazz marker versions the complete root-owned layout. Individual
+//! encoding receipts remain documented and tested without separate manifest
+//! markers. Groove and adapter formats retain their own compatibility gates.
 
 use crate::groove::storage::{Error, StorageCodecProfile};
 
-/// Epoch-one Jazz-owned durable codec families, in canonical lexical order.
+/// Node-owned format plus its durable schema indexes and Groove's dictionary
+/// of interned column values.
 ///
-/// Each identifier covers one independently versioned semantic byte family.
-/// Values that merely use Groove's typed record encoding do not acquire a
-/// second Jazz codec ID; byte fields whose interpretation belongs to Jazz do.
-pub const JAZZ_EPOCH_1_STORAGE_CODECS: &[&str] = &[
-    "jazz.branch-key.v1",
-    "jazz.catalogue.activation.v1",
-    "jazz.catalogue.bootstrap-ready.v1",
-    "jazz.catalogue.lens.v1",
-    "jazz.catalogue.lineage.v1",
-    "jazz.catalogue.physical-mapping.v1",
-    "jazz.catalogue.schema.v1",
-    "jazz.catalogue.write-pointer.v1",
-    // Reserved to open old roots and discard their retired subscription caches.
-    // No active scope writer or payload decoder uses this family.
-    "jazz.subscription-program-fact-key.v1",
-    "jazz.transaction-durability.v2",
-];
-
-/// The closed base profile shared by every persistent Jazz root.
-///
-/// Groove's mandatory epoch-one families remain first because codec IDs are
-/// sorted by the profile constructor. An incompatible byte-family version changes the
-/// top-level manifest; adapters reject the preceding profile before reading data. A separate
-/// durable root (such as the server's catalogue-entry store) composes this
-/// profile with its own root-local codec family before opening its adapter.
-/// A root that holds row history opens with [`node_storage_codec_profile`].
-pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
-    StorageCodecProfile::groove_epoch_1()
-        .with_additional_codecs(JAZZ_EPOCH_1_STORAGE_CODECS.iter().copied())
-}
-
-/// Families declared by every root that stores Jazz rows (Core, relay and
-/// client node stores, on every adapter), in canonical order.
-///
-/// `groove.durable-index.v2` is Groove's compact secondary-index layout
-/// (numeric index ids, single-escaped keys, empty values). Only node roots
-/// declare schema indexes, so auxiliary roots do not carry it. A node root
-/// written by the earlier name-prefixed index layout (alpha.59 and before)
-/// lacks it and is refused with [`Error::UnsupportedStorageCodecs`].
-///
-/// `jazz.history-version-current.v4` is the linear row-state layout: one
-/// history record per accepted transaction holding the merged row state,
-/// `_deletion` as a cell, history keyed by seq with each write's base and lost
-/// cells, a `by_seq` current index and a per-row ahead overlay. History and ahead-current tables carry
-/// no `by_tx` secondary index; the node-local `jazz_tx_touched_rows` record of
-/// each transaction lists the rows it touched instead. A history image stores `updated_by`
-/// only when it differs from its transaction's `made_by`.
-///
-/// It replaces the unreleased `v2` (`by_tx` indexes) and `v3` (a
-/// `jazz_transactions.touched_rows` column, `updated_by` always stored) and the DAG layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57),
-/// which was never a manifest member. A root written by either lacks this
-/// family and is refused at manifest admission with
+/// `groove.dictionary.v1`: every stored author column (`made_by`,
+/// `created_by`, `updated_by`) holds a 4-byte code into the node-local
+/// `authors` dictionary instead of the full author. A node root written before
+/// interned author columns lacks it and is refused with
 /// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
 pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &[
+    crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
     crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
-    "jazz.history-version-current.v4",
+    "jazz.node-storage.v2",
 ];
+/// Format owned by the independent server catalogue.
+pub const JAZZ_CATALOGUE_STORAGE_CODECS: &[&str] = &["jazz.catalogue-storage.v1"];
+/// Format owned by the independent account journal.
+pub const JAZZ_ACCOUNT_STORAGE_CODECS: &[&str] = &["jazz.account-storage.v1"];
 
-/// The closed profile for a root that stores Jazz rows: the epoch-one base
-/// plus [`JAZZ_NODE_STORAGE_CODECS`]. Auxiliary roots that hold no row
-/// history (account registry, server catalogue entries) keep the base profile.
+/// Client, relay and Core records, including transactions, history, branches,
+/// catalogue state and receiver metadata. Only node roots need schema indexes.
 pub fn node_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
-    epoch_1_storage_codec_profile()?
+    StorageCodecProfile::groove_epoch_1()
         .with_additional_codecs(JAZZ_NODE_STORAGE_CODECS.iter().copied())
+}
+
+/// The server's independent catalogue entries and their persisted payloads.
+pub fn catalogue_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
+    StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs(JAZZ_CATALOGUE_STORAGE_CODECS.iter().copied())
+}
+
+/// The account registry's independent ordered command journal.
+pub fn account_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
+    StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs(JAZZ_ACCOUNT_STORAGE_CODECS.iter().copied())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::groove::storage::StorageEpochManifest;
+    use std::collections::BTreeMap;
 
-    #[test]
-    fn epoch_one_jazz_profile_is_closed_and_canonically_sorted() {
-        let profile = epoch_1_storage_codec_profile().expect("valid fixed profile");
-        assert_eq!(
-            profile.codec_ids().collect::<Vec<_>>(),
-            vec![
-                "groove.large-value.v1",
-                "groove.ordered-chunk-storage.v1",
-                "groove.ordered-kv.v1",
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.subscription-program-fact-key.v1",
-                "jazz.transaction-durability.v2",
-            ]
-        );
+    fn manifest(profile: &StorageCodecProfile) -> StorageEpochManifest {
+        StorageEpochManifest::epoch_1_with_codec_profile("memory", 1, BTreeMap::new(), profile)
+            .unwrap()
     }
 
+    /// Internal byte receipts: Alice's node, catalogue and account roots each
+    /// have one Jazz marker. Public rows cannot expose the manifest grammar.
     #[test]
-    fn epoch_one_jazz_profile_has_a_pinned_manifest_receipt() {
-        use std::collections::BTreeMap;
-
-        let manifest = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]),
-            &epoch_1_storage_codec_profile().expect("valid fixed profile"),
-        )
-        .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0d\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
-        assert_eq!(manifest.encode().expect("canonical manifest"), expected);
-        assert_eq!(
-            crate::groove::storage::StorageEpochManifest::decode(expected)
-                .expect("fixture decodes")
-                .encode()
-                .expect("fixture re-encodes"),
-            expected
-        );
-    }
-
-    /// Internal manifest receipt: the node-root inventory is a durable byte
-    /// contract that no public API exposes. It differs from the epoch-one
-    /// base only by the durable-index and row-history families, so an old
-    /// node root (base only) is refused with the typed codec-inventory error.
-    #[test]
-    fn node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots() {
-        use std::collections::BTreeMap;
-
-        let parameters =
-            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]);
-        let node = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            parameters.clone(),
-            &node_storage_codec_profile().expect("valid node profile"),
-        )
-        .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0f\x17groove.durable-index.v2\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v4\x25jazz.subscription-program-fact-key.v1\x1ejazz.transaction-durability.v2\x01\x09key-order\0\x16unsigned-lexicographic";
-        assert_eq!(node.encode().expect("canonical manifest"), expected);
-
-        let base_root = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            parameters,
-            &epoch_1_storage_codec_profile().expect("valid base profile"),
-        )
-        .expect("valid manifest")
-        .encode()
-        .expect("canonical manifest");
-        match node.admit(Some(&base_root)) {
-            Err(Error::UnsupportedStorageCodecs {
-                epoch: 1,
-                missing,
-                unknown,
-            }) => {
-                assert_eq!(
-                    missing,
-                    vec![
-                        "groove.durable-index.v2".to_owned(),
-                        "jazz.history-version-current.v4".to_owned()
-                    ]
-                );
-                assert!(unknown.is_empty());
-            }
-            other => panic!("expected a typed refusal of a base-only root, got {other:?}"),
-        }
-    }
-
-    /// A linear-history node root written before the compact durability
-    /// encoding (`jazz.transaction-durability.v2`) declares the node families
-    /// without it and is refused naming exactly that family, before any
-    /// transaction's durability tag is decoded.
-    #[test]
-    fn node_profile_refuses_linear_roots_without_durability_v2() {
-        use std::collections::BTreeMap;
-
-        let parameters =
-            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]);
-        let node = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            parameters.clone(),
-            &node_storage_codec_profile().expect("valid node profile"),
-        )
-        .expect("valid manifest");
-        let pre_durability_v2 = StorageCodecProfile::groove_epoch_1()
-            .with_additional_codecs(
-                JAZZ_EPOCH_1_STORAGE_CODECS
-                    .iter()
-                    .copied()
-                    .filter(|codec| *codec != "jazz.transaction-durability.v2"),
-            )
-            .and_then(|profile| {
-                profile.with_additional_codecs(JAZZ_NODE_STORAGE_CODECS.iter().copied())
-            })
-            .expect("valid pre-durability-v2 node profile");
-        let old_root = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            parameters,
-            &pre_durability_v2,
-        )
-        .expect("valid manifest")
-        .encode()
-        .expect("canonical manifest");
-        match node.admit(Some(&old_root)) {
-            Err(Error::UnsupportedStorageCodecs {
-                epoch: 1,
-                missing,
-                unknown,
-            }) => {
-                assert_eq!(missing, vec!["jazz.transaction-durability.v2".to_owned()]);
-                assert!(unknown.is_empty());
-            }
-            other => panic!("expected a typed refusal of a pre-durability-v2 root, got {other:?}"),
-        }
-    }
-
-    /// Roots written by the unreleased v2 row layout (history `by_tx`
-    /// indexes) and v3 (`updated_by` in every history image) are refused
-    /// with the typed error naming the missing families (the current history
-    /// family and the durable-index layout) and the retired one, before any
-    /// record is decoded.
-    #[test]
-    fn node_profile_refuses_history_v2_and_v3_roots() {
-        use std::collections::BTreeMap;
-
-        let parameters =
-            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]);
-        let node = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-            "memory",
-            1,
-            parameters.clone(),
-            &node_storage_codec_profile().expect("valid node profile"),
-        )
-        .expect("valid manifest");
-        for retired in [
-            "jazz.history-version-current.v2",
-            "jazz.history-version-current.v3",
+    fn root_profiles_have_pinned_manifest_bytes() {
+        for (profile, expected) in [
+            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x00".as_slice()),
+            (catalogue_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x19jazz.catalogue-storage.v1\x00".as_slice()),
+            (account_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x17jazz.account-storage.v1\x00".as_slice()),
         ] {
-            let retired_root =
-                crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
-                    "memory",
-                    1,
-                    parameters.clone(),
-                    &epoch_1_storage_codec_profile()
-                        .and_then(|profile| profile.with_additional_codecs([retired]))
-                        .expect("valid retired profile"),
-                )
-                .expect("valid manifest")
+            assert_eq!(manifest(&profile).encode().unwrap(), expected);
+            assert_eq!(StorageEpochManifest::decode(expected).unwrap().encode().unwrap(), expected);
+            assert_eq!(profile.codec_ids().filter(|id| id.starts_with("jazz.")).count(), 1);
+        }
+    }
+
+    /// Node format v2 adds union row cases (SPEC 10 §10.3). Alice's v2 build
+    /// refuses a v1 node root at open, and a v1 build refuses her v2 root
+    /// at open instead of failing at its first union row.
+    #[test]
+    fn node_storage_v1_and_v2_roots_refuse_each_other() {
+        let v2 = node_storage_codec_profile().unwrap();
+        let v1 = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs([
+                crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
+                crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
+                "jazz.node-storage.v1",
+            ])
+            .unwrap();
+        for (opener, root, missing_id, unknown_id) in [
+            (&v2, &v1, "jazz.node-storage.v2", "jazz.node-storage.v1"),
+            (&v1, &v2, "jazz.node-storage.v1", "jazz.node-storage.v2"),
+        ] {
+            assert!(matches!(
+                manifest(opener).admit_existing(&manifest(root).encode().unwrap()),
+                Err(Error::UnsupportedStorageCodecs { missing, unknown, .. })
+                    if missing == [missing_id] && unknown == [unknown_id]
+            ));
+        }
+    }
+
+    /// Alice cannot open one root type as another, or admit missing, future,
+    /// or retired formats. No ordinary record is read at this boundary.
+    #[test]
+    fn root_profiles_reject_other_roots_and_changed_inventories() {
+        let profiles = [
+            node_storage_codec_profile().unwrap(),
+            catalogue_storage_codec_profile().unwrap(),
+            account_storage_codec_profile().unwrap(),
+        ];
+        for (index, profile) in profiles.iter().enumerate() {
+            for (other_index, other) in profiles.iter().enumerate() {
+                let bytes = manifest(other).encode().unwrap();
+                assert_eq!(
+                    manifest(profile).admit_existing(&bytes).is_ok(),
+                    index == other_index
+                );
+            }
+            let bare = manifest(&StorageCodecProfile::groove_epoch_1())
                 .encode()
-                .expect("canonical manifest");
-            match node.admit(Some(&retired_root)) {
-                Err(Error::UnsupportedStorageCodecs {
-                    epoch: 1,
-                    missing,
-                    unknown,
-                }) => {
-                    assert_eq!(
-                        missing,
-                        vec![
-                            "groove.durable-index.v2".to_owned(),
-                            "jazz.history-version-current.v4".to_owned()
-                        ]
-                    );
-                    assert_eq!(unknown, vec![retired.to_owned()]);
-                }
-                other => panic!("expected a typed refusal of a {retired} root, got {other:?}"),
+                .unwrap();
+            assert!(matches!(
+                manifest(profile).admit_existing(&bare),
+                Err(Error::UnsupportedStorageCodecs { .. })
+            ));
+            for extra in ["jazz.subscription-program-fact-key.v1", "jazz.future.v2"] {
+                let changed = profile.with_additional_codecs([extra]).unwrap();
+                assert!(
+                    matches!(manifest(profile).admit_existing(&manifest(&changed).encode().unwrap()),
+                    Err(Error::UnsupportedStorageCodecs { missing, unknown, .. }) if missing.is_empty() && unknown == [extra])
+                );
             }
         }
     }

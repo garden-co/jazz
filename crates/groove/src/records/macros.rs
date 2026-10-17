@@ -302,10 +302,13 @@ impl RecordField for f64 {
         Ok(value)
     }
 
-    fn read_tuple_raw(_bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
-        Err(Error::InvalidTupleMember {
-            member_type: value_type.clone(),
-        })
+    fn read_tuple_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+        if value_type != &ValueType::F64 {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::F64,
+            });
+        }
+        read_exact_array::<8>(bytes).and_then(super::values::f64_from_order_preserving)
     }
 }
 
@@ -457,7 +460,7 @@ impl RecordField for Value {
     }
 
     fn read_tuple_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
-        decode_value(bytes, value_type)
+        super::values::decode_tuple_member(bytes, value_type)
     }
 }
 

@@ -128,13 +128,6 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
-    /// Normalize relation syntax into the same prepared-query representation
-    /// used by every other read path.
-    #[doc(hidden)]
-    pub fn prepare_relation_query(&self, query: &RelationQuery) -> Result<PreparedQuery, Error> {
-        self.prepare_query(&relation_query_to_query(query)?)
-    }
-
     /// Prepare a query after asynchronously acquiring the node owner.
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
@@ -188,31 +181,7 @@ where
         };
         let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
-        let (local_plan, global_plan) =
-            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
-                (
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Local,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                    Some(
-                        node.prepared_query_plan(
-                            &shape,
-                            &binding,
-                            DurabilityTier::Global,
-                            AuthorSubject::SYSTEM,
-                        )
-                        .await?,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+        let [local_plan, global_plan] = prepared_plans(&mut node, &shape, &binding).await?;
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -670,6 +639,18 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
+        // Attach a query's coverage, released through `release_coverage` when
+        // the returned guard drops.
+        let attach_coverage =
+            async |query: &PreparedQuery, tier: DurabilityTier, tx: Option<OpenTransactionId>| {
+                let attachment = self
+                    .attach_query_with_coverage_async(query, opts.clone(), tier, tx, author)
+                    .await?;
+                Ok::<_, Error>(SerializedReadCoverage {
+                    attachment: Some(attachment),
+                    release: Some(release_coverage),
+                })
+            };
         // Read the maintained result itself, not just its coverage signal.
         // Dropping the subscription and re-evaluating below would retire its
         // exact request-scoped inputs before the one-shot consumes them.
@@ -692,19 +673,7 @@ where
             && !opts.include_deleted;
         if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
-                Some(SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &prepared,
-                            opts.clone(),
-                            coverage_tier,
-                            None,
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                })
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
             } else {
                 None
             };
@@ -718,19 +687,7 @@ where
             // open, as an attached remote read does. Attaching after the
             // stream opened leaves its deletion reconciliation unchanged.
             let strict_coverage = if strict_client_one_shot {
-                Some(SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &prepared,
-                            opts.clone(),
-                            coverage_tier,
-                            None,
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                })
+                Some(attach_coverage(&prepared, coverage_tier, None).await?)
             } else {
                 None
             };
@@ -830,19 +787,7 @@ where
         let mut coverage = None;
         let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
-            let hydration = SerializedReadCoverage {
-                attachment: Some(
-                    self.attach_query_with_coverage_async(
-                        &prepared,
-                        opts.clone(),
-                        DurabilityTier::Global,
-                        open_tx,
-                        author,
-                    )
-                    .await?,
-                ),
-                release: Some(release_coverage),
-            };
+            let hydration = attach_coverage(&prepared, DurabilityTier::Global, open_tx).await?;
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
             match self.race_remote_answer(epoch, None, covered).await {
                 Some(result) => {
@@ -855,19 +800,7 @@ where
             }
         }
         if coverage.is_none() && require_coverage {
-            let attachment = self
-                .attach_query_with_coverage_async(
-                    &prepared,
-                    opts.clone(),
-                    coverage_tier,
-                    open_tx,
-                    author,
-                )
-                .await?;
-            let required = SerializedReadCoverage {
-                attachment: Some(attachment),
-                release: Some(release_coverage),
-            };
+            let required = attach_coverage(&prepared, coverage_tier, open_tx).await?;
             self.wait_for_serialized_read_coverage(&required, coverage_expired)
                 .await?;
             coverage = Some(required);
@@ -882,19 +815,8 @@ where
                     break;
                 };
                 let source_query = self.prepare_query_async(&query).await?;
-                let hydration = SerializedReadCoverage {
-                    attachment: Some(
-                        self.attach_query_with_coverage_async(
-                            &source_query,
-                            opts.clone(),
-                            DurabilityTier::Global,
-                            Some(open_tx),
-                            author,
-                        )
-                        .await?,
-                    ),
-                    release: Some(release_coverage),
-                };
+                let hydration =
+                    attach_coverage(&source_query, DurabilityTier::Global, Some(open_tx)).await?;
                 let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
                 match self.race_remote_answer(epoch, None, covered).await {
                     Some(result) => {
@@ -993,28 +915,10 @@ where
         self.ensure_open_schema_admitted()?;
         let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
-        let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self.node.node.borrow().uses_schema_projected_read(&shape)
-        {
-            let mut node = self.node.node.borrow_mut();
-            (
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Local,
-                    AuthorSubject::SYSTEM,
-                ))?),
-                Some(super::block_on(node.prepared_query_plan(
-                    &shape,
-                    &binding,
-                    DurabilityTier::Global,
-                    AuthorSubject::SYSTEM,
-                ))?),
-            )
-        } else {
-            (None, None)
-        };
-        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
+        let mut node = self.node.node.borrow_mut();
+        let [local_plan, global_plan] =
+            super::block_on(prepared_plans(&mut node, &shape, &binding))?;
+        let groove_runtime_token = node.groove_runtime_token();
         Ok(PreparedQuery {
             request_identity_claims: None,
             shape,
@@ -1544,28 +1448,26 @@ where
             edges: Vec::new(),
         })
     }
+}
 
-    /// Tier-gated one-shot output-changing relation read evaluated as `author`.
-    pub async fn all_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<RelationSnapshot, Error> {
-        self.await_open_schema_for_coverage(read_coverage_tier(&opts))
-            .await?;
-        ensure_default_read_view(&opts)?;
-        let prepared = self.prepare_relation_query_async(query).await?;
-        // The relation terminal already emits the requested aliases and row
-        // identity. Re-projecting those rows against the physical source
-        // schema would reinterpret alias positions as source columns.
-        let rows = self.all_for_identity(&prepared, opts, author).await?;
-        Ok(RelationSnapshot {
-            root_count: rows.len(),
-            rows,
-            edges: Vec::new(),
-        })
+/// Install the `[local, global]` system plans a prepared query reuses, unless
+/// its shape is not worth preparing or reads through a schema projection.
+async fn prepared_plans<S: OrderedKvStorage>(
+    node: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> Result<[Option<PreparedQueryPlanHandle>; 2], Error> {
+    if !should_install_prepared_plan(shape) || node.uses_schema_projected_read(shape) {
+        return Ok([None, None]);
     }
+    let mut plan = async |tier| {
+        node.prepared_query_plan(shape, binding, tier, AuthorSubject::SYSTEM)
+            .await
+    };
+    Ok([
+        Some(plan(DurabilityTier::Local).await?),
+        Some(plan(DurabilityTier::Global).await?),
+    ])
 }
 
 /// The descriptor on a terminal operation describes its root record. Nested

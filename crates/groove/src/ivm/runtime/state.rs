@@ -36,9 +36,21 @@ pub struct RuntimeStats {
     pub hydration_memo_distinct_computed_nodes: usize,
     pub arrangement_rows: usize,
     pub arrangement_encoded_bytes: usize,
+    /// Arrangements read from storage by key instead of held.
+    pub stored_arrangement_count: usize,
+    /// Estimated bytes of the resident buckets of stored arrangements.
+    pub stored_arrangement_resident_bytes: usize,
     pub recursive_state_count: usize,
     pub recursive_accumulated_rows: usize,
     pub recursive_accumulated_encoded_bytes: usize,
+    /// Arg-max/min, top-by and collect operators keeping grouped state. Not
+    /// counted: a root collector's order indexes and lookup operators' rows.
+    pub grouped_operator_state_count: usize,
+    pub grouped_operator_state_groups: usize,
+    pub grouped_operator_state_rows: usize,
+    /// Group keys, sort values and row bytes; row bytes are measured like
+    /// `arrangement_encoded_bytes`.
+    pub grouped_operator_state_encoded_bytes: usize,
     pub logical_nodes_requested: u64,
     pub deduped_graph_nodes: usize,
 }
@@ -328,39 +340,23 @@ pub(super) struct EvalContext {
 }
 
 impl EvalContext {
+    /// Root scope, tick mode, accumulating arrangements.
     pub(super) fn root() -> Self {
-        Self {
-            scope: ScopeId::root(),
-            sub_tick: 0,
-            bindings: HashMap::default(),
-            binding_digests: HashMap::default(),
-            arrangement_update_mode: ArrangementUpdateMode::Accumulate,
-            eval_mode: EvalMode::Tick,
-            hydrate_arrangements: false,
-        }
+        Self::default()
     }
 
     pub(super) fn root_snapshot() -> Self {
         Self {
-            scope: ScopeId::root(),
-            sub_tick: 0,
-            bindings: HashMap::default(),
-            binding_digests: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
-            hydrate_arrangements: false,
+            ..Self::default()
         }
     }
 
     pub(super) fn root_subscription_snapshot() -> Self {
         Self {
-            scope: ScopeId::root(),
-            sub_tick: 0,
-            bindings: HashMap::default(),
-            binding_digests: HashMap::default(),
-            arrangement_update_mode: ArrangementUpdateMode::Replace,
-            eval_mode: EvalMode::Hydrate,
             hydrate_arrangements: true,
+            ..Self::root_snapshot()
         }
     }
 
@@ -370,20 +366,13 @@ impl EvalContext {
         binding: FrontierName,
         deltas: RecordDeltas,
     ) -> Self {
-        let mut bindings = HashMap::default();
-        let digest = record_deltas_digest(&deltas);
-        bindings.insert(binding.clone(), deltas);
-        let mut binding_digests = HashMap::default();
-        binding_digests.insert(binding, digest);
-        Self {
+        Self::with_binding_and_arrangement_mode(
             scope,
             sub_tick,
-            bindings,
-            binding_digests,
-            arrangement_update_mode: ArrangementUpdateMode::Accumulate,
-            eval_mode: EvalMode::Tick,
-            hydrate_arrangements: false,
-        }
+            binding,
+            deltas,
+            ArrangementUpdateMode::Accumulate,
+        )
     }
 
     pub(super) fn with_binding_and_arrangement_mode(
@@ -393,19 +382,14 @@ impl EvalContext {
         deltas: RecordDeltas,
         arrangement_update_mode: ArrangementUpdateMode,
     ) -> Self {
-        let mut bindings = HashMap::default();
         let digest = record_deltas_digest(&deltas);
-        bindings.insert(binding.clone(), deltas);
-        let mut binding_digests = HashMap::default();
-        binding_digests.insert(binding, digest);
         Self {
             scope,
             sub_tick,
-            bindings,
-            binding_digests,
+            bindings: HashMap::from_iter([(binding.clone(), deltas)]),
+            binding_digests: HashMap::from_iter([(binding, digest)]),
             arrangement_update_mode,
-            eval_mode: EvalMode::Tick,
-            hydrate_arrangements: false,
+            ..Self::default()
         }
     }
 }

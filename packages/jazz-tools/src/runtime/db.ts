@@ -47,9 +47,6 @@ import {
   WriteHandle,
   setWriteWaitReadiness,
   type TransactionKind,
-  type InsertOptions as InternalInsertOptions,
-  type RestoreOptions as InternalRestoreOptions,
-  type UpdateOptions as InternalUpdateOptions,
   type RowSettlement,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
@@ -108,6 +105,7 @@ import {
   setDbInternalSession,
   setTrustedReservedSession,
 } from "./db-internal-session.js";
+import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
@@ -121,6 +119,7 @@ import {
   type ConnectionManager,
   type DbForConnection,
 } from "./connection-manager/index.js";
+import { toError } from "./util.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -451,28 +450,11 @@ function normalizeBranchView(
   };
 }
 
-function nativeDbQueryOptions(
+function normalizeSelectorOptions<Options extends InsertOptions | RestoreOptions>(
   schema: WasmSchema,
   tableName: string,
-  options?: InternalDbQueryOptions,
-): InternalQueryExecutionOptions {
-  if (!options) return {};
-  const { branch, base, ...rest } = options;
-  if (branch === undefined) {
-    if (base !== undefined) throw new Error("A branch base requires a branch head.");
-    return rest;
-  }
-  return {
-    ...rest,
-    branch: normalizeBranchView(schema, tableName, branch, base),
-  };
-}
-
-function normalizeInsertOptions(
-  schema: WasmSchema,
-  tableName: string,
-  options?: InsertOptions,
-): InternalInsertOptions | undefined {
+  options?: Options,
+): (Omit<Options, "branch"> & { branch?: BranchSelector }) | undefined {
   if (!options) return undefined;
   const { branch, ...rest } = options;
   return branch === undefined
@@ -483,26 +465,11 @@ function normalizeInsertOptions(
       };
 }
 
-function normalizeRestoreOptions(
+function normalizeViewOptions<Options extends UpdateOptions | InternalDbQueryOptions>(
   schema: WasmSchema,
   tableName: string,
-  options?: RestoreOptions,
-): InternalRestoreOptions | undefined {
-  if (!options) return undefined;
-  const { branch, ...rest } = options;
-  return branch === undefined
-    ? rest
-    : {
-        ...rest,
-        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
-      };
-}
-
-function normalizeUpdateOptions(
-  schema: WasmSchema,
-  tableName: string,
-  options?: UpdateOptions,
-): InternalUpdateOptions | undefined {
+  options?: Options,
+): (Omit<Options, "branch" | "base"> & { branch?: BranchView }) | undefined {
   if (!options) return undefined;
   const { branch, base, ...rest } = options;
   if (branch === undefined) {
@@ -682,6 +649,16 @@ function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string):
   }
 
   throw new Error(`Query schema is missing table "${tableName}".`);
+}
+
+/** Apply the table's input transforms, then encode `data` as the write record for `operation`. */
+function writeRecord(
+  operation: WriteOperationName,
+  table: TableProxy<any, any, any, any, any>,
+  data: unknown,
+) {
+  const transformed = transformInputColumns(table, data);
+  return toWriteRecordForOperation(operation, transformed, table._schema, table._table);
 }
 
 function toWriteRecordForOperation(
@@ -1512,7 +1489,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const row = client.insertInternal(
       table._table,
       values,
-      normalizeInsertOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -1749,7 +1726,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._table,
       id,
       values,
-      normalizeRestoreOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -1865,20 +1842,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Upsert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     client.upsertInternal(
       table._table,
       id,
       values,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -1941,7 +1912,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
-    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
     if (descriptors.length > 0) {
       client.updateLargeValuesInternal(
         table._table,
@@ -2182,7 +2153,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("delete");
-    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
     client.deleteInternal(
       table._table,
       id,
@@ -2403,11 +2374,8 @@ async function readTransactionRows<T>(
   // reaching native options so JavaScript callers cannot smuggle runtime
   // controls (for example `localUpdates` or `openTransactionId`) through this
   // otherwise separate execution path.
-  const queryOptions = nativeDbQueryOptions(
-    query._schema,
-    builtQuery.table,
-    lowerPublicDbQueryOptions(options),
-  );
+  const queryOptions: InternalQueryExecutionOptions =
+    normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ?? {};
   if (settlementMetadata) queryOptions.settlementMetadata = settlementMetadata;
   const queryClient = global ? client.queryGlobal : client.queryInternal;
   if (!queryClient) throw new Error("Global transaction preflight is unavailable");
@@ -2509,13 +2477,12 @@ function preparedTransactionScope(
     kind: "exclusive",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
-      const transformed = transformInputColumns(table, data);
-      const values = toWriteRecordForOperation("Upsert", transformed, table._schema, table._table);
+      const values = writeRecord("Upsert", table, data);
       io.upsertInternal(
         table._table,
         id,
         values,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         session,
         attribution,
         openTransactionId,
@@ -2531,12 +2498,11 @@ function preparedTransactionScope(
     },
     insert(table, data, options) {
       binding.resolveClient(table._schema);
-      const transformed = transformInputColumns(table, data);
-      const values = toWriteRecordForOperation("Insert", transformed, table._schema, table._table);
+      const values = writeRecord("Insert", table, data);
       const row = io.insertInternal(
         table._table,
         values,
-        normalizeInsertOptions(table._schema, table._table, options),
+        normalizeSelectorOptions(table._schema, table._table, options),
         session,
         attribution,
         openTransactionId,
@@ -2929,6 +2895,7 @@ export class Db {
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
+    notifyLocalWrite(this);
     return setWriteWaitReadiness(handle, (tier) =>
       this.ensureReady(tier === "global" ? "server" : "runtime"),
     );
@@ -3263,7 +3230,7 @@ export class Db {
     const inserted = client.insert(
       table._table,
       values,
-      normalizeInsertOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3298,12 +3265,13 @@ export class Db {
     );
     const context = this.getAccessContext();
     const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    notifyLocalWrite(this);
     return client.insertStreaming(
       table._table,
       values,
       column,
       source,
-      normalizeInsertOptions(
+      normalizeSelectorOptions(
         table._schema,
         table._table,
         branch ? { ...options, branch } : options,
@@ -3329,13 +3297,14 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.updateStreaming(
       table._table,
       id,
       values,
       column,
       source,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3357,13 +3326,14 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.upsertStreaming(
       table._table,
       id,
       values,
       column,
       source,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3396,7 +3366,7 @@ export class Db {
       table._table,
       id,
       values,
-      normalizeRestoreOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3430,20 +3400,14 @@ export class Db {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Upsert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Upsert", table, data);
     const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.upsert(
         table._table,
         id,
         values,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3494,13 +3458,7 @@ export class Db {
       return this.preparedWrite("mergeable", client, (tx) => tx.update(table, id, data, options));
     }
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecordForOperation(
-      "Update",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const updates = writeRecord("Update", table, data);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
       return this.wrapWriteWait(
@@ -3509,7 +3467,7 @@ export class Db {
           id,
           updates,
           descriptors,
-          normalizeUpdateOptions(table._schema, table._table, options),
+          normalizeViewOptions(table._schema, table._table, options),
           context?.writeSession,
           context?.attribution,
         ),
@@ -3520,7 +3478,7 @@ export class Db {
         table._table,
         id,
         updates,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3539,7 +3497,7 @@ export class Db {
       client.delete(
         table._table,
         id,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3549,13 +3507,7 @@ export class Db {
   /** Request authoritative permission advice for inserting a row. */
   async canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Insert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Insert", table, data);
     const context = this.getAccessContext();
     return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
   }
@@ -3574,13 +3526,7 @@ export class Db {
     data: Partial<Init>,
   ): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecordForOperation(
-      "Update",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const updates = writeRecord("Update", table, data);
     const context = this.getAccessContext();
     return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.writeSession);
   }
@@ -3594,6 +3540,7 @@ export class Db {
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     this.assertOpen();
+    notifyLocalWrite(this);
     const context = this.getAccessContext();
     const configuredSchema = e2eeSchemaForDb(this);
     const ownerClient =
@@ -3725,7 +3672,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
@@ -3883,7 +3830,7 @@ export class Db {
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
@@ -3949,7 +3896,7 @@ export class Db {
       ) {
         return;
       }
-      subscription.terminalError ??= error instanceof Error ? error : new Error(String(error));
+      subscription.terminalError ??= toError(error);
       completeTerminalization(subscription);
     };
     const createSubscriptionGeneration = (

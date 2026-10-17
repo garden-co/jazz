@@ -8,6 +8,7 @@ pub mod profiling;
 pub mod public_schema_fixture;
 pub mod view_accounting;
 
+use distributions::Lcg;
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst};
@@ -64,16 +65,6 @@ impl BenchProfile {
         }
     }
 
-    /// True when the benchmark should choose interactive defaults.
-    pub fn is_fast(self) -> bool {
-        self == Self::Fast
-    }
-
-    /// True when the benchmark should choose profiler-friendly defaults.
-    pub fn is_profile(self) -> bool {
-        self == Self::Profile
-    }
-
     /// Select a default value for the active benchmark scale.
     pub fn select<T>(self, fast: T, profile: T, full: T) -> T {
         match self {
@@ -85,11 +76,6 @@ impl BenchProfile {
 }
 
 const GLOBAL_TRANSPORT_CODEC_ENV: &str = "JAZZ_TRANSPORT_CODEC";
-
-/// True when benchmark configs should use fast interactive defaults.
-pub fn fast_bench_profile() -> bool {
-    BenchProfile::from_env().is_fast()
-}
 
 /// Active benchmark scale from `JAZZ_BENCH_PROFILE`.
 pub fn bench_profile() -> BenchProfile {
@@ -1070,27 +1056,6 @@ pub fn run_echo_threaded(seed: u64, rounds: u64, profile: PeerProfile) -> RunRep
 
 fn empty_schema() -> JazzSchema {
     JazzSchema::empty()
-}
-
-#[derive(Clone, Debug)]
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed ^ 0x9e37_79b9_7f4a_7c15,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
 }
 
 fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {

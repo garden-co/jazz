@@ -1202,7 +1202,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
     // Exact version-set declarations are retired: without a watermark a
     // receiver declares nothing and the serving peer ships the full set.
 
-    let mut writer = open_node_with_uuid(node(1)).1;
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let tx_id = commit_mergeable_global(
         &mut writer,
         &mut core,
@@ -1437,7 +1437,7 @@ fn assert_eviction_failure_contract(
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(persisted_versions.len(), 1);
     let persisted_version = persisted_versions
         .first()
@@ -1448,24 +1448,9 @@ fn assert_eviction_failure_contract(
         .to_string();
     let logical_history_key = history_primary_key(persisted_version).unwrap().into_bytes();
     let (history_table, history_key) =
-        jazz_class_v2_history_physical_target(&logical_history_table, &logical_history_key);
+        jazz_class_v3_history_physical_target(&logical_history_table, &logical_history_key);
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
-    // Internal durable-boundary receipt: a reopened node intentionally lacks
-    // the live authority handoff needed to declare Fast, so that public API
-    // result alone cannot distinguish an evicted durable fact from a stale
-    // one. This isolated store has exactly this subscription's fact.
-    let known_state_facts = reader
-        .database
-        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
-        .unwrap();
-    assert_eq!(
-        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
-            .unwrap()
-            .len(),
-        0,
-        "settled updates never persist a subscription cursor"
-    );
     assert!(matches!(
         reader
             .known_state_declaration_for_subscription(
@@ -1510,16 +1495,6 @@ fn assert_eviction_failure_contract(
 
     let mut reopened =
         NodeState::new_with_shared_test_catalogue(node(3), schema(), storage).unwrap();
-    let known_state_facts = reopened
-        .database
-        .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
-        .unwrap();
-    assert!(
-        futures::executor::block_on(known_state_facts.prefix_entries(&[]))
-            .unwrap()
-            .is_empty(),
-        "eviction must durably remove every fast known-state fact even when body persistence fails"
-    );
     let reopened_history = reopened.row_history("todos", row_uuid).unwrap();
     match outcome {
         EvictionPersistenceOutcome::FailBeforeDelegation => {
@@ -1627,7 +1602,7 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     reader.cache_tx_versions(tx_id, persisted_versions);
     assert!(matches!(
         reader
@@ -1799,27 +1774,9 @@ fn scope_updates_are_volatile_while_native_rows_survive_reopen() {
             .any(|state| state.covered_input_versions == manifest)
     );
     reader.apply_sync_message_settled(reset).unwrap();
-    let settled_facts_store = reader
-        .database
-        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
-        .unwrap();
-    let durable_facts =
-        futures::executor::block_on(settled_facts_store.prefix_entries(&[])).unwrap();
-    assert!(
-        durable_facts.is_empty(),
-        "scope updates must not write durable membership"
-    );
-    assert!(
-        crate::local_executor::block_on(
-            reader
-                .database
-                .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
-                .unwrap()
-                .prefix_entries(&[])
-        )
-        .unwrap()
-        .is_empty()
-    );
+    for name in ["jazz_known_state_facts", "jazz_settled_program_facts"] {
+        assert!(reader.database.direct_record_store(name).is_err());
+    }
     drop(reader);
     let mut reopened = open_node_at(&reader_dir, schema());
     assert!(reopened.query.authority_results.is_empty());
@@ -1864,10 +1821,10 @@ fn covered_input_reset_and_reopen_have_no_result_member_store() {
     assert!(reopened.query.authority_results.is_empty());
 }
 
+/// Alice receives an accepted row and makes a pending local write. Reopening
+/// retains both writes but requires a fresh server snapshot for live authority.
 #[test]
-fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
-    // Internal recovery boundary: public APIs cannot manufacture a retired
-    // cache generation. All observable row/history assertions remain intact.
+fn scope_reopen_retains_native_and_pending_rows() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1888,60 +1845,10 @@ fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
         .unwrap();
     let before_versions = reader.query_all_versions().unwrap();
     let pending_before = reader.query_transaction(pending).unwrap().unwrap();
-    let store = reader
-        .database
-        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
-        .unwrap();
-    // Retired JPFK and JSIR byte receipts, plus intentionally unparseable cache
-    // data. Recovery must discard them without retaining any old decoder.
-    let cursor_key = vec![
-        Value::Uuid(shape.shape_id().0),
-        Value::Uuid(binding.binding_id().0),
-        Value::Uuid(subscription.read_view.id),
-        Value::U8(0),
-        Value::Bytes(vec![0; 32]),
-    ];
-    for (index, bytes) in [
-        hex::decode("4a50464b010005000000746f646f73010000000001").unwrap(),
-        hex::decode("4a5349520111111111111111111111111111111111050000007461736b73222222222222222222222222222222221f0000000000000033333333333333333333333333333333013434343434343434343434343434343400011f00000000000000333333333333333333333333333333330000").unwrap(),
-        vec![0xff],
-    ].into_iter().enumerate() {
-        let mut key = cursor_key.clone();
-        key.push(Value::Bytes(vec![index as u8; 32]));
-        crate::local_executor::block_on(store.set(&key, &[Value::Bytes(bytes)])).unwrap();
-    }
-    crate::local_executor::block_on(
-        reader
-            .database
-            .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
-            .unwrap()
-            .set(
-                &cursor_key,
-                &[Value::U64(15), Value::U64(u64::MAX), Value::U64(1)],
-            ),
-    )
-    .unwrap();
-    drop(store);
     drop(reader);
 
     let mut reopened = open_node_at(&reader_dir, schema());
     assert!(reopened.query.authority_results.is_empty());
-    for name in [
-        crate::schema::KNOWN_STATE_FACTS_STORE,
-        crate::schema::SETTLED_PROGRAM_FACTS_STORE,
-    ] {
-        assert!(
-            crate::local_executor::block_on(
-                reopened
-                    .database
-                    .direct_record_store(name)
-                    .unwrap()
-                    .prefix_entries(&[])
-            )
-            .unwrap()
-            .is_empty()
-        );
-    }
     assert_eq!(reopened.query_all_versions().unwrap(), before_versions);
     assert!(reopened.query_transaction(accepted).unwrap().is_some());
     let pending_after = reopened.query_transaction(pending).unwrap().unwrap();
@@ -1964,47 +1871,6 @@ fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
             .iter()
             .any(|input| input.row_uuid() == row(42))
     );
-}
-
-#[test]
-fn retired_scope_payloads_never_restore_authority() {
-    // Internal recovery boundary: even malformed retired cache bytes cannot
-    // become authority evidence, and cleanup need not decode their payloads.
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
-    register_shape_binding(&mut reader, &shape, &binding);
-    let subscription = reader.whole_table_subscription_key("todos").unwrap();
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("todos", row(43), 17).cells(title_cells("valid")),
-    );
-    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
-    let SyncMessage::ViewUpdate(payload) = &reset else {
-        panic!("expected authority reset");
-    };
-    reader.apply_sync_message_settled(reset).unwrap();
-    let corrupt_store = reader
-        .database
-        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
-        .unwrap();
-    let mut key = vec![
-        Value::Uuid(shape.shape_id().0),
-        Value::Uuid(binding.binding_id().0),
-        Value::Uuid(subscription.read_view.id),
-        Value::U8(0),
-        Value::Bytes(vec![0; 32]),
-    ];
-    key.push(Value::Bytes(vec![0xff; 32]));
-    futures::executor::block_on(corrupt_store.set(&key, &[Value::Bytes(vec![0xff])])).unwrap();
-    drop(corrupt_store);
-    futures::executor::block_on(reader.discard_legacy_subscription_scopes()).unwrap();
-    // Cleanup discards storage only; it must not mutate an active live scope.
-    assert!(!reader.query.authority_results.is_empty());
-    let reopened = reader.reopen_in_place().unwrap();
-    assert!(reopened.query.authority_results.is_empty());
 }
 
 #[test]

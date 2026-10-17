@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { View, Text, Pressable } from "react-native";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
 import type { JazzAuth } from "../session/app.js";
+import type { JazzSession } from "../session/state.js";
 import { createJazzSession, type JazzSessionConfig } from "./create-jazz-session.js";
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -65,12 +66,29 @@ function ApplicationJazzProvider({
   error,
   ...config
 }: JazzAppProviderProps) {
+  const view = { auth, children, signedOut, loading, error };
+  return <NativeJazzAppProvider {...view} config={config} createJazzSession={createJazzSession} />;
+}
+
+/** The app shell shared by React Native and Expo, with native default loading and error views. */
+export function NativeJazzAppProvider<Config extends { initial?: unknown }>({
+  config,
+  auth,
+  createJazzSession,
+  loading,
+  error,
+  ...view
+}: JazzAppViewProps<CreatedJazzClient> & {
+  config: Config;
+  auth?: JazzAuth;
+  createJazzSession: (config: Config) => Promise<JazzSession<CreatedJazzClient>>;
+}) {
   return (
     <ConfiguredJazzAppProvider
+      {...view}
       config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
       auth={auth}
       createJazzSession={createJazzSession}
-      signedOut={signedOut}
       loading={
         loading === undefined ? (
           <View>
@@ -92,8 +110,6 @@ function ApplicationJazzProvider({
             )
           : error
       }
-    >
-      {children}
-    </ConfiguredJazzAppProvider>
+    />
   );
 }

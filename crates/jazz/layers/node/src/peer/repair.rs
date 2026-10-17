@@ -35,24 +35,47 @@ impl PeerState {
             .count() as u64;
     }
 
-    fn record_outgoing_view_update<S: OrderedKvStorage>(
+    /// Evaluate a client commit's write policies at the terminal authority,
+    /// under the exact claims admitted for this connection. Each policy input
+    /// is already at the authority cut in this node's own storage, so the
+    /// evaluation reads it directly and keeps no per-connection support view.
+    /// Cross-authority support (INV-SHARD-13) would have to be bound to the
+    /// candidate's dependency closure; see #3794.
+    pub async fn prove_terminal_commit_authorization<S>(
         &mut self,
-        _node: &NodeState<S>,
-        _schema: crate::ids::SchemaVersionId,
-        update: &SyncMessage,
-    ) -> Result<(), Error> {
+        node: &mut NodeState<S>,
+        writer: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        versions: &[VersionRecord],
+        candidate_tx_id: TxId,
+    ) -> Result<bool, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        // SYSTEM is the trusted backend policy subject. Row-policy admission
+        // already bypasses it: claim and join predicates have no SYSTEM
+        // session to bind and are irrelevant to the bypass decision.
+        if writer == AuthorSubject::SYSTEM {
+            return Ok(true);
+        }
+        // The policy evaluation reads the active session scope. Keep the
+        // immutable admitted snapshot installed for the entire proof; the
+        // author-keyed compatibility map is neither sufficient nor safe for a
+        // scope-isolated relay, and same-author sessions may differ. A
+        // claim-only policy must not become an implicit grant.
+        let mut node = node.scoped_active_session_claims(writer, claims);
+        node.commit_unit_satisfies_write_policy(versions, writer, candidate_tx_id)
+            .await
+    }
+
+    fn record_outgoing_view_update(&mut self, update: &SyncMessage) {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
-            let state = self
-                .publication_states
+            self.publication_states
                 .entry(view.subscription)
-                .or_default();
-            state.supporting_revision = Some(view.supporting_rows.revision());
-            if let Some(maintained) = &mut state.maintained_subscription_view {
-                maintained.maintained.acknowledge_peer_source_closure();
-            }
+                .or_default()
+                .acknowledge_published(view.supporting_rows.revision());
         }
-        Ok(())
     }
 
     fn apply_outgoing_view_delta(
