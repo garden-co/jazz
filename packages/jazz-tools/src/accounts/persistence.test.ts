@@ -639,7 +639,7 @@ it.each([
 
 it("opens valid v3 founder inventory without changing selection or credential provenance", async () => {
   let value =
-    '{"format":"jazz-account-selection-v3","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"],"selected":1,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founderEligibleRoots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founders":[{"root":"jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","scope":"test/notes","deviceId":"device-original","epochId":"epoch-original","closed":false}]}';
+    '{"format":"jazz-account-selection-v3","roots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"],"selected":1,"assignment":null,"generatedHere":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founderEligibleRoots":["jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"founders":[{"root":"jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","scope":"test/notes","deviceId":"device-original","epochId":"epoch-original","closed":false}]}';
   const corpus = JSON.parse(value);
   const options = {
     appId: "test",

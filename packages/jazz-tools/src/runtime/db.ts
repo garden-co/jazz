@@ -2250,7 +2250,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
     const normalized = normalizeViewOptions(table._schema, table._table, optionsSnapshot);
-    if (operation === "upsert" && standaloneWriteRetries.has(this)) {
+    if (standaloneWriteRetries.has(this)) {
       const retryValues = structuredClone(updates);
       const retryOptions = optionsSnapshot;
       standaloneWriteRetries.set(this, {

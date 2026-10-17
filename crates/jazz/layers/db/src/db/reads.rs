@@ -376,17 +376,43 @@ where
                 }
             }),
         };
+        let mut settlements = Vec::new();
+        let result = self
+            .all_serialized_query_once(
+                query,
+                opts.clone(),
+                coverage_tier,
+                Some(open_tx),
+                request_scope.clone(),
+                author,
+                require_coverage,
+                &coverage_expired,
+                &release_coverage,
+                Some(&mut settlements),
+            )
+            .await?;
+        let SerializedReadResult::Rows(rows) = result else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        };
         let observed = if let Some(child) = child {
+            // Coverage belongs to the real parent read. This child is a
+            // private comparison at the captured accepted cut, which may be
+            // older than the authority's current completeness frontier.
+            let mut observation_opts = opts.clone();
+            observation_opts.tier = ReadTier::LocalOnly;
             let mut observed_settlements = Vec::new();
             let result = self
                 .all_serialized_query_once(
                     query,
-                    opts.clone(),
-                    coverage_tier,
+                    observation_opts,
+                    DurabilityTier::Local,
                     Some(child),
                     request_scope.clone(),
                     author,
-                    require_coverage,
+                    false,
                     &coverage_expired,
                     &release_coverage,
                     Some(&mut observed_settlements),
@@ -412,27 +438,6 @@ where
             Some((rows, observed_settlements))
         } else {
             None
-        };
-        let mut settlements = Vec::new();
-        let result = self
-            .all_serialized_query_once(
-                query,
-                opts,
-                coverage_tier,
-                Some(open_tx),
-                request_scope,
-                author,
-                require_coverage,
-                &coverage_expired,
-                &release_coverage,
-                Some(&mut settlements),
-            )
-            .await?;
-        let SerializedReadResult::Rows(rows) = result else {
-            return Err(Error::new(
-                ErrorCode::Query,
-                "E2EE settlement reads require ordinary stored rows",
-            ));
         };
         if let Some((observed_rows, observed_settlements)) = observed {
             if rows.len() != settlements.len() {

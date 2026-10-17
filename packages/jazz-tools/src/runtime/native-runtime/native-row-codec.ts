@@ -19,7 +19,7 @@ export type ValueType = {
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type EnumSchema = {
-  registryId?: number;
+  registryId?: bigint;
   name: string;
   variants?: string[];
   cases?: { name: string; payload: DescriptorField[] }[];
@@ -81,6 +81,7 @@ export type NativeRelationSubscriptionSnapshot = {
 type PostcardReaderLike = {
   string(): string;
   u64(): number;
+  u64BigInt(): bigint;
   option<T>(readValue: (reader: PostcardReaderLike) => T): T | undefined;
   bytes(): Uint8Array;
   bool(): boolean;
@@ -89,7 +90,7 @@ type PostcardReaderLike = {
 };
 
 type PostcardWriterLike = {
-  u64(value: number): void;
+  u64(value: number | bigint): void;
   vec(writeItem: (writer: PostcardWriterLike, index: number) => void, length: number): void;
   some(writeValue: (writer: PostcardWriterLike) => void): void;
   string(value: string): void;
@@ -286,7 +287,7 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     const enumSchema = valueType.enumSchema;
     const variants = enumSchema?.variants;
     if (!enumSchema || !variants) throw new Error("missing enum schema for ValueType::Enum");
-    writer.u64(enumSchema.registryId ?? 0);
+    writer.u64(enumSchema.registryId ?? 0n);
     writer.string(enumSchema.name);
     writer.vec((variantWriter, index) => variantWriter.string(variants[index]!), variants.length);
     return;
@@ -313,7 +314,7 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     const enumSchema = valueType.enumSchema;
     const cases = enumSchema?.cases;
     if (!enumSchema || !cases) throw new Error("missing cases for ValueType::Enum");
-    writer.u64(enumSchema.registryId ?? 0);
+    writer.u64(enumSchema.registryId ?? 0n);
     writer.string(enumSchema.name);
     writer.vec((caseWriter, index) => {
       const enumCase = cases[index]!;
@@ -336,7 +337,7 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     return {
       tag,
       enumSchema: {
-        registryId: reader.u64(),
+        registryId: reader.u64BigInt(),
         name: reader.string(),
         variants: reader.readVec((variantReader) => variantReader.string()),
       },
@@ -356,7 +357,7 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
     return {
       tag,
       enumSchema: {
-        registryId: reader.u64(),
+        registryId: reader.u64BigInt(),
         name: reader.string(),
         cases: reader.readVec((caseReader) => ({
           name: caseReader.string(),
