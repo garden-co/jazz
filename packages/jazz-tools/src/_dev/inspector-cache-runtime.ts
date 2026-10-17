@@ -178,7 +178,8 @@ export function attachInspectorCacheRuntime(
         property === "upsert" ||
         property === "restore" ||
         property === "updateLargeValues" ||
-        property === "streamingMutation"
+        property === "streamingMutation" ||
+        property === "stageStreamingMutation"
       )
         return () => {
           throw new Error("This mutation is not supported by the Inspector");

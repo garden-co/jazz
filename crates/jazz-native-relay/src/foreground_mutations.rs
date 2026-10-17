@@ -9,6 +9,7 @@ type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle>>>>;
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
     uploads: Rc<RefCell<BTreeMap<u64, Rc<StreamingUploadSlot>>>>,
+    staged: Rc<RefCell<BTreeMap<u64, jazz::db::StagedStreamingValue>>>,
     errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
 }
 
@@ -16,6 +17,10 @@ impl MutationHandles {
     #[cfg(test)]
     pub(super) fn upload_count_for_test(&self) -> usize {
         self.uploads.borrow().len()
+    }
+
+    pub(super) fn retire_staged(&self, handle: u64) {
+        self.staged.borrow_mut().remove(&handle);
     }
 
     pub(super) fn new(db: &Db) -> Self {
@@ -27,6 +32,7 @@ impl MutationHandles {
         Self {
             writes: Rc::new(RefCell::new(BTreeMap::new())),
             uploads: Rc::new(RefCell::new(BTreeMap::new())),
+            staged: Rc::new(RefCell::new(BTreeMap::new())),
             errors,
         }
     }
@@ -37,6 +43,7 @@ impl MutationHandles {
         // Closing drops its pending operations and Db; no unfinished scalar is
         // published to the persistent relay. Never await a node lock here.
         self.uploads.borrow_mut().clear();
+        self.staged.borrow_mut().clear();
         self.writes.borrow_mut().clear();
         self.errors.borrow_mut().clear();
         Ok(())
@@ -333,7 +340,9 @@ impl RelayWorker {
         }
         let cells = decode_foreground_cells(&cells)?;
         let client = self.foreground_client_mut(client)?;
-        if client.mutations.uploads.borrow().len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
+        if client.mutations.uploads.borrow().len() + client.mutations.staged.borrow().len()
+            >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX
+        {
             return Err(RelayError::ForegroundCommand(
                 "foreground streaming upload capacity exceeded".into(),
             ));
@@ -505,6 +514,116 @@ impl RelayWorker {
         Ok(result)
     }
 
+    pub(super) fn stage_foreground_streaming_mutation(
+        &mut self,
+        client: u64,
+        handle: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.ensure_mutation_operation_capacity(client)?;
+        let (db, uploads, staged, slot) = {
+            let client = self.foreground_client_mut(client)?;
+            let slot = client
+                .mutations
+                .uploads
+                .borrow()
+                .get(&handle)
+                .cloned()
+                .filter(|slot| !slot.closing.replace(true))
+                .ok_or_else(|| {
+                    RelayError::ForegroundCommand("streaming mutation is closed".into())
+                })?;
+            (
+                Rc::clone(&client.db),
+                Rc::clone(&client.mutations.uploads),
+                Rc::clone(&client.mutations.staged),
+                slot,
+            )
+        };
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let pending = slot.pending.lock().await.take().ok_or_else(|| {
+                RelayError::ForegroundCommand("streaming mutation is closed".into())
+            })?;
+            let result = db
+                .stage_streaming_value_upload(
+                    pending.upload,
+                    pending.mutation,
+                    &pending.table,
+                    pending.row_id,
+                    pending.cells,
+                    &pending.column,
+                    jazz::db::WriteIdentity::Database,
+                    pending.options.updated_at_ms,
+                    pending.options.head,
+                    pending.options.base,
+                )
+                .await;
+            uploads.borrow_mut().remove(&handle);
+            staged
+                .borrow_mut()
+                .insert(handle, result.map_err(RelayError::Db)?);
+            Ok(ForegroundOperationResult::StreamingMutationStaged(handle))
+        });
+        let result = self.start_foreground_operation(client, None, future)?;
+        if let ForegroundOperationPoll::Pending { operation } = result {
+            self.foreground_client_mut(client)?
+                .pending_operations
+                .get_mut(&operation)
+                .expect("new pending staging")
+                .finish_on_cancel = true;
+        }
+        Ok(result)
+    }
+
+    pub(super) fn attach_foreground_staged_streaming_mutation(
+        &mut self,
+        client: u64,
+        handle: u64,
+        transaction: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.ensure_mutation_operation_capacity(client)?;
+        let mut staged = self
+            .foreground_client_mut(client)?
+            .mutations
+            .staged
+            .borrow_mut()
+            .remove(&handle)
+            .ok_or_else(|| {
+                RelayError::ForegroundCommand("staged streaming mutation is closed".into())
+            })?;
+        let (db, tx) = self.foreground_transaction(client, transaction)?;
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            db.attach_staged_streaming_value(tx.open_tx_id, &mut staged)
+                .await
+                .map_err(RelayError::Db)?;
+            Ok(ForegroundOperationResult::StagedStreamingMutationAttached)
+        });
+        self.start_foreground_operation(client, None, future)
+    }
+
+    pub(super) fn abort_foreground_staged_streaming_mutation(
+        &mut self,
+        client: u64,
+        handle: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.ensure_mutation_operation_capacity(client)?;
+        let client_state = self.foreground_client_mut(client)?;
+        let staged = client_state.mutations.staged.borrow_mut().remove(&handle);
+        let db = Rc::clone(&client_state.db);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let aborted = match staged {
+                Some(mut staged) => db
+                    .abort_staged_streaming_value(&mut staged)
+                    .await
+                    .map_err(RelayError::Db)?,
+                None => false,
+            };
+            Ok(ForegroundOperationResult::StagedStreamingMutationAborted(
+                aborted,
+            ))
+        });
+        self.start_foreground_operation(client, None, future)
+    }
+
     pub(super) fn update_foreground_large_values(
         &mut self,
         client: u64,
@@ -604,6 +723,18 @@ impl NativeRelayClient {
                 ),
                 Request::AbortStreamingMutation { upload } => foreground_operation_response(
                     worker.abort_foreground_streaming_mutation(id, upload)?,
+                ),
+                Request::StageStreamingMutation { upload } => foreground_operation_response(
+                    worker.stage_foreground_streaming_mutation(id, upload)?,
+                ),
+                Request::AttachStagedStreamingMutation {
+                    staged,
+                    transaction,
+                } => foreground_operation_response(
+                    worker.attach_foreground_staged_streaming_mutation(id, staged, transaction)?,
+                ),
+                Request::AbortStagedStreamingMutation { staged } => foreground_operation_response(
+                    worker.abort_foreground_staged_streaming_mutation(id, staged)?,
                 ),
                 Request::UpdateLargeValues {
                     table,

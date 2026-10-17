@@ -21,6 +21,7 @@ export const {
   e2eeSodiumVerify,
   JazzServer,
   NapiDb,
+  StagedStreamingMutation,
   StreamingMutation,
   Subscription,
   TestJwtIssuer,

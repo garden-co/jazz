@@ -616,6 +616,51 @@ export class NativeForegroundDb {
           return unexpected("finishStreamingMutation", finished.type);
         return nativeWrite(this, finished.txId, rowId);
       },
+      stage: async () => {
+        assertOpen();
+        const admitted = this.execute({ type: "stageStreamingMutation", upload });
+        if (admitted.type === "operationError") throw new Error(admitted.reason);
+        closed = true;
+        const response = await this.completeMutationOperation(admitted);
+        if (response.type === "operationError") throw new Error(response.reason);
+        if (response.type !== "streamingMutationStaged")
+          return unexpected("stageStreamingMutation", response.type);
+        const staged = response.staged;
+        let consumed = false;
+        return {
+          attach: async (openTransactionId: string): Promise<void> => {
+            if (consumed) throw new Error("staged streaming mutation is closed");
+            const transaction = this.openTransaction(openTransactionId, "attach staged upload");
+            if (transaction.kind !== "exclusive")
+              throw new Error("Staged streaming mutation requires an exclusive transaction");
+            consumed = true;
+            const attached = await this.completeMutationOperation(
+              this.execute({
+                type: "attachStagedStreamingMutation",
+                staged,
+                transaction: transaction.handle,
+              }),
+            );
+            if (attached.type === "operationError") throw new Error(attached.reason);
+            if (attached.type !== "stagedStreamingMutationAttached")
+              return unexpected("attachStagedStreamingMutation", attached.type);
+          },
+          abort: async (): Promise<boolean> => {
+            if (consumed || this.closed) return false;
+            consumed = true;
+            const aborted = await this.completeMutationOperation(
+              this.execute({
+                type: "abortStagedStreamingMutation",
+                staged,
+              }),
+            );
+            if (aborted.type === "operationError") throw new Error(aborted.reason);
+            if (aborted.type !== "stagedStreamingMutationAborted")
+              return unexpected("abortStagedStreamingMutation", aborted.type);
+            return aborted.aborted;
+          },
+        };
+      },
       abort: async (): Promise<boolean> => {
         if (closed || this.closed) return false;
         const admitted = this.execute({ type: "abortStreamingMutation", upload });

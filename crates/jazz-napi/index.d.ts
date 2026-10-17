@@ -187,6 +187,11 @@ export declare class PendingNativeSubscriptionBatch {
   retryAfterMs(): number | null
 }
 
+export declare class StagedStreamingMutation {
+  attach(openTransactionId: string): void
+  abort(): boolean
+}
+
 /**
  * Native bounded-memory sink used by the TypeScript async streaming-mutation
  * adapter. Each push incrementally prepares and stages bounded Groove nodes,
@@ -195,6 +200,7 @@ export declare class PendingNativeSubscriptionBatch {
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
+  stage(): StagedStreamingMutation
   abort(): boolean
 }
 

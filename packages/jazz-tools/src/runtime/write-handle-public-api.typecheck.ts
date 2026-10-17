@@ -5,6 +5,7 @@ import type {
   TableProxy,
   WriteHandle,
   WriteResult,
+  StreamingWritePlan,
 } from "../index.js";
 // @ts-expect-error `BatchId` was removed from the runtime transaction API.
 import type { BatchId as _RemovedBatchId } from "./client.js";
@@ -46,6 +47,28 @@ async function assertWriteHandleContract() {
     title: new ReadableStream<string>(),
     done: true,
   });
+  const planned: ExclusiveWriteResult<string> = await db.streamingTransaction(
+    (plan: StreamingWritePlan) => {
+      const ordinary: { id: string } = plan.insert(todos, { title: "scope", done: false });
+      const file: { id: string } = plan.insertStreaming(todos, {
+        title: new ReadableStream<string>(),
+        done: false,
+      });
+      plan.updateStreaming(todos, ordinary.id, { title: new ReadableStream<string>() });
+      plan.upsertStreaming(todos, file.id, { title: new ReadableStream<string>(), done: true });
+      // @ts-expect-error Declaration plans have no reads or open native transactions.
+      plan.one(todos);
+      // @ts-expect-error Declaration plans cannot be committed by application code.
+      plan.commit();
+      // @ts-expect-error Declarations expose stable IDs, not provisional plaintext rows.
+      void ordinary.title;
+      // @ts-expect-error Required ordinary insert fields remain required.
+      plan.insertStreaming(todos, { title: new ReadableStream<string>() });
+      return file.id;
+    },
+  );
+  const plannedValue: string = await planned.wait({ tier: "global" });
+  void plannedValue;
 
   // @ts-expect-error Every required non-streamed column remains required.
   db.insertStreaming(todos, { title: new ReadableStream() });
