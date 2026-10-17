@@ -177,7 +177,7 @@ fn accepted_completion_of_pending_fragment_settles_every_version_before_receipt_
     let settled = alice.query_transaction(tx_id).unwrap().unwrap();
     assert_eq!(settled.fate, Fate::Accepted);
     assert_eq!(settled.global_time, Some(GlobalTime(1)));
-    assert!(!settled.view_scoped_cardinality);
+    assert!(!settled.is_partial);
     assert_eq!(
         alice
             .current_rows(&table, DurabilityTier::Global)

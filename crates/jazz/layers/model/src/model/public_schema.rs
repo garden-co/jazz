@@ -1,13 +1,6 @@
 //! Stable public schema and session vocabulary.
 
 pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-pub use crate::model::public_api::relation_ir::{
-    ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
-    KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp, PredicateExpr as RelPredicateExpr,
-    ProjectColumn as RelProjectColumn, ProjectExpr as RelProjectExpr,
-    RecursionBound as RelRecursionBound, RelExpr, RowIdRef, UnionArm as RelUnionArm,
-    ValueRef as RelValueRef,
-};
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::model::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
@@ -16,6 +9,12 @@ pub use crate::model::public_api::types::{
     Value, permissions, policy_expr,
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
+/// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.
+pub use crate::query::{
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
+};
 
 use crate::model::json_schema::{self, JsonSchemaError};
 

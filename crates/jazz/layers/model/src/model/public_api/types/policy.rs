@@ -1,10 +1,11 @@
 use super::*;
 use crate::model::public_api::policy::{CmpOp, Operation, PolicyValue};
-use crate::model::public_api::relation_ir::{
-    ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
-    ProjectExpr, RecursionBound, RelExpr, RowIdRef, ValueRef,
-};
 use crate::object::ObjectId;
+use crate::query::{
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+};
 use serde::{Deserialize, Serialize};
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
@@ -622,8 +623,8 @@ pub mod policy_expr {
     impl Table {
         /// Name this source occurrence for scoped predicates and joins.
         pub fn alias(self, alias: impl Into<String>) -> Relation {
-            Relation::new(RelExpr::TableScan {
-                table: self.table,
+            Relation::new(RelationExpr::TableScan {
+                table: self.table.as_str().to_owned(),
                 alias: Some(alias.into()),
             })
         }
@@ -659,9 +660,9 @@ pub mod policy_expr {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Relation {
-        rel: RelExpr,
+        rel: RelationExpr,
     }
 
     impl Relation {
@@ -669,27 +670,27 @@ pub mod policy_expr {
         /// most `max_depth` steps. The step may compare columns to the frontier
         /// with `rel::eq_frontier` and must project its next key as `id`.
         pub fn gather(self, step: Relation, max_depth: usize) -> Self {
-            Self::new(RelExpr::Gather {
+            Self::new(RelationExpr::Gather {
                 seed: Box::new(self.rel),
                 step: Box::new(step.rel),
-                frontier_key: KeyRef::RowId(RowIdRef::Current),
+                frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
                 bound: RecursionBound::MaxDepth(max_depth),
-                dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
             })
         }
 
         /// Project named columns from this relation.
         pub fn select(
             self,
-            columns: impl IntoIterator<Item = (impl Into<String>, impl Into<ColumnRef>)>,
+            columns: impl IntoIterator<Item = (impl Into<String>, impl Into<RelationColumnRef>)>,
         ) -> Self {
-            Self::new(RelExpr::Project {
+            Self::new(RelationExpr::Project {
                 input: Box::new(self.rel),
                 columns: columns
                     .into_iter()
-                    .map(|(alias, column)| ProjectColumn {
+                    .map(|(alias, column)| RelationProjectColumn {
                         alias: alias.into(),
-                        expr: ProjectExpr::Column(column.into()),
+                        expr: RelationProjectExpr::Column(column.into()),
                     })
                     .collect(),
             })
@@ -703,32 +704,32 @@ pub mod policy_expr {
         pub fn join(
             self,
             right: Relation,
-            left_column: impl Into<ColumnRef>,
-            right_column: impl Into<ColumnRef>,
+            left_column: impl Into<RelationColumnRef>,
+            right_column: impl Into<RelationColumnRef>,
         ) -> Self {
-            Self::new(RelExpr::Join {
+            Self::new(RelationExpr::Join {
                 left: Box::new(self.rel),
                 right: Box::new(right.rel),
-                on: vec![JoinCondition {
+                on: vec![RelationJoinCondition {
                     left: left_column.into(),
                     right: right_column.into(),
                 }],
-                join_kind: JoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             })
         }
 
-        fn new(rel: RelExpr) -> Self {
+        fn new(rel: RelationExpr) -> Self {
             Self { rel }
         }
 
-        pub fn where_(self, predicate: PredicateExpr) -> Self {
-            Self::new(RelExpr::Filter {
+        pub fn where_(self, predicate: RelationPredicate) -> Self {
+            Self::new(RelationExpr::Filter {
                 input: Box::new(self.rel),
                 predicate,
             })
         }
 
-        fn into_rel_expr(self) -> RelExpr {
+        fn into_rel_expr(self) -> RelationExpr {
             self.rel
         }
     }
@@ -741,12 +742,15 @@ pub mod policy_expr {
         }
     }
 
-    impl IntoTableWhere for PredicateExpr {
+    impl IntoTableWhere for RelationPredicate {
         type Output = Relation;
 
         fn into_table_where(self, table: TableName) -> Self::Output {
-            Relation::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan { table, alias: None }),
+            Relation::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: table.as_str().to_owned(),
+                    alias: None,
+                }),
                 predicate: self,
             })
         }
@@ -833,78 +837,85 @@ pub mod policy_expr {
         use super::*;
 
         /// Match a recursive step's column against the current frontier key.
-        pub fn eq_frontier(column: impl Into<ColumnRef>) -> PredicateExpr {
+        pub fn eq_frontier(column: impl Into<RelationColumnRef>) -> RelationPredicate {
             cmp(
                 column,
-                PredicateCmpOp::Eq,
-                ValueRef::RowId(RowIdRef::Frontier),
+                RelationCmpOp::Eq,
+                RelationValueRef::RowId(RelationRowIdRef::Frontier),
             )
         }
 
         /// Refer to a column in a named table or alias.
-        pub fn column(scope: impl Into<String>, column: impl Into<String>) -> ColumnRef {
-            ColumnRef {
+        pub fn column(scope: impl Into<String>, column: impl Into<String>) -> RelationColumnRef {
+            RelationColumnRef {
                 scope: Some(scope.into()),
                 column: column.into(),
             }
         }
 
         pub fn eq_session(
-            column: impl Into<ColumnRef>,
+            column: impl Into<RelationColumnRef>,
             path: impl IntoSessionPath,
-        ) -> PredicateExpr {
+        ) -> RelationPredicate {
             cmp(
                 column,
-                PredicateCmpOp::Eq,
-                ValueRef::SessionRef(path.into_session_path()),
+                RelationCmpOp::Eq,
+                RelationValueRef::SessionRef(path.into_session_path()),
             )
         }
 
         pub fn eq_outer(
-            column: impl Into<ColumnRef>,
+            column: impl Into<RelationColumnRef>,
             outer_column: impl Into<String>,
-        ) -> PredicateExpr {
+        ) -> RelationPredicate {
             cmp(
                 column,
-                PredicateCmpOp::Eq,
-                ValueRef::OuterColumn(ColumnRef::unscoped(outer_column)),
+                RelationCmpOp::Eq,
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped(outer_column)),
             )
         }
 
-        pub fn eq_literal(column: impl Into<ColumnRef>, value: impl Into<Value>) -> PredicateExpr {
-            cmp(column, PredicateCmpOp::Eq, ValueRef::Literal(value.into()))
+        pub fn eq_literal(
+            column: impl Into<RelationColumnRef>,
+            value: impl Into<Value>,
+        ) -> RelationPredicate {
+            cmp(
+                column,
+                RelationCmpOp::Eq,
+                RelationValueRef::literal(value.into()),
+            )
         }
 
-        pub fn is_null(column: impl Into<ColumnRef>) -> PredicateExpr {
-            PredicateExpr::IsNull {
+        pub fn is_null(column: impl Into<RelationColumnRef>) -> RelationPredicate {
+            RelationPredicate::IsNull {
                 column: column.into(),
             }
         }
 
-        pub fn all_of(exprs: impl IntoIterator<Item = PredicateExpr>) -> PredicateExpr {
+        pub fn all_of(exprs: impl IntoIterator<Item = RelationPredicate>) -> RelationPredicate {
             let exprs = exprs.into_iter().collect::<Vec<_>>();
             match exprs.len() {
-                0 => PredicateExpr::True,
+                0 => RelationPredicate::True,
                 1 => exprs.into_iter().next().unwrap(),
-                _ => PredicateExpr::And(exprs),
+                _ => RelationPredicate::And(exprs),
             }
         }
 
-        pub fn any_of(exprs: impl IntoIterator<Item = PredicateExpr>) -> PredicateExpr {
+        pub fn any_of(exprs: impl IntoIterator<Item = RelationPredicate>) -> RelationPredicate {
             let exprs = exprs.into_iter().collect::<Vec<_>>();
             match exprs.len() {
-                0 => PredicateExpr::False,
+                0 => RelationPredicate::False,
                 1 => exprs.into_iter().next().unwrap(),
-                _ => PredicateExpr::Or(exprs),
+                _ => RelationPredicate::Or(exprs),
             }
         }
 
         pub fn cmp(
-            column: impl Into<ColumnRef>,
-            op: PredicateCmpOp,
-            right: ValueRef,
-        ) -> PredicateExpr {
-            PredicateExpr::Cmp {
+            column: impl Into<RelationColumnRef>,
+            op: RelationCmpOp,
+            right: RelationValueRef,
+        ) -> RelationPredicate {
+            RelationPredicate::Cmp {
                 left: column.into(),
                 op,
                 right,

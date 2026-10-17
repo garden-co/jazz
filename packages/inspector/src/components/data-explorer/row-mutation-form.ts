@@ -11,7 +11,8 @@ export interface MutationFormField {
   readOnlyReason: MutationFieldReadOnlyReason;
 }
 
-function parseBoolean(value: string): boolean | null {
+/** Parse `true`/`1` or `false`/`0` (case-insensitive); anything else is `null`. */
+export function parseBoolean(value: string): boolean | null {
   const normalized = value.trim().toLowerCase();
   if (normalized === "true" || normalized === "1") return true;
   if (normalized === "false" || normalized === "0") return false;

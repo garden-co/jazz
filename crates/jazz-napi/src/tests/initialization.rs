@@ -280,9 +280,10 @@ fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner()
     .unwrap();
     let core = |db: &NapiDb| {
         let inner = db.inner.borrow();
-        let Some(NapiDbInnerStorage::Memory(core)) = inner.as_ref() else {
+        let Some(inner) = inner.as_ref() else {
             panic!("memory fixture");
         };
+        let core = &inner.core;
         Rc::clone(core)
     };
     let owner_core = core(&owner);

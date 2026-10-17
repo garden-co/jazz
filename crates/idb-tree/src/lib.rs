@@ -26,6 +26,8 @@ const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 type LeafEntry = (Vec<u8>, ValueCell);
+/// A resident overflow page: its successor in the chain and its bytes.
+type OverflowLink<'a> = (Option<PageId>, &'a [u8]);
 /// A resident root-to-leaf walk. `visited` belongs to the whole logical
 /// operation, rather than merely to the structural descent: an overflow chain
 /// must not alias a structural page, and a caller which goes on to inspect a
@@ -369,14 +371,18 @@ impl<S: PageStore + Clone> IdbTree<S> {
         self.inner.borrow().dirty.len()
     }
 
-    /// Compare an existing value in place; None denotes an absent key.
-    pub async fn value_equals(&self, key: &[u8], expected: &[u8]) -> Result<Option<bool>, Error> {
+    /// Run a point read from the read root, hydrating each precise miss and
+    /// retrying. A view of an empty store reads as an absent key.
+    async fn read_point<T>(
+        &self,
+        try_read: impl Fn(&TreeCore<S>, PageId) -> Result<Attempt<Option<T>>, Error>,
+    ) -> Result<Option<T>, Error> {
         loop {
             self.ensure_live()?;
             let attempt = {
                 let tree = self.inner.borrow();
                 match self.read_root(&tree) {
-                    Some(root) => tree.try_value_equals(root, key, expected)?,
+                    Some(root) => try_read(&tree, root)?,
                     None => Attempt::Ready(None),
                 }
             };
@@ -385,53 +391,44 @@ impl<S: PageStore + Clone> IdbTree<S> {
                 Attempt::Missing(page_id) => self.hydrate_for_read(page_id).await?,
             }
         }
+    }
+
+    /// Run a point write under a checkpoint, hydrating each precise miss and
+    /// retrying from the rolled-back tree.
+    async fn write_point<T>(
+        &self,
+        try_write: impl Fn(&mut TreeCore<S>) -> Result<Attempt<T>, Error>,
+    ) -> Result<T, Error> {
+        self.ensure_mutable()?;
+        loop {
+            self.ensure_live()?;
+            let attempt = self
+                .inner
+                .borrow_mut()
+                .with_write_attempt_checkpoint(&try_write)?;
+            match attempt {
+                Attempt::Ready(value) => return Ok(value),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
+    /// Compare an existing value in place; None denotes an absent key.
+    pub async fn value_equals(&self, key: &[u8], expected: &[u8]) -> Result<Option<bool>, Error> {
+        self.read_point(|tree, root| tree.try_value_equals(root, key, expected))
+            .await
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        loop {
-            self.ensure_live()?;
-            let attempt = {
-                let tree = self.inner.borrow();
-                match self.read_root(&tree) {
-                    Some(root) => tree.try_get(root, key)?,
-                    None => Attempt::Ready(None),
-                }
-            };
-            match attempt {
-                Attempt::Ready(value) => return Ok(value),
-                Attempt::Missing(page_id) => self.hydrate_for_read(page_id).await?,
-            }
-        }
+        self.read_point(|tree, root| tree.try_get(root, key)).await
     }
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
-        self.ensure_mutable()?;
-        loop {
-            self.ensure_live()?;
-            let attempt = self
-                .inner
-                .borrow_mut()
-                .with_write_attempt_checkpoint(|tree| tree.try_put(&key, &value))?;
-            match attempt {
-                Attempt::Ready(()) => return Ok(()),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
-            }
-        }
+        self.write_point(|tree| tree.try_put(&key, &value)).await
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
-        self.ensure_mutable()?;
-        loop {
-            self.ensure_live()?;
-            let attempt = self
-                .inner
-                .borrow_mut()
-                .with_write_attempt_checkpoint(|tree| tree.try_delete(key))?;
-            match attempt {
-                Attempt::Ready(deleted) => return Ok(deleted),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
-            }
-        }
+        self.write_point(|tree| tree.try_delete(key)).await
     }
 
     pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
@@ -468,20 +465,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
-        loop {
-            self.ensure_live()?;
-            let attempt = {
-                let tree = self.inner.borrow();
-                match self.read_root(&tree) {
-                    Some(root) => tree.try_range(root, start, end, limit)?,
-                    None => ScanAttempt::Ready(Vec::new()),
-                }
-            };
-            match attempt {
-                ScanAttempt::Ready(rows) => return Ok(rows),
-                ScanAttempt::Missing(page_ids) => self.hydrate_many_for_read(page_ids).await?,
-            }
-        }
+        self.scan(start, end, limit, false).await
     }
 
     /// Admission inventory: find a physical key without decoding/copying its value.
@@ -511,12 +495,22 @@ impl<S: PageStore + Clone> IdbTree<S> {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
+        self.scan(start, end, limit, true).await
+    }
+
+    async fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<KeyValue>, Error> {
         loop {
             self.ensure_live()?;
             let attempt = {
                 let tree = self.inner.borrow();
                 match self.read_root(&tree) {
-                    Some(root) => tree.try_range_reverse(root, start, end, limit)?,
+                    Some(root) => tree.try_range(root, start, end, limit, reverse)?,
                     None => ScanAttempt::Ready(Vec::new()),
                 }
             };
@@ -677,17 +671,8 @@ impl<S: PageStore> TreeCore<S> {
         }
         let checkpoint = self.write_checkpoint();
         let outcome = write(self);
-        self.write_floor = PageId::MAX;
-        match outcome {
-            Ok(value) => {
-                self.retirement_undo.clear();
-                Ok(value)
-            }
-            Err(error) => {
-                self.rollback_write(checkpoint);
-                Err(error)
-            }
-        }
+        self.finish_write(checkpoint, outcome.is_ok());
+        outcome
     }
 
     fn with_write_attempt_checkpoint<T>(
@@ -699,20 +684,18 @@ impl<S: PageStore> TreeCore<S> {
         }
         let checkpoint = self.write_checkpoint();
         let outcome = write(self);
+        self.finish_write(checkpoint, matches!(outcome, Ok(Attempt::Ready(_))));
+        outcome
+    }
+
+    /// Close a write checkpoint: keep a completed write, or roll back one
+    /// which failed or must retry after hydrating a missing page.
+    fn finish_write(&mut self, checkpoint: WriteCheckpoint, completed: bool) {
         self.write_floor = PageId::MAX;
-        match outcome {
-            Ok(Attempt::Ready(value)) => {
-                self.retirement_undo.clear();
-                Ok(Attempt::Ready(value))
-            }
-            Ok(Attempt::Missing(page_id)) => {
-                self.rollback_write(checkpoint);
-                Ok(Attempt::Missing(page_id))
-            }
-            Err(error) => {
-                self.rollback_write(checkpoint);
-                Err(error)
-            }
+        if completed {
+            self.retirement_undo.clear();
+        } else {
+            self.rollback_write(checkpoint);
         }
     }
 
@@ -789,27 +772,17 @@ impl<S: PageStore> TreeCore<S> {
                 let mut current = Some(*head);
                 let mut offset = 0usize;
                 while let Some(page_id) = current {
-                    if !visited.insert(page_id) {
-                        return Err(Error::InvalidPage(
-                            "tree graph contains a cycle or shared page".to_owned(),
-                        ));
-                    }
-                    let Some(page) = self.pages.get(&page_id) else {
+                    let Some((next, bytes)) = self.overflow_page(page_id, &mut visited)? else {
                         return Ok(Attempt::Missing(page_id));
-                    };
-                    let Page::Overflow { next, bytes } = page else {
-                        return Err(Error::InvalidPage(
-                            "value references a non-overflow page".to_owned(),
-                        ));
                     };
                     let end = offset.checked_add(bytes.len()).ok_or_else(|| {
                         Error::InvalidPage("overflow value length overflow".to_owned())
                     })?;
-                    if expected.get(offset..end) != Some(bytes.as_slice()) {
+                    if expected.get(offset..end) != Some(bytes) {
                         return Ok(Attempt::Ready(Some(false)));
                     }
                     offset = end;
-                    current = *next;
+                    current = next;
                 }
                 Ok(Attempt::Ready(Some(offset == expected.len())))
             }
@@ -825,13 +798,7 @@ impl<S: PageStore> TreeCore<S> {
             .ok()
             .map(|index| &entries[index].1);
         match value {
-            Some(value) => {
-                self.read_value_resident(value, &mut visited)
-                    .map(|attempt| match attempt {
-                        Attempt::Ready(value) => Attempt::Ready(Some(value)),
-                        Attempt::Missing(page_id) => Attempt::Missing(page_id),
-                    })
-            }
+            Some(value) => Ok(self.read_value_resident(value, &mut visited)?.map(Some)),
             None => Ok(Attempt::Ready(None)),
         }
     }
@@ -914,6 +881,7 @@ impl<S: PageStore> TreeCore<S> {
         start: &[u8],
         end: &[u8],
         limit: usize,
+        reverse: bool,
     ) -> Result<ScanAttempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
         let mut missing = Vec::new();
@@ -923,31 +891,7 @@ impl<S: PageStore> TreeCore<S> {
             start,
             end,
             limit,
-            &mut cells,
-            &mut missing,
-            &mut visited,
-        )?;
-        if !missing.is_empty() {
-            return Ok(ScanAttempt::Missing(missing));
-        }
-        self.materialize_range_values(cells, visited)
-    }
-
-    fn try_range_reverse(
-        &self,
-        root: PageId,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-    ) -> Result<ScanAttempt<Vec<KeyValue>>, Error> {
-        let mut cells = Vec::new();
-        let mut missing = Vec::new();
-        let mut visited = HashSet::new();
-        self.collect_range_reverse_resident(
-            root,
-            start,
-            end,
-            limit,
+            reverse,
             &mut cells,
             &mut missing,
             &mut visited,
@@ -1213,6 +1157,7 @@ impl<S: PageStore> TreeCore<S> {
 
     // Once a page is known missing the retry recollects every row, so leaves
     // visited afterwards are only walked for further misses, not cloned.
+    // `reverse` walks children and leaf entries in descending key order.
     #[allow(clippy::too_many_arguments)]
     fn collect_range_resident(
         &self,
@@ -1220,6 +1165,7 @@ impl<S: PageStore> TreeCore<S> {
         start: &[u8],
         end: &[u8],
         limit: usize,
+        reverse: bool,
         output: &mut Vec<LeafEntry>,
         missing: &mut Vec<PageId>,
         visited: &mut HashSet<PageId>,
@@ -1238,79 +1184,32 @@ impl<S: PageStore> TreeCore<S> {
         };
         match page {
             Page::Leaf { .. } if !missing.is_empty() => {}
-            Page::Leaf { entries } => output.extend(
-                entries
-                    .iter()
-                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
-                    .take(limit - output.len())
-                    .cloned(),
-            ),
+            Page::Leaf { entries } => {
+                let take = limit - output.len();
+                let in_range =
+                    |(key, _): &&LeafEntry| key.as_slice() >= start && key.as_slice() < end;
+                if reverse {
+                    output.extend(entries.iter().rev().filter(in_range).take(take).cloned());
+                } else {
+                    output.extend(entries.iter().filter(in_range).take(take).cloned());
+                }
+            }
             Page::Internal { keys, children } => {
-                for (index, child) in children.iter().copied().enumerate() {
+                for step in 0..children.len() {
+                    let index = if reverse {
+                        children.len() - 1 - step
+                    } else {
+                        step
+                    };
                     let below_end = index == 0 || keys[index - 1].as_slice() < end;
                     let above_start = index == keys.len() || keys[index].as_slice() > start;
                     if below_end && above_start {
                         self.collect_range_resident(
-                            child, start, end, limit, output, missing, visited,
-                        )?;
-                    }
-                    if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
-                        break;
-                    }
-                }
-            }
-            Page::Overflow { .. } => {
-                return Err(Error::InvalidPage(
-                    "overflow page reached during range traversal".to_owned(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collect_range_reverse_resident(
-        &self,
-        page_id: PageId,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-        output: &mut Vec<LeafEntry>,
-        missing: &mut Vec<PageId>,
-        visited: &mut HashSet<PageId>,
-    ) -> Result<(), Error> {
-        if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
-            return Ok(());
-        }
-        if !visited.insert(page_id) {
-            return Err(Error::InvalidPage(
-                "tree child graph contains a cycle or shared page".to_owned(),
-            ));
-        }
-        let Some(page) = self.pages.get(&page_id) else {
-            missing.push(page_id);
-            return Ok(());
-        };
-        match page {
-            Page::Leaf { .. } if !missing.is_empty() => {}
-            Page::Leaf { entries } => output.extend(
-                entries
-                    .iter()
-                    .rev()
-                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
-                    .take(limit - output.len())
-                    .cloned(),
-            ),
-            Page::Internal { keys, children } => {
-                for index in (0..children.len()).rev() {
-                    let below_end = index == 0 || keys[index - 1].as_slice() < end;
-                    let above_start = index == keys.len() || keys[index].as_slice() > start;
-                    if below_end && above_start {
-                        self.collect_range_reverse_resident(
                             children[index],
                             start,
                             end,
                             limit,
+                            reverse,
                             output,
                             missing,
                             visited,
@@ -1322,9 +1221,11 @@ impl<S: PageStore> TreeCore<S> {
                 }
             }
             Page::Overflow { .. } => {
-                return Err(Error::InvalidPage(
-                    "overflow page reached during reverse range traversal".to_owned(),
-                ));
+                return Err(Error::InvalidPage(if reverse {
+                    "overflow page reached during reverse range traversal".to_owned()
+                } else {
+                    "overflow page reached during range traversal".to_owned()
+                }));
             }
         }
         Ok(())
@@ -1657,22 +1558,34 @@ impl<S: PageStore> TreeCore<S> {
         };
         let mut current = Some(*head);
         while let Some(page_id) = current {
-            if !visited.insert(page_id) {
-                return Err(Error::InvalidPage(
-                    "tree graph contains a cycle or shared page".to_owned(),
-                ));
-            }
-            let Some(page) = self.pages.get(&page_id) else {
+            let Some((next, _)) = self.overflow_page(page_id, visited)? else {
                 return Ok(Attempt::Missing(page_id));
             };
-            let Page::Overflow { next, .. } = page else {
-                return Err(Error::InvalidPage(
-                    "value references a non-overflow page".to_owned(),
-                ));
-            };
-            current = *next;
+            current = next;
         }
         Ok(Attempt::Ready(()))
+    }
+
+    /// One link of a value's overflow chain: its successor and bytes, or None
+    /// when the page is not resident. `visited` rejects cycles and pages
+    /// shared with the tree structure or another value.
+    fn overflow_page(
+        &self,
+        page_id: PageId,
+        visited: &mut HashSet<PageId>,
+    ) -> Result<Option<OverflowLink<'_>>, Error> {
+        if !visited.insert(page_id) {
+            return Err(Error::InvalidPage(
+                "tree graph contains a cycle or shared page".to_owned(),
+            ));
+        }
+        match self.pages.get(&page_id) {
+            None => Ok(None),
+            Some(Page::Overflow { next, bytes }) => Ok(Some((*next, bytes))),
+            Some(_) => Err(Error::InvalidPage(
+                "value references a non-overflow page".to_owned(),
+            )),
+        }
     }
 
     /// Validate all value edges retained by a copied leaf. `visited` already
@@ -1706,21 +1619,11 @@ impl<S: PageStore> TreeCore<S> {
                 let mut output = Vec::new();
                 let mut current = Some(*head);
                 while let Some(page_id) = current {
-                    if !visited.insert(page_id) {
-                        return Err(Error::InvalidPage(
-                            "tree graph contains a cycle or shared page".to_owned(),
-                        ));
-                    }
-                    let Some(page) = self.pages.get(&page_id) else {
+                    let Some((next, bytes)) = self.overflow_page(page_id, visited)? else {
                         return Ok(Attempt::Missing(page_id));
                     };
-                    let Page::Overflow { next, bytes } = page else {
-                        return Err(Error::InvalidPage(
-                            "value references a non-overflow page".to_owned(),
-                        ));
-                    };
                     output.extend_from_slice(bytes);
-                    current = *next;
+                    current = next;
                 }
                 if u64::try_from(output.len()).ok() != Some(*len) {
                     return Err(Error::InvalidPage(format!(

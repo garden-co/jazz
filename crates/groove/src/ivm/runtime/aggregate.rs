@@ -9,48 +9,25 @@ pub(super) fn resolve_aggregate_expr(
     input: &RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<AggregateExpr, IvmRuntimeError> {
-    let expression = match &aggregate.expression {
-        Some(PlanExpr::Field(field)) => Some(PlanExpr::Field(validated_field_name(input, field)?)),
-        Some(PlanExpr::Nullable(field)) => {
-            Some(PlanExpr::Nullable(validated_field_name(input, field)?))
-        }
-        Some(PlanExpr::NullableFlat(field)) => {
-            Some(PlanExpr::NullableFlat(validated_field_name(input, field)?))
-        }
-        Some(PlanExpr::EnumTagRemap { field, tags }) => Some(PlanExpr::EnumTagRemap {
-            field: validated_field_name(input, field)?,
-            tags: tags.clone(),
-        }),
-        Some(PlanExpr::EnumRemap { field, tags }) => Some(PlanExpr::EnumRemap {
-            field: validated_field_name(input, field)?,
-            tags: tags.clone(),
-        }),
-        Some(PlanExpr::RecursiveEnumRemap {
-            field,
-            remaps,
-            omit_unrepresentable,
-        }) => Some(PlanExpr::RecursiveEnumRemap {
-            field: validated_field_name(input, field)?,
-            remaps: remaps.clone(),
-            omit_unrepresentable: *omit_unrepresentable,
-        }),
-        Some(PlanExpr::Literal(_)) | Some(PlanExpr::Null(_)) | None => aggregate.expression.clone(),
-    };
-    Ok(AggregateExpr {
-        function: aggregate.function.clone(),
-        expression,
-        distinct: aggregate.distinct,
-        output_name: aggregate.output_name.clone(),
-        output_identity: aggregate.output_identity.clone(),
-    })
+    // Only validate: evaluation resolves this same PlanExpr name again, so
+    // rewriting it to a raw carrier could bind a different field's identity.
+    if let Some(field) = aggregate.expression.as_ref().and_then(plan_expr_field) {
+        super::record_projection::resolve_field_name(input, field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+    }
+    Ok(aggregate.clone())
 }
 
-fn validated_field_name(input: &RecordDescriptor, field: &str) -> Result<String, IvmRuntimeError> {
-    super::record_projection::resolve_field_name(input, field)
-        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
-    // Evaluation resolves this same PlanExpr name again. Returning the raw
-    // carrier here could instead bind a different field's logical identity.
-    Ok(field.to_owned())
+fn plan_expr_field(expr: &PlanExpr) -> Option<&str> {
+    match expr {
+        PlanExpr::Field(field)
+        | PlanExpr::Nullable(field)
+        | PlanExpr::NullableFlat(field)
+        | PlanExpr::EnumTagRemap { field, .. }
+        | PlanExpr::EnumRemap { field, .. }
+        | PlanExpr::RecursiveEnumRemap { field, .. } => Some(field),
+        PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
+    }
 }
 
 /// Reconstructs the positive pre-tick input multiset from its post-tick state.
@@ -58,20 +35,9 @@ pub(super) fn records_before_from_deltas(
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
 ) -> Vec<(Bytes, i64)> {
-    let mut records = BTreeMap::<Bytes, (Bytes, i64)>::new();
-    for (record, weight) in after_records {
-        records.insert(record.clone(), (record, weight));
-    }
-    for delta in deltas {
-        let entry = records
-            .entry(delta.record.clone())
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
-    }
+    let mut records = super::windows::records_before_deltas(after_records, &deltas);
+    records.retain(|(_, weight)| *weight > 0);
     records
-        .into_iter()
-        .filter_map(|(_, (record, weight))| (weight > 0).then_some((record, weight)))
-        .collect()
 }
 
 pub(super) fn aggregate_row_from_records(
@@ -154,6 +120,23 @@ fn evaluate_aggregate(
     }
 }
 
+/// The non-null expression values of the live (positive-weight) records.
+fn live_values<'a>(
+    records: &'a [(Bytes, i64)],
+    input_desc: RecordDescriptor,
+    expr: &'a PlanExpr,
+) -> impl Iterator<Item = Result<(&'a Bytes, i64, Value), IvmRuntimeError>> + 'a {
+    records
+        .iter()
+        .filter(|(_, weight)| *weight > 0)
+        .filter_map(move |(record, weight)| {
+            match evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr) {
+                Ok(value) => unwrap_nullable_value(value).map(|value| Ok((record, *weight, value))),
+                Err(error) => Some(Err(error)),
+            }
+        })
+}
+
 fn aggregate_sum(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
@@ -166,69 +149,61 @@ fn aggregate_sum(
     let mut u64_sum = 0_u64;
     let mut i64_sum = 0_i64;
     let mut f64_sum = 0_f64;
-    for (record, weight) in records {
-        if *weight <= 0 {
-            continue;
-        }
-        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
-        let Some(value) = unwrap_nullable_value(value) else {
-            continue;
-        };
+    for live in live_values(records, input_desc, expr) {
+        let (_, weight, value) = live?;
         match value {
             Value::U8(value) => {
                 kind.get_or_insert(ValueType::U8);
-                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), weight)?;
             }
             Value::U16(value) => {
                 kind.get_or_insert(ValueType::U16);
-                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), weight)?;
             }
             Value::U32(value) => {
                 kind.get_or_insert(ValueType::U32);
-                u64_sum = add_weighted_u64(u64_sum, u64::from(value), *weight)?;
+                u64_sum = add_weighted_u64(u64_sum, u64::from(value), weight)?;
             }
             Value::U64(value) => {
                 kind.get_or_insert(ValueType::U64);
-                u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
+                u64_sum = add_weighted_u64(u64_sum, value, weight)?;
             }
             Value::I32(value) => {
                 kind.get_or_insert(ValueType::I32);
-                i64_sum = add_weighted_i64(i64_sum, i64::from(value), *weight)?;
+                i64_sum = add_weighted_i64(i64_sum, i64::from(value), weight)?;
             }
             Value::I64(value) => {
                 kind.get_or_insert(ValueType::I64);
-                i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
+                i64_sum = add_weighted_i64(i64_sum, value, weight)?;
             }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
-                f64_sum += value * (*weight as f64);
+                f64_sum += value * (weight as f64);
             }
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
         }
     }
     match kind {
         None => Ok(None),
-        Some(ValueType::U8) => u8::try_from(u64_sum)
-            .map(Value::U8)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::AggregateOverflow),
-        Some(ValueType::U16) => u16::try_from(u64_sum)
-            .map(Value::U16)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::AggregateOverflow),
-        Some(ValueType::U32) => u32::try_from(u64_sum)
-            .map(Value::U32)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U8) => narrow_sum(u64_sum, Value::U8),
+        Some(ValueType::U16) => narrow_sum(u64_sum, Value::U16),
+        Some(ValueType::U32) => narrow_sum(u64_sum, Value::U32),
         Some(ValueType::U64) => Ok(Some(Value::U64(u64_sum))),
-        Some(ValueType::I32) => i32::try_from(i64_sum)
-            .map(Value::I32)
-            .map(Some)
-            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::I32) => narrow_sum(i64_sum, Value::I32),
         Some(ValueType::F64) => Ok(Some(Value::F64(f64_sum))),
         Some(ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
         Some(_) => Err(IvmRuntimeError::UnsupportedOperator),
     }
+}
+
+/// A sum accumulated in a wide integer, narrowed back to its input type.
+fn narrow_sum<W, T: TryFrom<W>>(
+    sum: W,
+    value: fn(T) -> Value,
+) -> Result<Option<Value>, IvmRuntimeError> {
+    T::try_from(sum)
+        .map(|sum| Some(value(sum)))
+        .map_err(|_| IvmRuntimeError::AggregateOverflow)
 }
 
 fn aggregate_avg(
@@ -244,17 +219,11 @@ fn aggregate_avg(
     let mut count = 0_i64;
     let mut has_f64 = false;
     let mut has_non_finite = false;
-    for (record, weight) in records {
-        if *weight <= 0 {
-            continue;
-        }
-        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
-        let Some(value) = unwrap_nullable_value(value) else {
-            continue;
-        };
+    for live in live_values(records, input_desc, expr) {
+        let (_, weight, value) = live?;
         let numeric = numeric_value_as_f64(&value)?;
-        sum += numeric * (*weight as f64);
-        count += *weight;
+        sum += numeric * (weight as f64);
+        count += weight;
         has_f64 |= matches!(value, Value::F64(_));
         if numeric.is_finite() {
             scale = scale.max(numeric.abs());
@@ -277,16 +246,10 @@ fn aggregate_avg(
     }
 
     let mut scaled_sum = 0_f64;
-    for (record, weight) in records {
-        if *weight <= 0 {
-            continue;
-        }
-        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
-        let Some(value) = unwrap_nullable_value(value) else {
-            continue;
-        };
+    for live in live_values(records, input_desc, expr) {
+        let (_, weight, value) = live?;
         let numeric = numeric_value_as_f64(&value)?;
-        scaled_sum += (numeric / scale) * (*weight as f64);
+        scaled_sum += (numeric / scale) * (weight as f64);
     }
     let normalized = (scaled_sum / (count as f64)).clamp(-1.0, 1.0);
     Ok(Some(Value::F64(scale * normalized)))
@@ -301,14 +264,8 @@ fn aggregate_extremum(
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
     let mut best: Option<(Vec<u8>, Bytes, Value)> = None;
-    for (record, weight) in records {
-        if *weight <= 0 {
-            continue;
-        }
-        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
-        let Some(value) = unwrap_nullable_value(value) else {
-            continue;
-        };
+    for live in live_values(records, input_desc, expr) {
+        let (record, _, value) = live?;
         let mut value_key = Vec::new();
         encode_key_part(&mut value_key, &value)?;
         let replaces =
@@ -355,7 +312,7 @@ fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
-        Value::U64(value) => Ok(*value as f64),
+        Value::U64(value) | Value::U48(value) => Ok(*value as f64),
         Value::I32(value) => Ok(f64::from(*value)),
         Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
@@ -383,34 +340,23 @@ fn evaluate_aggregate_expr(
     record: &BorrowedRecord<'_>,
     expr: &PlanExpr,
 ) -> Result<Value, IvmRuntimeError> {
+    let field_value = |field: &str| {
+        let field_idx = super::record_projection::resolve_field_name(&record.descriptor(), field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+        record
+            .get_idx(field_idx)
+            .map_err(IvmRuntimeError::RecordEncoding)
+    };
     match expr {
         PlanExpr::Field(field) | PlanExpr::Nullable(field) | PlanExpr::NullableFlat(field) => {
-            let field_idx =
-                super::record_projection::resolve_field_name(&record.descriptor(), field)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-            record
-                .get_idx(field_idx)
-                .map_err(IvmRuntimeError::RecordEncoding)
+            field_value(field)
         }
-        PlanExpr::EnumTagRemap { field, tags } => {
-            let field_idx =
-                super::record_projection::resolve_field_name(&record.descriptor(), field)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-            remap_enum_tag(record.get_idx(field_idx)?, tags)
-        }
-        PlanExpr::EnumRemap { field, tags } => {
-            let field_idx =
-                super::record_projection::resolve_field_name(&record.descriptor(), field)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-            remap_enum(record.get_idx(field_idx)?, tags)
-        }
+        PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(field_value(field)?, tags),
+        PlanExpr::EnumRemap { field, tags } => remap_enum(field_value(field)?, tags),
         // Aggregates do not carry an output descriptor, so there is no
         // well-defined target boundary for a recursive re-encoding.
         PlanExpr::RecursiveEnumRemap { .. } => Err(IvmRuntimeError::UnsupportedOperator),
         PlanExpr::Literal(literal) => Ok(literal.to_value()),
-        PlanExpr::Null(value_type) => Ok(Value::Nullable(match value_type {
-            ValueType::Nullable(_) => None,
-            _ => None,
-        })),
+        PlanExpr::Null(_) => Ok(Value::Nullable(None)),
     }
 }

@@ -55,8 +55,8 @@ fn open(
     author: CoreAuthorSubject,
     storage_owner: String,
     node: u8,
-) -> js::Result<NapiDb> {
-    NapiDb::open_persistent_account_owner(
+) -> std::result::Result<NapiDb, PersistentOpenError> {
+    NapiDb::try_open_persistent_account_owner(
         path.to_string_lossy().into_owned(),
         schema(),
         config(author, node),
@@ -146,9 +146,10 @@ impl jazz::db::Transport for OutboundCapture {
 fn take_original_pending_unit(db: &NapiDb) -> Vec<u8> {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let inner = db.inner.borrow();
-    let Some(NapiDbInnerStorage::Persistent(core)) = inner.as_ref() else {
+    let Some(inner) = inner.as_ref() else {
         panic!("persistent owner");
     };
+    let core = &inner.core;
     let upstream =
         core_block_on(core.connect_upstream(Box::new(OutboundCapture(Rc::clone(&sent)))));
     for _ in 0..16 {
@@ -177,7 +178,7 @@ fn legacy_root_claim_preserves_rows_and_restores_exact_pending_before_transport(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("unchanged-hashed-account-root");
     let author = author("alice", 0xb1);
-    let db = NapiDb::open_persistent(
+    let db = NapiDb::try_open_persistent(
         path.to_string_lossy().into_owned(),
         schema(),
         config(author, 0xb3),
@@ -264,7 +265,7 @@ fn owner_author_and_marker_mismatches_preserve_existing_marker_and_rows() {
         assert_eq!(std::fs::read(&marker).unwrap(), malformed);
         // Raw opening is deliberately unchanged; inspect the original rows
         // without granting the rejected account-owner route any fallback.
-        let raw = NapiDb::open_persistent(
+        let raw = NapiDb::try_open_persistent(
             path.to_string_lossy().into_owned(),
             schema(),
             config(alice, 0xb7),
@@ -300,7 +301,7 @@ fn self_signed_owner_checks_native_proof_claim_and_account_before_marker() {
     let resolved = identity::verify_client_runtime_author(&token, "owner-test", &claim).unwrap();
     let placeholder = author("placeholder", 0xbb);
     let attempt = |token: String, claim: String, storage_owner: String| {
-        NapiDb::open_persistent_account_owner_with_self_signed_proof(
+        NapiDb::try_open_persistent_account_owner_with_self_signed_proof(
             path.to_string_lossy().into_owned(),
             schema(),
             config(placeholder, 0xbc),
@@ -332,7 +333,7 @@ fn raw_and_backend_factories_do_not_claim_account_roots() {
     let author = author("external-host-admitted", 0xbd);
     let raw_path = directory.path().join("raw");
     close(
-        NapiDb::open_persistent(
+        NapiDb::try_open_persistent(
             raw_path.to_string_lossy().into_owned(),
             schema(),
             config(author, 0xbe),
@@ -343,7 +344,7 @@ fn raw_and_backend_factories_do_not_claim_account_roots() {
     assert!(!raw_path.join(".jazz-account-owner").exists());
     let backend_path = directory.path().join("backend");
     close(
-        NapiDb::open_persistent_as_backend(
+        NapiDb::try_open_persistent_as_backend(
             backend_path.to_string_lossy().into_owned(),
             schema(),
             config(author, 0xbf),

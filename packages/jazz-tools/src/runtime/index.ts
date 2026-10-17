@@ -18,6 +18,10 @@ export {
   ExclusiveWriteResult,
 } from "./client.js";
 export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
 export { createDb } from "./default-create-db.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */

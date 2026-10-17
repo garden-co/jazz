@@ -1,22 +1,30 @@
-/// Slots 5-8 of `jazz_transactions` for `tx_id`, as stored.
+/// The read-evidence slots of `tx_id`'s `jazz_pending_transactions` record, as
+/// stored; all null when the transaction has no pending record.
 fn stored_exclusive_evidence_slots(node: &NodeState, tx_id: TxId) -> Vec<Value> {
+    pending_record_evidence_slots(node, tx_id).unwrap_or_else(|| vec![Value::Nullable(None); 4])
+}
+
+/// The read-evidence slots of `tx_id`'s `jazz_pending_transactions` record, or
+/// `None` when the transaction has no pending record.
+fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Value>> {
     let alias = node.node_aliases[&tx_id.node];
     let raw = crate::local_executor::block_on(node.database.primary_key_get_raw(
-        "jazz_transactions",
+        PENDING_TRANSACTIONS_TABLE,
         &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
     ))
-    .unwrap()
-    .unwrap();
+    .unwrap()?;
     let record = raw.record();
-    [
-        TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX,
-        TransactionRowRecord::FIELD_ROW_READ_SET_IDX,
-        TransactionRowRecord::FIELD_ABSENT_READ_SET_IDX,
-        TransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX,
-    ]
-    .into_iter()
-    .map(|index| record.get_idx(index).unwrap())
-    .collect()
+    Some(
+        [
+            PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX,
+            PendingTransactionRowRecord::FIELD_ROW_READ_SET_IDX,
+            PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX,
+            PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX,
+        ]
+        .into_iter()
+        .map(|index| record.get_idx(index).unwrap())
+        .collect(),
+    )
 }
 
 /// Reopening before and after authority settlement must recover the exact
@@ -68,7 +76,8 @@ fn exclusive_evidence_survives_reopen_before_and_after_settlement() {
             .is_some_and(|reads| !reads.is_empty())
     );
     assert!(
-        stored_exclusive_evidence_slots(&client, tx_id)
+        pending_record_evidence_slots(&client, tx_id)
+            .expect("a pending exclusive transaction keeps a pending record")
             .iter()
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
@@ -77,7 +86,7 @@ fn exclusive_evidence_survives_reopen_before_and_after_settlement() {
     // epoch-one stores. Admission must accept them without rewriting evidence.
     let alias = client.node_aliases[&tx_id.node];
     let raw = crate::local_executor::block_on(client.database.primary_key_get_raw(
-        "jazz_transactions",
+        PENDING_TRANSACTIONS_TABLE,
         &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
     ))
     .unwrap()
@@ -144,26 +153,17 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
         )
         .unwrap();
     let stored = writer.query_transaction(tx_id).unwrap().unwrap();
-    let mut values = transaction_values(
-        stored.node_alias,
-        &stored.tx,
-        stored.fate.clone(),
-        stored.global_time,
-        stored.durability,
-        Value::Nullable(None),
-    )
-    .unwrap();
+    assert_eq!(stored.global_time, None, "the planted record must be read");
     let snapshot =
         crate::tx::Snapshot::exclusive_base(node(1), GlobalTime(0), TxTime::from(1), Vec::new())
             .unwrap();
     let mut exclusive = stored.tx.clone();
     exclusive.kind = TxKind::Exclusive;
     exclusive.base_snapshot = Some(snapshot);
-    let [base, ..] =
-        super::super::exclusive_read_evidence::evidence_slot_values(&exclusive).unwrap();
-    values[TransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
+    let [base, rows, absent, predicates] = super::super::exclusive_read_evidence::evidence_slot_values(&exclusive).unwrap();
+    let values = vec![Value::U64(tx_id.time.0), Value::U64(stored.node_alias.0), base, rows, absent, predicates];
     let mut batch = writer.database.open_batch();
-    batch.update("jazz_transactions", values);
+    batch.update(PENDING_TRANSACTIONS_TABLE, values);
     let applied = crate::local_executor::block_on(writer.database.apply_batch(batch)).unwrap();
     let persisted = crate::local_executor::block_on(applied.persist());
     writer.database.finish_persistence(persisted).unwrap();
@@ -272,7 +272,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
     let binding = shape
         .bind(BTreeMap::from([("title".to_owned(), v("x"))]))
         .unwrap();
-    let mut commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
+    let commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
         let open_id = OpenTransactionId::new();
         alice.open_exclusive(open_id).unwrap();
         assert!(

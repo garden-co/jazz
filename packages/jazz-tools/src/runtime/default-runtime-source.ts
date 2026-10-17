@@ -44,25 +44,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
+import { deterministicBytes } from "./deterministic-bytes.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    const view = new DataView(bytes.buffer);
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 function randomBytes(): Uint8Array {
@@ -276,7 +263,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       jwtToken: config.jwtToken,
       cookieSession: config.cookieSession,
       adminSecret: config.adminSecret,
-      tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
     return JazzClient.connectWithRuntime(

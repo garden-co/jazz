@@ -3,243 +3,15 @@
 //! This stays below the database facade: it converts authenticated byte frames
 //! into logical sync messages without changing peer dispatch semantics.
 
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use super::{ConnectionSessionContext, Transport};
-use crate::protocol::SyncMessage;
+use crate::protocol::{SubscriptionKey, SyncMessage, ViewUpdatePayload};
 use crate::protocol_limits::validate_wire_frame_len;
-#[cfg(test)]
-use crate::protocol_limits::{
-    MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-    MAX_INFLIGHT_ENCODED_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
-    validate_encoded_message_len,
-};
 use crate::wire::{
     TransportError, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFeatures, WireFrame,
     WireInboundContext, WireRetry, WireSession, WireTransport, current_wire_features,
 };
-#[cfg(test)]
-use crate::wire::{WireEnvelope, WireMessageFragment};
-
-#[cfg(test)]
-pub(super) const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
-
-/// Adapter from postcard wire frames to the internal sync-message transport.
-#[cfg(test)]
-pub(super) struct IncompleteLogicalMessage {
-    protocol_version: u16,
-    features: WireFeatures,
-    session: Option<WireSession>,
-    message_digest: [u8; 32],
-    total_len: usize,
-    received_len: usize,
-    extents: BTreeMap<usize, Vec<u8>>,
-    absolute_deadline_ms: u64,
-    deadline_ms: u64,
-}
-
-#[cfg(test)]
-pub(super) struct LogicalMessageReassembler {
-    pub(super) incomplete: HashMap<u64, IncompleteLogicalMessage>,
-    pub(super) staged_bytes: usize,
-    deadlines: BTreeSet<(u64, u64)>,
-    staging_budget: usize,
-    recently_completed: VecDeque<(u64, [u8; 32])>,
-}
-
-#[cfg(test)]
-impl Default for LogicalMessageReassembler {
-    fn default() -> Self {
-        Self {
-            incomplete: HashMap::new(),
-            staged_bytes: 0,
-            deadlines: BTreeSet::new(),
-            staging_budget: MAX_INFLIGHT_ENCODED_MESSAGE_BYTES,
-            recently_completed: VecDeque::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl LogicalMessageReassembler {
-    #[cfg(test)]
-    pub(super) fn with_staging_budget_for_test(staging_budget: usize) -> Self {
-        Self {
-            staging_budget,
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn discard(&mut self, message_id: u64) {
-        if let Some(state) = self.incomplete.remove(&message_id) {
-            self.deadlines.remove(&(state.deadline_ms, message_id));
-            self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
-        }
-    }
-
-    pub(super) fn expire(&mut self, now_ms: u64) {
-        while let Some(&(deadline_ms, message_id)) = self.deadlines.first() {
-            if deadline_ms > now_ms {
-                break;
-            }
-            self.deadlines.pop_first();
-            if self
-                .incomplete
-                .get(&message_id)
-                .is_some_and(|state| state.deadline_ms == deadline_ms)
-            {
-                let state = self
-                    .incomplete
-                    .remove(&message_id)
-                    .expect("expired logical message state exists");
-                self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
-            }
-        }
-    }
-
-    pub(super) fn push(
-        &mut self,
-        fragment: WireMessageFragment,
-        now_ms: u64,
-    ) -> Result<Option<WireEnvelope>, String> {
-        self.expire(now_ms);
-        if let Some((_, digest)) = self
-            .recently_completed
-            .iter()
-            .find(|(message_id, _)| *message_id == fragment.message_id)
-        {
-            return if digest == &fragment.message_digest {
-                Ok(None)
-            } else {
-                Err("completed logical message id was reused with another digest".to_owned())
-            };
-        }
-        let total_len = usize::try_from(fragment.total_len)
-            .map_err(|_| "encoded message length does not fit this receiver".to_owned())?;
-        validate_encoded_message_len(total_len)?;
-        let offset = usize::try_from(fragment.offset)
-            .map_err(|_| "encoded message fragment offset does not fit this receiver".to_owned())?;
-        let end = offset
-            .checked_add(fragment.payload.len())
-            .ok_or_else(|| "encoded message fragment range overflow".to_owned())?;
-        if fragment.payload.is_empty() || end > total_len {
-            return Err("logical message fragment has an empty or out-of-range extent".to_owned());
-        }
-        if !self.incomplete.contains_key(&fragment.message_id) {
-            if self.incomplete.len() >= MAX_INFLIGHT_LOGICAL_MESSAGES {
-                return Err("too many incomplete logical messages for peer".to_owned());
-            }
-            let absolute_deadline_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
-            let deadline_ms =
-                absolute_deadline_ms.min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
-            self.incomplete.insert(
-                fragment.message_id,
-                IncompleteLogicalMessage {
-                    protocol_version: fragment.protocol_version,
-                    features: fragment.features,
-                    session: fragment.session.clone(),
-                    message_digest: fragment.message_digest,
-                    total_len,
-                    received_len: 0,
-                    extents: BTreeMap::new(),
-                    absolute_deadline_ms,
-                    deadline_ms,
-                },
-            );
-            self.deadlines.insert((deadline_ms, fragment.message_id));
-        }
-        let state = self
-            .incomplete
-            .get_mut(&fragment.message_id)
-            .expect("logical message state inserted");
-        if state.total_len != total_len
-            || state.protocol_version != fragment.protocol_version
-            || state.features != fragment.features
-            || state.session != fragment.session
-            || state.message_digest != fragment.message_digest
-        {
-            return Err("logical message fragments disagree on metadata".to_owned());
-        }
-        if let Some(existing) = state.extents.get(&offset) {
-            return if existing == &fragment.payload {
-                Ok(None)
-            } else {
-                Err("conflicting duplicate logical message fragment".to_owned())
-            };
-        }
-        if state
-            .extents
-            .range(..=offset)
-            .next_back()
-            .is_some_and(|(start, bytes)| *start + bytes.len() > offset)
-            || state
-                .extents
-                .range(offset..)
-                .next()
-                .is_some_and(|(start, _)| *start < end)
-        {
-            return Err("overlapping logical message fragments".to_owned());
-        }
-        let next_staged = self
-            .staged_bytes
-            .checked_add(fragment.payload.len())
-            .ok_or_else(|| "logical message staging byte count overflow".to_owned())?;
-        if next_staged > self.staging_budget {
-            return Err("incomplete logical messages exceed peer staging budget".to_owned());
-        }
-        self.staged_bytes = next_staged;
-        state.received_len += fragment.payload.len();
-        state.extents.insert(offset, fragment.payload);
-        if state.received_len != state.total_len {
-            let previous_deadline_ms = state.deadline_ms;
-            let deadline_ms = state
-                .absolute_deadline_ms
-                .min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
-            if deadline_ms != previous_deadline_ms {
-                state.deadline_ms = deadline_ms;
-                self.deadlines
-                    .remove(&(previous_deadline_ms, fragment.message_id));
-                self.deadlines.insert((deadline_ms, fragment.message_id));
-            }
-            return Ok(None);
-        }
-
-        let state = self
-            .incomplete
-            .remove(&fragment.message_id)
-            .expect("completed logical message state exists");
-        self.deadlines
-            .remove(&(state.deadline_ms, fragment.message_id));
-        self.staged_bytes -= state.received_len;
-        let mut cursor = 0;
-        let mut payload = Vec::with_capacity(state.total_len);
-        for (offset, extent) in state.extents {
-            if offset != cursor {
-                return Err(
-                    "logical message fragments do not provide contiguous coverage".to_owned(),
-                );
-            }
-            cursor += extent.len();
-            payload.extend_from_slice(&extent);
-        }
-        if cursor != state.total_len || *blake3::hash(&payload).as_bytes() != state.message_digest {
-            return Err("logical message digest mismatch".to_owned());
-        }
-        self.recently_completed
-            .push_back((fragment.message_id, state.message_digest));
-        if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
-            self.recently_completed.pop_front();
-        }
-        Ok(Some(WireEnvelope {
-            protocol_version: state.protocol_version,
-            features: state.features,
-            session: state.session,
-            payload,
-        }))
-    }
-}
 
 /// Outcome of one bounded transport-output turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,9 +47,14 @@ pub struct WireTransportAdapter<T> {
     terminal_error: Option<TransportError>,
     last_wire_error: Option<WireError>,
     received_wire_error: bool,
-    // Retained only for historical fragment corpus tests, not live admission.
-    #[cfg(test)]
-    pub(super) reassembler: LogicalMessageReassembler,
+    /// Remaining bounded parts of one accepted oversized `ViewUpdate`. While
+    /// any remain, every other canonical offer is refused, so this holds at
+    /// most the one logical update the adapter has already accepted.
+    outbound_view_parts: VecDeque<SyncMessage>,
+    /// Received `ViewUpdatePart`s awaiting their final `ViewUpdate`, by
+    /// subscription. Dropped with the adapter, so a reconnect never resumes
+    /// a partial sequence.
+    inbound_view_parts: BTreeMap<SubscriptionKey, InboundViewParts>,
 }
 
 impl<T: WireTransport> WireTransportAdapter<T> {
@@ -338,8 +115,8 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             terminal_error: None,
             last_wire_error: None,
             received_wire_error: false,
-            #[cfg(test)]
-            reassembler: LogicalMessageReassembler::default(),
+            outbound_view_parts: VecDeque::new(),
+            inbound_view_parts: BTreeMap::new(),
         }
     }
     /// Return the underlying byte transport.
@@ -347,9 +124,21 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         self.inner
     }
 
+    /// `ViewUpdatePart`s buffered while their final part is outstanding, and
+    /// parts of an accepted oversized update not yet admitted to a channel.
+    #[cfg(test)]
+    pub(super) fn view_update_parts_in_flight_for_test(&self) -> (usize, usize) {
+        (
+            self.inbound_view_parts
+                .values()
+                .map(|buffered| buffered.parts.len())
+                .sum(),
+            self.outbound_view_parts.len(),
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn set_reassembly_elapsed_for_test(&mut self, elapsed_ms: u64) {
-        self.reassembler.expire(elapsed_ms);
         self.endpoint.set_elapsed_for_test(elapsed_ms);
     }
 
@@ -394,6 +183,140 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
+        self.enqueue_outbound_view_parts()?;
+        let status = self.flush_endpoints(turns)?;
+        if self.outbound_view_parts.is_empty() {
+            return Ok(status);
+        }
+        // Sending frames does not return credit, but a part may have become
+        // admissible since the first attempt; either way the sequence stays
+        // pending until the peer grants more credit.
+        self.enqueue_outbound_view_parts()?;
+        Ok(match status {
+            WireFlushStatus::Idle if self.endpoint.has_pending() => WireFlushStatus::MoreReady,
+            WireFlushStatus::Idle if !self.outbound_view_parts.is_empty() => {
+                WireFlushStatus::Backpressured
+            }
+            status => status,
+        })
+    }
+
+    /// Route and enqueue one canonical message. `Ok(false)` is backpressure:
+    /// nothing was admitted and the caller still owns the message.
+    fn enqueue_canonical(&mut self, message: &SyncMessage) -> Result<bool, TransportError> {
+        let (slot, generation, class, barrier) = match self.route(message) {
+            Ok(route) => route,
+            Err(TransportError::Backpressure) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match self
+            .endpoint
+            .enqueue(slot, generation, class, message, barrier)
+        {
+            Ok(()) => {}
+            Err(TransportError::Backpressure) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
+            self.routes.retain(|_, (existing, _)| *existing != slot);
+            self.routes
+                .insert(delivery_route_key(message), (slot, generation));
+        }
+        Ok(true)
+    }
+
+    /// Admit as many remaining parts of the accepted oversized update as
+    /// channel credit allows, in order. The adapter already owns them, so a
+    /// hard failure is terminal for the link.
+    fn enqueue_outbound_view_parts(&mut self) -> Result<(), TransportError> {
+        while let Some(part) = self.outbound_view_parts.pop_front() {
+            match self.enqueue_canonical(&part) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.outbound_view_parts.push_front(part);
+                    break;
+                }
+                Err(error) => {
+                    self.outbound_view_parts.clear();
+                    self.terminal_error = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hold a received `ViewUpdatePart` until its final `ViewUpdate`, and
+    /// yield that update whole. Every other message passes through.
+    fn assemble_view_update(
+        &mut self,
+        received: super::ReceivedSyncMessage,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        let super::ReceivedSyncMessage {
+            message,
+            lease,
+            receipts_validated,
+        } = received;
+        match message {
+            SyncMessage::ViewUpdatePart(part) => {
+                // Each open sequence occupies one delivery stream, so a peer
+                // cannot hold more open sequences than it has streams. The
+                // part's lease is released here: it is buffered semantically,
+                // and holding its credit could stall the rest of the sequence.
+                drop(lease);
+                let open = self.inbound_view_parts.len();
+                let entry = self
+                    .inbound_view_parts
+                    .entry(part.subscription)
+                    .or_insert_with(|| InboundViewParts {
+                        parts: Vec::new(),
+                        receipts_validated: true,
+                    });
+                if entry.parts.is_empty() && open >= crate::wire::channels::MAX_CHANNELS {
+                    return Err(self.fail_view_update_assembly(
+                        "more open view-update part sequences than delivery streams",
+                    ));
+                }
+                entry.parts.push(part);
+                entry.receipts_validated &= receipts_validated;
+                Ok(None)
+            }
+            SyncMessage::ViewUpdate(last) => {
+                let Some(buffered) = self.inbound_view_parts.remove(&last.subscription) else {
+                    return Ok(Some(super::ReceivedSyncMessage {
+                        message: SyncMessage::ViewUpdate(last),
+                        lease,
+                        receipts_validated,
+                    }));
+                };
+                let merged =
+                    super::view_update_parts::merge_view_update_parts(buffered.parts, last)
+                        .map_err(|reason| self.fail_view_update_assembly(&reason))?;
+                Ok(Some(super::ReceivedSyncMessage {
+                    message: SyncMessage::ViewUpdate(merged),
+                    lease,
+                    receipts_validated: receipts_validated && buffered.receipts_validated,
+                }))
+            }
+            message => Ok(Some(super::ReceivedSyncMessage {
+                message,
+                lease,
+                receipts_validated,
+            })),
+        }
+    }
+
+    fn fail_view_update_assembly(&mut self, reason: &str) -> TransportError {
+        self.inbound_view_parts.clear();
+        self.last_wire_error = Some(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            reason.to_owned(),
+        ));
+        TransportError::Failed(reason.to_owned())
+    }
+
+    fn flush_endpoints(&mut self, turns: usize) -> Result<WireFlushStatus, TransportError> {
         self.endpoint.expire().map_err(TransportError::Failed)?;
         self.auxiliary
             .lock()
@@ -539,6 +462,17 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     }
 
     fn receive(&mut self) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        // A buffered part yields nothing on its own; keep draining until a
+        // complete message or an empty inbound queue.
+        while let Some(received) = self.receive_routed()? {
+            if let Some(message) = self.assemble_view_update(received)? {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
+    }
+
+    fn receive_routed(&mut self) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
@@ -656,27 +590,25 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                 };
             }
         } else {
-            let (slot, generation, class, barrier) = match self.route(&message) {
-                Ok(route) => route,
-                Err(TransportError::Backpressure) => {
-                    return Ok(WireSendOutcome::Rejected(message));
-                }
-                Err(error) => return Err(error),
-            };
-            match self
-                .endpoint
-                .enqueue(slot, generation, class, &message, barrier)
-            {
-                Ok(()) => {}
-                Err(TransportError::Backpressure) => {
-                    return Ok(WireSendOutcome::Rejected(message));
-                }
-                Err(error) => return Err(error),
+            // The parts of an accepted oversized update go out contiguously,
+            // before any later canonical message.
+            self.enqueue_outbound_view_parts()?;
+            if !self.outbound_view_parts.is_empty() {
+                return Ok(WireSendOutcome::Rejected(message));
             }
-            if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
-                self.routes.retain(|_, (existing, _)| *existing != slot);
-                self.routes
-                    .insert(delivery_route_key(&message), (slot, generation));
+            match message {
+                SyncMessage::ViewUpdate(view) if exceeds_routed_payload_limit(&view) => {
+                    let limit = super::routed_messages::max_routed_payload_bytes();
+                    let parts = super::view_update_parts::split_view_update(view, limit)
+                        .map_err(|error| TransportError::Failed(error.to_string()))?;
+                    self.outbound_view_parts = parts.into();
+                    self.enqueue_outbound_view_parts()?;
+                }
+                message => {
+                    if !self.enqueue_canonical(&message)? {
+                        return Ok(WireSendOutcome::Rejected(message));
+                    }
+                }
             }
         }
         // Semantic ownership is now accepted. A rejected physical extent is
@@ -796,18 +728,33 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     }
 }
 
+/// Parts of one oversized `ViewUpdate` still waiting for their final part.
+struct InboundViewParts {
+    parts: Vec<ViewUpdatePayload>,
+    receipts_validated: bool,
+}
+
+/// Whether `view` must be sent as bounded parts. A size walk without
+/// allocation; ordinary updates stop here.
+fn exceeds_routed_payload_limit(view: &ViewUpdatePayload) -> bool {
+    // Measure the payload as a message: the variant tag is one byte.
+    postcard::experimental::serialized_size(view).map_or(true, |bytes| {
+        bytes.saturating_add(1) > super::routed_messages::max_routed_payload_bytes()
+    })
+}
+
 fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
     use SyncMessage::*;
     let (tag, bytes) = match message {
-        ViewUpdate(view) => (0, postcard::to_allocvec(&view.subscription).unwrap()),
-        SubscribeRejected { subscription, .. } | AuthorizationScopeReceipt { subscription, .. } => {
-            (0, postcard::to_allocvec(subscription).unwrap())
+        // Every part of one update shares its subscription's stream.
+        ViewUpdate(view) | ViewUpdatePart(view) => {
+            (0, postcard::to_allocvec(&view.subscription).unwrap())
         }
+        SubscribeRejected { subscription, .. } => (0, postcard::to_allocvec(subscription).unwrap()),
         AuthorizationScopeView { request_id, .. }
         | AuthorizationScopeAggregateReceipt { request_id, .. }
         | AuthorizationScopeUnavailable { request_id }
-        | AuthorizationScopeDecision { request_id, .. }
-        | PermissionAdviceResponse { request_id, .. } => (1, request_id.0.to_vec()),
+        | AuthorizationScopeDecision { request_id, .. } => (1, request_id.0.to_vec()),
         CurrentRowsReceipt(receipt) => (2, receipt.request_id.0.to_vec()),
         ChunkUploadStart(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
         ChunkUploadNodes(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),

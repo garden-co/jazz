@@ -36,7 +36,7 @@ fn maintained_witness_with_projected_schema_keeps_immutable_history_identity() {
         Vec::<String>::new(),
     )
     .unwrap();
-    let original = owner.query_versions_for_tx(tx).unwrap().remove(0);
+    let original = owner.stored_versions_for_tx_for_test(tx).unwrap().remove(0);
     let alias = owner
         .ensure_schema_version_alias(evolved.version_id())
         .unwrap();
@@ -74,10 +74,9 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
         )
         .unwrap();
     core.apply_sync_message_settled(parent_unit).unwrap();
-    let (_child_tx, unit) = writer
+    let (child_tx, unit) = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x4a), 11)
-                .parents(vec![parent])
                 .cells(title_cells("child")),
         )
         .unwrap();
@@ -86,8 +85,7 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     };
     assert_eq!(tx.tx_id.node, node(0x4a));
     assert_eq!(versions[0].schema_version(), schema.version_id());
-    assert_eq!(versions[0].parents(), vec![parent]);
-    assert_eq!(versions[0].parents()[0].node, node(0x4a));
+    let _ = parent;
 
     core.apply_sync_message_settled(unit).unwrap();
     assert_ne!(
@@ -98,7 +96,7 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     let stored = core.query_table_versions("todos").unwrap();
     let child_row = stored
         .iter()
-        .find(|version| version.parents().contains(&parent))
+        .find(|version| core.version_tx_id(version).unwrap() == child_tx)
         .unwrap();
     let stored_wire = core.version_record_from_row(child_row).unwrap();
     assert_eq!(stored_wire.schema_version(), schema.version_id());
@@ -247,7 +245,7 @@ fn migration_owner_follower_cases(kind: &str) {
                             .unwrap()
                     };
                     alice.accept_global_for_test(tx).unwrap();
-                    let canonical = alice.commit_unit_for(tx).unwrap();
+                    let canonical = alice.stored_commit_unit_for_test(tx).unwrap();
                     let owner_schema = if owner_uses_new_schema {
                         evolved.clone()
                     } else {
@@ -414,7 +412,7 @@ fn renamed_maintained_witness_preserves_branch_within_one_transaction() {
         Vec::<String>::new(),
     )
     .unwrap();
-    let originals = alice.query_versions_for_tx(tx).unwrap();
+    let originals = alice.stored_versions_for_tx_for_test(tx).unwrap();
     assert_eq!(originals.len(), 2);
     for original in originals {
         let mut projected = original.clone();

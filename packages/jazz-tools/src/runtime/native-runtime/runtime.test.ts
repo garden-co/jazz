@@ -5194,7 +5194,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     { name: "truncated record", provenanceBytes: encodedAuthorFixture().subarray(0, 4) },
     {
       name: "malformed UTF-8 subject",
-      provenanceBytes: encodedAuthorFixture(Uint8Array.of(2, 255)),
+      provenanceBytes: encodedAuthorFixture(Uint8Array.of(0, 255)),
     },
     { name: "ASCII-blank component", provenanceBytes: encodedAuthorFixture(inlineScalar(" ")) },
   ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
@@ -6937,7 +6937,7 @@ class FakeWebSocket {
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(2);
+  writer.u64(1);
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);
@@ -7555,7 +7555,7 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
 }
 
 function inlineScalar(value: string): Uint8Array {
-  return Uint8Array.from([2, ...new TextEncoder().encode(value)]);
+  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {

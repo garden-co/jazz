@@ -50,24 +50,7 @@ pub fn prepare_runtime_snapshot(
             target.schema.public_schema(),
         )
         .map_err(|error| error.to_string())?;
-        let new_tables = migration
-            .forward
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                LensOp::AddTable { table, .. } => Some(table.to_string()),
-                _ => None,
-            })
-            .collect();
-        let dropped_tables = migration
-            .forward
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                LensOp::RemoveTable { table, .. } => Some(table.to_string()),
-                _ => None,
-            })
-            .collect();
+        let (new_tables, dropped_tables) = migration.table_changes();
         incoming
             .entry(target.id)
             .or_default()

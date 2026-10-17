@@ -196,7 +196,6 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     accept_global(
         &mut core,
         MergeableCommit::new("documents", row(99), 305)
-            .parents(vec![document_txs[99]])
             .cells(BTreeMap::from([
                 ("updated_at".to_owned(), Value::U64(99)),
                 ("published".to_owned(), Value::Bool(false)),

@@ -35,11 +35,11 @@ where
     S: OrderedKvStorage,
 {
     let versions = node.query_table_versions(table).unwrap();
-    let mut local_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
-    let mut global_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut local_expected = BTreeMap::<RowUuid, TxId>::new();
+    let mut global_expected = BTreeMap::<RowUuid, TxId>::new();
     for version in &versions {
         let tx_id = node.version_tx_id(version).unwrap();
-        let key = (version.row_uuid(), version.layer());
+        let key = version.row_uuid();
         local_expected
             .entry(key)
             .and_modify(|winner| *winner = (*winner).max(tx_id))
@@ -55,32 +55,24 @@ where
         }
     }
 
-    for ((row_uuid, layer), expected_tx) in local_expected {
+    for (row_uuid, expected_tx) in local_expected {
         let actual = node
-            .query_local_layer_winner(table, row_uuid, layer)
+            .query_local_winner(table, row_uuid)
             .unwrap()
             .map(|winner| node.version_tx_id(&winner).unwrap());
         assert_eq!(
             actual,
             Some(expected_tx),
-            "local argmax winner must match stored versions for {table}/{row_uuid:?}/{layer:?}"
+            "local argmax winner must match stored versions for {table}/{row_uuid:?}"
         );
     }
 
-    let mut actual_global = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut actual_global = BTreeMap::<RowUuid, TxId>::new();
     let physical_table = node
         .physical_table_id_for_schema(node.catalogue.local_schema_version_id, table)
         .unwrap();
-    for (storage_table, layer) in [
-        (
-            physical_global_current_table_name(physical_table),
-            VersionLayer::Content,
-        ),
-        (
-            physical_register_global_current_table_name(physical_table),
-            VersionLayer::Deletion,
-        ),
-    ] {
+    {
+        let storage_table = physical_global_current_table_name(physical_table);
         for raw in node
             .database
             .primary_key_scan_raw(&storage_table, &[])
@@ -103,7 +95,7 @@ where
                     .unwrap(),
             );
             let tx_node = node.node_for_alias(tx_node_alias).unwrap();
-            actual_global.insert((row_uuid, layer), TxId::new(tx_time, tx_node));
+            actual_global.insert(row_uuid, TxId::new(tx_time, tx_node));
         }
     }
     assert_eq!(
@@ -187,14 +179,12 @@ fn schema() -> JazzSchema {
 fn global_winner_tx<S>(
     node: &mut NodeState<S>,
     table: &str,
-    row_uuid: RowUuid,
-    layer: VersionLayer,
-) -> Option<TxId>
+    row_uuid: RowUuid,) -> Option<TxId>
 where
     S: OrderedKvStorage,
 {
     let winner = node
-        .query_global_layer_winner(table, row_uuid, layer)
+        .query_global_winner(table, row_uuid)
         .unwrap()?;
     Some(node.version_tx_id(&winner).unwrap())
 }
@@ -209,14 +199,6 @@ where
         .primary_key_scan_raw(&physical_ahead_current_table_name(physical_table), &[])
         .unwrap()
         .len()
-        + node
-            .database
-            .primary_key_scan_raw(
-                &physical_register_ahead_current_table_name(physical_table),
-                &[],
-            )
-            .unwrap()
-            .len()
 }
 fn owner_policy_schema() -> JazzSchema {
     build_public_test_schema(
@@ -332,7 +314,7 @@ fn current_row_pair(row: CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {
 }
 fn version_record<V: Into<Value> + Clone>(
     row_uuid: RowUuid,
-    parents: Vec<TxId>,
+    _parents: Vec<TxId>,
     cells: BTreeMap<String, V>,
     deletion: Option<DeletionEvent>,
 ) -> VersionRecord {
@@ -341,14 +323,12 @@ fn version_record<V: Into<Value> + Clone>(
         &schema.tables[0],
         schema.version_id(),
         row_uuid,
-        parents,
         AuthorSubject::system_at(node(1)),
         1,
         AuthorSubject::system_at(node(1)),
         1,
         &cells,
-        deletion,
-    )
+        deletion,)
     .unwrap()
 }
 fn version_record_cells(record: &VersionRecord, table: &TableSchema) -> BTreeMap<String, Value> {
@@ -827,7 +807,7 @@ fn commit_and_oracle(
     commit: MergeableCommit,
 ) -> TxId {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let published = node.commit_mergeable(commit).unwrap();
@@ -847,7 +827,7 @@ fn commit_global_and_oracle(
     commit: MergeableCommit,
 ) -> (TxId, GlobalTime) {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
@@ -1158,7 +1138,7 @@ fn add_core_versions_to_oracle(
         if tx_id.node == node(9) && known_txs.insert(tx_id) {
             let table_schema = core.table(&version.table).unwrap().clone();
             let cells = version.cells(&table_schema).unwrap();
-            let parents = version.parents();
+            let parents = Vec::<TxId>::new();
             assert_eq!(
                 cells,
                 oracle.merged_cells_for_parents(version.row_uuid(), &parents),
@@ -1206,7 +1186,7 @@ fn add_commit_unit_versions_to_oracle(
 ) {
     for version in versions {
         let mut model = ModelRowVersion::new(version.row_uuid(), tx.tx_id, tx.tx_id.time);
-        model.parents = version.parents();
+        model.parents = Vec::new();
         model.cells = version_record_cells(version, table_schema);
         model.deletion = version.deletion();
         oracle.add_version(model);
@@ -1500,7 +1480,7 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let bundles_before = peer.metrics.version_bundles_out;
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
-    let update = peer.reset_current_rows(core, "todos").unwrap();
+    let update = peer.rehydrate_current_rows(core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = &update else {
         panic!("expected view update");
     };
@@ -1613,6 +1593,9 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let mut oracle = Oracle::new();
     let mut oracle_txs = BTreeSet::new();
     let mut exclusive_txs = Vec::new();
+    // Parents the harness delivers after their chained child, against the
+    // per-writer order the transport keeps (`INV-HIST-23`).
+    let mut late_parents = BTreeMap::new();
     let rows = [row(1), row(2), row(3)];
     let mut upstream = VecDeque::new();
     let mut fate_a = VecDeque::new();
@@ -1657,7 +1640,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 };
                 commits_started += 1;
                 let row_uuid = commit.row_uuid;
-                let parents = commit.parents.clone();
+                let parents: Vec<TxId> = Vec::new();
                 let cells = commit.cells.clone();
                 let deletion = commit.deletion;
                 let (published, message) = if use_writer_a {
@@ -1857,7 +1840,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit =
                     MergeableCommit::new("todos", parent_row, 1_300 + rng.choose(12) as u64)
-                        .parents(vec![parent_ref])
                         .made_by(made_by)
                         .cells(owner_cells_with_author(
                             owner,
@@ -1876,6 +1858,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 commits_started += 2;
                 oracle_txs.insert(parent_ref);
                 oracle_txs.insert(child_ref);
+                late_parents.insert(parent_ref, child_ref);
                 let SyncMessage::CommitUnit { tx, versions } = &parent_message else {
                     panic!("expected parent commit unit");
                 };
@@ -1922,6 +1905,20 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     let SyncMessage::FateUpdate { tx_id, .. } = &fate else {
                         panic!("core should only emit fate updates here");
                     };
+                    if let Some(child) = late_parents.get(tx_id)
+                        && matches!(
+                            core.transaction_state_settled(*child),
+                            Some((Fate::Accepted, ..))
+                        )
+                    {
+                        // The child reached Core first and was applied as
+                        // written; its parent arriving afterwards is never
+                        // applied over it.
+                        assert!(
+                            matches!(&fate, SyncMessage::FateUpdate { fate: Fate::Rejected(_), .. }),
+                            "seed {seed}: a parent delivered after its accepted child must be refused: {fate:?}"
+                        );
+                    }
                     record_fate_update_in_oracle(&mut oracle, &fate);
                     let queue = if tx_id.node == node(1) {
                         &mut fate_a
@@ -2002,7 +1999,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_a.len() as u64;
                     views_a.clear();
                     link_a = PeerState::client_link(author_a);
-                    views_a.push_back(link_a.reset_current_rows(&mut core, "todos").unwrap());
+                    views_a.push_back(link_a.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 } else {
                     drop(reader_b);
@@ -2011,7 +2008,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_b.len() as u64;
                     views_b.clear();
                     link_b = PeerState::client_link(author_b);
-                    views_b.push_back(link_b.reset_current_rows(&mut core, "todos").unwrap());
+                    views_b.push_back(link_b.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 }
             }
@@ -2110,10 +2107,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         assert!(
             node.parking.parked_commit_units.is_empty(),
             "seed {seed}: {name} parked commit units should drain before index checks"
-        );
-        assert!(
-            node.rejections.child_txs_by_parent.is_empty(),
-            "seed {seed}: {name} pending cascade edges should be pruned at quiescence"
         );
     }
     assert_exclusive_serialization_matches_oracle(

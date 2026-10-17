@@ -474,7 +474,8 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => graph_contains_point_scan(input),
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => graph_contains_point_scan(input),
         GraphBuilder::Union { inputs } => {
             inputs.iter().any(|input| graph_contains_point_scan(input))
         }
@@ -1214,9 +1215,9 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         same_tx_bundle.versions.iter().any(|version| {
             version.table() == "notes"
                 && version.row_uuid() == row(0)
-                && version.deletion().is_none()
+                && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
         }),
-        "same transaction carries the visible content version"
+        "same transaction carries one restored row image with its content"
     );
     assert!(
         same_tx_bundle.versions.iter().any(|version| {

@@ -310,7 +310,6 @@ pub struct VersionWitnessSchema {
     /// Updated-at HLC field.
     pub updated_at_field: String,
     /// Parent transaction set field.
-    pub parents_field: String,
     /// Nullable serialized set of explicitly authored user columns.
     pub authored_columns_field: String,
     /// Nullable deletion event field.
@@ -507,17 +506,6 @@ pub struct TypedOutputField {
     pub name: String,
     /// Field type.
     pub ty: ColumnType,
-}
-
-/// Ordered/ranked window terminal row schema.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WindowResultSchema {
-    /// Result membership row represented in the window.
-    pub result: ResultMembershipSchema,
-    /// Ordered order-by value fields retained for recomputation.
-    pub order_fields: Vec<TypedOutputField>,
-    /// Internal retained window-position witness, when needed by the graph.
-    pub position_witness_field: Option<String>,
 }
 
 /// Predicate-read fact schema.

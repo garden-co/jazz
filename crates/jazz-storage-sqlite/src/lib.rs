@@ -341,6 +341,14 @@ impl SqliteStorage {
         };
         let manifest = admission.manifest();
         if manifest != &source && manifest != &target {
+            // Preserve the typed codec-inventory refusal before reporting
+            // a receipt/layout mismatch at an otherwise known epoch.
+            let expected = if manifest.epoch() == source.epoch() {
+                &source
+            } else {
+                &target
+            };
+            expected.admit_existing(&manifest.encode()?)?;
             return Err(Error::InvalidStorageLayout(
                 "unsupported SQLite node manifest".into(),
             ));

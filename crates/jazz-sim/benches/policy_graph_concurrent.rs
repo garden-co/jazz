@@ -690,6 +690,7 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
         ColumnType::U16 => Value::U16(json_u64(value) as u16),
         ColumnType::U32 => Value::U32(json_u64(value) as u32),
         ColumnType::U64 => Value::U64(json_u64(value)),
+        ColumnType::U48 => Value::U48(json_u64(value)),
         ColumnType::I32 => {
             Value::I32(i32::try_from(json_i64(value)).expect("expected i32-range integer cell"))
         }
