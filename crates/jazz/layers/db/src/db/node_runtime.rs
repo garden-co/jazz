@@ -561,6 +561,30 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
+    /// Drop a caller-owned reserved publication before it can retain the node
+    /// lock past cancellation. Ordinary queued mutations keep their ownership.
+    pub(super) fn cancel_reserved_write(&self, tx_id: TxId) {
+        let operation = {
+            let mut queue = self.queued_mutations.borrow_mut();
+            queue
+                .iter()
+                .position(|operation| {
+                    operation.transaction.is_some_and(|(id, _)| id == tx_id)
+                        && operation.open_tx_id.is_none()
+                        && operation.status.is_none()
+                        && operation.completion.is_none()
+                })
+                .and_then(|index| queue.remove(index))
+        };
+        if let Some(operation) = operation {
+            // Drop the future outside the queue borrow: its guards may enqueue
+            // cleanup and must immediately release any suspended node lock.
+            drop(operation);
+            self.reserved_mutations.borrow_mut().remove(&tx_id);
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
     pub(super) fn enqueue_transaction_operation(
         &self,
         open_tx_id: OpenTransactionId,

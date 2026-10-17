@@ -2169,6 +2169,14 @@ where
         F: FnOnce(Self) -> Fut,
         Fut: Future<Output = Result<WriteHandle<S>, Error>> + 'static,
     {
+        struct CancelPublication(Option<Box<dyn FnOnce()>>);
+        impl Drop for CancelPublication {
+            fn drop(&mut self) {
+                if let Some(cancel) = self.0.take() {
+                    cancel();
+                }
+            }
+        }
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let publication = publish(self.clone_for_reserved_transaction(tx_id));
         let (sender, mut receiver) = futures::channel::oneshot::channel();
@@ -2181,11 +2189,16 @@ where
                 outcome
             }),
         );
+        let owner = Rc::clone(&self.node);
+        let mut cancellation = CancelPublication(Some(Box::new(move || {
+            owner.cancel_reserved_write(tx_id);
+        })));
         std::future::poll_fn(|context| {
             loop {
                 if let std::task::Poll::Ready(result) =
                     std::pin::Pin::new(&mut receiver).poll(context)
                 {
+                    cancellation.0.take();
                     return std::task::Poll::Ready(result.unwrap_or_else(|_| {
                         Err(Error::new(
                             ErrorCode::WriteRejected,
