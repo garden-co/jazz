@@ -133,7 +133,7 @@ export default defineConfig({
     // WebKit gives each browser file its own heavyweight WPE/WASM process.
     // Four concurrent files exceed practical memory pressure before exercising
     // product concurrency; the multi-tab suites below provide that coverage.
-    maxWorkers: browserName === "webkit" ? 1 : 2,
+    maxWorkers: browserName === "webkit" ? 1 : 4,
     browser: {
       enabled: true,
       provider: playwright(),
