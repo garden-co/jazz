@@ -48,7 +48,7 @@ Invariant digest:
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 - `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
 - `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. For a current read, Global/Ahead candidates first choose their single canonical winner; the compatibility boundary then removes that unrepresentable winner before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it. It MUST NOT fall back to an older compatible candidate. Unused enum occurrences remain undecoded and do not affect row visibility.
-- `INV-LOWER-30`: A table's declared composite indexes MUST be part of its `SchemaVersionId` (a distinct id domain used only when some table declares one, so plain schema ids never change) and its `v2` CATS schema envelope, and MUST lower to `by_physical_composite_v1_<column ids>` on both ahead-current and global-current tables keyed by `branch_key` then each indexed column in declared order; declaration order of distinct indexes is not identity.
+- `INV-LOWER-30`: A table's declared composite indexes MUST be part of its `SchemaVersionId` (a distinct id domain used only when some table declares one, so plain schema ids never change) and its stored catalogue schema, and MUST lower to `by_physical_composite_v1_<column ids>` on both ahead-current and global-current tables keyed by `branch_key` then each indexed column in declared order; declaration order of distinct indexes is not identity.
 
 ## Details
 
@@ -69,13 +69,47 @@ chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
 evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
 
 Lowered subscription installation selects Groove's prepared-shape lifetime.
-Private retained serving shapes transfer ownership to their bindings after a
-successful opening; their last binding releases the registration. Retained
-client-local installations keep the existing shared-shape policy. First-result
-reads keep explicit ownership of their private preparation and retire it on
-completion or cancellation. While binding is suspended, the Jazz installation
+Retained installations, client-local and trusted serving alike, use shared
+prepared shapes: subscribers with identical terminals bind one shape, and its
+last binding releases the registration. A trusted-serving binding source is
+shared across sessions: claim values bound as binding slots (including a
+policy's equality against a carried claim) are part of a session's binding key,
+and a claim the graph still inlines as a literal makes its terminals, and so
+its shape, distinct. Client-local sources stay scoped to the session's claims. First-result reads keep explicit ownership of their
+private preparation and retire it on completion or cancellation. While binding is suspended, the Jazz installation
 guard still owns a caller-owned preparation. This changes resource ownership,
 not query results, authorisation routing, or storage and wire encodings.
+
+A shared prepared program is only sound when every operator keeps bindings
+apart. Before a trusted-serving program is installed, the node checks its
+lowered graphs structurally against the binding routes the parameter domain
+declares (`route_discipline.rs`). A node depends on a route when a binding
+source for it lies below. Then:
+
+- every terminal delivers by every route its graph depends on;
+- a binding-dependent join input carries the routes it depends on, an inner
+  join keys on every route both inputs carry, and a semi or anti join keys on
+  every route its right input depends on;
+- aggregates, arg-max/min, windows and collect-by group on every route their
+  input depends on;
+- a lookup keyed by binding values depends on no route: its rows serve every
+  binding at once, and pairing them with a route is sound only on the
+  lookup's own key, which the check cannot yet identify;
+- recursive operators and streaming checksums depend on no route.
+
+A typed query template is checked as the declarative operators it was compiled
+from; one that cannot be expanded must depend on no route. Every program whose
+graphs read a binding source is checked, including one compiled without a
+source name (recursive and frontier policies seeded from claim slots).
+
+A program that breaks a rule is not shared: its binding source is renamed to a
+per-session, per-binding name, so it behaves exactly as a private preparation.
+A program that passes reads a binding source named after its own lowered
+graphs. Equal programs share it, and a program whose graph inlines a session's
+claims reads only its own bindings, never every session's of its signature.
+The check is the safety net; lowering paths that keep routes (closure joins
+key on routes both sides carry, include-deleted policy sources declare their
+routes) are what let a program share.
 
 ### 14.2 Schema → groove
 
@@ -234,14 +268,6 @@ projection is not a substitute for this internal carrier: it may omit the
 marker. Claim-routing fields remain routing inputs, not materialization output.
 Include-deleted decoding resolves the marker from the returned descriptor rather
 than inferring its position from the application schema (`INV-LOWER-19`).
-
-Live branch-view include-deleted sources compose content-backed rows with
-selected register-only tombstones. The sparse arm is application output only,
-not an authorization-subplan subject. It excludes physical content winners
-before compatibility omission and reuses the selected source's exact runtime
-carrier types and logical field identities, including bound enum registries,
-logical nullable wrappers and JSON semantic kinds. Only explicitly selected
-head/current-base sources participate; no implicit preimage lookup is added.
 
 There is one intended lowered-query core. That core takes an explicit **base
 source expression graph** (for example visible current rows for a table/tier,

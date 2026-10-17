@@ -19,6 +19,8 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output: Option<Arc<crate::records::PreparedRecordCopy>>,
+    /// Set on an `Arrange` node whose arrangement is read from storage.
+    pub(super) stored_arrangement: Option<Arc<stored_arrangement::StoredArrangementPlan>>,
     pub(super) aggregate_group_fields: Option<Arc<[String]>>,
 }
 
@@ -73,12 +75,16 @@ impl NodeState {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 }
                 let StaticScanBounds::Prefix(prefix) =
-                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                    persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 };
+                let candidate_index_id = input
+                    .durable_ids
+                    .candidate
+                    .ok_or(IvmRuntimeError::UnsupportedIndexCandidateFilter)?;
                 let StaticScanBounds::Prefix(candidate_prefix) =
-                    persisted_index_scan_bounds(&filter.table, &filter.index, Some(&filter.scan))?
+                    persisted_index_scan_bounds(candidate_index_id, Some(&filter.scan))?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 };
@@ -97,16 +103,17 @@ impl NodeState {
             }
             if !input.intersections.is_empty() {
                 let StaticScanBounds::Prefix(prefix) =
-                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                    persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
                 };
                 let intersections = input
                     .intersections
                     .iter()
-                    .map(|(index, scan)| {
+                    .zip(&input.durable_ids.intersections)
+                    .map(|((index, scan), index_id)| {
                         let StaticScanBounds::Prefix(prefix) =
-                            persisted_index_scan_bounds(&input.table, index, Some(scan))?
+                            persisted_index_scan_bounds(*index_id, Some(scan))?
                         else {
                             return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
                         };
@@ -124,8 +131,7 @@ impl NodeState {
             }
             let max_items = scan_max_items(input.scan.as_ref());
             return Ok(Some(
-                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
-                {
+                match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                     StaticScanBounds::Prefix(prefix) => {
                         if let Some(max_items) = max_items {
                             super::evaluation_session::StorageRequestKey::IndexedRowsPrefixLimit {
@@ -155,7 +161,7 @@ impl NodeState {
             ));
         }
         Ok(
-            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
+            match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                 StaticScanBounds::Prefix(prefix) => {
                     let max_items = scan_max_items(input.scan.as_ref());
                     Some(match max_items {
@@ -185,44 +191,64 @@ impl NodeState {
         )
     }
 
-    // Resolve each variant layout once for the batch, before projecting rows.
-    // A descriptor is interned, but constructing its fields is not free.
+    /// Group stored rows of `table` into logical table deltas, one per
+    /// variant. Each variant layout is resolved once for the batch. Every IVM
+    /// source that reads base rows from storage comes through here, so a
+    /// table's interned columns are resolved to their values (through
+    /// `dictionaries`) before any operator sees a record; tables without
+    /// interned columns keep their stored bytes as they are.
     pub(super) fn group_source_rows<'a>(
         table: &crate::schema::TableSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         rows: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-        let mut grouped = HashMap::<u32, TableDelta>::default();
+        let mut grouped =
+            HashMap::<u32, (TableDelta, Option<crate::records::RecordTranscoder>)>::default();
+        let mut registry = None;
         for stored in rows {
             let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let group = match grouped.entry(variant_tag) {
+            let (group, transcoder) = match grouped.entry(variant_tag) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let descriptor =
-                        table
-                            .record_schema_for_variant(variant_tag)
-                            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                                table: table.name.clone(),
-                                version: u64::from(variant_tag),
-                            })?;
-                    entry.insert(TableDelta {
-                        table: table.name.clone(),
-                        variant_tag,
-                        descriptor,
-                        deltas: Vec::new(),
-                    })
+                    let storage = table
+                        .storage_record_schema_for_variant(variant_tag)
+                        .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                            table: table.name.clone(),
+                            version: u64::from(variant_tag),
+                        })?;
+                    let transcoder = crate::records::RecordTranscoder::new(storage)?;
+                    let descriptor = transcoder
+                        .as_ref()
+                        .map_or(storage, crate::records::RecordTranscoder::logical);
+                    entry.insert((
+                        TableDelta {
+                            table: table.name.clone(),
+                            variant_tag,
+                            descriptor,
+                            deltas: Vec::new(),
+                        },
+                        transcoder,
+                    ))
                 }
             };
-            group.deltas.push(RecordDelta {
-                record: Bytes::copy_from_slice(payload),
-                weight: 1,
-            });
+            let record = match transcoder {
+                Some(transcoder) => {
+                    let registry = registry.get_or_insert_with(|| dictionaries.borrow());
+                    Bytes::from(crate::dictionary::transcode_to_logical(
+                        transcoder, registry, payload,
+                    )?)
+                }
+                None => Bytes::copy_from_slice(payload),
+            };
+            group.deltas.push(RecordDelta { record, weight: 1 });
         }
-        Ok(grouped.into_values().collect())
+        Ok(grouped.into_values().map(|(delta, _)| delta).collect())
     }
 
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -235,6 +261,7 @@ impl NodeState {
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
         let table_deltas = Self::group_source_rows(
             table_schema,
+            dictionaries,
             inputs
                 .rows(request)?
                 .iter()
@@ -252,6 +279,7 @@ impl NodeState {
     pub(super) fn update_index_source_from_inputs(
         input: &IndexSourceOp,
         schema: &DatabaseSchema,
+        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -266,6 +294,7 @@ impl NodeState {
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
             let table_deltas = Self::group_source_rows(
                 table_schema,
+                dictionaries,
                 rows.iter().map(|(_, stored)| stored.as_slice()),
             )?;
             return Self::update_table_source(
@@ -280,13 +309,16 @@ impl NodeState {
                 &table_deltas,
             );
         }
+        let prefix_len = durable_index_key_prefix(input.durable_ids.index).len();
         let deltas = rows
             .iter()
-            .map(|(_, record)| RecordDelta {
-                record: Bytes::copy_from_slice(record),
-                weight: 1,
+            .map(|(key, value)| {
+                Ok(RecordDelta {
+                    record: index_record_from_storage(prefix_len, key, value.to_vec())?,
+                    weight: 1,
+                })
             })
-            .collect();
+            .collect::<Result<_, IvmRuntimeError>>()?;
         Ok(RecordDeltas {
             descriptor: *output_desc,
             deltas,
@@ -443,8 +475,7 @@ impl NodeState {
                 ScanDirection::Forward
             };
             let scan =
-                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
-                {
+                match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                     StaticScanBounds::Prefix(prefix) => {
                         storage
                             .scan(ScanRequest {
@@ -471,11 +502,14 @@ impl NodeState {
                 };
             let mut scan = scan;
             let mut deltas = Vec::new();
+            let prefix_len = durable_index_key_prefix(input.durable_ids.index).len();
             while let Some(batch) = scan.next_batch().await? {
-                deltas.extend(batch.into_iter().map(|(_, record)| RecordDelta {
-                    record: Bytes::from(record),
-                    weight: 1,
-                }));
+                for (key, value) in batch {
+                    deltas.push(RecordDelta {
+                        record: index_record_from_storage(prefix_len, &key, value)?,
+                        weight: 1,
+                    });
+                }
             }
             return Ok(RecordDeltas {
                 descriptor: *output_desc,

@@ -43,18 +43,13 @@ impl PadHistoryFixture {
         let mut core =
             block_on(NodeState::new(node(), schema, storage)).expect("open pad-history node");
 
-        let mut parent = None;
         let mut newest_tx = None;
         for index in 0..depth {
-            let mut commit =
+            let commit =
                 MergeableCommit::new(TABLE, row(), 20_000_000 + index as u64).cells(cells(index));
-            if let Some(parent_tx) = parent {
-                commit = commit.parents(vec![parent_tx]);
-            }
             let publication = block_on(core.commit_mergeable(commit)).expect("commit pad edit");
             let tx_id = publication.tx_id();
             block_on(core.persist_and_settle_transaction(publication)).expect("persist pad edit");
-            parent = Some(tx_id);
             newest_tx = Some(tx_id);
         }
 
@@ -91,16 +86,18 @@ impl PadHistoryFixture {
             DurabilityTier::Local,
             self.newest_tx,
         );
+        // Pending edits fold into one overlay row per row, so the read cost
+        // no longer grows with the retained edit depth.
         assert_eq!(
             metrics.ahead_current_rows.reads,
-            self.depth,
-            "{:?} the pad read must scan exactly its retained edit depth: {metrics:?}",
+            1,
+            "{:?} the pad read must read one folded overlay row: {metrics:?}",
             DurabilityTier::Local,
         );
         assert_eq!(
             metrics.ahead_current_rows.ranges,
-            2,
-            "{:?} the pad read must scan content and deletion ahead-current ranges: {metrics:?}",
+            1,
+            "{:?} the pad read must scan one ahead-current range (deletion is a row cell): {metrics:?}",
             DurabilityTier::Local,
         );
     }

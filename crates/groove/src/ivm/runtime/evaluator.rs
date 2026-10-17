@@ -2,6 +2,8 @@
 
 use super::*;
 mod kernels;
+mod lookup;
+pub(super) use lookup::LookupState;
 
 // Test-only work receipt: output equivalence alone cannot detect accidental
 // reintroduction of a full ancestor traversal for each ready queue slot.
@@ -99,6 +101,27 @@ pub(super) enum OperatorState {
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
     StreamingChecksum(Box<StreamingChecksumOperatorState>),
+    Lookup(AsOf<LookupState, SubTick>),
+}
+
+/// Memory held by grouped operator state (arg-max/min, top-by, collect).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct OperatorStateFootprint {
+    pub(super) groups: usize,
+    pub(super) rows: usize,
+    pub(super) encoded_bytes: usize,
+}
+
+impl OperatorState {
+    /// The grouped state's footprint, if this operator keeps grouped state.
+    pub(super) fn grouped_footprint(&self) -> Option<OperatorStateFootprint> {
+        match self {
+            Self::ArgBy(groups) => Some(groups.value().footprint()),
+            Self::TopBy(state) => Some(state.value().groups.footprint()),
+            Self::CollectBy(state) => Some(state.groups.footprint()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -435,6 +458,29 @@ impl SparseGroups {
         self.overlay = Rc::default();
     }
 
+    /// Groups, positive rows and their encoded bytes: group keys, sort
+    /// values and row bytes, rows measured like
+    /// `ArrangementState::encoded_bytes`.
+    pub(super) fn footprint(&self) -> OperatorStateFootprint {
+        let mut footprint = OperatorStateFootprint::default();
+        for key in self.present_keys() {
+            let Some(group) = self.get(key) else {
+                continue;
+            };
+            footprint.groups += 1;
+            footprint.encoded_bytes += key.len();
+            for ((sort, row), weight) in group.iter() {
+                if *weight > 0 {
+                    footprint.rows += 1;
+                    footprint.encoded_bytes += row.len();
+                    footprint.encoded_bytes +=
+                        sort.iter().map(TopBySortPart::encoded_len).sum::<usize>();
+                }
+            }
+        }
+        footprint
+    }
+
     /// Present group keys in ascending order: untouched base keys merged
     /// with staged insertions, skipping staged removals.
     fn present_keys(&self) -> impl Iterator<Item = &[u8]> {
@@ -733,6 +779,7 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
+        OpType::Lookup(_) => OperatorState::Lookup(AsOf::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -923,6 +970,7 @@ pub(super) struct FrameInputs<'a> {
 
 pub(super) struct TickEvaluator<'a> {
     pub(super) schema: &'a DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
@@ -953,6 +1001,7 @@ pub(super) struct TickEvaluator<'a> {
 /// This avoids giving recursion ownership of the whole [`IvmRuntime`].
 pub(super) struct GraphRuntimeView<'a> {
     pub(super) schema: &'a DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
@@ -977,6 +1026,7 @@ pub(super) struct GraphRuntimeView<'a> {
 #[allow(clippy::too_many_arguments)]
 fn graph_runtime_view<'a>(
     schema: &'a DatabaseSchema,
+    dictionaries: &'a crate::dictionary::SharedDictionaries,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
@@ -999,6 +1049,7 @@ fn graph_runtime_view<'a>(
 ) -> GraphRuntimeView<'a> {
     GraphRuntimeView {
         schema,
+        dictionaries,
         graph,
         variant_projections,
         table_deltas,
@@ -1031,6 +1082,7 @@ impl GraphRuntimeView<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
@@ -1081,6 +1133,7 @@ impl GraphRuntimeView<'_> {
         }
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas,
@@ -1124,6 +1177,7 @@ impl GraphRuntimeView<'_> {
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
+            dictionaries: self.dictionaries,
             graph: self.graph,
             variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
@@ -1890,7 +1944,26 @@ impl TickEvaluator<'_> {
                 scope: self.context.scope,
                 input: node,
             };
-            !self.arrangement_states.contains_key(&key)
+            // A stored arrangement may not hold every bucket, so a rebuild
+            // that scans all of them must rebuild it too. One probed by
+            // another input's keys is read from storage instead.
+            self.arrangement_states.get(&key).is_none_or(|state| {
+                self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
+                    && state.value().probe_plan().is_some()
+                    && self.stored_arrangement_is_scanned(node)
+            })
+        } else if matches!(
+            self.graph.node(node).map(|node| &node.descriptor.operator),
+            Some(OpType::Lookup(_))
+        ) && self.context.eval_mode == EvalMode::Hydrate
+        {
+            // A lookup's records are reusable only with the key set and
+            // matched rows that maintain them.
+            let key = self.operator_key(node);
+            !matches!(
+                self.operator_states.get(&key),
+                Some(OperatorState::Lookup(state)) if state.as_of().is_some()
+            )
         } else {
             false
         };
@@ -2027,7 +2100,7 @@ impl TickEvaluator<'_> {
         result
     }
 
-    fn compute_filter(
+    pub(super) fn compute_filter(
         &mut self,
         node: NodeId,
         filter: &FilterOp,
@@ -2087,7 +2160,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn compute_projection(
+    pub(super) fn compute_projection(
         &mut self,
         node: NodeId,
         project: &MapProjectOp,
@@ -2197,6 +2270,12 @@ impl TickEvaluator<'_> {
                     let mut inputs = smallvec::SmallVec::<[Arc<RecordDeltas>; 2]>::new();
                     for input in &graph_node.descriptor.inputs {
                         inputs.push(self.update_node(*input).await?);
+                    }
+                    // Without a session, a kernel cannot load stored buckets.
+                    // Boxed: this driver recurses, and an inline storage scan
+                    // would grow every frame of it.
+                    if self.evaluation_inputs.is_none() {
+                        Box::pin(self.prefetch_stored_inputs(node)).await?;
                     }
                     self.compute_batch(node, &inputs)
                 }
@@ -2356,6 +2435,9 @@ impl TickEvaluator<'_> {
             }
             OpType::IndexSource(input) => {
                 tables.insert(input.table);
+            }
+            OpType::Lookup(input) => {
+                tables.insert(input.source.table);
             }
             OpType::BindingSource(input) => {
                 bindings.insert(input.key);
@@ -3099,6 +3181,11 @@ impl TickEvaluator<'_> {
                 }
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -3233,6 +3320,11 @@ impl TickEvaluator<'_> {
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -3257,7 +3349,7 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn arrangement_key(
+    pub(super) fn arrangement_key(
         &mut self,
         input: NodeId,
         descriptor: RecordDescriptor,
@@ -3283,7 +3375,11 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn join_field_names(&mut self, node: NodeId, join: &JoinOp) -> (Arc<[String]>, Arc<[String]>) {
+    pub(super) fn join_field_names(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+    ) -> (Arc<[String]>, Arc<[String]>) {
         let meta = self.node_meta.entry(node).or_default();
         let left = meta
             .join_left_fields
@@ -3361,7 +3457,7 @@ impl TickEvaluator<'_> {
         );
     }
 
-    fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
+    pub(super) fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
         SubTick {
             tick: self.current_tick,
             // Root-scope arrangements represent table time, not recursive
@@ -3450,6 +3546,7 @@ impl TickEvaluator<'_> {
                 recursive_as_of.value_mut(),
                 super::recursion::HydrationRecomputeContext {
                     schema: self.schema,
+                    dictionaries: self.dictionaries,
                     graph: self.graph,
                     variant_projections: self.variant_projections,
                     inputs: self.evaluation_inputs.as_deref_mut(),
@@ -3483,6 +3580,7 @@ impl TickEvaluator<'_> {
             };
             let mut runtime = graph_runtime_view(
                 self.schema,
+                self.dictionaries,
                 self.graph,
                 self.variant_projections,
                 self.table_deltas,
@@ -3538,6 +3636,7 @@ impl TickEvaluator<'_> {
             recursive_as_of.value_mut(),
             graph_runtime_view(
                 self.schema,
+                self.dictionaries,
                 self.graph,
                 self.variant_projections,
                 self.table_deltas,
@@ -3798,7 +3897,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn materialize_indirect_fields(
+    pub(super) fn materialize_indirect_fields(
         &mut self,
         input: &Arc<RecordDeltas>,
         fields: &BTreeSet<String>,

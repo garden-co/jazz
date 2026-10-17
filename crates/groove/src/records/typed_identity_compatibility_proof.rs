@@ -182,14 +182,26 @@ fn identity_only_codec_change_changes_aggregate_identity_and_flat_join_preimage(
 
 #[test]
 fn physical_index_spelling_changes_the_durable_key_namespace() {
-    use crate::ivm::runtime::durable_index_key_prefix;
-    // Exact formats from both revisions of Jazz physical/catalogue.rs.
+    use crate::ivm::runtime::{IndexIdRegistry, durable_index_key_prefix};
+    use crate::schema::IndexSchema;
+    // Exact index names from both revisions of Jazz physical/catalogue.rs.
+    // Durable entries are keyed by a numeric id registered per
+    // (table, index name, definition), so a respelled index never shares the
+    // old spelling's key namespace.
     let table = "jazz_1_global_current";
-    let contained = durable_index_key_prefix(table, "by_physical_app_v1_7");
-    let typed = durable_index_key_prefix(table, "by_physical_user_v1_7");
+    let mut registry = IndexIdRegistry::default();
+    let contained = registry.resolve(
+        table,
+        &IndexSchema::new("by_physical_app_v1_7", ["_app_owner"]),
+    );
+    let typed = registry.resolve(
+        table,
+        &IndexSchema::new("by_physical_user_v1_7", ["_app_owner"]),
+    );
     assert_ne!(contained, typed);
-    assert_eq!(contained, b"jazz_1_global_current\0by_physical_app_v1_7\0");
-    assert_eq!(typed, b"jazz_1_global_current\0by_physical_user_v1_7\0");
+    let contained = durable_index_key_prefix(contained);
+    let typed = durable_index_key_prefix(typed);
+    assert!(!contained.starts_with(&typed) && !typed.starts_with(&contained));
 }
 
 #[test]
@@ -203,21 +215,21 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         ),
     ]);
     let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
-    // Existing Jazz durable golden, unchanged from the contained implementation.
+    // Current kind-specific encoding; the historical universal-node codec is
+    // retained below to verify that schema semantics and row bytes agree.
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
-        "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
+        "93f42a44ed3c7851826440336a7c284a76efea4efeed20ea50aba29ce2d37fa0"
     );
-    assert_eq!(
-        encoded,
-        contained::encode_record_descriptor(&descriptor).unwrap()
-    );
+    let historical = contained::encode_record_descriptor(&descriptor).unwrap();
+    assert_ne!(encoded, historical);
+    assert!(decode_persisted_record_descriptor(&historical).is_err());
     assert_eq!(
         decode_persisted_record_descriptor(&encoded).unwrap(),
         descriptor
     );
     assert_eq!(
-        contained::decode_record_descriptor(&encoded).unwrap(),
+        contained::decode_record_descriptor(&historical).unwrap(),
         descriptor
     );
     let mut trailing = encoded.clone();
@@ -240,10 +252,9 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         ))])])
         .unwrap();
     let encoded = encode_persisted_record_descriptor(&parent).unwrap();
-    assert_eq!(
-        encoded,
-        contained::encode_record_descriptor(&parent).unwrap()
-    );
+    let historical = contained::encode_record_descriptor(&parent).unwrap();
+    assert_ne!(encoded, historical);
+    assert!(decode_persisted_record_descriptor(&historical).is_err());
     let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
     assert_ne!(decoded, parent); // executable bindings are deliberately absent
     assert_eq!(
@@ -257,7 +268,7 @@ fn canonical_persisted_descriptor_preserves_frozen_names_and_nested_value_bytes(
         raw
     );
     assert_eq!(
-        contained::decode_record_descriptor(&encoded).unwrap(),
+        contained::decode_record_descriptor(&historical).unwrap(),
         decoded
     );
 }

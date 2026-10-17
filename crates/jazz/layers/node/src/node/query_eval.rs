@@ -59,8 +59,8 @@ use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
     ProgramFactEntry, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RelationEdgeEntry,
-    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
-    ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, ShapeAst,
+    ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -75,6 +75,7 @@ mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
+mod subscription_watermarks;
 mod unavailable_inputs;
 
 pub use local_availability_receipts::{
@@ -91,16 +92,6 @@ use query_result_rows::{
     aggregate_output_schema, aggregate_query_row_uuid, aggregate_record_field_index,
     aggregate_result_table, compare_optional_values, sort_aggregate_rows,
 };
-
-#[cfg(test)]
-pub fn exact_known_state_declaration_for_test(
-    shape_id: ShapeId,
-    subscription: SubscriptionKey,
-    values: &[Value],
-    refs: Vec<RowVersionRef>,
-) -> Option<KnownStateDeclaration> {
-    exact_known_state_declaration_if_within_limits(shape_id, subscription, values, refs)
-}
 
 pub const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -237,6 +228,9 @@ pub fn take_required_sink_deltas(
 }
 
 mod lowering;
+mod route_discipline;
+#[cfg(test)]
+pub(crate) use route_discipline::take_scoped_binding_sources_for_test;
 
 use lowering::*;
 pub use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
@@ -533,7 +527,11 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
-        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
+        // A branch view's layers are masked before their predicates (SPEC 4
+        // §4.7), so an index bounds each of its content layers for a one-shot
+        // read as much as for a maintained one.
+        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView)
+            || matches!(read_view.source, ReadViewSourceSpec::BranchView { .. });
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
             binding,
@@ -638,8 +636,8 @@ where
         Ok(Some((program, exhausted)))
     }
 
-    /// Match the content scan's raw UUID prefix. Looking up deletion winners
-    /// for just these candidates preserves the anti-join after the cap.
+    /// Match the content scan's raw UUID prefix. Reading deletion winners from
+    /// exactly the same capped entries preserves the anti-join after the cap.
     async fn bounded_deletion_register_for_uuid_page(
         &mut self,
         shape: &ValidatedQuery,
@@ -654,7 +652,6 @@ where
                 "UUID page probe has no physical table mapping",
             ))?;
         let content_table = physical_global_current_table_name(mapping.table_id);
-        let register_table = physical_register_global_current_table_name(mapping.table_id);
         let branch = Value::Bytes(BranchKey::default().canonical_bytes());
         let scan = StaticScanSpec::PrefixLimit {
             prefix: vec![LiteralValue::from(branch.clone())],
@@ -668,7 +665,7 @@ where
         let candidates = self
             .database
             .query_graph(
-                GraphBuilder::variant_source_scan(content_table.clone(), projection, scan)
+                GraphBuilder::variant_source_scan(content_table.clone(), projection, scan.clone())
                     .project(["row_uuid"]),
             )
             .await
@@ -705,26 +702,15 @@ where
         } else {
             false
         };
-        let mut registers = Vec::with_capacity(candidates.deltas.len());
-        for row_uuid in row_uuids {
-            if let Some(register) = self
-                .database
-                .primary_key_get_raw(&register_table, &[branch.clone(), Value::Uuid(row_uuid)])
-                .await
-                .map_err(Error::Groove)?
-            {
-                registers.push(register.raw().to_vec());
-            }
-        }
-        let descriptor = self
-            .database
-            .table_schema(&register_table)
-            .map_err(Error::Groove)?
-            .record_schema();
-        Ok((
-            GraphBuilder::inline_records(descriptor, registers),
-            exhausted,
-        ))
+        // Deletion markers live on the content rows themselves, so the
+        // register reads the same capped primary-key entries as the content
+        // source through the winner projection, which needs only system
+        // fields.
+        let register = self
+            .physical_global_marker_page_graph(shape.schema_version(), &shape.query().table, scan)?
+            .project_fields(register_storage_fields_for_query_engine(""))
+            .filter(PredicateExpr::is_not_null("_deletion"));
+        Ok((register, exhausted))
     }
 
     /// A UUID beyond the requested page, or an exhausted physical prefix,
@@ -943,7 +929,6 @@ where
                     "ordered page probe has no order column mapping",
                 ))?;
         let content_table = physical_global_current_table_name(mapping.table_id);
-        let register_table = physical_register_global_current_table_name(mapping.table_id);
         let index = physical_current_composite_index_name(&[column_id, order_column_id]);
         let branch = Value::Bytes(BranchKey::default().canonical_bytes());
         let scan_prefix = std::iter::once(branch.clone())
@@ -996,32 +981,29 @@ where
         let exhausted = row_uuids.len() < cap
             && self
                 .database
-                .query_graph(GraphBuilder::index_scan(content_table, index, scan))
+                .query_graph(GraphBuilder::index_scan(
+                    content_table,
+                    index.clone(),
+                    scan.clone(),
+                ))
                 .await
                 .map_err(Error::Groove)?
                 .deltas
                 .len()
                 < cap;
-        let mut registers = Vec::with_capacity(row_uuids.len());
-        for row_uuid in row_uuids {
-            if let Some(register) = self
-                .database
-                .primary_key_get_raw(&register_table, &[branch.clone(), Value::Uuid(row_uuid)])
-                .await
-                .map_err(Error::Groove)?
-            {
-                registers.push(register.raw().to_vec());
-            }
-        }
-        let descriptor = self
-            .database
-            .table_schema(&register_table)
-            .map_err(Error::Groove)?
-            .record_schema();
-        Ok((
-            GraphBuilder::inline_records(descriptor, registers),
-            exhausted,
-        ))
+        // Deletion markers live on the content rows themselves, so the
+        // register reads the same capped composite index entries through the
+        // winner projection, which needs only system fields.
+        let register = self
+            .physical_global_marker_index_graph(
+                shape.schema_version(),
+                &shape.query().table,
+                index,
+                scan,
+            )?
+            .project_fields(register_storage_fields_for_query_engine(""))
+            .filter(PredicateExpr::is_not_null("_deletion"));
+        Ok((register, exhausted))
     }
 
     /// Probe an ordered current index a page at a time. The query graph still
@@ -1207,6 +1189,7 @@ where
         param_types: &BTreeMap<String, ColumnType>,
         claim_params: &BTreeMap<String, ProgramClaimParam>,
         identity: AuthorSubject,
+        shared_serving: bool,
     ) -> Option<String> {
         let source = query_binding_source_shape_for_parts_if_needed(param_types, claim_params)?;
         if identity == AuthorSubject::SYSTEM {
@@ -1220,6 +1203,10 @@ where
             .any(|claim| !groove::records::collect_by_ordered_scalar(&claim.ty))
         {
             Some(self.effective_session_claim_scope_key(identity))
+        } else if shared_serving {
+            // Trusted serving routes scalar claim slots per binding, so
+            // sessions share one source and differ only in their bindings.
+            None
         } else {
             self.active_session_claim_scope_key(identity)
         };
@@ -1254,6 +1241,7 @@ where
                     shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1294,6 +1282,7 @@ where
                     shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1353,8 +1342,12 @@ where
                 &mut claim_params,
             )?;
         }
-        let source_shape =
-            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
+        let source_shape = self.query_binding_source_shape_for_identity(
+            shape.params(),
+            &claim_params,
+            identity,
+            false,
+        );
         if let Some(source_shape) = &source_shape {
             if use_prepared_binding_source
                 && !input_shape.reachable_contributions.is_empty()
@@ -1449,6 +1442,7 @@ where
                     lowered_shape.params(),
                     &claim_params,
                     identity,
+                    false,
                 ),
                 BTreeMap::new(),
                 claim_params,
@@ -1677,6 +1671,7 @@ where
                     shape.params(),
                     &binding_claim_params,
                     identity,
+                    !client_local,
                 )
             })
             .flatten();
@@ -1691,6 +1686,27 @@ where
                 binding,
                 &binding_claim_params,
             )?;
+        }
+        // Prepared binding-source names are runtime identities.  On a client,
+        // equal author identities may hold distinct authenticated sessions:
+        // give their claim scopes separate source identities so a later
+        // session cannot replace an already-maintained sibling binding.
+        //
+        // Trusted serving shares one source across sessions. Claim values
+        // bound as slots are part of a session's binding key, so sessions
+        // with different claims hold different bindings of one shared graph;
+        // a claim still inlined as a literal makes the graph itself distinct.
+        // A per-session name would give every connected user a private copy
+        // of the whole compiled program and its IVM graph (#4017). Payload
+        // claims cannot be route slots, so they keep a session scope even
+        // when serving; `query_binding_source_shape_for_identity` applies both
+        // rules.
+        if crate::debug_env::covered_input_trace() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=program_scope identity={identity:?} mode={authorization_mode:?} prepared={use_prepared_binding_source} source_shape={source_shape:?} strips_policy_branches={strips_policy_branches} query_policy_branches={} query_includes={} policy={policy:?}",
+                shape.query().policy_branches.len(),
+                shape.query().includes.len(),
+            );
         }
         let root_has_read_policy = self
             .table_in_schema_ref(&shape.query().table, shape.schema_version())?
@@ -2617,8 +2633,12 @@ where
             let input_shape = self.normalized_row_set_shape(shape, binding)?;
             binding_claim_params_for_shape(&input_shape, shape.params())
         };
-        let source_shape =
-            self.query_binding_source_shape_for_identity(shape.params(), &claim_params, identity);
+        let source_shape = self.query_binding_source_shape_for_identity(
+            shape.params(),
+            &claim_params,
+            identity,
+            false,
+        );
         Ok(source_shape.map(|source_shape| format!("{source_shape}:client-local")))
     }
 
@@ -2902,188 +2922,68 @@ where
         self.bounded_historical_current_rows(table, position).await
     }
 
-    async fn bounded_global_change_records_at(
-        &mut self,
-        table: &str,
-        position: GlobalTime,
-    ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
-        if position.0 == u64::MAX {
-            Ok(self
-                .database
-                .index_scan_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                    ],
-                )
-                .await?)
-        } else {
-            Ok(self
-                .database
-                .index_scan_range_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(0),
-                    ],
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(position.0 + 1),
-                    ],
-                )
-                .await?)
-        }
-    }
-
+    /// Global rows of `table` as of seq `position`: a row whose latest
+    /// accepted seq is at or below the cut reads current; a newer row seeks
+    /// its history for the newest accepted image at or below the cut.
     async fn bounded_historical_current_rows(
         &mut self,
         table: &str,
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table(table)?.clone();
-        let mut rows_by_uuid = BTreeMap::<
-            RowUuid,
-            (
-                Option<(TxTime, NodeAlias)>,
-                Option<(TxTime, NodeAlias, Option<DeletionEvent>)>,
-            ),
-        >::new();
-        for raw in self
-            .bounded_global_change_records_at(table, position)
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let current_table = physical_global_current_table_name(table_id);
+        let branch = BranchKey::default();
+        let records = self
+            .database
+            .primary_key_scan_raw(&current_table, &[Value::Bytes(branch.canonical_bytes())])
             .await?
-        {
-            let record = raw.record();
-            let row_uuid = RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?);
-            let layer = record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?;
-            let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-            let tx_node = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            let deletion = record
-                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
-                .transpose()?;
-            let entry = rows_by_uuid.entry(row_uuid).or_insert((None, None));
-            if layer == version_layer_string(VersionLayer::Content).as_bytes() {
-                if entry.0.is_none_or(|current| (tx_time, tx_node) > current) {
-                    entry.0 = Some((tx_time, tx_node));
-                }
-            }
-            if entry.1.is_none_or(|(current_time, current_node, _)| {
-                (tx_time, tx_node) > (current_time, current_node)
-            }) {
-                entry.1 = Some((tx_time, tx_node, deletion));
-            }
-        }
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
         let mut rows = Vec::new();
-        for (row_uuid, (content, latest_event)) in rows_by_uuid {
-            let Some((_, _, latest_deletion)) = latest_event else {
-                continue;
+        for record in records {
+            let record = record.borrowed();
+            let row_uuid = RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?);
+            let seq = record
+                .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .unwrap_or(0);
+            let version = if seq <= position.0 {
+                let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+                let tx_node =
+                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+                self.query_version_by_alias(table, row_uuid, tx_time, tx_node)
+                    .await?
+                    .ok_or(Error::InvalidStoredValue(
+                        "historical row winner is missing",
+                    ))?
+            } else {
+                let mut best: Option<(GlobalTime, VersionRow)> = None;
+                for version in self
+                    .query_row_versions_in_branch(table, &branch, row_uuid)
+                    .await?
+                {
+                    let tx_id = self.version_tx_id(&version)?;
+                    let Some((_, Some(seq), _)) = self.query_transaction_state(tx_id).await? else {
+                        continue;
+                    };
+                    if seq <= position && best.as_ref().is_none_or(|(best, _)| *best < seq) {
+                        best = Some((seq, version));
+                    }
+                }
+                let Some((_, version)) = best else {
+                    continue;
+                };
+                version
             };
-            if latest_deletion == Some(DeletionEvent::Deleted) {
+            if version.is_deleted() {
                 continue;
             }
-            let Some((tx_time, tx_node_alias)) = content else {
-                continue;
-            };
-            let version = self
-                .query_version_by_alias(
-                    table,
-                    row_uuid,
-                    VersionLayer::Content,
-                    tx_time,
-                    tx_node_alias,
-                )
-                .await?
-                .ok_or(Error::InvalidStoredValue(
-                    "historical content winner is missing",
-                ))?;
             rows.push(self.current_row_from_materialized_version(&table_schema, &version)?);
         }
         sort_current_rows(&mut rows);
         Ok(rows)
-    }
-    #[allow(dead_code)]
-    async fn historical_content_witness_at(
-        &mut self,
-        table: &str,
-        read_schema: SchemaVersionId,
-        row_uuid: RowUuid,
-        position: GlobalTime,
-    ) -> Result<Option<TxId>, Error> {
-        let mut content = None::<(TxTime, NodeAlias)>;
-        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
-        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
-        let raw_records = if position.0 == u64::MAX {
-            self.database
-                .index_scan_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                    ],
-                )
-                .await?
-        } else {
-            self.database
-                .index_scan_range_raw(
-                    "jazz_global_changes",
-                    "by_table_global_time",
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(0),
-                    ],
-                    &[
-                        Value::U64(table_id.0),
-                        Value::Bytes(BranchKey::default().canonical_bytes()),
-                        Value::U64(position.0 + 1),
-                    ],
-                )
-                .await?
-        };
-        for raw in raw_records {
-            let record = raw.record();
-            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
-                continue;
-            }
-            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
-                == version_layer_string(VersionLayer::Content).as_bytes()
-                && content.is_none_or(|current| (time, alias) > current)
-            {
-                content = Some((time, alias));
-            }
-            let deletion = record
-                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
-                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
-                .transpose()?;
-            if latest_event.is_none_or(|(current_time, current_alias, _)| {
-                (time, alias) > (current_time, current_alias)
-            }) {
-                latest_event = Some((time, alias, deletion));
-            }
-        }
-        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
-            return Ok(None);
-        }
-        let Some((time, alias)) = content else {
-            return Ok(None);
-        };
-        let node = self
-            .node_aliases
-            .node_for_alias(alias)
-            .ok_or(Error::InvalidStoredValue(
-                "historical content witness node alias is missing",
-            ))?;
-        Ok(Some(TxId::new(time, node)))
     }
     async fn query_relation_snapshot_in_authorization_mode(
         &mut self,
@@ -3198,8 +3098,7 @@ where
         let table_id = self.physical_table_id_for_schema(result_schema, result_table)?;
         for version in versions.iter().rev() {
             if version.row_uuid() == row_uuid
-                && !version.is_register_record()
-                && version.deletion().is_none()
+                && !version.is_deleted()
                 && self.physical_table_id_for_version(version)? == table_id
             {
                 return Ok(Some(version));
@@ -3895,6 +3794,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        self.ensure_tx_aggregate_read_precedes_writes(tx_id, shape)?;
         let narrowing =
             self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
@@ -3923,37 +3823,25 @@ where
                 &program,
             )
             .await?;
-        let predicate_read = PredicateRead {
-            table: shape.query().table.clone(),
-            shape_id: shape.shape_id(),
-            shape: shape.query().clone(),
-            binding_id: binding.binding_id(),
-            binding_values: binding.values().clone(),
-        };
-        let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.push(predicate_read);
-        if shape.query().aggregate.is_none() {
-            // Prove every row the relation returns, root and included alike.
-            let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
-            for row in &snapshot.rows {
-                returned
-                    .entry(row.table().to_owned())
-                    .or_default()
-                    .push(row.row_uuid());
-            }
-            for (table, rows) in returned {
-                self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
-                    .await?;
-            }
-        } else {
-            self.record_tx_aggregate_input_reads(
-                tx_id,
-                shape,
-                binding,
-                identity,
-                authorization_mode,
-            )
-            .await?;
+        if shape.query().aggregate.is_some() {
+            // An aggregate's relation snapshot is its result rows.
+            self.record_tx_aggregate_read(tx_id, shape, binding, &snapshot.rows)?;
+            return Ok(snapshot);
+        }
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(predicate_read_without_result(shape, binding));
+        // Prove every row the relation returns, root and included alike.
+        let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
+        for row in &snapshot.rows {
+            returned
+                .entry(row.table().to_owned())
+                .or_default()
+                .push(row.row_uuid());
+        }
+        for (table, rows) in returned {
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
+                .await?;
         }
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
@@ -3970,6 +3858,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        self.ensure_tx_aggregate_read_precedes_writes(tx_id, shape)?;
         let query = shape.query();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let narrowing =
@@ -4001,33 +3890,24 @@ where
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)?
         };
-        let predicate_read = PredicateRead {
-            table: query.table.clone(),
-            shape_id: shape.shape_id(),
-            shape: shape.query().clone(),
-            binding_id: binding.binding_id(),
-            binding_values: binding.values().clone(),
-        };
-        let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.push(predicate_read);
-        if query.aggregate.is_none() {
-            let root_rows = rows
-                .iter()
-                .filter(|row| row.table() == query.table)
-                .map(CurrentRow::row_uuid)
-                .collect::<Vec<_>>();
-            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
-                .await?;
-        } else {
-            self.record_tx_aggregate_input_reads(
-                tx_id,
-                shape,
-                binding,
-                identity,
-                authorization_mode,
-            )
-            .await?;
+        if query.aggregate.is_some() {
+            self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
+            self.record_tx_aggregate_read(tx_id, shape, binding, &rows)?;
+            if query.array_subqueries.is_empty() {
+                self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            }
+            return Ok(rows);
         }
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(predicate_read_without_result(shape, binding));
+        let root_rows = rows
+            .iter()
+            .filter(|row| row.table() == query.table)
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>();
+        self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
+            .await?;
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -4037,41 +3917,49 @@ where
         Ok(rows)
     }
 
-    /// Prove the rows an exclusive aggregate read consumed. An aggregate
-    /// returns no rows to prove, so the transaction also reads the aggregate's
-    /// input rows; the authority validates the aggregate against them
-    /// (garden-co/jazz#3694).
-    async fn record_tx_aggregate_input_reads(
+    /// Record an aggregate read by the result it returned
+    /// (`jazz.aggregate-read-result.v1`, garden-co/jazz#3768). The
+    /// transaction observed only that result, so it records neither the rows
+    /// the aggregate consumed nor the narrowed reads of its joined sources:
+    /// the authority re-runs the aggregate as the transaction's permission
+    /// subject and conflicts iff the result differs.
+    fn record_tx_aggregate_read(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorSubject,
-        authorization_mode: QueryAuthorizationMode,
+        rows: &[CurrentRow],
     ) -> Result<(), Error> {
-        let Some(input) = shape.query().aggregate_input() else {
-            return Ok(());
-        };
-        if !self.transaction_is_exclusive(tx_id)? {
-            return Ok(());
+        let aggregate_result = aggregate_read_result::aggregate_read_result_from_rows(rows)?;
+        self.open_tx_mut(tx_id)?
+            .predicate_reads
+            .push(PredicateRead {
+                aggregate_result: Some(aggregate_result),
+                ..predicate_read_without_result(shape, binding)
+            });
+        Ok(())
+    }
+
+    /// Fail an exclusive aggregate read that would observe the transaction's
+    /// own staged writes. The authority re-runs the aggregate over committed
+    /// state only, which does not include this transaction's writes, so a
+    /// result that saw them cannot be compared soundly: a `max` that a staged
+    /// write lowered stays equal while another writer removes the row that
+    /// set it. An aggregate read before the transaction's first write is exact.
+    fn ensure_tx_aggregate_read_precedes_writes(
+        &self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+    ) -> Result<(), Error> {
+        if shape.query().aggregate.is_some()
+            && self.transaction_is_exclusive(tx_id)?
+            && self.open_tx(tx_id)?.writes.len() != 0
+        {
+            return Err(Error::UnsupportedExclusiveRead(format!(
+                "an aggregate of `{}` after a write in the same transaction",
+                shape.query().table
+            )));
         }
-        let schema = &self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
-            .schema;
-        let input = input.validate(schema)?;
-        let input_binding = input.bind(binding.values().clone())?;
-        Box::pin(self.tx_query_in_authorization_mode(
-            tx_id,
-            &input,
-            &input_binding,
-            identity,
-            false,
-            authorization_mode,
-        ))
-        .await?;
         Ok(())
     }
 
@@ -5262,14 +5150,8 @@ fn local_maintained_view_content_witness<'a>(
     table: &str,
     row_uuid: RowUuid,
 ) -> Option<&'a VersionRow> {
-    // `versions_by_tx` is canonically ordered by encoded record, not by write time.
-    // Within one transaction the complete content witness sorts after the
-    // metadata-only register projection, so search from the back.
     versions.iter().rev().find(|version| {
-        version.table() == table
-            && version.row_uuid() == row_uuid
-            && !version.is_register_record()
-            && version.deletion().is_none()
+        version.table() == table && version.row_uuid() == row_uuid && !version.is_deleted()
     })
 }
 
@@ -5283,26 +5165,6 @@ fn current_row_has_required_subscription_cells(
             || matches!(column.column_type, ValueType::Nullable(_))
             || row.cell(table, &column.name).is_some()
     })
-}
-
-fn contiguous_tx_time_spans(times: &BTreeSet<TxTime>) -> Vec<(TxTime, Option<TxTime>)> {
-    let mut spans = Vec::new();
-    let mut iter = times.iter().copied();
-    let Some(mut start) = iter.next() else {
-        return spans;
-    };
-    let mut last = start;
-    for time in iter {
-        if last.0.checked_add(1) == Some(time.0) {
-            last = time;
-            continue;
-        }
-        spans.push((start, last.0.checked_add(1).map(TxTime)));
-        start = time;
-        last = time;
-    }
-    spans.push((start, last.0.checked_add(1).map(TxTime)));
-    spans
 }
 
 fn sort_query_default_rows(rows: &mut [CurrentRow]) {
@@ -5482,3 +5344,18 @@ fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Opt
 
 #[cfg(test)]
 mod tests;
+
+/// The predicate read of a non-aggregate `shape` under `binding`.
+pub(super) fn predicate_read_without_result(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+) -> PredicateRead {
+    PredicateRead {
+        table: shape.query().table.clone(),
+        shape_id: shape.shape_id(),
+        shape: shape.query().clone(),
+        binding_id: binding.binding_id(),
+        binding_values: binding.values().clone(),
+        aggregate_result: None,
+    }
+}

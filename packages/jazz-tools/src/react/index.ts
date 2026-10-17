@@ -29,19 +29,7 @@ export {
   createAccountManager,
   type AccountManagerConfig,
 } from "../accounts/create-account-manager.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountSnapshot,
-  AccountManager,
-} from "../accounts/state.js";
-export {
-  AccountAuthError,
-  exportLocalFirstSecret,
-  type BackendAuth,
-  type JWTAuth,
-} from "../accounts/enrollment.js";
-export type { AccountStore } from "../accounts/persistence.js";
+export * from "../accounts/exports.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
 
@@ -59,13 +47,7 @@ export {
 
 export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 
-export {
-  connectAuthProvider,
-  type AuthProviderConnection,
-  type AuthProviderState,
-  type AuthProviderSnapshot,
-} from "../session/auth-provider.js";
-export { connectBetterAuth, type BetterAuthClient } from "../session/better-auth.js";
+export * from "../session/auth-provider-exports.js";
 export { useBetterAuth, useAuthProvider } from "./auth-provider.js";
 
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";

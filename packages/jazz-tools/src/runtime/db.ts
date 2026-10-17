@@ -54,9 +54,6 @@ import {
   WriteHandle,
   setWriteWaitReadiness,
   type TransactionKind,
-  type InsertOptions as InternalInsertOptions,
-  type RestoreOptions as InternalRestoreOptions,
-  type UpdateOptions as InternalUpdateOptions,
   type RowSettlement,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
@@ -74,7 +71,11 @@ import {
   type StreamingValueSource,
   type TransactionPreparationIO,
 } from "./client.js";
-import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
+import {
+  type BrowserForegroundNodeLease,
+  type RuntimeSource,
+  type RuntimeTokenOptions,
+} from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import {
@@ -94,8 +95,12 @@ import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
+  isRetainedAccountSessionInput,
 } from "./client-session.js";
-import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
+import {
+  createBrowserPhysicalDatabaseName,
+  createBrowserStorageOwner,
+} from "./browser-worker-config.js";
 import {
   createInspectorLocalQueryOptions,
   isInspectorLocalQueryOptions,
@@ -107,6 +112,7 @@ import {
   setDbInternalSession,
   setTrustedReservedSession,
 } from "./db-internal-session.js";
+import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
@@ -120,6 +126,7 @@ import {
   type ConnectionManager,
   type DbForConnection,
 } from "./connection-manager/index.js";
+import { toError } from "./util.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -450,28 +457,11 @@ function normalizeBranchView(
   };
 }
 
-function nativeDbQueryOptions(
+function normalizeSelectorOptions<Options extends InsertOptions | RestoreOptions>(
   schema: WasmSchema,
   tableName: string,
-  options?: InternalDbQueryOptions,
-): InternalQueryExecutionOptions {
-  if (!options) return {};
-  const { branch, base, ...rest } = options;
-  if (branch === undefined) {
-    if (base !== undefined) throw new Error("A branch base requires a branch head.");
-    return rest;
-  }
-  return {
-    ...rest,
-    branch: normalizeBranchView(schema, tableName, branch, base),
-  };
-}
-
-function normalizeInsertOptions(
-  schema: WasmSchema,
-  tableName: string,
-  options?: InsertOptions,
-): InternalInsertOptions | undefined {
+  options?: Options,
+): (Omit<Options, "branch"> & { branch?: BranchSelector }) | undefined {
   if (!options) return undefined;
   const { branch, ...rest } = options;
   return branch === undefined
@@ -482,26 +472,11 @@ function normalizeInsertOptions(
       };
 }
 
-function normalizeRestoreOptions(
+function normalizeViewOptions<Options extends UpdateOptions | InternalDbQueryOptions>(
   schema: WasmSchema,
   tableName: string,
-  options?: RestoreOptions,
-): InternalRestoreOptions | undefined {
-  if (!options) return undefined;
-  const { branch, ...rest } = options;
-  return branch === undefined
-    ? rest
-    : {
-        ...rest,
-        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
-      };
-}
-
-function normalizeUpdateOptions(
-  schema: WasmSchema,
-  tableName: string,
-  options?: UpdateOptions,
-): InternalUpdateOptions | undefined {
+  options?: Options,
+): (Omit<Options, "branch" | "base"> & { branch?: BranchView }) | undefined {
   if (!options) return undefined;
   const { branch, base, ...rest } = options;
   if (branch === undefined) {
@@ -681,6 +656,16 @@ function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string):
   }
 
   throw new Error(`Query schema is missing table "${tableName}".`);
+}
+
+/** Apply the table's input transforms, then encode `data` as the write record for `operation`. */
+function writeRecord(
+  operation: WriteOperationName,
+  table: TableProxy<any, any, any, any, any>,
+  data: unknown,
+) {
+  const transformed = transformInputColumns(table, data);
+  return toWriteRecordForOperation(operation, transformed, table._schema, table._table);
 }
 
 function toWriteRecordForOperation(
@@ -1539,7 +1524,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const row = client.insertInternal(
       table._table,
       values,
-      normalizeInsertOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -1852,7 +1837,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._table,
       id,
       values,
-      normalizeRestoreOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -1968,20 +1953,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Upsert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     client.upsertInternal(
       table._table,
       id,
       values,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       session,
       attribution,
       openTransactionId,
@@ -2052,7 +2031,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
-    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
     if (descriptors.length > 0) {
       client.updateLargeValuesInternal(
         table._table,
@@ -2315,7 +2294,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("delete");
-    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
     client.deleteInternal(
       table._table,
       id,
@@ -2619,11 +2598,8 @@ async function readTransactionRows<T>(
   // reaching native options so JavaScript callers cannot smuggle runtime
   // controls (for example `localUpdates` or `openTransactionId`) through this
   // otherwise separate execution path.
-  const queryOptions = nativeDbQueryOptions(
-    query._schema,
-    builtQuery.table,
-    lowerPublicDbQueryOptions(options),
-  );
+  const queryOptions: InternalQueryExecutionOptions =
+    normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ?? {};
   if (settlementMetadata) queryOptions.settlementMetadata = settlementMetadata;
   const queryClient = global ? client.queryGlobal : client.queryInternal;
   if (!queryClient) throw new Error("Global transaction preflight is unavailable");
@@ -2741,13 +2717,12 @@ function preparedTransactionScope(
     kind: "exclusive",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
-      const transformed = transformInputColumns(table, data);
-      const values = toWriteRecordForOperation("Upsert", transformed, table._schema, table._table);
+      const values = writeRecord("Upsert", table, data);
       io.upsertInternal(
         table._table,
         id,
         values,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         session,
         attribution,
         openTransactionId,
@@ -2763,12 +2738,11 @@ function preparedTransactionScope(
     },
     insert(table, data, options) {
       binding.resolveClient(table._schema);
-      const transformed = transformInputColumns(table, data);
-      const values = toWriteRecordForOperation("Insert", transformed, table._schema, table._table);
+      const values = writeRecord("Insert", table, data);
       const row = io.insertInternal(
         table._table,
         values,
-        normalizeInsertOptions(table._schema, table._table, options),
+        normalizeSelectorOptions(table._schema, table._table, options),
         session,
         attribution,
         openTransactionId,
@@ -3129,9 +3103,10 @@ export class Db {
   static async createWithBrowserWorker(
     config: DbConfig,
     runtimeSource: AnyRuntimeSource,
+    earlyLease?: Promise<BrowserForegroundNodeLease>,
   ): Promise<Db> {
     const db = new Db(config, runtimeSource);
-    const connection = new BrowserConnectionManager(db.dbForConnection());
+    const connection = new BrowserConnectionManager(db.dbForConnection(), earlyLease);
     db.connection = connection;
     await connection.start();
     return db;
@@ -3160,6 +3135,7 @@ export class Db {
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
+    notifyLocalWrite(this);
     return setWriteWaitReadiness(handle, (tier) =>
       this.ensureReady(tier === "global" ? "server" : "runtime"),
     );
@@ -3512,7 +3488,7 @@ export class Db {
     const inserted = client.insert(
       table._table,
       values,
-      normalizeInsertOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3547,12 +3523,13 @@ export class Db {
     );
     const context = this.getAccessContext();
     const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    notifyLocalWrite(this);
     return client.insertStreaming(
       table._table,
       values,
       column,
       source,
-      normalizeInsertOptions(
+      normalizeSelectorOptions(
         table._schema,
         table._table,
         branch ? { ...options, branch } : options,
@@ -3578,13 +3555,14 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.updateStreaming(
       table._table,
       id,
       values,
       column,
       source,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3606,13 +3584,14 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
+    notifyLocalWrite(this);
     return client.upsertStreaming(
       table._table,
       id,
       values,
       column,
       source,
-      normalizeUpdateOptions(table._schema, table._table, options),
+      normalizeViewOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3645,7 +3624,7 @@ export class Db {
       table._table,
       id,
       values,
-      normalizeRestoreOptions(table._schema, table._table, options),
+      normalizeSelectorOptions(table._schema, table._table, options),
       context?.writeSession,
       context?.attribution,
     );
@@ -3680,20 +3659,14 @@ export class Db {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Upsert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Upsert", table, data);
     const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.upsert(
         table._table,
         id,
         values,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3744,13 +3717,7 @@ export class Db {
       return this.preparedWrite("mergeable", client, (tx) => tx.update(table, id, data, options));
     }
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecordForOperation(
-      "Update",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const updates = writeRecord("Update", table, data);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
       return this.wrapWriteWait(
@@ -3759,7 +3726,7 @@ export class Db {
           id,
           updates,
           descriptors,
-          normalizeUpdateOptions(table._schema, table._table, options),
+          normalizeViewOptions(table._schema, table._table, options),
           context?.writeSession,
           context?.attribution,
         ),
@@ -3770,7 +3737,7 @@ export class Db {
         table._table,
         id,
         updates,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3789,7 +3756,7 @@ export class Db {
       client.delete(
         table._table,
         id,
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
         context?.writeSession,
         context?.attribution,
       ),
@@ -3799,13 +3766,7 @@ export class Db {
   /** Request authoritative permission advice for inserting a row. */
   async canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecordForOperation(
-      "Insert",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const values = writeRecord("Insert", table, data);
     const context = this.getAccessContext();
     return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
   }
@@ -3824,13 +3785,7 @@ export class Db {
     data: Partial<Init>,
   ): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecordForOperation(
-      "Update",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    const updates = writeRecord("Update", table, data);
     const context = this.getAccessContext();
     return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.writeSession);
   }
@@ -3847,6 +3802,7 @@ export class Db {
     context = this.getAccessContext(),
   ): Transaction<TKind> {
     this.assertOpen();
+    notifyLocalWrite(this);
     const configuredSchema = e2eeSchemaForDb(this);
     const ownerClient =
       this.getCurrentClient() ?? (configuredSchema ? this.getClient(configuredSchema) : null);
@@ -3978,7 +3934,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ?? {};
     const equality = encryptedSchemas.has(query._schema)
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;
@@ -3986,10 +3942,7 @@ export class Db {
       const wasmQuery = translateQuery(equality?.json ?? builderJson, planningSchema);
       const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
       const context = this.getAccessContext();
-      const effectiveTier = resolveEffectiveQueryExecutionOptions(
-        { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-        queryOptions,
-      ).tier;
+      const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
       await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
       const rows =
         context || usesRelationTraversal
@@ -4193,7 +4146,7 @@ export class Db {
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
@@ -4264,7 +4217,7 @@ export class Db {
       ) {
         return;
       }
-      subscription.terminalError ??= error instanceof Error ? error : new Error(String(error));
+      subscription.terminalError ??= toError(error);
       completeTerminalization(subscription);
     };
     const createSubscriptionGeneration = (
@@ -4723,10 +4676,7 @@ export class Db {
       return null;
     }
 
-    const resolvedOptions = resolveEffectiveQueryExecutionOptions(
-      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
-      options,
-    );
+    const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
     if (resolvedOptions.tier === "local-only") return null;
@@ -4835,9 +4785,104 @@ function createRuntimeTokenOptions(
   };
 }
 
+/**
+ * @internal Start the persistent browser worker for an account context before
+ * its runtime and credential are ready. An account's browser root and worker
+ * are named by its account id and registry alone, so the SharedWorker can boot
+ * and compile its WASM while the page loads its own runtime and resolves auth.
+ * Returns undefined when the root depends on a credential or no worker is used.
+ */
+export function startBrowserWorkerLease(
+  config: DbConfig,
+  runtimeSource: RuntimeSource<any>,
+): Promise<BrowserForegroundNodeLease> | undefined {
+  if (
+    !runtimeSource.supportsBrowserWorker ||
+    !isBrowserRuntime() ||
+    resolveStorageDriver(config.driver).type !== "persistent" ||
+    !config.accountId ||
+    !config.accountRegistryAuthority ||
+    config.adminSecret ||
+    config.runtimeSources?.browserWorkerPort
+  )
+    return undefined;
+  const lease = runtimeSource.acquireBrowserForegroundNodeLease(config);
+  // Observed by the Db that adopts it, or returned by releaseUnusedLease.
+  void lease.catch(() => undefined);
+  leaseRoots.set(lease, browserLeaseRoot(config));
+  return lease;
+}
+
+/** The worker realm, physical root and owner a lease was acquired for. */
+const leaseRoots = new WeakMap<Promise<BrowserForegroundNodeLease>, string | undefined>();
+
+function browserLeaseRoot(config: DbConfig): string | undefined {
+  try {
+    const sources = config.runtimeSources;
+    return JSON.stringify([
+      resolveDefaultPersistentDbName(config),
+      createBrowserStorageOwner(config),
+      sources?.wasmUrl ?? null,
+      sources?.baseUrl ?? null,
+      sources?.brokerWorkerUrl ?? null,
+      sources?.wasmVersion ?? null,
+      Boolean(sources?.wasmModule || sources?.wasmSource),
+    ]);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An early lease is only adopted for the exact root it was acquired for; a
+ * config whose principal or assets changed while it resolved gets its own.
+ */
+function leaseMatches(lease: Promise<BrowserForegroundNodeLease>, config: DbConfig): boolean {
+  const root = leaseRoots.get(lease);
+  return root !== undefined && root === browserLeaseRoot(config);
+}
+
+/**
+ * @internal Return a lease that no Db adopted, keeping its node reusable.
+ * Resolves once the worker has the lease back (or it never issued one), so a
+ * replacement acquired afterwards never queues behind it.
+ */
+export async function releaseUnusedLease(
+  lease: Promise<BrowserForegroundNodeLease> | undefined,
+): Promise<void> {
+  if (!lease || leaseClaimed.has(lease)) return;
+  leaseClaimed.add(lease);
+  try {
+    const acquired = await lease;
+    await acquired.returnWithHighWater(acquired.confirmedTxTime);
+  } catch {
+    // A lease that failed to arrive, or could not be returned, holds nothing.
+  }
+}
+
 export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
+  earlyLease?: Promise<BrowserForegroundNodeLease>,
+): Promise<Db> {
+  let lease = earlyLease;
+  try {
+    return await openDbWithRuntimeSource(config, runtimeSource, () => {
+      lease ??= startBrowserWorkerLease(config, runtimeSource);
+      return lease;
+    });
+  } finally {
+    void releaseUnusedLease(lease);
+  }
+}
+
+/** Leases already adopted by a Db or released; neither may happen twice. */
+const leaseClaimed = new WeakSet<Promise<BrowserForegroundNodeLease>>();
+
+async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
+  config: RuntimeConfig,
+  runtimeSource: RuntimeSource<RuntimeConfig>,
+  startLease: () => Promise<BrowserForegroundNodeLease> | undefined,
 ): Promise<Db> {
   assertAccountConfig(config);
   assertNoClientBackendSecret(config);
@@ -4858,6 +4903,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
   let resolvedConfig: DbConfig = { ...config };
   setTrustedReservedSession(resolvedConfig, getTrustedReservedSession(config));
+  // Boot the worker while this page loads its own runtime.
+  const earlyLease = startLease();
   await runtimeSource.load(config);
   const {
     secret: _secret,
@@ -4882,7 +4929,15 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
-  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
+  } else if (
+    !config.jwtToken &&
+    !config.cookieSession &&
+    !config.adminSecret &&
+    !isRetainedAccountSessionInput({
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    })
+  ) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
@@ -4902,10 +4957,26 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
-  const db =
-    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
-      ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
-      : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
+  const browserWorker =
+    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent";
+  const adoptedLease =
+    earlyLease && browserWorker && leaseMatches(earlyLease, resolvedConfig)
+      ? earlyLease
+      : undefined;
+  if (adoptedLease) {
+    leaseClaimed.add(adoptedLease);
+  } else if (earlyLease) {
+    // Hand a lease for some other root back before this Db acquires its own,
+    // so the two are never held, or queued behind each other, at once.
+    await releaseUnusedLease(earlyLease);
+  }
+  const db = browserWorker
+    ? await Db.createWithBrowserWorker(
+        resolvedConfig,
+        runtimeSource as AnyRuntimeSource,
+        adoptedLease,
+      )
+    : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);

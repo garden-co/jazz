@@ -194,7 +194,7 @@ where
 async fn completed_large_value_upload_journal<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
-) -> Result<Option<crate::large_values::PendingLargeValueUpload>, Error>
+) -> Result<Option<CompletedLargeValueUpload>, Error>
 where
     S: OrderedKvStorage + ?Sized,
 {
@@ -206,9 +206,7 @@ where
         return Ok(None);
     };
     let completed = decode_completed_large_value_upload_at_key(&upload_key, &encoded)?;
-    let receipt_id = completed.receipt_id.ok_or_else(|| {
-        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
-    })?;
+    let receipt_id = completed.receipt_id;
     let receipt_key = completed_large_value_receipt_key(receipt_id);
     let reverse = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
@@ -218,8 +216,8 @@ where
                 "completed upload has no receipt reverse binding".to_owned(),
             )
         })?;
-    let reverse_completed = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
-    if reverse != encoded || reverse_completed != completed {
+    let reverse_upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
+    if reverse_upload_id != upload_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -242,9 +240,7 @@ where
     let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
         return Ok(None);
     };
-    let receipt_id = completed
-        .receipt_id
-        .expect("completed journal requires a receipt id");
+    let receipt_id = completed.receipt_id;
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -259,7 +255,7 @@ where
     let staged_key = staged_large_value_key(receipt_id);
     let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
-        || completed.descriptor.as_ref() != Some(&staged.value_ref)
+        || completed.descriptor != staged.value_ref
         || staged.accounting != completed.accounting
     {
         return Err(Error::InvalidLargeValueMetadata(
@@ -302,8 +298,8 @@ where
     else {
         return Ok(Vec::new());
     };
-    let completed = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
-    let upload_key = completed_large_value_upload_key(completed.id);
+    let upload_id = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
+    let upload_key = completed_large_value_upload_key(upload_id);
     let forward = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
         .await?
@@ -311,7 +307,7 @@ where
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
     let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
-    if forward != encoded || forward_completed != completed {
+    if forward_completed.receipt_id != receipt_id {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -383,8 +379,23 @@ impl Database {
         // marker/mutation path.
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let ivm_runtime = IvmRuntime::new(schema)?;
+        // Compile once against a scratch id registry so an invalid schema
+        // fails before any durable engine state (layout marker) is created.
+        drop(IvmRuntime::new(schema.clone())?);
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
+        // Durable index ids must be known before schema indexes compile. This
+        // also refuses an `indices` family written by an earlier index layout.
+        let index_ids = crate::ivm::runtime::IndexIdRegistry::load(storage.as_ref()).await?;
+        // Interned columns decode synchronously, so every dictionary is
+        // resident and validated before the first read or write.
+        let dictionaries =
+            crate::dictionary::DictionaryRegistry::load(storage.as_ref(), &schema.dictionaries)
+                .await?;
+        let ivm_runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::new(std::cell::RefCell::new(index_ids)),
+            Rc::new(std::cell::RefCell::new(dictionaries)),
+        )?;
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
                 crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
@@ -421,6 +432,8 @@ impl Database {
                 }),
             ),
         ));
+        let storage_read_metrics =
+            Rc::new(ReadMetricsSink::new(Rc::clone(ivm_runtime.index_ids())));
         Self {
             storage,
             chunk_storage,
@@ -428,7 +441,7 @@ impl Database {
             ivm_runtime,
             last_commit_metrics: None,
             last_tick_metrics: None,
-            storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
+            storage_read_metrics,
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             immutable_batch_owner: Rc::new(()),
@@ -578,10 +591,23 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let mut runtime = IvmRuntime::new(schema)?;
+        // Dictionaries are loaded only at open: a rebuild may keep using
+        // them, but cannot declare one the open did not load.
+        self.ivm_runtime
+            .dictionaries()
+            .borrow()
+            .check_declares(&schema.dictionaries)?;
+        let mut runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::clone(self.ivm_runtime.index_ids()),
+            Rc::clone(self.ivm_runtime.dictionaries()),
+        )?;
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        // A rebuild keeps how this database reads stored tables.
+        runtime.set_stored_arrangements_enabled(self.ivm_runtime.stored_arrangements_enabled());
+        runtime.set_cache_memory_budget(self.ivm_runtime.own_cache_memory_budget());
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -635,6 +661,19 @@ impl Database {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }
 
+    /// Read arrangements of stored tables by primary key from storage instead
+    /// of holding them, for arrangements compiled from now on. On by default.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Bound the memory the buckets of stored arrangements keep resident;
+    /// `None` (the default) is unbounded. See
+    /// `IvmRuntime::set_cache_memory_budget`.
+    pub fn set_cache_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_cache_memory_budget(budget);
+    }
+
     /// Enable or disable generic root positions (insert indices and moves in
     /// terminal deltas) for plain ordered outputs. On by default. A consumer
     /// that ignores those positions should turn them off: collecting them
@@ -661,13 +700,6 @@ impl Database {
 
     pub fn local_chunk_reader(&self) -> crate::chunks::LocalChunkReader {
         crate::chunks::LocalChunkReader::new(self.chunk_storage.clone())
-    }
-
-    pub fn large_value_upload_cursor(
-        &self,
-        value: &crate::large_values::LargeValueRef,
-    ) -> Result<crate::large_values::LargeValueUploadCursor, crate::large_values::Error> {
-        crate::large_values::LargeValueUploadCursor::new(value, self.owned_chunk_provider())
     }
 
     /// Install Groove's policy-blind immutable chunk storage and route future
@@ -1296,6 +1328,38 @@ impl Database {
         Ok(())
     }
 
+    /// Run a chunk-demanding large-value attempt until it stops blocking:
+    /// each time it blocks, fetch the chunks it asked for from the chunk
+    /// provider into `inputs` and try again.
+    async fn attempt_with_chunks<T>(
+        &self,
+        inputs: &mut crate::ivm::runtime::evaluation_session::EvaluationInputs,
+        mut attempt: impl FnMut(
+            &mut crate::ivm::runtime::evaluation_session::EvaluationInputs,
+        ) -> Result<T, crate::ivm::runtime::IvmRuntimeError>,
+    ) -> Result<T, Error> {
+        let provider = self.ivm_runtime.chunk_provider();
+        loop {
+            match attempt(inputs) {
+                Ok(value) => return Ok(value),
+                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    if requests.is_empty() {
+                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
+                    }
+                    for request in requests {
+                        let bytes = provider
+                            .get(request.clone())
+                            .await
+                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        inputs.install_chunk_from_provider(request, bytes);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     /// Replay a descriptor's edit tail against its immutable base tree. This
     /// reads only the base ranges each edit needs, never the whole value.
     async fn validate_large_value_edit_tail(
@@ -1452,17 +1516,22 @@ impl Database {
         )
         .await?;
         promotion_state.borrow_mut().extend(registration_operations);
-        let completed = encode_pending_large_value_upload(&bound_upload)?;
+        let completed = encode_completed_large_value_upload(&CompletedLargeValueUpload {
+            id: upload_id,
+            receipt_id,
+            descriptor: staged.value_ref.clone(),
+            accounting: staged.accounting,
+        })?;
         promotion_state.borrow_mut().extend([
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_upload_key(upload_id),
-                value: completed.clone(),
+                value: completed,
             },
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: completed_large_value_receipt_key(receipt_id),
-                value: completed,
+                value: upload_id.0.to_vec(),
             },
         ]);
         self.storage
@@ -1735,25 +1804,12 @@ impl Database {
         let mut continuation = crate::large_values::ConsolidationContinuation::new(value)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
-        let provider = self.ivm_runtime.chunk_provider();
         loop {
-            match continuation.step(&mut inputs) {
-                Ok(Some(prepared)) => return Ok(prepared),
-                Ok(None) => continue,
-                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = inputs.take_missing_chunks();
-                    if requests.is_empty() {
-                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
-                    }
-                    for request in requests {
-                        let bytes = provider
-                            .get(request.clone())
-                            .await
-                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                        inputs.install_chunk_from_provider(request, bytes);
-                    }
-                }
-                Err(error) => return Err(error.into()),
+            if let Some(prepared) = self
+                .attempt_with_chunks(&mut inputs, |inputs| continuation.step(inputs))
+                .await?
+            {
+                return Ok(prepared);
             }
         }
     }
@@ -1816,32 +1872,17 @@ impl Database {
         insert_bytes: Vec<u8>,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
-        let provider = self.ivm_runtime.chunk_provider();
-        let outcome = loop {
-            match crate::large_values::replace_tail_attempt(
-                &value,
-                offset,
-                delete_length,
-                insert_bytes.clone(),
-                &mut inputs,
-            ) {
-                Ok(outcome) => break outcome,
-                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = inputs.take_missing_chunks();
-                    if requests.is_empty() {
-                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
-                    }
-                    for request in requests {
-                        let bytes = provider
-                            .get(request.clone())
-                            .await
-                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                        inputs.install_chunk_from_provider(request, bytes);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
+        let outcome = self
+            .attempt_with_chunks(&mut inputs, |inputs| {
+                crate::large_values::replace_tail_attempt(
+                    &value,
+                    offset,
+                    delete_length,
+                    insert_bytes.clone(),
+                    inputs,
+                )
+            })
+            .await?;
         match outcome {
             crate::large_values::TailEditOutcome::Updated(value_ref) => {
                 Ok(crate::large_values::PreparedLargeValue {
@@ -1878,26 +1919,10 @@ impl Database {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
-        let provider = self.ivm_runtime.chunk_provider();
-        loop {
-            match crate::large_values::byte_range_attempt(value, range.clone(), &mut inputs) {
-                Ok(bytes) => return Ok(bytes),
-                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = inputs.take_missing_chunks();
-                    if requests.is_empty() {
-                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
-                    }
-                    for request in requests {
-                        let bytes = provider
-                            .get(request.clone())
-                            .await
-                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                        inputs.install_chunk_from_provider(request, bytes);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
+        self.attempt_with_chunks(&mut inputs, |inputs| {
+            crate::large_values::byte_range_attempt(value, range.clone(), inputs)
+        })
+        .await
     }
 
     /// Consume the next bounded window of a sequential logical-value cursor.
@@ -1970,33 +1995,15 @@ impl Database {
         range: std::ops::Range<u64>,
     ) -> Result<String, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
-        let provider = self.ivm_runtime.chunk_provider();
-        loop {
-            match crate::large_values::utf16_range_attempt(value, range.clone(), &mut inputs) {
-                Ok(bytes) => {
-                    return String::from_utf8(bytes).map_err(|_| {
-                        crate::ivm::runtime::IvmRuntimeError::from(
-                            crate::large_values::Error::InvalidUtf8,
-                        )
-                        .into()
-                    });
-                }
-                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = inputs.take_missing_chunks();
-                    if requests.is_empty() {
-                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
-                    }
-                    for request in requests {
-                        let bytes = provider
-                            .get(request.clone())
-                            .await
-                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                        inputs.install_chunk_from_provider(request, bytes);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
+        let bytes = self
+            .attempt_with_chunks(&mut inputs, |inputs| {
+                crate::large_values::utf16_range_attempt(value, range.clone(), inputs)
+            })
+            .await?;
+        String::from_utf8(bytes).map_err(|_| {
+            crate::ivm::runtime::IvmRuntimeError::from(crate::large_values::Error::InvalidUtf8)
+                .into()
+        })
     }
 
     /// Resolve a final logical UTF-16 position to its byte position. This uses
@@ -2008,26 +2015,10 @@ impl Database {
         offset: u64,
     ) -> Result<u64, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
-        let provider = self.ivm_runtime.chunk_provider();
-        loop {
-            match crate::large_values::utf16_offset_to_byte_attempt(value, offset, &mut inputs) {
-                Ok(byte_offset) => return Ok(byte_offset),
-                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = inputs.take_missing_chunks();
-                    if requests.is_empty() {
-                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
-                    }
-                    for request in requests {
-                        let bytes = provider
-                            .get(request.clone())
-                            .await
-                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                        inputs.install_chunk_from_provider(request, bytes);
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
+        self.attempt_with_chunks(&mut inputs, |inputs| {
+            crate::large_values::utf16_offset_to_byte_attempt(value, offset, inputs)
+        })
+        .await
     }
 
     /// Resolve a JSON Pointer against literal validated JSON source. The
@@ -2103,6 +2094,11 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Live subscriptions, without the state walk of `runtime_stats()`.
+    pub fn active_subscription_count(&self) -> usize {
+        self.ivm_runtime.active_subscription_count()
     }
 
     /// Lifetime topology-cache counters, independent of transactional state.

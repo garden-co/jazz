@@ -612,16 +612,17 @@ fn analyze_root_node(
                 correlation: correlation.clone(),
                 requirement: *requirement,
                 output_steps: Vec::new(),
-                siblings: collect_sibling_correlated_paths(
+                siblings: collect_correlated_paths(
                     parent.root.source().ok_or_else(|| {
                         UnsupportedReason::Operator("path parent must be a source".to_owned())
                     })?,
-                    &path.child,
+                    Some(&path.child),
                     &request.input.shape.nodes,
                     &mut visited,
                 )?,
-                nested: collect_nested_correlated_paths(
+                nested: collect_correlated_paths(
                     &path.child,
+                    None,
                     &request.input.shape.nodes,
                     &mut visited,
                 )?,
@@ -682,16 +683,17 @@ fn analyze_root_node(
                 analyze_correlated_path_root(&request.input.shape.root, request, &mut path_visited)
             {
                 let mut plan = plan;
-                plan.nested = collect_nested_correlated_paths(
+                plan.nested = collect_correlated_paths(
                     &plan.path.child,
+                    None,
                     &request.input.shape.nodes,
                     &mut path_visited,
                 )?;
-                plan.siblings = collect_sibling_correlated_paths(
+                plan.siblings = collect_correlated_paths(
                     plan.parent.root.source().ok_or_else(|| {
                         UnsupportedReason::Operator("path parent must be a source".to_owned())
                     })?,
-                    &plan.path.child,
+                    Some(&plan.path.child),
                     &request.input.shape.nodes,
                     &mut path_visited,
                 )?;
@@ -757,8 +759,9 @@ fn analyze_correlated_path_root(
                 requirement: *requirement,
                 output_steps: Vec::new(),
                 siblings: Vec::new(),
-                nested: collect_nested_correlated_paths(
+                nested: collect_correlated_paths(
                     &path.child,
+                    None,
                     &request.input.shape.nodes,
                     visited,
                 )?,
@@ -798,8 +801,11 @@ fn analyze_correlated_path_root(
     }
 }
 
-fn collect_nested_correlated_paths(
+/// Collects the correlated paths owned by `owner`, except the one into
+/// `excluded_child` (the path whose siblings are being collected).
+fn collect_correlated_paths(
     owner: &SourceId,
+    excluded_child: Option<&SourceId>,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
 ) -> Result<Vec<CorrelatedPathPlan>, UnsupportedReason> {
@@ -815,7 +821,7 @@ fn collect_nested_correlated_paths(
         else {
             continue;
         };
-        if &path.owner != owner {
+        if &path.owner != owner || Some(&path.child) == excluded_child {
             continue;
         }
         visited.insert(node_id.clone());
@@ -833,49 +839,7 @@ fn collect_nested_correlated_paths(
             requirement: *requirement,
             output_steps: Vec::new(),
             siblings: Vec::new(),
-            nested: collect_nested_correlated_paths(&path.child, nodes, visited)?,
-        });
-    }
-    Ok(paths)
-}
-
-fn collect_sibling_correlated_paths(
-    owner: &SourceId,
-    excluded_child: &SourceId,
-    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
-    visited: &mut BTreeSet<RowSetNodeId>,
-) -> Result<Vec<CorrelatedPathPlan>, UnsupportedReason> {
-    let mut paths = Vec::new();
-    for (node_id, node) in nodes {
-        let RowSetExpr::CorrelatedPathProjection {
-            input,
-            child_input,
-            path,
-            correlation,
-            requirement,
-        } = node
-        else {
-            continue;
-        };
-        if &path.owner != owner || &path.child == excluded_child {
-            continue;
-        }
-        visited.insert(node_id.clone());
-        let mut parent_visited = BTreeSet::new();
-        let parent = analyze_linear_subplan(input, nodes, &mut parent_visited)?;
-        visited.extend(parent_visited);
-        let mut child_visited = BTreeSet::new();
-        let child = analyze_correlated_child_subplan(child_input, path, nodes, &mut child_visited)?;
-        visited.extend(child_visited);
-        paths.push(CorrelatedPathPlan {
-            parent,
-            child,
-            path: path.clone(),
-            correlation: correlation.clone(),
-            requirement: *requirement,
-            output_steps: Vec::new(),
-            siblings: Vec::new(),
-            nested: collect_nested_correlated_paths(&path.child, nodes, visited)?,
+            nested: collect_correlated_paths(&path.child, None, nodes, visited)?,
         });
     }
     Ok(paths)
@@ -1364,36 +1328,6 @@ fn unsupported_marker_message(keys: &[NormalizedValueRef]) -> Option<String> {
         return None;
     };
     String::from_utf8(bytes.clone()).ok()
-}
-
-fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
-    match predicate {
-        PredicateExpr::True | PredicateExpr::False => false,
-        PredicateExpr::Compare { left, right, .. } => {
-            value_contains_param(left) || value_contains_param(right)
-        }
-        PredicateExpr::In { value, options } => {
-            value_contains_param(value) || options.iter().any(value_contains_param)
-        }
-        PredicateExpr::ArrayContains { value, needle }
-        | PredicateExpr::TextContains { value, needle } => {
-            value_contains_param(value) || value_contains_param(needle)
-        }
-        PredicateExpr::IsNull(value) | PredicateExpr::IsNotNull(value) => {
-            value_contains_param(value)
-        }
-        PredicateExpr::And(predicates) | PredicateExpr::Or(predicates) => {
-            predicates.iter().any(predicate_contains_param)
-        }
-        PredicateExpr::Not(predicate) => predicate_contains_param(predicate),
-        PredicateExpr::EnumMatch { value, payload, .. } => {
-            value_contains_param(value) || predicate_contains_param(payload)
-        }
-    }
-}
-
-fn value_contains_param(value: &NormalizedValueRef) -> bool {
-    matches!(value, NormalizedValueRef::Param(_))
 }
 
 fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) {

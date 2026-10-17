@@ -139,6 +139,27 @@ pub enum JazzError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// The persistent local store was written with a storage format this
+    /// build does not read. The store is left untouched. There is no
+    /// migration: delete the data directory and resync from Core. Writes in
+    /// the old store that never reached Core are lost.
+    ///
+    /// Codec IDs carry their format version (`name.vN`): `missing` names
+    /// formats this build requires that the store lacks, and `unknown` names
+    /// formats the store was written with that this build does not read.
+    #[error(
+        "Unsupported storage format: this epoch-{epoch} store lacks codec families {missing:?} \
+         required by this build and declares {unknown:?} that this build does not read"
+    )]
+    UnsupportedStorageCodecs {
+        /// Storage epoch the refused store declares.
+        epoch: u16,
+        /// Codec families this build requires and the store lacks.
+        missing: Vec<String>,
+        /// Codec families the store declares and this build does not read.
+        unknown: Vec<String>,
+    },
+
     #[error("Schema error: {0}")]
     Schema(String),
 

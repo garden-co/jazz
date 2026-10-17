@@ -47,20 +47,6 @@ export type NativeTerminalEdit =
   | { Update: { key: NativeTerminalBytes; value: NativeTerminalBytes } }
   | { Remove: { key: NativeTerminalBytes } }
   | { Move: { key: NativeTerminalBytes; index: number } };
-/** Immutable producer-owned root descriptor contract retained for codec compatibility. */
-export interface NativeTerminalRootLayout {
-  id: string;
-  rootDescriptor: number[];
-  rootKeySlot: number;
-  rootKeyFieldName: string;
-  publicFields: Array<{
-    name: string;
-    descriptorFieldName: string;
-    slot: number;
-    carrier?: "CurrentRow" | "Logical";
-  }>;
-  carrier: "CurrentRow" | "Logical";
-}
 export interface NativeTerminalOperation {
   rootLayoutId?: string;
   rootDescriptor?: number[];

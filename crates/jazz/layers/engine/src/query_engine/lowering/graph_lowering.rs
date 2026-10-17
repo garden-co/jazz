@@ -1615,6 +1615,23 @@ fn lower_linear_plan_steps_cached(
                         semi_join_if_needed(graph, right, semi_left_keys, semi_right_keys, request);
                     last_join_right = None;
                 } else {
+                    // One prepared graph serves every binding of its source.
+                    // When both sides carry the same binding route, a left
+                    // row must only meet right rows derived for its own
+                    // binding; joining on the relation keys alone would pair
+                    // one binding's row with another binding's proof (#4017).
+                    let (mut left_keys, mut right_keys) = (left_keys, right_keys);
+                    for field in &available_route_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route
+                            && lowered_right.fields.contains(field)
+                            && !right_keys.contains(field)
+                        {
+                            left_keys.push(field.clone());
+                            right_keys.push(field.clone());
+                        }
+                    }
                     graph =
                         policy_join_if_needed(graph, right_graph, left_keys, right_keys, request);
                     let right_fields = lowered_right.fields.clone();
@@ -1665,6 +1682,22 @@ fn lower_linear_plan_steps_cached(
                     let mut next_fields = fields.clone();
                     let mut next_nullable = nullable_fields.clone();
                     let mut next_depths = nullable_field_depths.clone();
+                    // A binding route the right input introduces must stay
+                    // addressable under its own name: the next join keys on
+                    // it, so a later input pairs only with rows derived for
+                    // the same binding. Renaming it away would let a chain
+                    // whose left lacked the route pair one binding's proof
+                    // with another's (#4017).
+                    for field in &right_fields {
+                        let binding_route = route_param_from_field(field).is_some()
+                            || claim_path_from_param_field(field).is_some();
+                        if binding_route && !fields.contains(field) {
+                            projection
+                                .push(ProjectField::renamed(right_field(field), field.clone()));
+                            next_fields.insert(field.clone());
+                            available_route_fields.insert(field.clone());
+                        }
+                    }
                     for field in right_fields {
                         let output = union_occurrence_outputs
                             .get(&field)
@@ -2506,40 +2539,20 @@ fn lower_join_key_pairs(
     right_source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
-    // A true join condition is an uncorrelated existence gate. Routing keys
-    // are added by the caller, so independent prepared sessions stay isolated.
-    if matches!(predicate, PredicateExpr::True) {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let pairs = match predicate {
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .map(|predicate| {
-                lower_join_key_pair(
-                    predicate,
-                    left_source_id,
-                    left_source,
-                    right_source_id,
-                    right_source,
-                    request,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_join_key_pair(
-            predicate,
-            left_source_id,
-            left_source,
-            right_source_id,
-            right_source,
-            request,
-        )?],
-    };
-    if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join_via requires at least one equality join predicate".to_owned(),
-        ));
-    }
-    Ok(pairs.into_iter().unzip())
+    lower_key_pairs(
+        predicate,
+        "join_via requires at least one equality join predicate",
+        |predicate| {
+            lower_join_key_pair(
+                predicate,
+                left_source_id,
+                left_source,
+                right_source_id,
+                right_source,
+                request,
+            )
+        },
+    )
 }
 
 fn lower_linear_join_key_pair(
@@ -2580,42 +2593,21 @@ fn lower_linear_join_key_pairs(
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
-    // A true join condition is an uncorrelated existence gate. Routing keys
-    // are added by the caller, so independent prepared sessions stay isolated.
-    if matches!(predicate, PredicateExpr::True) {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let pairs = match predicate {
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .map(|predicate| {
-                lower_linear_join_key_pair(
-                    predicate,
-                    left_root,
-                    left_source,
-                    right_plan,
-                    right_output,
-                    accumulated_join_fields,
-                    request,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_linear_join_key_pair(
-            predicate,
-            left_root,
-            left_source,
-            right_plan,
-            right_output,
-            accumulated_join_fields,
-            request,
-        )?],
-    };
-    if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join_via requires at least one equality join predicate".to_owned(),
-        ));
-    }
-    Ok(pairs.into_iter().unzip())
+    lower_key_pairs(
+        predicate,
+        "join_via requires at least one equality join predicate",
+        |predicate| {
+            lower_linear_join_key_pair(
+                predicate,
+                left_root,
+                left_source,
+                right_plan,
+                right_output,
+                accumulated_join_fields,
+                request,
+            )
+        },
+    )
 }
 
 fn lower_root_to_relation_key_pair(
@@ -2641,6 +2633,28 @@ pub(super) fn lower_root_to_relation_key_pairs(
     right_output: &LoweredRelationInput,
     request: &LoweringContext<'_>,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    lower_key_pairs(
+        predicate,
+        "join contribution membership requires at least one equality predicate",
+        |predicate| {
+            lower_root_to_relation_key_pair(
+                predicate,
+                root_source,
+                right_plan,
+                right_output,
+                request,
+            )
+        },
+    )
+}
+
+/// Lowers a conjunction of equality predicates (or a single one) into the
+/// parallel left and right key lists, one pair per conjunct.
+fn lower_key_pairs(
+    predicate: &PredicateExpr,
+    empty_message: &str,
+    lower_pair: impl Fn(&PredicateExpr) -> Result<(String, String), UnsupportedReason>,
+) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     // A true join condition is an uncorrelated existence gate. Routing keys
     // are added by the caller, so independent prepared sessions stay isolated.
     if matches!(predicate, PredicateExpr::True) {
@@ -2649,28 +2663,12 @@ pub(super) fn lower_root_to_relation_key_pairs(
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
-            .map(|predicate| {
-                lower_root_to_relation_key_pair(
-                    predicate,
-                    root_source,
-                    right_plan,
-                    right_output,
-                    request,
-                )
-            })
+            .map(&lower_pair)
             .collect::<Result<Vec<_>, _>>()?,
-        _ => vec![lower_root_to_relation_key_pair(
-            predicate,
-            root_source,
-            right_plan,
-            right_output,
-            request,
-        )?],
+        _ => vec![lower_pair(predicate)?],
     };
     if pairs.is_empty() {
-        return Err(UnsupportedReason::Operator(
-            "join contribution membership requires at least one equality predicate".to_owned(),
-        ));
+        return Err(UnsupportedReason::Operator(empty_message.to_owned()));
     }
     Ok(pairs.into_iter().unzip())
 }
@@ -3083,7 +3081,7 @@ fn lower_equality_param_filter_joins(
     let mut residual = Vec::new();
     let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
-        let Some(join) = equality_param_join(predicate, source_id, source)? else {
+        let Some(join) = equality_param_join(predicate, source_id, source, request)? else {
             residual.push(predicate.clone());
             continue;
         };
@@ -3202,6 +3200,7 @@ fn equality_param_join(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    request: &LoweringContext<'_>,
 ) -> Result<Option<EqualityParamJoin>, UnsupportedReason> {
     let PredicateExpr::Compare {
         left,
@@ -3211,24 +3210,43 @@ fn equality_param_join(
     else {
         return Ok(None);
     };
-    if let (Some((field, value_type, nullable)), NormalizedValueRef::Param(param)) =
-        (source_join_field(left, source_id, source)?, right)
-    {
-        return Ok(Some(EqualityParamJoin {
-            field,
-            param: param.clone(),
-            value_type,
-            nullable,
-        }));
-    }
-    match (left, source_join_field(right, source_id, source)?) {
-        (NormalizedValueRef::Param(param), Some((field, value_type, nullable))) => {
-            Ok(Some(EqualityParamJoin {
-                field,
-                param: param.clone(),
-                value_type,
-                nullable,
-            }))
+    let (field, value) = match (
+        source_join_field(left, source_id, source)?,
+        source_join_field(right, source_id, source)?,
+    ) {
+        (Some(field), None) => (field, right),
+        (None, Some(field)) => (field, left),
+        _ => return Ok(None),
+    };
+    let Some(param) = equality_binding_param(value, request)? else {
+        return Ok(None);
+    };
+    let (field, value_type, nullable) = field;
+    Ok(Some(EqualityParamJoin {
+        field,
+        param,
+        value_type,
+        nullable,
+    }))
+}
+
+/// The binding slot an equality operand reads, when it has one.
+///
+/// A claim operand is a binding slot too when the program carries that claim
+/// as a prepared routing parameter (see `claim_binding_slot`). Joining it
+/// against the binding source keeps the claim value out of the graph, so
+/// every session with the same query shares one graph instead of compiling
+/// its own literal copy (#4017). Any other claim stays a literal predicate.
+fn equality_binding_param(
+    value: &NormalizedValueRef,
+    request: &LoweringContext<'_>,
+) -> Result<Option<String>, UnsupportedReason> {
+    match value {
+        NormalizedValueRef::Param(param) => Ok(Some(param.clone())),
+        NormalizedValueRef::Claim(path) if request.input.binding.source_shape.is_some() => {
+            let domain = request.parameter_domain()?;
+            Ok(super::claim_binding_slot(domain, path)
+                .filter(|slot| domain.routing_params.contains(slot)))
         }
         _ => Ok(None),
     }
@@ -3609,13 +3627,21 @@ fn lower_predicate_inner(
         PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::Compare { left, op, right } => {
-            lower_compare(left, *op, right, source_id, source, request)?
+            lower_compare(left, *op, right, false, source_id, source, request)?
         }
         PredicateExpr::In { value, options } => {
             let predicates = options
                 .iter()
                 .map(|option| {
-                    lower_compare(value, ComparisonOp::Eq, option, source_id, source, request)
+                    lower_compare(
+                        value,
+                        ComparisonOp::Eq,
+                        option,
+                        false,
+                        source_id,
+                        source,
+                        request,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             GroovePredicateExpr::Or(predicates)
@@ -3766,14 +3792,9 @@ fn lower_not_predicate_inner(
     Ok(match predicate {
         PredicateExpr::True => GroovePredicateExpr::Or(Vec::new()),
         PredicateExpr::False => GroovePredicateExpr::And(Vec::new()),
-        PredicateExpr::Compare { left, op, right } => lower_compare(
-            left,
-            invert_comparison(*op),
-            right,
-            source_id,
-            source,
-            request,
-        )?,
+        PredicateExpr::Compare { left, op, right } => {
+            lower_compare(left, *op, right, true, source_id, source, request)?
+        }
         PredicateExpr::In { value, options } => GroovePredicateExpr::And(
             options
                 .iter()
@@ -3817,9 +3838,9 @@ fn lower_two_valued_ne(
     source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
-    // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
-    // predicates are two-valued, so unequal means either exactly one operand is
-    // null or both are non-null and Groove reports inequality.
+    // Groove comparisons deliberately use SQL-null semantics. Jazz membership
+    // negation is two-valued: exactly one operand is null, or equality is false.
+    // Row-dependent negated equality still uses Groove's inequality semantics.
     Ok(GroovePredicateExpr::Or(vec![
         GroovePredicateExpr::And(vec![
             lower_null_test(left, true, source_id, source, request)?,
@@ -3829,7 +3850,15 @@ fn lower_two_valued_ne(
             lower_null_test(left, false, source_id, source, request)?,
             lower_null_test(right, true, source_id, source, request)?,
         ]),
-        lower_compare(left, ComparisonOp::Ne, right, source_id, source, request)?,
+        lower_compare(
+            left,
+            ComparisonOp::Eq,
+            right,
+            true,
+            source_id,
+            source,
+            request,
+        )?,
     ])
     .canonicalize())
 }
@@ -3849,13 +3878,15 @@ fn lower_compare(
     left: &NormalizedValueRef,
     op: ComparisonOp,
     right: &NormalizedValueRef,
+    negated: bool,
     source_id: &SourceId,
     source: &ResolvedSource,
     request: &LoweringContext<'_>,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let left = lower_value_ref(left, source_id, source, request)?;
     let right = lower_value_ref(right, source_id, source, request)?;
-    let kind = predicate_kind(op);
+    let effective_op = if negated { invert_comparison(op) } else { op };
+    let kind = predicate_kind(effective_op);
 
     match (left, right) {
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
@@ -3869,16 +3900,20 @@ fn lower_compare(
                 coerce_literal_for_source_field(value, source, &field),
             ))
         }
-        (LoweredValueRef::Field(field), LoweredValueRef::Field(value_field)) => match op {
-            ComparisonOp::Eq => Ok(GroovePredicateExpr::EqField { field, value_field }),
-            ComparisonOp::Ne => Ok(GroovePredicateExpr::NeqField { field, value_field }),
-            _ => Err(UnsupportedReason::Operator(format!(
-                "field-to-field comparison {:?} is not lowered yet",
-                op
-            ))),
-        },
+        (LoweredValueRef::Field(field), LoweredValueRef::Field(value_field)) => {
+            match effective_op {
+                ComparisonOp::Eq => Ok(GroovePredicateExpr::EqField { field, value_field }),
+                ComparisonOp::Ne => Ok(GroovePredicateExpr::NeqField { field, value_field }),
+                _ => Err(UnsupportedReason::Operator(format!(
+                    "field-to-field comparison {:?} is not lowered yet",
+                    effective_op
+                ))),
+            }
+        }
         (LoweredValueRef::Literal(left), LoweredValueRef::Literal(right)) => {
-            Ok(constant_predicate(compare_literals(&left, op, &right)))
+            // Inverting an operator is not boolean negation for unordered floats.
+            let matches = compare_literals(&left, op, &right);
+            Ok(constant_predicate(if negated { !matches } else { matches }))
         }
     }
 }
@@ -4016,7 +4051,33 @@ fn predicate_kind(op: ComparisonOp) -> PredicateKind {
     }
 }
 
+fn literal_float(mut value: &LiteralValue) -> Option<f64> {
+    while let LiteralValue::Nullable(Some(inner)) = value {
+        value = inner;
+    }
+    match value {
+        LiteralValue::F64(bits) => Some(f64::from_bits(*bits)),
+        _ => None,
+    }
+}
+
 fn compare_literals(left: &LiteralValue, op: ComparisonOp, right: &LiteralValue) -> bool {
+    if let Some(left_float) = literal_float(left)
+        && let Some(right_float) = literal_float(right)
+    {
+        // Predicate semantics are numeric; raw bits remain structural identity.
+        // Unordered comparisons are false for every operator, including Ne.
+        return left_float
+            .partial_cmp(&right_float)
+            .is_some_and(|ordering| match op {
+                ComparisonOp::Eq => ordering.is_eq(),
+                ComparisonOp::Ne => ordering.is_ne(),
+                ComparisonOp::Lt => ordering.is_lt(),
+                ComparisonOp::Lte => ordering.is_le(),
+                ComparisonOp::Gt => ordering.is_gt(),
+                ComparisonOp::Gte => ordering.is_ge(),
+            });
+    }
     match op {
         ComparisonOp::Eq => left == right,
         ComparisonOp::Ne => left != right,

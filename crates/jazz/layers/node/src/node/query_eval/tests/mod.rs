@@ -5,6 +5,7 @@ use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt a
 
 mod authorization;
 mod bindings;
+mod exclusive_aggregates;
 mod execution;
 mod lowering;
 mod maintained_views;
@@ -21,13 +22,13 @@ use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
 use crate::model::public_schema::{
-    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue, RelColumnRef as PublicRelColumnRef,
-    RelExpr as PublicRelExpr, RelJoinCondition as PublicRelJoinCondition,
-    RelJoinKind as PublicRelJoinKind, RelKeyRef as PublicRelKeyRef,
-    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
-    RelProjectColumn as PublicRelProjectColumn, RelProjectExpr as PublicRelProjectExpr,
-    RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
-    RowIdRef as PublicRelRowIdRef,
+    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue,
+    RecursionBound as PublicRelRecursionBound, RelationCmpOp as PublicRelPredicateCmpOp,
+    RelationColumnRef as PublicRelColumnRef, RelationExpr as PublicRelExpr,
+    RelationJoinCondition as PublicRelJoinCondition, RelationJoinKind as PublicRelJoinKind,
+    RelationKeyRef as PublicRelKeyRef, RelationPredicate as PublicRelPredicateExpr,
+    RelationProjectColumn as PublicRelProjectColumn, RelationProjectExpr as PublicRelProjectExpr,
+    RelationRowIdRef as PublicRelRowIdRef, RelationValueRef as PublicRelValueRef,
 };
 use crate::model::public_schema::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
@@ -111,7 +112,8 @@ fn collect_binding_source_descriptor_fields(
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. } => {
+        | GraphBuilder::StreamingChecksum { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => {
             collect_binding_source_descriptor_fields(input, descriptors_by_shape);
         }
         GraphBuilder::Union { inputs } => {
@@ -181,7 +183,8 @@ fn collect_binding_source_projected_fields(
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. } => {
+        | GraphBuilder::StreamingChecksum { input, .. }
+        | GraphBuilder::Lookup { keys: input, .. } => {
             collect_binding_source_projected_fields(input, projected_by_shape);
         }
         GraphBuilder::Union { inputs } => {
@@ -660,32 +663,6 @@ fn current_titles(
             )
         })
         .collect()
-}
-
-fn historical_titles_via_full_scan(
-    node: &mut NodeState,
-    table: &TableSchema,
-    position: GlobalTime,
-) -> BTreeMap<RowUuid, Value> {
-    let table_id = node
-        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, &table.name)
-        .expect("physical table id");
-    let history_source = node
-        .physical_history_source_graph(node.catalogue.local_schema_version_id, &table.name)
-        .expect("physical history source");
-    let deltas = node
-        .database
-        .query_graph(historical_current_graph_full_scan(
-            table,
-            table_id,
-            position,
-            history_source,
-        ))
-        .expect("full-scan historical graph");
-    let rows = node
-        .materialize_inline_current_query_rows(table, deltas)
-        .expect("materialize full-scan historical graph");
-    current_titles(table, rows)
 }
 
 fn delete_global(

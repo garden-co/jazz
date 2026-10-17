@@ -3,15 +3,9 @@ use super::{AccountCommand, AccountId, Principal};
 use crate::groove::records::{
     EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, Value, ValueType,
 };
+use crate::ids::author_identity_descriptor as principal_descriptor;
 
 const MAX_COMPONENT: usize = 16 * 1024;
-
-fn principal_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("issuer", ValueType::String),
-        ("subject", ValueType::String),
-    ])
-}
 
 fn schema() -> EnumSchema {
     let principal = || ValueType::Record(Box::new(principal_descriptor()));

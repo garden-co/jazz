@@ -74,6 +74,7 @@ import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import { nativeCoreErrorCode } from "./native-error-code.js";
+import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -94,9 +95,11 @@ import {
   encodeNativeColumnValue,
   encodeNativeNullValue,
   logicalStorageColumns,
+  namedValues,
   nativeFixedValueSize,
   storageColumnTypeToValueType,
   storageColumnValueType,
+  withValuesByColumn,
   writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
@@ -288,7 +291,8 @@ type NativeDb = {
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
-  foregroundTxTimeHighWater?(): bigint;
+  /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
+  foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
   subscribe?(
     query: Uint8Array,
@@ -633,6 +637,13 @@ type NativeRowFieldPlan = {
 const textDecoder = new Utf8Decoder({ fatal: true });
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
+/**
+ * Open a persistent native store. A store written in a storage format this
+ * build does not read is refused by the binding with code
+ * `unsupported_storage_codecs`; it is rethrown as an
+ * `UnsupportedStorageCodecsError` so callers can match the class as well as
+ * the code.
+ */
 function openPersistentDb(
   Runtime: NativeDbConstructor,
   dataPath: string,
@@ -640,6 +651,28 @@ function openPersistentDb(
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   backendMode = false,
+): NativeDb {
+  try {
+    return openPersistentNativeDb(
+      Runtime,
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof,
+      backendMode,
+    );
+  } catch (error) {
+    throw asUnsupportedStorageCodecsError(error);
+  }
+}
+
+function openPersistentNativeDb(
+  Runtime: NativeDbConstructor,
+  dataPath: string,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof: NativeSelfSignedClientProof | undefined,
+  backendMode: boolean,
 ): NativeDb {
   if (selfSignedClientProof && backendMode) {
     throw new Error("A native runtime cannot be both self-signed and backend-scoped");
@@ -723,6 +756,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  private readonly localSettlementListeners = new Set<(pending: boolean) => void>();
   // A streaming mutation can wait on its source while owning a native upload
   // handle. A foreground lease cannot return until every admitted handle has
   // published its write (and advanced the HLC) or has been aborted. Local
@@ -806,6 +840,11 @@ export class NativeRuntimeAdapter implements Runtime {
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
+  // While that drain runs, already-started native futures may hold the node
+  // lock until a core tick completes their host continuation (cold storage,
+  // admission deadlines). Mutation admission stays closed, but core progress
+  // must continue, or the HLC readout waits behind them forever.
+  private foregroundLeaseDraining = false;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
@@ -1081,7 +1120,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /** @internal Return the native HLC high-water for a foreground lease handoff. */
-  foregroundTxTimeHighWater(): bigint {
+  foregroundTxTimeHighWater(): bigint | Promise<bigint> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
     if (!this.db.foregroundTxTimeHighWater) {
       throw new Error("Native runtime does not expose foreground transaction high-water");
@@ -1105,16 +1144,25 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closed = true;
     this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
-    const capture = this.captureForegroundTxTimeHighWater();
+    this.foregroundLeaseDraining = true;
+    const capture = this.captureForegroundTxTimeHighWater().finally(() => {
+      this.foregroundLeaseDraining = false;
+      this.clearCoreDeadline();
+    });
     this.foregroundLeaseCapture = capture;
     return capture;
+  }
+
+  /** Core ticks run while open, and while a lease handoff drains started work. */
+  private coreProgressAllowed(): boolean {
+    return !this.closed || this.foregroundLeaseDraining;
   }
 
   private async captureForegroundTxTimeHighWater(): Promise<bigint> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
     await this.coreOperation?.completion.catch(() => undefined);
-    return this.foregroundTxTimeHighWater();
+    return await this.foregroundTxTimeHighWater();
   }
 
   /** @internal Seed a foreground lease high-water before the first local write. */
@@ -1420,6 +1468,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
+    this.localSettlementListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
@@ -2780,6 +2829,14 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /** Observe worker durability work, including fire-and-forget mutations. */
+  onLocalSettlementChange(listener: (pending: boolean) => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onLocalSettlementChange(listener);
+    this.localSettlementListeners.add(listener);
+    listener(this.pendingLocalSettlements.size > 0);
+    return () => this.localSettlementListeners.delete(listener);
+  }
+
   private deliverMutationError(event: MutationErrorEvent): void {
     const transactionId = event.transaction.transactionId;
     if (this.deliveredMutationErrors.has(transactionId)) return;
@@ -2797,8 +2854,17 @@ export class NativeRuntimeAdapter implements Runtime {
     // failures available for a real waiter or the mutation-error callback.
     settlement = this.waitForTransaction(txId, "local", { observeOnly: true })
       .catch(() => undefined)
-      .finally(() => this.pendingLocalSettlements.delete(settlement));
+      .finally(() => {
+        this.pendingLocalSettlements.delete(settlement);
+        if (this.pendingLocalSettlements.size === 0) {
+          for (const listener of this.localSettlementListeners) listener(false);
+        }
+      });
+    const wasEmpty = this.pendingLocalSettlements.size === 0;
     this.pendingLocalSettlements.add(settlement);
+    if (wasEmpty) {
+      for (const listener of this.localSettlementListeners) listener(true);
+    }
   }
 
   private finishInsert(
@@ -3381,7 +3447,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreWake(urgency: CoreTickWake): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (urgency === "after-current-turn") {
       // A microtask would set `coreTickAgain` while a core tick is still
       // running, recursively entering the next tick before the browser can
@@ -3420,7 +3486,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleCoreTick(): void {
-    if (this.closed) return;
+    if (!this.coreProgressAllowed()) return;
     if (this.coreOperation) {
       this.coreTickAgain = true;
       return;
@@ -3457,7 +3523,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private runCoreTick(): Promise<void> {
-    if (this.closed) return Promise.resolve();
+    if (!this.coreProgressAllowed()) return Promise.resolve();
     const operation = this.coreOperation;
     if (operation) {
       this.coreTickAgain = true;
@@ -3487,7 +3553,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();
-        if (this.closed || !this.coreTickAgain) break;
+        if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
           break;
@@ -3497,7 +3563,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.drainTransportRetirements();
       this.coreOperation = null;
     }
-    if (yielded && !this.closed) {
+    if (yielded && this.coreProgressAllowed()) {
       setTimeout(() => this.scheduleCoreTick(), 0);
     }
   }
@@ -3915,6 +3981,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionAttempt = null;
     this.serverCarrier = null;
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    // Frames the retired socket buffered belong to its channel state, not the next connection's.
+    this.pendingInboundServerFrames.length = 0;
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const now = Date.now();
@@ -6205,15 +6273,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
   });
 }
 
-function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
-}
-
 export function decodeSubscriptionDelta(
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
@@ -6316,14 +6375,14 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
@@ -6454,22 +6513,14 @@ export function decodeNestedRowBytes(
             ),
       );
     }
-    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
-      id,
-      values: columns.map(
-        (column) =>
-          valuesByColumn.get(column.name) ??
-          (column.column_type.type === "Array"
-            ? ({ type: "Array", value: [] } satisfies Value)
-            : ({ type: "Null" } satisfies Value)),
-      ),
-    };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
+    const values = columns.map(
+      (column) =>
+        valuesByColumn.get(column.name) ??
+        (column.column_type.type === "Array"
+          ? ({ type: "Array", value: [] } satisfies Value)
+          : ({ type: "Null" } satisfies Value)),
+    );
+    return withValuesByColumn({ id, values }, valuesByColumn);
   }
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
@@ -6695,12 +6746,7 @@ function runtimeSubscriptionRow(
   const values = valuesForNativeFrame(row, columns).map((value, index) =>
     runtimeSubscriptionValue(value, columns[index]!.column_type),
   );
-  const result: WasmRow = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
@@ -6742,12 +6788,7 @@ function runtimeSubscriptionNestedRow(
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
     return runtimeSubscriptionValue(resolved, column.column_type);
   });
-  const result = { id: row.id, values };
-  Object.defineProperty(result, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-    configurable: true,
-  });
-  return result;
+  return withValuesByColumn({ id: row.id, values }, namedValues(columns, values));
 }
 
 function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[]): Value[] {

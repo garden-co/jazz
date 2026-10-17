@@ -27,7 +27,7 @@ use groove::ivm::ProjectField;
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value, ValueType};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[allow(unused_imports)] // Typed receipt integration is implemented in a separate change.
@@ -35,7 +35,7 @@ pub use query_eval::{
     LocalAvailabilityWatermark, LocalRowAvailability, local_availability_record_descriptor,
 };
 
-use self::query_engine::{QueryAuthorizationMode, user_column_field};
+use self::query_engine::user_column_field;
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
     RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
@@ -56,17 +56,16 @@ use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
 };
 use crate::schema::{
-    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy,
-    SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, TableSchema,
+    AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, SUPERSEDED_WRITES_STORE, TableSchema,
     registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{
     AbsentRead, BranchWriteIntent, BranchWriteOperation, ContributionComponent,
     ContributionCoordinate, ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
-    ContributionSubstitutionIndex, DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect,
-    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
-    Transaction, TransactionRecord, TxId, TxKind,
+    DeletionEvent, DurabilityTier, Fate, HistoryEntry, MergeAspect, PredicateRead,
+    RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot, Transaction,
+    TransactionRecord, TxId, TxKind,
 };
 
 fn install_enum_case_ids(
@@ -317,6 +316,95 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+mod aggregate_read_result;
+/// The local delta's rows, held in memory: overlay row key (physical table,
+/// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
+/// image it holds, plus how many rows each physical table holds under each
+/// branch key. No caller needs ordering, so the maps use the low-overhead
+/// deterministic hasher.
+///
+/// The per-branch-key count is what a read pays to mask origin by the
+/// delta's whole presence, known without reading storage (see
+/// `JazzSourceGraphPreparer::local_mask_read`). It is kept per branch key
+/// because that read covers only the read's own branch keys: a large draft
+/// branch's pending rows cost nothing to a read of another branch.
+#[derive(Debug, Default)]
+pub(in crate::node) struct AheadCurrentKeys {
+    keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
+    /// Physical table -> encoded branch-key part of the overlay key
+    /// ([`global_current_key_branch_prefix`]) -> rows. Holds no zero counts.
+    rows_per_branch: FxHashMap<PhysicalTableId, FxHashMap<Vec<u8>, usize>>,
+}
+
+impl AheadCurrentKeys {
+    pub(in crate::node) fn get(&self, key: &(PhysicalTableId, Vec<u8>)) -> Option<&TxId> {
+        self.keys.get(key)
+    }
+
+    pub(in crate::node) fn contains_key(&self, key: &(PhysicalTableId, Vec<u8>)) -> bool {
+        self.keys.contains_key(key)
+    }
+
+    pub(in crate::node) fn insert(
+        &mut self,
+        key: (PhysicalTableId, Vec<u8>),
+        tx_id: TxId,
+    ) -> Option<TxId> {
+        let table_id = key.0;
+        let branch = global_current_key_branch_prefix(&key.1).to_vec();
+        let previous = self.keys.insert(key, tx_id);
+        if previous.is_none() {
+            *self
+                .rows_per_branch
+                .entry(table_id)
+                .or_default()
+                .entry(branch)
+                .or_default() += 1;
+        }
+        previous
+    }
+
+    pub(in crate::node) fn remove(&mut self, key: &(PhysicalTableId, Vec<u8>)) -> Option<TxId> {
+        let removed = self.keys.remove(key);
+        if removed.is_some()
+            && let Some(branches) = self.rows_per_branch.get_mut(&key.0)
+        {
+            let branch = global_current_key_branch_prefix(&key.1);
+            if let Some(rows) = branches.get_mut(branch) {
+                *rows -= 1;
+                if *rows == 0 {
+                    branches.remove(branch);
+                }
+            }
+            if branches.is_empty() {
+                self.rows_per_branch.remove(&key.0);
+            }
+        }
+        removed
+    }
+
+    pub(in crate::node) fn clear(&mut self) {
+        self.keys.clear();
+        self.rows_per_branch.clear();
+    }
+
+    /// How many pending rows `table_id`'s local delta holds under
+    /// `branch_key`.
+    pub(in crate::node) fn branch_rows(
+        &self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+    ) -> usize {
+        self.rows_per_branch
+            .get(&table_id)
+            .and_then(|branches| {
+                branches.get(global_current_branch_key_prefix(branch_key).as_slice())
+            })
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 pub mod api_error;
 mod catalogue_ingest;
 mod codec;
@@ -327,6 +415,7 @@ mod eviction;
 mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
+mod layer_stack;
 mod node_aliases;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]
@@ -334,6 +423,7 @@ pub use node_aliases::NodeAliases;
 pub mod legacy_test_future;
 #[doc(hidden)]
 pub mod maintained_subscription_view;
+mod merge_ops;
 #[doc(hidden)]
 pub mod migration_validation;
 mod open_tx;
@@ -345,6 +435,7 @@ mod policy;
 pub use jazz_engine::query_engine;
 mod query_eval;
 mod recovery;
+mod refs;
 pub mod relay_scope;
 mod row_availability;
 mod source_resolution;
@@ -366,12 +457,13 @@ pub use query_eval::{
     LocalMaintainedViewSubscriptionUpdate,
 };
 pub use views::MaintainedViewBundleInputs;
-pub use views::simple_scalar_exit_query;
+pub use views::{simple_scalar_exit_query, single_table_scalar_query};
 
 use codec::*;
 use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
+use refs::{Ref, Remote};
 
 pub use eviction::{ClientCacheBudget, ClientCacheBudgetReport, ClientCacheClass, EvictColdReport};
 
@@ -417,6 +509,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_seqs`; the cache is cleared when it fills.
+const HISTORY_TX_SEQ_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -491,6 +585,9 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
+    /// Only schemas ranked no later than this may lie on the path
+    /// (`compiled_lens_path_within`).
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -498,16 +595,7 @@ struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
     table: String,
-}
-const CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES: usize = 64;
-const CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS: usize = 65_536;
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ContentVersionReachabilityCacheKey {
-    table_id: PhysicalTableId,
-    branch_key: BranchKey,
-    row_uuid: RowUuid,
-    start: TxId,
+    within: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -604,30 +692,27 @@ pub struct NodeState<S = BoxedStorage> {
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
     absent_node_alias: Option<NodeUuid>,
-    /// Exact ahead-current keys used to make peer replay idempotent. No caller
-    /// needs ordering, so use the low-overhead deterministic hasher here.
-    ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
-    /// Complete row-local ancestry closures. Entries are bounded by both
-    /// frontier count and total transaction identities because a single merge
-    /// graph can otherwise dominate the node's memory.
-    content_version_reachability_cache:
-        BTreeMap<ContentVersionReachabilityCacheKey, FxHashSet<TxId>>,
-    /// Approximate insertion order for the bounded ancestry cache.
-    content_version_reachability_cache_order: VecDeque<ContentVersionReachabilityCacheKey>,
-    /// Total transaction identities retained by the ancestry cache.
-    content_version_reachability_cache_tx_ids: usize,
+    /// Exact ahead-current keys used to make peer replay idempotent, and
+    /// how many each physical table holds.
+    ahead_current_keys: AheadCurrentKeys,
+    /// History rows written since the last applied node batch, per
+    /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
+    /// the transaction's `jazz_tx_touched_rows` list, or releases the list
+    /// when the transaction has settled. A transaction whose settled status
+    /// was staged has an entry here even when it wrote no rows.
+    tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
+    /// Global times of transactions read from storage, which key their
+    /// history records (`history_tx_seq`). Bounded by
+    /// `HISTORY_TX_SEQ_CACHE_MAX_ENTRIES`; a transaction's global time never
+    /// changes once set, so entries never go stale.
+    history_tx_seqs: RefCell<FxHashMap<(TxTime, NodeAlias), GlobalTime>>,
+    /// Set while this node (Core) mints a seq for an incoming patch.
+    minting_global_time: bool,
 
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
     query_engine_read_metrics: QueryEngineReadMetrics,
-    /// Test-only observer for one node's merge-head graph walks. This must be
-    /// node-scoped so unrelated parallel test nodes cannot contaminate it.
-    #[cfg(any(test, feature = "testing"))]
-    merge_head_reachability_walks: usize,
-    /// Test-only count of transaction nodes visited by merge-head walks.
-    #[cfg(any(test, feature = "testing"))]
-    merge_head_reachability_nodes: usize,
     /// Test-only count of query programs actually lowered, excluding cache hits.
     #[cfg(any(test, feature = "testing"))]
     query_program_compilations: usize,
@@ -738,7 +823,10 @@ struct SchemaCatalogue {
         SchemaVersionId,
         BTreeMap<
             String,
-            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+            BTreeMap<
+                (physical::PhysicalWriteTarget, bool),
+                Arc<physical::PreparedPhysicalWritePlan>,
+            >,
         >,
     >,
     /// Schema version currently used for newly authored writes.
@@ -868,6 +956,9 @@ struct Clock {
     committed_global_time: GlobalTime,
     /// Global transactions held by a partial node outside its core frontier.
     applied_global_times_after_frontier: BTreeSet<GlobalTime>,
+    /// The transactions accepted at each of those times: an exclusive
+    /// transaction's base names them without an index scan per time.
+    frontier_dots: BTreeMap<GlobalTime, Vec<TxId>>,
 }
 
 impl Clock {
@@ -883,65 +974,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    #[doc(hidden)]
-    pub fn clear_content_version_reachability_cache(&mut self) {
-        self.content_version_reachability_cache.clear();
-        self.content_version_reachability_cache_order.clear();
-        self.content_version_reachability_cache_tx_ids = 0;
-    }
-
-    fn cached_content_version_reachability(
-        &self,
-        key: &ContentVersionReachabilityCacheKey,
-        target: TxId,
-    ) -> Option<bool> {
-        self.content_version_reachability_cache
-            .get(key)
-            .map(|ancestors| ancestors.contains(&target))
-    }
-
-    fn cache_content_version_reachability(
-        &mut self,
-        key: ContentVersionReachabilityCacheKey,
-        ancestors: FxHashSet<TxId>,
-    ) {
-        if ancestors.len() > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS {
-            return;
-        }
-
-        if let Some(previous) = self.content_version_reachability_cache.remove(&key) {
-            self.content_version_reachability_cache_tx_ids -= previous.len();
-            self.content_version_reachability_cache_order
-                .retain(|existing| existing != &key);
-        }
-
-        while self.content_version_reachability_cache.len()
-            >= CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
-            || self.content_version_reachability_cache_tx_ids + ancestors.len()
-                > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
-        {
-            let Some(oldest) = self.content_version_reachability_cache_order.pop_front() else {
-                break;
-            };
-            let Some(evicted) = self.content_version_reachability_cache.remove(&oldest) else {
-                continue;
-            };
-            self.content_version_reachability_cache_tx_ids -= evicted.len();
-        }
-
-        if self.content_version_reachability_cache.len()
-            < CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
-            && self.content_version_reachability_cache_tx_ids + ancestors.len()
-                <= CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
-        {
-            self.content_version_reachability_cache_tx_ids += ancestors.len();
-            self.content_version_reachability_cache_order
-                .push_back(key.clone());
-            self.content_version_reachability_cache
-                .insert(key, ancestors);
-        }
-    }
-
     #[doc(hidden)]
     pub fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
         // Binding mutations reserve through the shared clock before taking
@@ -965,19 +997,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn reset_merge_head_reachability_walks_for_test(&mut self) {
-        self.merge_head_reachability_walks = 0;
-        self.merge_head_reachability_nodes = 0;
-    }
-
-    pub(super) fn merge_head_reachability_walks_for_test(&self) -> usize {
-        self.merge_head_reachability_walks
-    }
-
-    pub(super) fn merge_head_reachability_nodes_for_test(&self) -> usize {
-        self.merge_head_reachability_nodes
-    }
-
     pub(super) fn reset_query_program_compilations_for_test(&mut self) {
         self.query_program_compilations = 0;
     }
@@ -1016,6 +1035,9 @@ struct Parking {
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
     parked_catalogue_commit_units: BTreeSet<TxId>,
+    /// The newest `now_ms` an authority commit ingest has seen: the clock a
+    /// write's wait behind a parked predecessor is bounded by.
+    newest_ingest_ms: u64,
 }
 
 /// Recently stored transaction versions with a row-addressable cache view.
@@ -1027,44 +1049,11 @@ struct Parking {
 #[derive(Clone, Debug, Default)]
 struct CachedTransactionVersions {
     versions: Vec<VersionRow>,
-    by_schema_table_row: BTreeMap<(SchemaVersionAlias, String, RowUuid), Vec<usize>>,
 }
 
 impl CachedTransactionVersions {
     fn new(versions: Vec<VersionRow>) -> Self {
-        let mut by_schema_table_row = BTreeMap::new();
-        for (index, version) in versions.iter().enumerate() {
-            by_schema_table_row
-                .entry((
-                    version.schema_version_alias(),
-                    version.table().to_owned(),
-                    version.row_uuid(),
-                ))
-                .or_insert_with(Vec::new)
-                .push(index);
-        }
-        Self {
-            versions,
-            by_schema_table_row,
-        }
-    }
-
-    fn versions_for_schema_table_row(
-        &self,
-        schema_alias: SchemaVersionAlias,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Vec<VersionRow> {
-        let key = (schema_alias, table.to_owned(), row_uuid);
-        let Some(indexes) = self.by_schema_table_row.get(&key) else {
-            return Vec::new();
-        };
-        #[cfg(test)]
-        record_parent_version_lookup_materialized_rows(indexes.len());
-        indexes
-            .iter()
-            .map(|index| self.versions[*index].clone())
-            .collect()
+        Self { versions }
     }
 }
 
@@ -1083,6 +1072,15 @@ struct ScopedPolicyAuthorizationGraphReplacement {
 
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
+    /// Durable watermarks are consulted once per result per process, before
+    /// this process holds any receipt for it; in-process state wins after.
+    watermark_restore_seen: BTreeSet<AuthorityResultKey>,
+    /// Last watermark written per result, so an unchanged confirmation
+    /// stays entirely in memory.
+    persisted_watermarks: BTreeMap<AuthorityResultKey, (GlobalTime, [u8; 16])>,
+    /// Set once scopes are invalidated (eviction, catalogue or rebuild): the
+    /// local rows can no longer stand in for a stored watermark's held set.
+    watermarks_invalidated: bool,
     local_availability_records: BTreeMap<
         (PolicyBindingKey, crate::ids::GlobalPhysicalTableId, RowUuid),
         query_eval::LocalAvailabilityRecord,
@@ -1117,18 +1115,16 @@ struct QueryServing {
     /// Policy tables currently being compiled as membership proofs. This is
     /// transient recursion state, not a cache.
     policy_proof_stack: Vec<PolicyProofStackEntry>,
-    /// Logical tables that have history rows for a stored transaction.
-    tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction, indexed by
     /// authored schema/table/row so parent validation does not rescan wide
     /// transactions on a cache hit.
     tx_versions_cache: BTreeMap<TxId, CachedTransactionVersions>,
-    /// Approximate insertion order for bounding `tx_version_tables_cache`.
+    /// Approximate insertion order for bounding `tx_versions_cache`.
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
     /// Physical version-storage sources keyed by logical table and layer.
-    version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
+    version_storage_sources_cache: BTreeMap<String, Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Exact semantic registration options keyed by the read-view identity
@@ -1536,39 +1532,6 @@ struct OpenTxState {
 struct RejectionTracking {
     /// Transactions rejected by local policy or conflict checks.
     rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
-    /// Pending child transactions grouped by pending parent transaction.
-    child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
-    /// Includes Accepted partial-child constraints, unlike `child_txs_by_parent`.
-    /// The shared pending-edge staging helper advances this before inserting a row.
-    /// Deletes/failed batches never lower it; recovery recomputes it from every
-    /// durable edge. Unknown during startup cannot prove absence.
-    pending_parent_time_bound: PendingParentTimeBound,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-enum PendingParentTimeBound {
-    #[default]
-    Unknown,
-    Empty,
-    Through(TxTime),
-}
-
-impl PendingParentTimeBound {
-    fn observe(&mut self, time: TxTime) {
-        match self {
-            Self::Unknown => {}
-            Self::Empty => *self = Self::Through(time),
-            Self::Through(ceiling) => *ceiling = (*ceiling).max(time),
-        }
-    }
-
-    fn excludes(self, time: TxTime) -> bool {
-        match self {
-            Self::Unknown => false,
-            Self::Empty => true,
-            Self::Through(ceiling) => time > ceiling,
-        }
-    }
 }
 
 /// Authenticated identity attached to an inbound commit-unit upload.
@@ -2632,6 +2595,17 @@ pub struct QueryEngineReadMetrics {
     pub source_global_time_range_scans: u64,
     /// Visible-current source resolutions that fell back to a full source scan.
     pub source_full_scans: u64,
+    /// Branch-view deletion-register and presence-mask layers that read a
+    /// whole branch key. A primary-key access path bounds them by its prefix,
+    /// and under an index they are looked up by the content candidates' row
+    /// ids; they stay whole without an access path and inside a recursive
+    /// step, where no lookup can run.
+    pub source_branch_register_full_scans: u64,
+    /// Indexed `Local` reads whose choice of how the local delta masks
+    /// origin failed to count origin's candidates (a table or index mapping
+    /// mismatch, or a storage error) and fell back to reading the delta
+    /// whole. Exact either way; nonzero only signals a lost optimization.
+    pub local_mask_count_fallbacks: u64,
 }
 
 /// Wall-clock attribution for one synchronous query materialization.
@@ -2706,14 +2680,6 @@ pub struct MergeableCommit {
     pub authored_columns: Option<BTreeSet<String>>,
     /// Deletion-register event, if any.
     pub deletion: Option<DeletionEvent>,
-    /// Exact prior versions of this same physical row and layer.
-    ///
-    /// Version parents describe only row-history ancestry: they are neither a
-    /// general transaction-dependency graph nor a way to express an observed
-    /// state precondition. In particular, content and deletion registers have
-    /// independent parent chains. A read/CAS precondition belongs to an
-    /// exclusive transaction's read set instead.
-    pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
     /// Columns carrying Groove preparations staged through this node. Private
@@ -2756,7 +2722,6 @@ impl MergeableCommit {
             cells: BTreeMap::new(),
             authored_columns: None,
             deletion: None,
-            parents: Vec::new(),
             user_metadata_json: None,
             prepared_large_columns: BTreeSet::new(),
             staged_large_values: Vec::new(),
@@ -2861,12 +2826,6 @@ impl MergeableCommit {
         self
     }
 
-    /// Set exact same-row/layer history parents.
-    pub fn parents(mut self, parents: Vec<TxId>) -> Self {
-        self.parents = parents;
-        self
-    }
-
     /// Attach application metadata.
     pub fn user_metadata(mut self, json: String) -> Self {
         self.user_metadata_json = Some(json);
@@ -2880,7 +2839,6 @@ impl MergeableCommit {
             )
         })?;
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
-        codec::validate_parent_tx_ids(&self.parents)?;
         if self.cells.iter().any(|(column, value)| {
             value_contains_indirect_descriptor(value)
                 && !self.prepared_large_columns.contains(column)
@@ -2955,6 +2913,14 @@ fn version_indirect_descriptors(
                 collect_indirect_descriptors(&value, &mut descriptors);
             }
         }
+        for extra in version.extra_cells() {
+            let record = extra.record().borrowed();
+            for index in 0..extra.record().descriptor().fields().len() {
+                if let Ok(Value::Nullable(Some(value))) = record.get_idx(index) {
+                    collect_indirect_descriptors(&value, &mut descriptors);
+                }
+            }
+        }
     }
     descriptors
 }
@@ -3001,12 +2967,6 @@ impl ViewUpdateParts {
 }
 
 type CompiledScopeTables = BTreeMap<crate::ids::GlobalPhysicalTableId, groove::Intern<String>>;
-
-#[derive(Default)]
-struct IngestMemo {
-    tx_exists: BTreeMap<TxId, bool>,
-    tx_made_at: BTreeMap<TxId, Option<TxTime>>,
-}
 
 /// A Jazz transaction whose resident Groove publication is visible while its
 /// owned durable write is still pending.
@@ -3078,15 +3038,6 @@ impl<T> PublicationOutcome<T> {
             post_settlement_work: VecDeque::new(),
         }
     }
-
-    #[doc(hidden)]
-    pub fn published_then(value: T, publication: PublishedTransaction, work: SyncMessage) -> Self {
-        Self {
-            value,
-            publications: vec![publication],
-            post_settlement_work: VecDeque::from([work]),
-        }
-    }
 }
 
 impl<T> PublicationOutcome<Vec<T>> {
@@ -3116,9 +3067,8 @@ struct CatalogueOpenState {
     active_catalogue_seq: u64,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
-    current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
-    recovered_active_schema: Option<ActiveSchema>,
+    active_schema: ActiveSchema,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -3363,6 +3313,15 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// The store's history was truncated at or below a horizon, which this
+    /// build cannot read (SPEC 2 §2.8, `jazz_history_horizon`).
+    #[error(
+        "Opening a store whose history is truncated at or below seq {horizon} is not supported by this build yet"
+    )]
+    TruncatedHistoryUnsupported {
+        /// The store's history horizon.
+        horizon: u64,
+    },
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.
@@ -3376,6 +3335,11 @@ pub enum Error {
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),
+    /// A settled transaction's versions were asked for as a list, but its
+    /// touched-rows list was released at settle. Its versions are read by
+    /// exact `(table, row, tx)` point reads only.
+    #[error("transaction versions are no longer listed: {0:?}")]
+    TransactionVersionsReleased(TxId),
     /// View update payload was internally inconsistent.
     #[error("malformed view update: {0}")]
     MalformedViewUpdate(&'static str),

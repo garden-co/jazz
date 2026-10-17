@@ -106,7 +106,7 @@ mod variant_case_tests {
         }
         let storage_tables = [
             table.history_storage_table(),
-            table.global_current_storage_tables().remove(0),
+            table.global_current_storage_table(),
             table.rejected_versions_storage_table(),
         ];
         let prefixes = [HistoryRowRecord::USER_CELLS, GlobalCurrentRowRecord::USER_CELLS,
@@ -123,7 +123,8 @@ mod variant_case_tests {
                 expected.extend(table.columns.iter()
                     .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
                     .map(|column| physical_user_column_field(mapping.columns[&column.name])));
-                expected.extend(storage.columns[prefix + table.columns.len()..].iter().map(|c| c.name.clone()));
+                let trailing = &storage.columns[prefix + table.columns.len()..];
+                expected.extend(trailing.iter().map(|c| c.name.clone()));
                 assert_eq!(*actual, expected);
             }
         }
@@ -136,6 +137,46 @@ mod variant_case_tests {
         assert!(physical_current_field_names_for_case(table, &mapping, Some(&none)).is_ok());
         assert!(physical_history_field_names_for_case(table, &mapping, Some(&none)).is_ok());
         assert!(physical_rejected_version_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+    }
+
+    // The durable history layout of `jazz.history-version-current.v4` (SPEC 4
+    // §4.6, "Durable layout"): a record ends with the merge fields (seq and base) and
+    // is keyed by seq; no row state carries a merge timestamp.
+    #[test]
+    fn history_record_ends_with_merge_fields_and_is_keyed_by_seq() {
+        use groove::schema::{ColumnType as GrooveColumnType, IntegerKeyType, PrimaryKeyColumn};
+        let public = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("entries").column("body", PublicColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&public).unwrap();
+        let table = &schema.tables[0];
+        let history = table.history_storage_table();
+        let trailing = history.columns[history.columns.len() - 5..]
+            .iter()
+            .map(|column| (column.name.as_str(), column.column_type.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trailing,
+            [
+                ("authored_columns", GrooveColumnType::U64.array_of().nullable()),
+                ("counter_signs", GrooveColumnType::Bytes),
+                ("seq", GrooveColumnType::U64),
+                ("base_seq", GrooveColumnType::U64.nullable()),
+                ("base_pending", crate::schema::history_base_pending_storage_type()),
+            ]
+        );
+        let key = history.primary_key.as_ref().unwrap();
+        assert_eq!(
+            key.columns.iter().map(|column| column.column.as_str()).collect::<Vec<_>>(),
+            ["branch_key", "row_uuid", "seq", "tx_time", "tx_node_id"]
+        );
+        assert_eq!(key.columns[2], PrimaryKeyColumn::integer("seq", IntegerKeyType::U64));
+        for current in [table.global_current_storage_table(), table.rejected_versions_storage_table()] {
+            assert!(current.columns.iter().all(|column| {
+                !["seq", "base_seq", "base_pending"].contains(&column.name.as_str())
+                    && !column.name.starts_with("_ts_")
+            }));
+        }
     }
 
     #[test]
@@ -1757,5 +1798,61 @@ mod variant_case_tests {
         assert_eq!(reopened.catalogue.next_physical_column_id, next_column);
         crate::local_executor::block_on(reopened.close())
             .expect("close reopened cleaned scalar receipt storage");
+    }
+}
+
+#[cfg(test)]
+mod class_table_id_tests {
+    use super::*;
+
+    /// Every per-table family Jazz names frames its storage keys with the
+    /// catalogue physical table id itself, and every fixed family Jazz lowers
+    /// has a static class table id.
+    #[test]
+    fn jazz_families_frame_keys_with_catalogue_or_fixed_ids() {
+        for id in [1, 2, groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID] {
+            let table_id = checked_physical_table_id(id).unwrap();
+            for name in [
+                physical_history_table_name(table_id),
+                physical_global_current_table_name(table_id),
+                physical_ahead_current_table_name(table_id),
+                physical_rejected_versions_table_name(table_id),
+            ] {
+                assert_eq!(
+                    u64::from(groove::storage::class_table_id(&name).unwrap()),
+                    id,
+                    "{name}"
+                );
+            }
+        }
+        for family in JazzSchema::empty().lower_to_groove().column_families() {
+            if family.starts_with("jazz_") {
+                groove::storage::class_table_id(&family)
+                    .unwrap_or_else(|error| panic!("{family} has no class table id: {error}"));
+            }
+        }
+    }
+
+    #[test]
+    fn schema_ingest_refuses_table_ids_beyond_the_storage_key_range() {
+        assert!(matches!(
+            checked_physical_table_id(groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID + 1),
+            Err(Error::InvalidCatalogueUpdate(_))
+        ));
+        let mut next_table_id = groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID + 1;
+        let mut next_column_id = 1;
+        let schema = JazzSchema::new_with_branch_columns([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", groove::schema::ColumnType::String)],
+        )]);
+        assert!(matches!(
+            allocate_provisional_physical_mapping(
+                &schema,
+                PhysicalIdentityManifest::allocate(&schema),
+                &mut next_table_id,
+                &mut next_column_id,
+            ),
+            Err(Error::InvalidCatalogueUpdate(_))
+        ));
     }
 }

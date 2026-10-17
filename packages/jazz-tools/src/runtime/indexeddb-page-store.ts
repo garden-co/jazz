@@ -2,6 +2,9 @@ import {
   claimBrowserReclamationOwnership,
   type BrowserPhysicalDatabaseEpoch,
 } from "./browser-physical-database-epoch.js";
+import { UnsupportedStorageCodecsError } from "./unsupported-storage-codecs-error.js";
+
+export { UnsupportedStorageCodecsError };
 
 /** Durable IndexedDB metadata/page-store format, independent of browser IDB's schema version. */
 export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
@@ -61,19 +64,15 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
-  "groove.large-value.v1",
-  "groove.ordered-chunk-storage.v1",
+  // Interned author columns: the node-local `authors` Groove dictionary. A
+  // browser root written before them lacks this family and fails manifest
+  // admission instead of decoding full authors as dictionary codes.
+  "groove.dictionary.v1",
+  "groove.durable-index.v2",
+  "groove.large-value.v2",
+  "groove.ordered-chunk-storage.v2",
   "groove.ordered-kv.v1",
-  "jazz.branch-key.v1",
-  "jazz.catalogue.activation.v1",
-  "jazz.catalogue.bootstrap-ready.v1",
-  "jazz.catalogue.lens.v1",
-  "jazz.catalogue.lineage.v1",
-  "jazz.catalogue.physical-mapping.v1",
-  "jazz.catalogue.schema.v1",
-  "jazz.catalogue.write-pointer.v1",
-  "jazz.subscription-program-fact-key.v1",
-  "jazz.transaction-durability.v2",
+  "jazz.node-storage.v2",
 ] as const;
 
 /**
@@ -975,12 +974,26 @@ function assertStorageManifest(value: unknown): asserts value is IndexedDbStorag
     manifest.pageFormatMagic !== INDEXEDDB_STORAGE_MANIFEST.pageFormatMagic ||
     manifest.pageFormatVersion !== INDEXEDDB_STORAGE_MANIFEST.pageFormatVersion ||
     !Array.isArray(manifest.requiredCodecIds) ||
-    manifest.requiredCodecIds.length !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds.length ||
-    manifest.requiredCodecIds.some(
-      (codec, index) => codec !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds[index],
-    )
+    !manifest.requiredCodecIds.every((codec: unknown) => typeof codec === "string")
   ) {
     throw new Error("Missing or invalid IndexedDB storage epoch manifest");
+  }
+  const found: readonly string[] = manifest.requiredCodecIds;
+  const expected: readonly string[] = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
+  if (found.length !== expected.length || found.some((codec, index) => codec !== expected[index])) {
+    // A well-formed epoch manifest whose codec-family inventory differs from
+    // the one this build reads. Raised before any page is decoded; the root
+    // is left untouched. The message keeps the generic manifest-rejection
+    // prefix so existing matches on it still hold.
+    const missing = expected.filter((codec) => !found.includes(codec));
+    const unknown = found.filter((codec) => !expected.includes(codec));
+    throw new UnsupportedStorageCodecsError(
+      missing,
+      unknown,
+      `Missing or invalid IndexedDB storage epoch manifest: unsupported storage format: ` +
+        `this epoch-${INDEXEDDB_STORAGE_EPOCH} root lacks codec families ${JSON.stringify(missing)} ` +
+        `required by this build and declares ${JSON.stringify(unknown)} that this build does not read`,
+    );
   }
 }
 
