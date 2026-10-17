@@ -647,7 +647,7 @@ export class E2ee {
     });
     currentSpaceKeys.set(
       db,
-      async (scope, identifier, use, includeHistory, _prepareOnline, forWrite) => {
+      async (scope, identifier, use, includeHistory, _prepareOnline, forWrite, requiredEpochs) => {
         await this.prepare(true);
         return this.requireSpaces().withKeys(
           scope,
@@ -656,6 +656,7 @@ export class E2ee {
           includeHistory,
           () => this.prepare(),
           forWrite,
+          requiredEpochs,
         );
       },
     );
