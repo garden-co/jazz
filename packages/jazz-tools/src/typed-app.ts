@@ -1,4 +1,8 @@
 import { assertRelationshipDeclaration } from "./relationships.js";
+import {
+  columnTransformDependencies,
+  validateTransformDependencies,
+} from "./runtime/column-transforms.js";
 import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyTypedColumnBuilder,
@@ -43,6 +47,7 @@ export class DefinedTable<
     public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
     public readonly compositeIndexes?: readonly (readonly Extract<keyof TColumns, string>[])[],
   ) {
+    validateTransformDependencies(columns);
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
   }
 
@@ -177,7 +182,7 @@ export function defineTable<
   const TColumns extends TableDefinition,
   const TRelations extends Relationships,
 >(
-  columns: TColumns,
+  columns: TColumns & ValidateTransformContexts<TColumns>,
   relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
 ): DefinedTable<TColumns, TRelations> {
   if (!relations || typeof relations !== "object" || Array.isArray(relations))
@@ -227,8 +232,57 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable(columns, relations);
+  return new DefinedTable<TColumns, TRelations>(columns, relations);
 }
+
+type StoredDependencyValue<C extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<C> extends true
+    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
+    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
+type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
+  readonly [K in D]: K extends "id"
+    ? string
+    : K extends keyof C
+      ? Stored extends true
+        ? StoredDependencyValue<C[K]>
+        : ColumnBuilderOptional<C[K]> extends true
+          ? ColumnBuilderInitValue<C[K]> | null
+          : ColumnBuilderInitValue<C[K]>
+      : never;
+};
+type ValidDependencyContext<
+  C extends TableDefinition,
+  D extends string,
+  Context,
+  Stored extends boolean,
+> =
+  Exclude<keyof Context, D> extends never
+    ? DependencyValues<C, D, Stored> extends Context
+      ? true
+      : false
+    : false;
+type ValidateTransformContexts<C extends TableDefinition> = {
+  [K in keyof C]: C[K] extends {
+    readonly __jazzDependencies: readonly (infer D extends string)[];
+    readonly __jazzStoredDependencies: infer S;
+    readonly __jazzInputDependencies: infer I;
+  }
+    ? string extends D
+      ? C[K]
+      : Exclude<D, keyof C | "id"> extends never
+        ? K extends D
+          ? never
+          : ValidDependencyContext<C, D, S, true> extends true
+            ? ValidDependencyContext<C, D, I, false> extends true
+              ? C[K]
+              : never
+            : never
+        : never
+    : C[K];
+};
+type ValidateSchemaTransformContexts<S extends SchemaDefinition> = {
+  [K in keyof S]: S[K] extends TableDefinition ? ValidateTransformContexts<S[K]> : S[K];
+};
 
 type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;
 type ExplicitColumnTarget<R extends Relationships, C extends string> = {
@@ -1744,18 +1798,29 @@ function columnTransformsForTable(
 
   const columnsDefinition = unwrapTableDefinition(definition);
   const transforms: ColumnTransformMap = {};
+  validateTransformDependencies(columnsDefinition);
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     if (builder._transform) {
-      transforms[columnName] = builder._transform as ColumnTransform;
+      transforms[columnName] = {
+        ...builder._transform,
+        ...(builder._transform.dependsOn
+          ? { dependsOn: Object.freeze([...builder._transform.dependsOn]) }
+          : {}),
+      } as ColumnTransform;
     }
   }
-  return Object.keys(transforms).length > 0 ? transforms : undefined;
+  if (Object.keys(transforms).length === 0) return undefined;
+  columnTransformDependencies(transforms);
+  return transforms;
 }
 
-function columnTransformsForSchema(definition: SchemaDefinition): ColumnTransformRegistry {
-  const registry: ColumnTransformRegistry = {};
+function columnTransformsForSchema(
+  definition: SchemaDefinition,
+): ColumnTransformRegistry | undefined {
+  let registry: ColumnTransformRegistry | undefined;
   for (const [tableName, tableDefinition] of Object.entries(definition)) {
-    registry[tableName] = columnTransformsForTable(tableDefinition);
+    const transforms = columnTransformsForTable(tableDefinition);
+    if (transforms) (registry ??= {})[tableName] = transforms;
   }
   return registry;
 }
@@ -1782,7 +1847,10 @@ export function definitionToSchema<TSchema extends SchemaDefinition>(
 }
 
 export function defineSchema<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
+  definition: TSchema &
+    ValidateSchemaRefs<TSchema> &
+    ValidateSchemaColumnNames<TSchema> &
+    ValidateSchemaTransformContexts<TSchema>,
 ): Schema<TSchema> {
   for (const [tableName, tableDefinition] of Object.entries(definition)) {
     assertSchemaNameAllowed(tableName);
@@ -1811,7 +1879,10 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  */
 export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
+  definition: TSchema &
+    ValidateSchemaRefs<TSchema> &
+    ValidateSchemaColumnNames<TSchema> &
+    ValidateSchemaTransformContexts<TSchema>,
 ): App<Schema<TSchema>>;
 export function defineApp(
   definition: SchemaDefinition | Schema<any>,
@@ -1844,7 +1915,10 @@ export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
 ): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
+  definition: TSchema &
+    ValidateSchemaRefs<TSchema> &
+    ValidateSchemaColumnNames<TSchema> &
+    ValidateSchemaTransformContexts<TSchema>,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,
