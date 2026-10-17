@@ -49,6 +49,117 @@ afterAll(async () => {
   await server?.stop();
 });
 
+it.each(["success", "failure"] as const)(
+  "joins a background recovery proof with %s and leaves subsequent recovery usable",
+  async (outcome) => {
+    let saved: string | null = null;
+    let challengeId: string | undefined;
+    let proofCalls = 0;
+    let heldKey: Uint8Array | undefined;
+    let armed = true;
+    let proofEntered!: () => void;
+    let releaseProof!: () => void;
+    let foregroundReleased!: () => void;
+    const proofStarted = new Promise<void>((resolve) => {
+      proofEntered = resolve;
+    });
+    const proofRelease = new Promise<void>((resolve) => {
+      releaseProof = resolve;
+    });
+    const foregroundReady = new Promise<void>((resolve) => {
+      foregroundReleased = resolve;
+    });
+    const sentinel = new Error("Recovery proof provider unavailable");
+    const decoder = new TextDecoder();
+    const client = await createDb({
+      ...account,
+      e2ee: {
+        store: {
+          async read() {
+            return saved;
+          },
+          async update(transform) {
+            saved = transform(saved);
+          },
+        },
+        crypto: {
+          ...adapters,
+          keyEnvelope: {
+            ...adapters.keyEnvelope,
+            async wrap(key, context, plaintext) {
+              const text = decoder.decode(context);
+              if (armed && challengeId && text.includes(challengeId) && text.includes("proof")) {
+                proofCalls++;
+                heldKey = key;
+                proofEntered();
+                await proofRelease;
+                if (outcome === "failure") throw sentinel;
+              }
+              return adapters.keyEnvelope.wrap(key, context, plaintext);
+            },
+          },
+        },
+      },
+    });
+    const insert = client.insert.bind(client);
+    const insertion = vi.spyOn(client, "insert").mockImplementation((table, data, options) => {
+      const result = insert(table, data, options);
+      if (table !== deviceRequestApp.__e2ee_device_challenges || challengeId) return result;
+      challengeId = (result.value as { id: string }).id;
+      const wait = result.wait.bind(result);
+      // Preserve real global acceptance. Delay only its caller until the
+      // subscription is demonstrably responding to the accepted challenge.
+      vi.spyOn(result, "wait").mockImplementation(
+        (waitOptions) =>
+          new Promise((resolve, reject) => {
+            wait(waitOptions).then(async (accepted) => {
+              await proofStarted;
+              // Queue useRecovery's continuation first: it reaches respond()
+              // before the test resumes and releases the held provider.
+              resolve(accepted);
+              foregroundReleased();
+            }, reject);
+          }),
+      );
+      return result;
+    });
+    try {
+      const before = await client.e2ee.devices.list();
+      const pending = before.filter((device) => device.state === "pending");
+      expect(pending).toHaveLength(1);
+      const recovery = client.e2ee.recovery.use(material).wait();
+      const completed =
+        outcome === "failure"
+          ? expect(recovery).rejects.toBe(sentinel)
+          : expect(recovery).resolves.toBeUndefined();
+      await foregroundReady;
+      expect(proofCalls).toBe(1);
+      expect(heldKey?.some((byte) => byte !== 0)).toBe(true);
+      releaseProof();
+      await completed;
+      expect(proofCalls).toBe(1);
+      expect(heldKey?.every((byte) => byte === 0)).toBe(true);
+      armed = false;
+      // A shared rejection belongs to the waiting call, not its next retry.
+      // Successful responses likewise leave no promise that can mask new work.
+      await client.e2ee.recovery.use(material).wait();
+      expect(await client.e2ee.devices.list()).toContainEqual(
+        expect.objectContaining({
+          id: pending[0]!.id,
+          state: "active",
+          keyReadiness: "verified",
+        }),
+      );
+    } finally {
+      armed = false;
+      releaseProof();
+      insertion.mockRestore();
+      await client.shutdown();
+    }
+  },
+  60_000,
+);
+
 // Cases share accepted history but open and close their own pending device.
 // Earlier recovered devices must never satisfy a later case's success checks.
 

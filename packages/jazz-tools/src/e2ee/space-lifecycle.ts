@@ -304,8 +304,8 @@ export class Spaces {
     roots: SpaceRoot[];
     device?: DeviceState;
   }> {
-    await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
-    await this.groups?.warmMembership({ accountId: this.accountId });
+    if (this.groups) await this.groups.warmMembership({ accountId: this.accountId });
+    else await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
       const device = requireActiveDevice ? await this.requireDevice().states(tx) : undefined;
       const own =
@@ -374,16 +374,21 @@ export class Spaces {
       ]);
       this.assertOpen();
       const groupIds = this.groupHistoryIds(grants, []);
-      if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
-      await Promise.all(
-        [
-          ...this.accounts(
-            observed,
-            grants,
-            successors.map((row) => row.authorAccountId),
-          ),
-        ].map((id) => prefetchPublicMembershipHistory(this.db, id, this.tables)),
-      );
+      const accounts = [
+        ...this.accounts(
+          observed,
+          grants,
+          successors.map((row) => row.authorAccountId),
+        ),
+      ];
+      // Group discovery already prepares its accounts. Include the space's
+      // accounts in that same set rather than ordering overlapping reads twice.
+      if (groupIds !== undefined && this.groups)
+        await this.groups.warmMembership({ groupIds }, accounts);
+      else
+        await Promise.all(
+          accounts.map((id) => prefetchPublicMembershipHistory(this.db, id, this.tables)),
+        );
       const query =
         recoveryRootId === undefined
           ? undefined
@@ -1082,13 +1087,21 @@ export class Spaces {
     const recipients: InitialRecipient[] = [];
     const expectedRecipients: unknown[] = [];
     for (const recipientId of ids) {
-      const history =
+      const observedHistory =
         recipientId === this.accountId
           ? state.publicHistory
-          : await readPublicMembershipHistory(tx, recipientId, this.tables);
+          : groupSnapshot?.histories.get(recipientId);
       const group = graph?.get(recipientId);
-      if (group && history.roots.rows.length) throw new Error("Ambiguous E2EE space recipient ID");
       if (group) {
+        // Only an accepted account root can make this group ID ambiguous.
+        // Keep that predicate in this transaction without reading four unused
+        // account-history tables. Reused histories were read by this same tx.
+        const accountRoots =
+          observedHistory?.roots ??
+          (await tx.allSettledForE2ee(
+            this.tables.__e2ee_account_roots.where({ accountId: recipientId }),
+          ));
+        if (accountRoots.rows.length) throw new Error("Ambiguous E2EE space recipient ID");
         if (group.sealed || group.rotationRequired)
           throw new Error("E2EE initial recipient group requires reconciliation");
         recipients.push({
@@ -1103,6 +1116,8 @@ export class Spaces {
           group.members,
         ]);
       } else {
+        const history =
+          observedHistory ?? (await readPublicMembershipHistory(tx, recipientId, this.tables));
         if (!history.roots.rows.length)
           throw new E2eeInitializationNotReady("E2EE initial recipient account is unavailable");
         const recipient = await replayAccountMembership(
@@ -1563,16 +1578,19 @@ export class Spaces {
     ]);
     this.assertCurrentReconciliation(reconciliation);
     const groupIds = this.groupHistoryIds(grants, extraAccounts);
-    if (groupIds !== undefined) await this.groups?.warmMembership({ groupIds });
+    const accounts = [
+      ...this.accounts([observed], grants, [
+        ...extraAccounts,
+        ...successors.map((row) => row.authorAccountId),
+      ]),
+    ];
+    if (groupIds !== undefined && this.groups)
+      await this.groups.warmMembership({ groupIds }, accounts);
+    else
+      await Promise.all(
+        accounts.map((id) => prefetchPublicMembershipHistory(this.db, id, this.tables)),
+      );
     this.assertCurrentReconciliation(reconciliation);
-    await Promise.all(
-      [
-        ...this.accounts([observed], grants, [
-          ...extraAccounts,
-          ...successors.map((row) => row.authorAccountId),
-        ]),
-      ].map((id) => prefetchPublicMembershipHistory(this.db, id, this.tables)),
-    );
   }
 
   private async changeRecipient(

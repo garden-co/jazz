@@ -119,6 +119,7 @@ export async function prefetchPublicMembershipHistory(
   db: Db,
   accountId: string,
   tables: DeviceTables = app,
+  forceRefresh = false,
 ): Promise<void> {
   let schemas = preparedMembershipAccounts.get(db);
   if (!schemas) {
@@ -132,7 +133,7 @@ export async function prefetchPublicMembershipHistory(
     schemas.set(tables, prepared);
   }
   const rootsQuery = tables.__e2ee_account_roots.where({ accountId });
-  if (prepared.has(accountId)) {
+  if (!forceRefresh && prepared.has(accountId)) {
     // A Global root read orders the already prepared public queries. Callers still
     // collect every record and settlement in a fresh covered transaction snapshot.
     await db.all(rootsQuery, { tier: "remote" });
