@@ -551,7 +551,7 @@ mod tests {
                 "unknown variant `Nope`, expected one of `Cmp`, `SessionCmp`, `IsNull`, \
                  `SessionIsNull`, `IsNotNull`, `SessionIsNotNull`, `Contains`, \
                  `SessionContains`, `In`, `InList`, `SessionInList`, `Exists`, `ExistsRel`, \
-                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False` at line \
+                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False`, `ExistsIncludingCreated` at line \
                  1 column 14",
             ),
         ] {

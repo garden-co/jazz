@@ -673,8 +673,8 @@ mod tests {
             source: source.clone(),
             target: target.clone(),
         };
-        let fresh_bytes = b"JSA1\x00\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
-        let completed_bytes = b"JSA1\x01\x00\x00\x00\x7eJSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let fresh_bytes = b"JSA1\x00\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let completed_bytes = b"JSA1\x01\x00\x00\x00\x7eJSM1\0\x01\0\x01\x06memory\x03\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic\x00\x00\x00\x7eJSM1\0\x02\0\x01\x06memory\x03\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(fresh.encode().unwrap(), fresh_bytes);
         assert_eq!(completed.encode().unwrap(), completed_bytes);
         assert_eq!(StorageAdmissionReceipt::decode(fresh_bytes).unwrap(), fresh);

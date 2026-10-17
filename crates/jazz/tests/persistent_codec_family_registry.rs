@@ -262,16 +262,17 @@ fn authoritative_persistent_codec_family_registry_is_complete_and_current() {
 }
 
 #[test]
-fn epoch_two_profile_composes_frozen_epoch_one_with_registered_additions() {
+fn epoch_two_profile_replaces_node_layout_marker_and_preserves_other_codecs() {
     let registry = registry();
     let mut registered = profile_ids(&registry, "groove-root");
-    registered.extend(profile_ids(&registry, "jazz-root"));
+    registered.extend(profile_ids(&registry, "jazz-node-root"));
     let legacy = jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap();
     registered.sort();
     assert_eq!(
         registered,
         legacy.codec_ids().map(str::to_owned).collect::<Vec<_>>()
     );
+    registered.retain(|id| id != "jazz.node-storage.v2");
     registered.extend(profile_ids(&registry, "jazz-epoch-2-additions"));
     registered.sort();
     assert_eq!(
