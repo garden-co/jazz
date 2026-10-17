@@ -1,7 +1,10 @@
 import type { ColumnDescriptor, Value } from "../drivers/types.js";
 import type { Db, TableProxy } from "../runtime/db.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
-import { encodeNativeRowValues, decodeNativeRowValues } from "../runtime/native-runtime/native-row-codec.js";
+import {
+  encodeNativeRowValues,
+  decodeNativeRowValues,
+} from "../runtime/native-runtime/native-row-codec.js";
 import { unwrapValue } from "../runtime/row-transformer.js";
 import { encodeCellType } from "./cell-type.js";
 import { E2eeDataError } from "./data-error.js";
