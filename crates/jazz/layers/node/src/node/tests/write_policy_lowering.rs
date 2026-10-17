@@ -929,7 +929,7 @@ fn lowered_write_policy_does_not_restore_removed_grants_after_table_rename() {
     );
 
     let existing = row(0xe5);
-    let existing_tx = core
+    let _existing_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("tasks", existing, 2)
                 .made_by(AuthorSubject::SYSTEM)

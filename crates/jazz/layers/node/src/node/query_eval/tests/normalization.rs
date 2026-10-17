@@ -259,6 +259,7 @@ fn join_read_tables_include_source_lookups_and_nested_joins() {
         table: "nested_junction".to_owned(),
         on_column: "target".to_owned(),
         target: Default::default(),
+        source_mode: Default::default(),
         source_column: None,
         source_lookup: Some(JoinSourceLookup {
             table: "nested_lookup".to_owned(),
@@ -273,6 +274,7 @@ fn join_read_tables_include_source_lookups_and_nested_joins() {
         table: "root_junction".to_owned(),
         on_column: "target".to_owned(),
         target: Default::default(),
+        source_mode: Default::default(),
         source_column: None,
         source_lookup: Some(JoinSourceLookup {
             table: "root_lookup".to_owned(),

@@ -262,8 +262,9 @@ mod tests {
         use jazz::groove::storage::OrderedKvStorage;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("accounts.rocksdb");
-        let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
+        let factory = jazz_storage_rocksdb::RocksDbStorageFactory::default();
+        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
+            .unwrap()
             .with_additional_codecs(["jazz.account-command.v1"])
             .unwrap();
         jazz::db::block_on(async {
@@ -284,7 +285,7 @@ mod tests {
         let path = directory.path().join("accounts.rocksdb");
         let open = || {
             AccountRegistryOwner::open(Some((
-                Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+                Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
                 path.clone(),
             )))
             .unwrap()

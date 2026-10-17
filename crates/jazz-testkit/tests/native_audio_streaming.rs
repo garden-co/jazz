@@ -101,7 +101,9 @@ async fn enrolled_native_audio_survives_offline_reopen() {
             context.admin_secret = None;
             context.backend_secret = None;
             context.storage = ClientStorage::Persistent;
-            context.storage_factory = Some(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory));
+            context.storage_factory = Some(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ));
             context.data_dir = directory.path().join("project");
             enroll_test_context(&mut context).await.unwrap();
             let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);

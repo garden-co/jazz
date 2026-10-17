@@ -314,7 +314,7 @@ fn current_row_pair(row: CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {
 }
 fn version_record<V: Into<Value> + Clone>(
     row_uuid: RowUuid,
-    parents: Vec<TxId>,
+    _parents: Vec<TxId>,
     cells: BTreeMap<String, V>,
     deletion: Option<DeletionEvent>,
 ) -> VersionRecord {
@@ -518,6 +518,10 @@ impl ReopenRefusingMemoryStorage {
 }
 
 impl OrderedKvStorage for ReopenRefusingMemoryStorage {
+    fn admission(&self) -> Result<groove::storage::StorageAdmission, groove::storage::Error> {
+        self.inner.admission()
+    }
+
     fn get(
         &self,
         cf: String,

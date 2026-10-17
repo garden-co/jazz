@@ -175,6 +175,18 @@ fn prefix_normalized_relation_arm(
     Ok(())
 }
 
+pub(super) fn join_via_source_path(prefix: &str, index: usize) -> String {
+    if prefix == "query" {
+        format!("join_via:{index}")
+    } else {
+        format!("{prefix}:join_via:{index}")
+    }
+}
+
+pub(super) fn nested_join_source_path(parent: &str, index: usize) -> String {
+    format!("{parent}:nested:{index}")
+}
+
 pub(super) fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     SourceId {
         table: join.table.clone(),
@@ -1826,7 +1838,7 @@ fn normalize_join_via_right(
     }
 
     for (nested_index, nested) in join.nested_joins.iter().enumerate() {
-        let nested_path = format!("{path}:nested:{nested_index}");
+        let nested_path = nested_join_source_path(path, nested_index);
         let mut descendants = Vec::new();
         let (nested_right, nested_source) = normalize_join_via_right(
             nodes,
@@ -2472,7 +2484,7 @@ struct PolicyAtomChain<'a> {
 /// state per path so independent policy alternatives do not consume each
 /// other's depth budget.
 #[derive(Clone, Default)]
-struct InheritanceExpansionPath {
+pub(super) struct InheritanceExpansionPath {
     uses: BTreeMap<InheritanceExpansionKey, usize>,
 }
 
@@ -2544,11 +2556,7 @@ fn normalize_filter_join_chain(
     }
 
     for (index, join) in chain.joins.iter().enumerate() {
-        let path = if prefix == "query" {
-            format!("join_via:{index}")
-        } else {
-            format!("{prefix}:join_via:{index}")
-        };
+        let path = join_via_source_path(prefix, index);
         let mut nested_contributions = Vec::new();
         let (right, join_source) = normalize_join_via_right(
             nodes,

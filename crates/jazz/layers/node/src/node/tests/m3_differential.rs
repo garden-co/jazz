@@ -750,7 +750,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     made_at: u64,
     cells: BTreeMap<String, Value>,
 ) {
-    let mut commit = MergeableCommit::new("docs", row_uuid, made_at).cells(cells);
+    let commit = MergeableCommit::new("docs", row_uuid, made_at).cells(cells);
     let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     parents.entry(row_uuid).or_default().0 = Some(tx_id);
@@ -762,7 +762,7 @@ fn delete_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     row_uuid: RowUuid,
     made_at: u64,
 ) {
-    let mut commit =
+    let commit =
         MergeableCommit::new("docs", row_uuid, made_at).deletion(DeletionEvent::Deleted);
     let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
@@ -1875,7 +1875,7 @@ fn accept_with_parent(
     made_at: u64,
     cells: BTreeMap<String, Value>,
 ) -> TxId {
-    let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
+    let commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
     let tx = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().0 = Some(tx);
     tx
@@ -1888,7 +1888,7 @@ fn delete_with_parent(
     row_uuid: RowUuid,
     made_at: u64,
 ) -> TxId {
-    let mut commit =
+    let commit =
         MergeableCommit::new(table, row_uuid, made_at).deletion(DeletionEvent::Deleted);
     let tx = accept_global(core, commit);
     parents.entry((table, row_uuid)).or_default().1 = Some(tx);

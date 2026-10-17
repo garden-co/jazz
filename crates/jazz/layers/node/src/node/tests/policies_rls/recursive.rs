@@ -776,7 +776,7 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     };
 
     let seed_row = row(0x51);
-    let seed_grant = accept_global(
+    let _seed_grant = accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 50).cells(BTreeMap::from([
             ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
@@ -803,7 +803,7 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
         BTreeSet::from([doc_a, doc_b, doc_c]),
     );
 
-    let seed_move = accept_global(
+    let _seed_move = accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 51)
             .cells(BTreeMap::from([
@@ -932,7 +932,7 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
     let hidden_doc = row(0x68);
     let allowed_insert = row(0x69);
     let denied_insert = row(0x6a);
-    let update_parent = accept_global(
+    let _update_parent = accept_global(
         &mut core,
         MergeableCommit::new("docs", update_doc, 30)
             .cells(recursive_doc_cells("update old", "write")),
@@ -942,7 +942,7 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
         MergeableCommit::new("docs", delete_doc, 31)
             .cells(recursive_doc_cells("delete me", "write")),
     );
-    let hidden_parent = accept_global(
+    let _hidden_parent = accept_global(
         &mut core,
         MergeableCommit::new("docs", hidden_doc, 32)
             .cells(recursive_doc_cells("hidden", "write")),

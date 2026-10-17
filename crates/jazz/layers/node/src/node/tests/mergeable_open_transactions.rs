@@ -173,8 +173,8 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
         intervening_content = Some(content);
         intervening_deletion = Some(deletion_tx);
     }
-    let intervening_content = intervening_content.unwrap();
-    let intervening_deletion = intervening_deletion.unwrap();
+    let _intervening_content = intervening_content.unwrap();
+    let _intervening_deletion = intervening_deletion.unwrap();
 
     let expected_commits = vec![
         MergeableCommit::new("todos", inserted, 200)

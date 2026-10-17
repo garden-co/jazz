@@ -39,7 +39,7 @@ use crate::model::public_schema::{Schema, validate_json_value};
 use crate::model::transaction::OpenTransactionId;
 use crate::model::transaction::TransactionId;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
-use crate::storage_codec_profile::node_storage_codec_profile;
+use crate::storage_codec_profile::open_node_storage;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
@@ -2798,15 +2798,13 @@ async fn core_storage(
                     "persistent client storage requires a target-shell storage factory".to_string(),
                 )
             })?;
-            factory
-                .open(
-                    context.data_dir.join("jazz-core.rocksdb"),
-                    column_families,
-                    node_storage_codec_profile()
-                        .map_err(|error| JazzError::Connection(error.to_string()))?,
-                )
-                .await
-                .map_err(persistent_storage_open_error)
+            open_node_storage(
+                factory.as_ref(),
+                context.data_dir.join("jazz-core.rocksdb"),
+                column_families,
+            )
+            .await
+            .map_err(persistent_storage_open_error)
         }
     }
 }
@@ -4565,6 +4563,23 @@ mod tests {
     struct YieldingStorageFactory;
 
     impl StorageFactory for YieldingStorageFactory {
+        fn open_staged(
+            &self,
+            path: std::path::PathBuf,
+            column_families: Vec<String>,
+            _source: crate::groove::storage::StorageOpenSpec,
+            target: crate::groove::storage::StorageOpenSpec,
+        ) -> StorageFuture<
+            '_,
+            std::result::Result<crate::groove::storage::StagedStorageOpen, StorageError>,
+        > {
+            Box::pin(async move {
+                self.open(path, column_families, target.codec_profile)
+                    .await
+                    .map(crate::groove::storage::StagedStorageOpen::Ready)
+            })
+        }
+
         fn open(
             &self,
             _path: std::path::PathBuf,
@@ -5110,7 +5125,7 @@ mod tests {
             data_dir,
             storage: ClientStorage::default(),
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             account_id: None,
             jwt_token: None,
@@ -5131,7 +5146,7 @@ mod tests {
         };
         if storage == ClientStorage::Persistent {
             context.storage_factory = Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             ));
         }
         context

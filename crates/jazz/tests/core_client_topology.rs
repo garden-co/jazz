@@ -13,7 +13,7 @@ use jazz::tools::{
     ColumnType, OpenTransactionId, SchemaBuilder, TablePolicies, TableSchemaBuilder,
 };
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
-use jazz_storage_rocksdb::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorageFactory;
 
 use common::{compile_schema, session_eq};
 
@@ -53,9 +53,12 @@ fn schema() -> JazzSchema {
 
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -64,9 +67,12 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, Nod
 }
 
 fn reopen_node(temp_dir: &tempfile::TempDir, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        schema.column_families(),
+    ))
+    .unwrap();
     block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))

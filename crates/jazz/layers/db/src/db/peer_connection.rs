@@ -3234,12 +3234,31 @@ where
                             }
                             message => {
                                 let admitted = *self.admitted_upstream_authority.borrow();
+                                let current_authority_receipt_eligible =
+                                    authority_receipt_eligible
+                                        && expected_scope_authority.is_some_and(|expected| {
+                                            admitted.is_some_and(|admitted| {
+                                                admitted.same_admitted_link(expected)
+                                            })
+                                        });
                                 let outbox_release_receipt_eligible =
                                     upload_answer_receipt_eligible(
                                         authority_receipt_eligible,
                                         *expected_scope_authority,
                                         admitted,
                                     );
+                                // This is a receipt from the selected authenticated
+                                // physical upstream, not merely a stored Global fate.
+                                // A rejected or weaker receipt carries no authority cut.
+                                let authoritative_write_cut = match &message {
+                                    SyncMessage::FateUpdate {
+                                        fate: Fate::Accepted,
+                                        global_time: Some(global_time),
+                                        durability: Some(DurabilityTier::Global),
+                                        ..
+                                    } if current_authority_receipt_eligible => Some(*global_time),
+                                    _ => None,
+                                };
                                 let routed_fate = match &message {
                                     SyncMessage::FateUpdate { tx_id, .. } => {
                                         Some((*tx_id, message.clone()))
@@ -3296,6 +3315,12 @@ where
                                 } else {
                                     let outcome = ingress_owner.apply_sync_message_with_ingest_context(message, None).await?;
                                     publications.extend(outcome.publications);
+                                }
+                                // Apply/reconcile must have succeeded before the cut is
+                                // published. Do this under the existing owner and before
+                                // terminal fate routing or Global waiters can wake.
+                                if let Some(cut) = authoritative_write_cut {
+                                    ingress_owner.record_authoritative_settled_through(cut);
                                 }
                                 drop(ingress_owner);
                                 if let Some((tx_id, fate)) = routed_fate {

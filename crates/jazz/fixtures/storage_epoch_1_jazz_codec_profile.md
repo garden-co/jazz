@@ -2,7 +2,8 @@
 
 ## Independent root profiles
 
-The physical storage epoch remains 1. Each independently persisted root
+The source physical storage epoch is 1. Node admission upgrades it to epoch 2
+with `jazz.node-storage.v3`; auxiliary catalogue and account roots remain epoch 1. Each independently persisted root
 requires exactly one Jazz-owned format marker in addition to Groove's base:
 `groove.large-value.v2`, `groove.ordered-chunk-storage.v2`, and
 `groove.ordered-kv.v1`.
@@ -84,3 +85,14 @@ evidence. Current native and browser fixtures are regenerated through their
 production-adapter producers. Node, catalogue and account reopen tests cover
 their independent current profiles. The browser's replica identity and lease
 metadata remain independent physical metadata and are unchanged.
+
+## Epoch two node proof retention
+
+The target profile replaces only `jazz.node-storage.v2` with
+`jazz.node-storage.v3`. Groove dictionary, durable-index and chunk codec IDs
+are unchanged. The layout remains `groove.jazz-physical-class.v3`.
+`jazz_pending_transactions` keeps exclusive proof after acceptance or rejection;
+its slots 2–5 retain the existing `jazz.exclusive-read-evidence.v2` bytes.
+The upgrade scans the source under the backend guard and atomically publishes
+the epoch-two manifest and `groove.storage-admission-receipt.v1` receipt.
+See `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.

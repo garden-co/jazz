@@ -1,4 +1,4 @@
-use crate::query::{in_list, is_null};
+use crate::query::is_null;
 
 fn access_path_schema() -> JazzSchema {
     build_public_test_schema(
@@ -1361,7 +1361,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
     let mut oracle = Oracle::new();
     let row = row(7);
 
-    let base = commit_and_oracle(
+    let _base = commit_and_oracle(
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
@@ -1378,7 +1378,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
     );
     assert_current_rows_match_oracle(&mut node, &oracle);
 
-    let child = commit_and_oracle(
+    let _child = commit_and_oracle(
         &mut node,
         &mut oracle,
         MergeableCommit::new("todos", row, 11)

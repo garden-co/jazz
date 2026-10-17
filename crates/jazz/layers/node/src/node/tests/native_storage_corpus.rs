@@ -14,6 +14,61 @@ use jazz_storage_sqlite::{
 };
 use sha2::{Digest, Sha256};
 
+fn open_native_corpus_storage(
+    factory: &dyn groove::storage::StorageFactory,
+    path: &std::path::Path,
+    families: Vec<String>,
+    migrated_from_epoch_one: bool,
+) -> YieldingStorage<BoxedStorage> {
+    use groove::storage::{StorageAdmission, StorageOpenSpec};
+    let storage = crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+        factory,
+        path.to_path_buf(),
+        families,
+    ))
+    .expect("admit native Jazz corpus storage");
+    let StorageAdmission::Durable(admission) =
+        storage.admission().expect("read actual native admission")
+    else {
+        panic!("native Jazz corpus requires a durable admission receipt");
+    };
+    let manifest = admission.manifest();
+    let target = manifest
+        .with_open_spec(&StorageOpenSpec {
+            epoch: 2,
+            codec_profile: crate::storage_codec_profile::epoch_2_storage_codec_profile().unwrap(),
+        })
+        .unwrap();
+    assert_eq!(
+        manifest, &target,
+        "native corpus must use the exact Jazz E2 profile"
+    );
+    let source = manifest
+        .with_open_spec(&StorageOpenSpec {
+            epoch: 1,
+            codec_profile: crate::storage_codec_profile::epoch_1_storage_codec_profile().unwrap(),
+        })
+        .unwrap();
+    admission
+        .validate(&source, &target)
+        .expect("receipt binds exact source and target");
+    assert_eq!(
+        admission.is_migrated(),
+        migrated_from_epoch_one,
+        "fresh and migrated native roots must retain their distinct admission receipts",
+    );
+    YieldingStorage::wrap(storage)
+}
+
+fn incomplete_native_corpus_profile(factory: &dyn groove::storage::StorageFactory, path: &std::path::Path, families: Vec<String>) -> Result<YieldingStorage<BoxedStorage>, groove::storage::Error> {
+    let (source, mut target) = crate::storage_codec_profile::node_storage_open_specs()?;
+    target.codec_profile = groove::storage::StorageCodecProfile::groove_epoch_1();
+    match crate::local_executor::block_on(factory.open_staged(path.to_path_buf(), families, source, target))? {
+        groove::storage::StagedStorageOpen::Ready(storage) => Ok(YieldingStorage::wrap(storage)),
+        groove::storage::StagedStorageOpen::Guard(_) => panic!("current corpus unexpectedly needs admission"),
+    }
+}
+
 /// The storage families that the native settlement producer must prove before
 /// its logical pack can be promoted to a committed historical fixture.
 ///
@@ -733,9 +788,9 @@ fn publish_native_corpus_lineage<S>(
     // deliberately exercises both durable records: recovering an active lens
     // and projecting the old note into its descendant current-write schema.
     node.activate_catalogue_schema_settled(crate::protocol::CurrentWriteSchema {
-            revision: 1,
-            schema: target,
-        })
+        revision: 1,
+        schema: target,
+    })
     .expect("activate native corpus descendant write schema");
 }
 
@@ -1394,13 +1449,13 @@ where
     // rewrite any producer bytes before reporting the incompatibility.
     match open_with_incomplete_profile().err() {
         Some(groove::storage::Error::UnsupportedStorageCodecs {
-            epoch: 1,
+            epoch: 2,
             missing,
             unknown,
         }) => {
             assert!(missing.is_empty(), "{missing:?}");
             assert!(
-                unknown.iter().any(|codec| codec == "jazz.node-storage.v2")
+                unknown.iter().any(|codec| codec == "jazz.node-storage.v3")
                     && unknown.iter().any(|codec| codec == "groove.durable-index.v2"),
                 "the refusal names the Jazz families the incomplete profile cannot read: {unknown:?}"
             );
@@ -1511,7 +1566,7 @@ fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> Native
 }
 
 /// Proves that both production native adapters share the same full Jazz
-/// producer/reopen/mixed-write semantics under the closed epoch-one profile.
+/// producer/reopen/mixed-write semantics under the admitted epoch-two profile.
 ///
 /// alice creates a branch-local row with two immutable versions and a byte
 /// scalar, then closes the native store.  A fresh process reads the old state,
@@ -1530,12 +1585,11 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let snapshot = native_corpus_authority_snapshot(&schema);
     // A root that stores Jazz rows opens with the node profile (epoch-one base
     // plus the durable-index and linear row-history families).
-    let profile = node_storage_codec_profile().expect("closed Jazz node profile");
+    let _profile = node_storage_codec_profile().expect("closed Jazz node profile");
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB corpus directory");
     let rocks_path = rocks_directory.path().to_path_buf();
     let rocks_schema = schema.clone();
-    let rocks_profile = profile.clone();
     let rocks_open_path = rocks_path.clone();
     let rocks_wrong_path = rocks_path.clone();
     let rocks_live_path_for_verification = rocks_path.clone();
@@ -1553,33 +1607,22 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let rocks_archive_output = rocks_candidate_archive.clone();
     let rocks_candidate_verify_archive = rocks_candidate_archive.clone();
     let rocks_candidate_schema = rocks_schema.clone();
-    let rocks_candidate_profile = profile.clone();
     let rocks_receipt = exercise_native_corpus(
         rocks_schema.clone(),
         &snapshot,
         move || {
-            let families = rocks_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            YieldingStorage::wrap(
-                ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                    &rocks_open_path,
-                    &refs,
+            open_native_corpus_storage(
+                &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(
                     RocksDurability::FullSync,
-                    &rocks_profile,
-                )
-                .expect("open RocksDB corpus storage"),
+                ),
+                &rocks_open_path,
+                rocks_schema.column_families(),
+                false,
             )
         },
         move || {
-            let families = rocks_wrong_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                &rocks_wrong_path,
-                &refs,
-                RocksDurability::FullSync,
-                &groove::storage::StorageCodecProfile::groove_epoch_1(),
-            )
-            .map(YieldingStorage::wrap)
+            incomplete_native_corpus_profile(&jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(RocksDurability::FullSync), &rocks_wrong_path, rocks_wrong_schema.column_families())
+
         },
         move || {
             assert_ne!(
@@ -1615,21 +1658,17 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             inspect_native_rocksdb_candidate(&candidate_root)
                 .expect("exported RocksDB candidate has readable durable rows");
             let candidate_schema = rocks_candidate_schema.clone();
-            let candidate_profile = rocks_candidate_profile.clone();
             verify_historical_native_corpus(
                 candidate_schema.clone(),
                 current_producer_native_corpus_pack,
                 move || {
-                    let families = candidate_schema.column_families();
-                    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-                    YieldingStorage::wrap(
-                        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                            &candidate_root,
-                            &refs,
+                    open_native_corpus_storage(
+                        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(
                             RocksDurability::FullSync,
-                            &candidate_profile,
-                        )
-                        .expect("current RocksDB adapter opens exported candidate corpus"),
+                        ),
+                        &candidate_root,
+                        candidate_schema.column_families(),
+                        false,
                     )
                 },
             );
@@ -1664,33 +1703,22 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let sqlite_candidate_output = sqlite_candidate_path.clone();
     let sqlite_candidate_verify_path = sqlite_candidate_path.clone();
     let sqlite_candidate_schema = sqlite_schema.clone();
-    let sqlite_candidate_profile = profile.clone();
     let sqlite_receipt = exercise_native_corpus(
         sqlite_schema.clone(),
         &snapshot,
         move || {
-            let families = sqlite_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            YieldingStorage::wrap(
-                ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                    &sqlite_open_path,
-                    &refs,
+            open_native_corpus_storage(
+                &jazz_storage_sqlite::SqliteStorageFactory::with_durability(
                     SqliteDurability::FullSync,
-                    &profile,
-                )
-                .expect("open SQLite corpus storage"),
+                ),
+                &sqlite_open_path,
+                sqlite_schema.column_families(),
+                false,
             )
         },
         move || {
-            let families = sqlite_wrong_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &sqlite_wrong_path,
-                &refs,
-                SqliteDurability::FullSync,
-                &groove::storage::StorageCodecProfile::groove_epoch_1(),
-            )
-            .map(YieldingStorage::wrap)
+            incomplete_native_corpus_profile(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &sqlite_wrong_path, sqlite_wrong_schema.column_families())
+
         },
         move || {
             assert_ne!(
@@ -1717,21 +1745,17 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             inspect_native_sqlite_candidate(&verification_path)
                 .expect("exported SQLite candidate has readable durable rows");
             let candidate_schema = sqlite_candidate_schema.clone();
-            let candidate_profile = sqlite_candidate_profile.clone();
             verify_historical_native_corpus(
                 candidate_schema.clone(),
                 current_producer_native_corpus_pack,
                 move || {
-                    let families = candidate_schema.column_families();
-                    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-                    YieldingStorage::wrap(
-                        ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                            &verification_path,
-                            &refs,
+                    open_native_corpus_storage(
+                        &jazz_storage_sqlite::SqliteStorageFactory::with_durability(
                             SqliteDurability::FullSync,
-                            &candidate_profile,
-                        )
-                        .expect("current SQLite adapter opens exported candidate corpus"),
+                        ),
+                        &verification_path,
+                        candidate_schema.column_families(),
+                        false,
                     )
                 },
             );
@@ -1828,17 +1852,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
         sqlite_schema.clone(),
         current_physical_native_corpus_pack,
         move || {
-            let families = sqlite_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            YieldingStorage::wrap(
-                ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                    &sqlite_open_path,
-                    &refs,
-                    SqliteDurability::FullSync,
-                    &sqlite_profile,
-                )
-                .expect("current SQLite adapter opens committed native corpus"),
-            )
+            open_native_corpus_storage(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &sqlite_open_path, sqlite_schema.column_families(), true)
         },
     );
 
@@ -1882,17 +1896,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
         rocks_schema.clone(),
         current_physical_native_corpus_pack,
         move || {
-            let families = rocks_schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            YieldingStorage::wrap(
-                ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                    &rocks_open_path,
-                    &refs,
-                    RocksDurability::FullSync,
-                    &profile,
-                )
-                .expect("current RocksDB adapter opens committed native corpus"),
-            )
+            open_native_corpus_storage(&jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(RocksDurability::FullSync), &rocks_open_path, rocks_schema.column_families(), true)
         },
     );
 }
@@ -2270,17 +2274,7 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
         schema.clone(),
         current_physical_native_corpus_pack,
         move || {
-            let families = schema.column_families();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            YieldingStorage::wrap(
-                ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                    &verification_path,
-                    &refs,
-                    SqliteDurability::FullSync,
-                    &profile,
-                )
-                .expect("current Jazz opens staged candidate without the producer"),
-            )
+            open_native_corpus_storage(&jazz_storage_sqlite::SqliteStorageFactory::with_durability(SqliteDurability::FullSync), &verification_path, schema.column_families(), true)
         },
     );
 }
@@ -2366,7 +2360,8 @@ fn published_alpha54_native_corpus_is_refused_with_the_typed_codec_error() {
         include_str!("../../../../../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
         "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
         "published alpha.54 RocksDB",
-    ).unwrap();
+    )
+    .unwrap();
     let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
     let before = rocksdb_family_entries(&path);
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(

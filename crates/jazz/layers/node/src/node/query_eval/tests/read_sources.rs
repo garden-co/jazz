@@ -152,6 +152,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         node: &mut node,
         read_view: &read_view,
         inline_sources: BTreeMap::new(),
+        created_sources: BTreeMap::new(),
         covered_input_sources: BTreeMap::new(),
         covered_input_descriptors: BTreeMap::new(),
         access_paths: BTreeMap::new(),
@@ -315,7 +316,7 @@ fn historical_cut_hides_rows_created_after_the_cut() {
 #[test]
 fn denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds() {
     let (_dir, mut node) = open_node();
-    let first = commit_global_cells(
+    let _first = commit_global_cells(
         &mut node,
         "issues",
         row(11),

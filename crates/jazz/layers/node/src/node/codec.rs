@@ -82,7 +82,7 @@ groove::define_record! {
 
 groove::define_record! {
     /// `jazz.tx-record.v2`: the permanent `jazz_transactions` record. Fields
-    /// needed only until settlement live in [`PendingTransactionRowRecord`],
+    /// kept across settlement live in [`PendingTransactionRowRecord`],
     /// provenance in [`TxProvenanceRowRecord`] (SPEC 2 §2.8).
     pub(super) struct TransactionRowRecord {
         0 => time: TxTime,
@@ -132,7 +132,7 @@ groove::define_record! {
     }
 }
 
-/// `jazz_pending_transactions`: what a transaction needs only until it has a
+/// `jazz_pending_transactions`: immutable proof retained after it has a
 /// seq or a rejection (SPEC 2 §2.8).
 pub(super) const PENDING_TRANSACTIONS_TABLE: &str = "jazz_pending_transactions";
 
@@ -3743,12 +3743,6 @@ impl TransactionRecordStatus {
     pub(super) fn releases_touched_rows(&self, kind: TxKind) -> bool {
         releases_touched_rows(kind, &self.fate, self.global_time, self.is_partial)
     }
-
-    /// Whether the transaction still waits for a seq or a rejection, and so
-    /// may keep a `jazz_pending_transactions` record.
-    pub(super) fn is_unsettled(&self) -> bool {
-        self.global_time.is_none() && !matches!(self.fate, Fate::Rejected(_))
-    }
 }
 
 /// How a transaction record write lands in its batch.
@@ -3765,8 +3759,7 @@ pub(super) enum TransactionRecordWrite {
 /// Stage one transaction's `jazz.tx-record.v2` records: its
 /// `jazz_transactions` record, its `jazz_pending_transactions` record while it
 /// is unsettled and has one, and on insert its `jazz_tx_provenance` record.
-/// The batch that settles an exclusive transaction deletes its pending
-/// record.
+/// The batch that settles an exclusive transaction retains its proof record.
 pub(super) fn stage_transaction_record(
     batch: &mut DatabaseBatch,
     write: TransactionRecordWrite,
@@ -3775,13 +3768,6 @@ pub(super) fn stage_transaction_record(
     status: &TransactionRecordStatus,
 ) -> Result<(), Error> {
     let header = transaction_record_values(node_alias, tx, status)?;
-    let key = || {
-        PrimaryKeyValue::Composite(vec![
-            PrimaryKeyValue::U64(tx.tx_id.time.0),
-            PrimaryKeyValue::U64(node_alias.0),
-        ])
-    };
-    let updating = matches!(write, TransactionRecordWrite::Update);
     match write {
         TransactionRecordWrite::Insert { provenance } => {
             if provenance.is_some() != tx.contribution_merge.is_some() {
@@ -3803,14 +3789,9 @@ pub(super) fn stage_transaction_record(
         }
         TransactionRecordWrite::Update => batch.update("jazz_transactions", header),
     }
-    match pending_transaction_values(node_alias, tx, status)? {
-        Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
-        // Only exclusive transactions keep read evidence, so a mergeable
-        // one never has a pending record to delete.
-        None if updating && tx.kind == TxKind::Exclusive => {
-            batch.delete(PENDING_TRANSACTIONS_TABLE, key());
-        }
-        None => {}
+    // Redacted view receipts cannot erase a complete retained proof.
+    if let Some(values) = pending_transaction_values(node_alias, tx, status)? {
+        batch.update(PENDING_TRANSACTIONS_TABLE, values);
     }
     Ok(())
 }
@@ -3887,22 +3868,15 @@ pub(super) fn transaction_permission_subject(
     Ok(Some(made_by))
 }
 
-/// Values of the `jazz_pending_transactions` record of an unsettled
-/// transaction, or `None` when it is settled or has nothing to keep there.
-/// Exclusive read evidence is kept only while the fate is pending
-/// (`jazz.exclusive-read-evidence.v1`).
+/// Values of the historically named `jazz_pending_transactions` proof record.
+/// `jazz.exclusive-read-evidence.v2` survives every fate; absent proof has no record.
 pub(super) fn pending_transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<Option<Vec<Value>>, Error> {
-    if !status.is_unsettled() {
-        return Ok(None);
-    }
-    let evidence = super::exclusive_read_evidence::evidence_slot_values(
-        tx,
-        matches!(status.fate, Fate::Pending),
-    )?;
+    let _ = status; // Evidence belongs to the immutable commit unit, regardless of fate.
+    let evidence = super::exclusive_read_evidence::evidence_slot_values(tx)?;
     if evidence
         .iter()
         .all(|slot| matches!(slot, Value::Nullable(None)))
@@ -3999,13 +3973,17 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
     }
 }
 
-/// Compare a stored transaction with a redelivered one. The store drops a
-/// transaction's exclusive read evidence once it settles, so a stored copy
-/// without it still matches a redelivery that carries it.
+/// Compare immutable transaction payloads across a proof-redacting carrier.
+/// Complete retained proof must agree with any complete proof redelivered.
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
     incoming: &Transaction,
 ) -> bool {
+    if existing.permission_subject != incoming.permission_subject
+        || !super::exclusive_read_evidence::compatible(existing, incoming)
+    {
+        return false;
+    }
     let mut redacted_existing = existing.clone();
     redacted_existing.base_snapshot = None;
     redacted_existing.row_read_set = None;
@@ -4016,10 +3994,7 @@ pub(super) fn known_transaction_payload_matches(
     redacted_incoming.row_read_set = None;
     redacted_incoming.absent_read_set = None;
     redacted_incoming.predicate_read_set = None;
-    existing == incoming
-        || &redacted_existing == incoming
-        || existing == &redacted_incoming
-        || redacted_existing == redacted_incoming
+    redacted_existing == redacted_incoming
 }
 
 /// Copy a transaction for a carrier boundary or duplicate comparison without
@@ -4041,7 +4016,8 @@ pub fn known_transaction_payload_matches_redacted_permission_subject(
     known_transaction_payload_matches(
         &transaction_without_permission_subject(existing),
         &transaction_without_permission_subject(incoming),
-    )
+    ) && super::exclusive_read_evidence::is_absent(existing)
+        == super::exclusive_read_evidence::is_absent(incoming)
 }
 
 pub(super) fn known_transaction_payload_matches_redacted_cardinality(

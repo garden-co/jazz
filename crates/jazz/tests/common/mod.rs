@@ -71,7 +71,7 @@ pub fn direct_subscription(
 /// The delegated snapshot models the fixture's already-admitted scope, not a
 /// capability that an ordinary network client may assert for itself.
 pub async fn register_direct_receiver(
-    node: &mut jazz::node::NodeState,
+    node: &mut jazz::node::NodeState<groove::storage::BoxedStorage>,
     schema: &JazzSchema,
     table: &str,
     scope: jazz::protocol::DelegatedSessionBinding,
@@ -102,7 +102,7 @@ pub async fn register_direct_receiver(
 }
 
 pub async fn direct_query_update(
-    node: &mut jazz::node::NodeState,
+    node: &mut jazz::node::NodeState<groove::storage::BoxedStorage>,
     peer: &mut jazz::peer::PeerState,
     schema: &JazzSchema,
     table: &str,

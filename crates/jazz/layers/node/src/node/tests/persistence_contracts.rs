@@ -29,8 +29,7 @@ fn jazz_class_v3_history_physical_target(
 struct FailWriteManyMemoryStorage {
     inner: MemoryStorage,
     fail_on_write_many: std::rc::Rc<std::cell::Cell<Option<usize>>>,
-    targeted_write_many_failure:
-        std::rc::Rc<std::cell::RefCell<Option<TargetedWriteManyFailure>>>,
+    targeted_write_many_failure: std::rc::Rc<std::cell::RefCell<Option<TargetedWriteManyFailure>>>,
     write_many_calls: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
@@ -77,15 +76,35 @@ impl FailWriteManyMemoryStorage {
 }
 
 impl OrderedKvStorage for FailWriteManyMemoryStorage {
-    fn get(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn admission(&self) -> Result<groove::storage::StorageAdmission, groove::storage::Error> {
+        self.inner.admission()
+    }
+
+    fn get(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         self.inner.get(cf, key)
     }
 
-    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         self.inner.put_if_absent(cf, key, value)
     }
 
-    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
         self.inner.compare_and_delete(cf, key, expected)
     }
 
@@ -98,15 +117,28 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
-    fn scan(&self, request: groove::storage::ScanRequest) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+    fn scan(
+        &self,
+        request: groove::storage::ScanRequest,
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<groove::storage::StorageScan<'_>, groove::storage::Error>,
+    > {
         self.inner.scan(request)
     }
 
-    fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn write_many(
+        &self,
+        operations: Vec<groove::storage::OwnedWriteOperation>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         let call = self.write_many_calls.get() + 1;
         self.write_many_calls.set(call);
         let matches_target = self
@@ -137,11 +169,19 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
                     ))
                 });
             }
-            return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected durable commit failure".to_owned())) });
+            return Box::pin(async {
+                Err(groove::storage::Error::InvalidStorageLayout(
+                    "injected durable commit failure".to_owned(),
+                ))
+            });
         }
         if self.fail_on_write_many.get() == Some(call) {
             self.fail_on_write_many.set(None);
-            return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected durable commit failure".to_owned())) });
+            return Box::pin(async {
+                Err(groove::storage::Error::InvalidStorageLayout(
+                    "injected durable commit failure".to_owned(),
+                ))
+            });
         }
         self.inner.write_many(operations)
     }
@@ -159,7 +199,10 @@ impl OrderedKvStorage for FailWriteManyMemoryStorage {
 }
 
 impl ReopenableStorage for FailWriteManyMemoryStorage {
-    fn reopen(self, column_families: Vec<String>) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+    fn reopen(
+        self,
+        column_families: Vec<String>,
+    ) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
         Box::pin(async move {
             let Self {
                 inner,
@@ -189,7 +232,7 @@ fn fail_write_many_node() -> (NodeState, FailWriteManyMemoryStorage) {
     (node, storage)
 }
 
-fn assert_poisoned_node_exposes_nothing(core: &mut NodeState) {
+fn assert_poisoned_node_exposes_nothing<S: OrderedKvStorage>(core: &mut NodeState<S>) {
     assert!(matches!(
         core.subscribe_history("todos").resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))

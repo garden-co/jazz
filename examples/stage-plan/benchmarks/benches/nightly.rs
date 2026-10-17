@@ -11,7 +11,7 @@
 //! cargo bench -p jazz-example-stage-plan-benchmark --bench nightly
 //! ```
 
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::{BoxedStorage, MemoryStorage};
 use jazz_example_stage_plan_benchmark::board::Fixture;
 use jazz_example_stage_plan_benchmark::tasks::Fixture as TaskListFixture;
 use jazz_storage_rocksdb::RocksDbStorage;
@@ -28,7 +28,7 @@ fn main() {
 /// Two indexed equalities and LIMIT 50 over the profile-S fixture.
 #[divan::bench(sample_count = 5)]
 fn query_bounded_activity_page_profile_s_rocksdb(bencher: divan::Bencher<'_, '_>) {
-    let (_dir, fixture) = Fixture::<RocksDbStorage>::rocksdb_profile_s();
+    let (_dir, fixture) = Fixture::<BoxedStorage>::rocksdb_profile_s();
     bencher.bench_local(|| fixture.bounded_activity_page_count());
 }
 
@@ -38,7 +38,7 @@ fn query_bounded_activity_page_scaling_rocksdb(
     bencher: divan::Bencher<'_, '_>,
     activity_events: usize,
 ) {
-    let (_dir, fixture) = Fixture::<RocksDbStorage>::rocksdb(3_000, 12_000, activity_events);
+    let (_dir, fixture) = Fixture::<BoxedStorage>::rocksdb(3_000, 12_000, activity_events);
     bencher.bench_local(|| fixture.bounded_activity_page_count());
 }
 
@@ -57,7 +57,7 @@ fn query_comments_scaling_rocksdb(
     bencher: divan::Bencher<'_, '_>,
     (tasks, comments, activity): (usize, usize, usize),
 ) {
-    let (_dir, fixture) = Fixture::<RocksDbStorage>::rocksdb(tasks, comments, activity);
+    let (_dir, fixture) = Fixture::<BoxedStorage>::rocksdb(tasks, comments, activity);
     bencher.bench_local(|| fixture.comments_count());
 }
 
@@ -73,7 +73,7 @@ fn query_comments_scaling_memory(
 /// Indexed-field update with no live subscription attached.
 #[divan::bench(sample_count = 10)]
 fn update_activity_indexed_predicate_no_subscription_rocksdb(bencher: divan::Bencher<'_, '_>) {
-    let (_dir, mut fixture) = Fixture::<RocksDbStorage>::rocksdb_profile_s();
+    let (_dir, mut fixture) = Fixture::<BoxedStorage>::rocksdb_profile_s();
     bencher.bench_local(|| fixture.toggle_activity_indexed_predicate());
 }
 

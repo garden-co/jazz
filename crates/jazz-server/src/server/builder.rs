@@ -670,7 +670,9 @@ mod tests {
 
         let result = ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
             .with_schema(dynamic_bootstrap_schema())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -693,7 +695,9 @@ mod tests {
         drop(storage);
         ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
             .with_schema(dynamic_bootstrap_schema())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -737,7 +741,9 @@ mod tests {
             write_raw_catalogue_entry(&catalogue_path, &entry);
 
             let result = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -767,7 +773,9 @@ mod tests {
             .expect("remove corrupt catalogue entry");
             drop(storage);
             ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -818,7 +826,9 @@ mod tests {
         );
 
         let error = ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -841,7 +851,9 @@ mod tests {
         .expect("remove corrupt nested catalogue entry");
         drop(storage);
         ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -910,7 +922,9 @@ mod tests {
             );
 
             let result = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -942,7 +956,9 @@ mod tests {
             .expect("remove corrupt catalogue entry");
             drop(storage);
             ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -985,7 +1001,9 @@ mod tests {
             );
 
             let error = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1022,7 +1040,9 @@ mod tests {
         write_raw_catalogue_entry(&catalogue_path, &entry);
 
         ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1048,7 +1068,9 @@ mod tests {
         {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1069,7 +1091,9 @@ mod tests {
         }
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1120,7 +1144,9 @@ mod tests {
         );
         let builder = || {
             ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: dir.path().to_path_buf(),
                 })
@@ -1198,7 +1224,9 @@ mod tests {
         let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1223,7 +1251,9 @@ mod tests {
 
         let rebuilt = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1242,7 +1272,9 @@ mod tests {
         {
             let dropped = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1254,7 +1286,9 @@ mod tests {
 
         let reopened_after_drop = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1278,7 +1312,9 @@ mod tests {
             .build();
         let built = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1311,7 +1347,9 @@ mod tests {
 
         let reopened = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage_factory(Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1340,7 +1378,9 @@ mod tests {
                 .block_on(
                     ServerBuilder::new(app_id)
                         .with_schema(schema.clone())
-                        .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                        .with_storage_factory(Arc::new(
+                            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                        ))
                         .with_storage(StorageBackend::Persistent {
                             path: data_dir.path().to_path_buf(),
                         })
@@ -1386,7 +1426,9 @@ mod tests {
             assert!(state.runtime().is_none());
             ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage_factory(Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                ))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })

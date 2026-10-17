@@ -31,7 +31,8 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
-        self.ingest_commit_unit_with_context(tx, versions, now_ms, None).await
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
+            .await
     }
 
     /// Ingest a commit unit as fate authority with an optional authenticated
@@ -48,6 +49,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         self.parking.newest_ingest_ms = self.parking.newest_ingest_ms.max(now_ms);
         // A session or relay transport may not select a durable policy
         // capability. Its authenticated context is evaluated separately; only
@@ -135,7 +137,8 @@ where
     /// restoration preserves retryability for a definitely-uncommitted batch.
     fn restore_clock_after_failed_authority_ingest(&mut self, before: Clock) {
         if self.clock.committed_global_time == before.committed_global_time
-            && self.clock.applied_global_times_after_frontier == before.applied_global_times_after_frontier
+            && self.clock.applied_global_times_after_frontier
+                == before.applied_global_times_after_frontier
         {
             self.clock = before;
             return;
@@ -170,7 +173,8 @@ where
     ) -> Result<PublicationOutcome<()>, Error> {
         self.require_catalogue_ready()?;
         let stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         if stored.tx.kind != TxKind::Mergeable {
             return Err(Error::UnsupportedCommitUnit(
@@ -181,7 +185,8 @@ where
             return Ok(PublicationOutcome::settled(()));
         }
         let records = self
-            .query_versions_for_tx(tx_id).await?
+            .query_versions_for_tx(tx_id)
+            .await?
             .into_iter()
             .map(|stored| self.version_record_from_row(&stored))
             .collect::<Result<Vec<_>, Error>>()?;
@@ -232,12 +237,9 @@ where
     /// Finalize a locally-authored pending exclusive commit as the global
     /// authority, returning the accepted or rejected fate.
     ///
-    /// Validation runs against the in-memory commit unit (`tx` + `versions`),
-    /// the evidence the author captured. The stored row keeps the same
-    /// evidence only while the fate is pending, for retransmission after a
-    /// restart (`jazz.exclusive-read-evidence.v1`). This mirrors the foreign
-    /// authority path, which validates the arriving commit unit before it is
-    /// ingested.
+    /// Validation uses the exact captured commit unit (`tx` + `versions`).
+    /// Durable recovery retains the same immutable evidence; neither path
+    /// replaces the original observations with current-state reads.
     pub async fn finalize_local_exclusive_commit(
         &mut self,
         tx: Transaction,
@@ -251,7 +253,8 @@ where
             ));
         }
         let stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         if !matches!(stored.fate, Fate::Pending) {
             return Ok(PublicationOutcome::settled(stored.fate));
@@ -311,7 +314,8 @@ where
     where
         S: ReopenableStorage,
     {
-        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false).await
+        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false)
+            .await
     }
 
     #[doc(hidden)]
@@ -321,9 +325,11 @@ where
         versions: Vec<VersionRecord>,
         trusted_encoder: bool,
     ) -> Result<(), Error>
-    where S: ReopenableStorage,
+    where
+        S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         let tx = Transaction {
             permission_subject: None,
             ..tx
@@ -420,7 +426,8 @@ where
         )? {
             return Ok(());
         }
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
 
         self.ingest_transaction_and_versions(
             tx,
@@ -428,7 +435,8 @@ where
             Fate::Pending,
             None,
             DurabilityTier::Local,
-        ).await
+        )
+        .await
     }
 
     /// One admission attempt of a unit at the authority: its decision,
@@ -512,6 +520,18 @@ where
                 if !matches {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
+                if tx.kind == TxKind::Exclusive && !matches!(existing.fate, Fate::Rejected(_)) {
+                    let mut existing_versions = self
+                        .query_versions_for_tx(tx.tx_id)
+                        .await?
+                        .into_iter()
+                        .map(|stored| self.version_record_from_row(&stored))
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    existing_versions.sort();
+                    if existing_versions != versions {
+                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                    }
+                }
                 return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                     tx_id: tx.tx_id,
                     fate: existing.fate.clone(),
@@ -572,7 +592,8 @@ where
         )? {
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
         // Validate untrusted metadata before a missing ordinary history parent
         // can park the unit. Otherwise malformed provenance would leave an
         // inert parked receipt instead of producing its terminal fate.
@@ -666,8 +687,7 @@ where
                 durability: None,
             }]));
         }
-        let authority_now_ms =
-            GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
+        let authority_now_ms = GlobalTime::authority_now_ms(now_ms, tx.tx_id.time.physical_ms());
         let global_time = self.clock.allocate_global_time(authority_now_ms)?;
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
@@ -702,16 +722,23 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
             "a global timestamp requires Global durability"
         );
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
-        self.prepare_authored_schema_variants_for_commit(&versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&versions)
+            .await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing.is_partial
+            // View receipts redact the complete proof. Author retransmission
+            // uses the stricter duplicate check; a receipt may match retained
+            // proof without replacing or erasing it.
+            if !(known_transaction_payload_matches(
+                &transaction_without_permission_subject(&existing.tx),
+                &transaction_without_permission_subject(&tx),
+            ) || existing.is_partial
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -722,7 +749,11 @@ where
                 return self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability).await;
             }
             // Normalize aliases before establishing the batch's resident base.
-            for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+            for schema in versions
+                .iter()
+                .map(VersionRecord::schema_version)
+                .collect::<BTreeSet<_>>()
+            {
                 self.ensure_schema_version_alias(schema).await?;
             }
             let mut batch = self.database.open_batch();
@@ -791,6 +822,7 @@ where
         staged_content_versions: &mut Vec<VersionRow>,
         staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<(), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
             "a global timestamp requires Global durability"
@@ -834,7 +866,10 @@ where
         .await
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.ingest"))]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.ingest")
+    )]
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
@@ -842,6 +877,7 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            self.validate_incoming_exclusive_evidence(bundle.tx).await?;
             // This helper is also called directly by reset fast paths; do not
             // rely on their outer ViewUpdate preflight for durable admission.
             self.admit_contribution_merge_for_storage(bundle.tx)?;
@@ -937,11 +973,10 @@ where
         }
         let eligible_versions = eligible
             .iter()
-            .flat_map(|(tx_bundles, _, _)| {
-                tx_bundles.iter().flat_map(|bundle| bundle.versions)
-            })
+            .flat_map(|(tx_bundles, _, _)| tx_bundles.iter().flat_map(|bundle| bundle.versions))
             .collect::<Vec<_>>();
-        self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
+        self.prepare_authored_schema_variants_for_commit(&eligible_versions)
+            .await?;
 
         let mut batch = self.database.open_batch();
         self.sync_metrics.receiver_bulk_ingest_commits += 1;

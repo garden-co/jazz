@@ -34,6 +34,10 @@ impl FailTransactionReadMemoryStorage {
 }
 
 impl OrderedKvStorage for FailTransactionReadMemoryStorage {
+    fn admission(&self) -> Result<groove::storage::StorageAdmission, groove::storage::Error> {
+        self.inner.admission()
+    }
+
     fn get(
         &self,
         cf: String,
@@ -318,7 +322,7 @@ fn authority_read_for_write_check_is_mergeable_only() {
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let target = row(0x95);
-    let base = accept_global(
+    let _base = accept_global(
         &mut core,
         MergeableCommit::new("todos", target, 10).cells(BTreeMap::from([(
             "title".to_owned(),
@@ -907,7 +911,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let author_a = user(0xa1);
     let author_b = user(0xb2);
     let row_uuid = row(7);
-    let tx_a = commit_core_owner_fixture(&mut core, row_uuid, author_a, "owned by A", 10);
+    let _tx_a = commit_core_owner_fixture(&mut core, row_uuid, author_a, "owned by A", 10);
     let mut link_a = PeerState::client_link(author_a);
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();

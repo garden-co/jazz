@@ -80,6 +80,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
@@ -249,6 +250,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
         // too: an empty catalogue does not make an existing Jazz store safe to
@@ -656,6 +658,7 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let local_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
@@ -965,6 +968,7 @@ impl NodeState {
         catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
         let current_tables = physical_version_storage_tables(
@@ -1994,6 +1998,7 @@ where
     where
         T: ReopenableStorage + 'static,
     {
+        crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =

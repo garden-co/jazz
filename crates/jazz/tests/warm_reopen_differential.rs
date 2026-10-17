@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod common;
 
+use groove::storage::BoxedStorage;
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, RemovedRow, SeededRowIdSource, SubscriptionEvent,
@@ -13,7 +14,6 @@ use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -44,7 +44,7 @@ enum CanonicalEvent {
     Closed,
 }
 
-type NamedMutation = (&'static str, Box<dyn Fn(&Db)>);
+type NamedMutation = (&'static str, Box<dyn Fn(&Db<BoxedStorage>)>);
 
 fn row(seed: u64) -> RowUuid {
     let mut bytes = [0_u8; 16];
@@ -95,10 +95,19 @@ fn local_opts() -> ReadOpts {
     }
 }
 
-fn open_db(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8, seed: u64) -> Db {
+fn open_db(
+    dir: &tempfile::TempDir,
+    schema: &JazzSchema,
+    node_byte: u8,
+    seed: u64,
+) -> Db<BoxedStorage> {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).expect("open rocks storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocks storage");
     block_on(Db::open(
         DbConfig::new(
             schema.clone(),
@@ -337,7 +346,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
 
 fn assert_one_shot_matches_subscription(
     schema: &JazzSchema,
-    db: &Db,
+    db: &Db<BoxedStorage>,
     snapshot: &RelationSnapshot,
     label: &str,
 ) {
@@ -351,13 +360,17 @@ fn assert_one_shot_matches_subscription(
     );
 }
 
-fn apply_to_pair(rebuild: &Db, persisted_placeholder: &Db, mutation: impl Fn(&Db)) {
+fn apply_to_pair(
+    rebuild: &Db<BoxedStorage>,
+    persisted_placeholder: &Db<BoxedStorage>,
+    mutation: impl Fn(&Db<BoxedStorage>),
+) {
     mutation(rebuild);
     mutation(persisted_placeholder);
 }
 
 fn next_event_after(
-    db: &Db,
+    db: &Db<BoxedStorage>,
     stream: &mut jazz::db::SubscriptionStream,
     label: &str,
 ) -> SubscriptionEvent {

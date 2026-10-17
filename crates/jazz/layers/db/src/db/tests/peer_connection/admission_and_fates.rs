@@ -5412,3 +5412,228 @@ mod e13_terminal_ingress {
         )));
     }
 }
+
+/// Exercise actual upstream ingress with a real locally persisted Pending
+/// transaction. These receipt forms cannot certify an authority history cut.
+#[test]
+fn non_global_terminal_receipts_do_not_advance_authority_snapshot_cut() {
+    let cases = [
+        (Fate::Pending, Some(DurabilityTier::Local)),
+        (Fate::Pending, Some(DurabilityTier::Global)),
+        (Fate::Accepted, Some(DurabilityTier::Local)),
+        (Fate::Accepted, Some(DurabilityTier::Global)),
+        (Fate::Accepted, None),
+        (
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            Some(DurabilityTier::Global),
+        ),
+    ];
+    for (fate, durability) in cases {
+        let author = AuthorSubject::for_test_bytes([0xe1; 16]);
+        let client = open_db(0xe1, author, &schema());
+        let (transport, mut authority) = duplex_with_admitted_session_context(
+            author,
+            NodeUuid::from_bytes([0xe1; 16]),
+            1,
+            NodeUuid::from_bytes([0x5e; 16]),
+            1,
+        );
+        let _upstream = block_on(client.connect_upstream(transport));
+        let write = client
+            .insert(
+                "todos",
+                cells("pending authority receipt control", false, author),
+                Default::default(),
+            )
+            .unwrap();
+        let before = client.node.node().borrow().committed_global_time();
+        authority
+            .send(SyncMessage::FateUpdate {
+                tx_id: write.mergeable_tx_id(),
+                fate: fate.clone(),
+                global_time: None,
+                durability,
+            })
+            .unwrap();
+        client.tick().unwrap();
+        assert_eq!(
+            client.node.node().borrow().committed_global_time(),
+            before,
+            "receipt {fate:?} / {durability:?} without Global timestamp cannot admit a cut"
+        );
+    }
+}
+
+#[test]
+fn invalid_global_receipt_is_rejected_before_authority_cut_advances() {
+    let author = AuthorSubject::for_test_bytes([0xe2; 16]);
+    let client = open_db(0xe2, author, &schema());
+    let (transport, mut authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xe2; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(transport));
+    let write = client
+        .insert(
+            "todos",
+            cells("malformed authority receipt", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let before = client.node.node().borrow().committed_global_time();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(u64::MAX / 2)),
+            durability: Some(DurabilityTier::Local),
+        })
+        .unwrap();
+    assert!(
+        client.tick().is_err(),
+        "malformed peer receipt must fail ingress"
+    );
+    assert_eq!(client.node.node().borrow().committed_global_time(), before);
+}
+
+/// Receiving content/fate from a parallel link does not select that authority
+/// as the owner of the stable snapshot coordinate. A fresh selected receipt
+/// for the identical stored fate is sufficient, proving the guard is at ingress.
+#[test]
+fn only_selected_admitted_link_advances_authority_snapshot_cut() {
+    let author = AuthorSubject::for_test_bytes([0xe3; 16]);
+    let client = open_db(0xe3, author, &schema());
+    let (first, mut selected_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xe3; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _first = block_on(client.connect_upstream(first));
+    let selected = *client.node.admitted_upstream_authority.borrow();
+    let (second, mut other_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xe3; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _second = block_on(client.connect_upstream(second));
+    assert_eq!(*client.node.admitted_upstream_authority.borrow(), selected);
+    let write = client
+        .insert(
+            "todos",
+            cells("parallel link receipt", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let before = client.node.node().borrow().committed_global_time();
+    let cut = GlobalTime(u64::MAX / 2);
+    assert!(cut > before);
+    let fate = SyncMessage::FateUpdate {
+        tx_id: write.mergeable_tx_id(),
+        fate: Fate::Accepted,
+        global_time: Some(cut),
+        durability: Some(DurabilityTier::Global),
+    };
+    other_authority.send(fate.clone()).unwrap();
+    client.tick().unwrap();
+    assert_eq!(client.node.node().borrow().committed_global_time(), before);
+    selected_authority.send(fate).unwrap();
+    client.tick().unwrap();
+    assert_eq!(client.node.node().borrow().committed_global_time(), cut);
+}
+
+/// The authority handoff drain explicitly quarantines previously queued frames.
+/// An accepted fate may still reconcile its transaction, but cannot admit a cut.
+#[test]
+fn staged_pre_handoff_fate_cannot_advance_authority_snapshot_cut() {
+    let author = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let client = open_db(0xe4, author, &schema());
+    let (transport, mut authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xe4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = block_on(client.connect_upstream(transport));
+    let write = client
+        .insert(
+            "todos",
+            cells("queued before handoff", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let before = client.node.node().borrow().committed_global_time();
+    let cut = GlobalTime(u64::MAX / 2);
+    assert!(cut > before);
+    let fate = SyncMessage::FateUpdate {
+        tx_id: write.mergeable_tx_id(),
+        fate: Fate::Accepted,
+        global_time: Some(cut),
+        durability: Some(DurabilityTier::Global),
+    };
+    authority.send(fate.clone()).unwrap();
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    assert!(!upstream.borrow().staged_inbound.is_empty());
+    client.tick().unwrap();
+    assert_eq!(client.node.node().borrow().committed_global_time(), before);
+    authority.send(fate).unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        client.node.node().borrow().committed_global_time(),
+        cut,
+        "a fresh selected link receipt certifies the stored Global lower bound"
+    );
+}
+
+#[test]
+fn conflicting_accepted_global_receipt_cannot_advance_authority_snapshot_cut() {
+    let author = AuthorSubject::for_test_bytes([0xe5; 16]);
+    let client = open_db(0xe5, author, &schema());
+    let (transport, mut authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xe5; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = block_on(client.connect_upstream(transport));
+    let write = client
+        .insert(
+            "todos",
+            cells("conflicting terminal fate", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    client.tick().unwrap();
+    let before = client.node.node().borrow().committed_global_time();
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(u64::MAX / 2)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    assert!(
+        client.tick().is_err(),
+        "an accepted receipt cannot replace the rejected terminal fate"
+    );
+    assert_eq!(client.node.node().borrow().committed_global_time(), before);
+}

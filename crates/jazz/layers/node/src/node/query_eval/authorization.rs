@@ -8,6 +8,9 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+mod candidates;
+pub(in crate::node) use candidates::{AuthorizedCreatedEvidence, CandidateProofBudget};
+
 pub(super) struct NormalizedReadPolicyInput {
     pub(super) shape: ValidatedQuery,
     pub(super) binding: Binding,
@@ -101,6 +104,19 @@ fn compile_permission_scope_policy(
     claim_values: &BTreeMap<String, Value>,
     schema: &RuntimeSchema,
 ) -> Result<(ValidatedQuery, Binding), Error> {
+    // Support subscriptions are accepted authority data, never a capability
+    // to publish an uncommitted row. This is a private copy: the original
+    // policy and its digest retain every occurrence's source mode.
+    fn accepted_only(joins: &mut [JoinVia]) {
+        for join in joins {
+            join.source_mode = crate::query::CandidateSourceMode::AcceptedOnly;
+            accepted_only(&mut join.nested_joins);
+        }
+    }
+    accepted_only(&mut query.joins);
+    for branch in &mut query.policy_branches {
+        accepted_only(&mut branch.joins);
+    }
     query.filters = query
         .filters
         .into_iter()
@@ -791,7 +807,7 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
     ) -> Result<bool, Error> {
-        self.policy_query_allows_candidate_with_provenance_for_schema(
+        self.write_policy_query_allows_candidate_in_proof_scope(
             policy_schema_version,
             table,
             policy,
@@ -800,29 +816,37 @@ where
             identity,
             insert_candidate,
             provenance,
-            PolicyDecisionRole::Write,
+            false,
+            None,
             &TransactionWriteOverlay::default(),
         )
         .await
     }
 
-    /// Authorize an inline candidate whose policy evidence is committed
-    /// state overlaid with its own transaction's other writes (`INV-RLS-9`).
-    /// With an empty overlay this is exactly
-    /// [`Self::write_policy_query_allows_candidate_with_provenance_for_schema`].
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::node) async fn write_policy_query_allows_candidate_over_transaction(
+    pub(in crate::node) async fn write_policy_query_allows_candidate_in_proof_scope(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
-        policy: &crate::query::Query,
+        policy: &JazzQuery,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorSubject,
         insert_candidate: bool,
         provenance: RowProvenance,
+        global_only: bool,
+        budget: Option<&mut CandidateProofBudget>,
         transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
+        if let Some(budget) = budget {
+            self.charge_candidate_policy(policy_schema_version, policy, insert_candidate, budget)?;
+        }
+        let marked = policy.uses_authorized_created_sources();
+        if marked && !insert_candidate {
+            return Ok(false);
+        }
+        // A marker always permits accepted Global evidence. Complete-unit
+        // admission is needed only to augment that source with created rows.
         self.policy_query_allows_candidate_with_provenance_for_schema(
             policy_schema_version,
             table,
@@ -833,7 +857,14 @@ where
             insert_candidate,
             provenance,
             PolicyDecisionRole::Write,
-            transaction_overlay,
+            (global_only || marked).then(BTreeMap::new),
+            &if marked && !transaction_overlay.accepted_updates_only() {
+                TransactionWriteOverlay::accepted_state()
+            } else if global_only {
+                transaction_overlay.accepted_updates()
+            } else {
+                transaction_overlay.clone()
+            },
         )
         .await
     }
@@ -861,13 +892,58 @@ where
             false,
             provenance,
             PolicyDecisionRole::Read,
+            None,
             &TransactionWriteOverlay::accepted_state(),
         )
         .await
     }
 
+    /// Share the canonical occurrence order with commit dependency discovery.
+    /// Binding and normalization may reorder OR arms and same-table aliases.
+    fn candidate_policy_shape_for_schema(
+        &self,
+        policy_schema_version: SchemaVersionId,
+        policy: &JazzQuery,
+        insert_candidate: bool,
+    ) -> Result<ValidatedQuery, Error> {
+        let mut policy = policy.clone();
+        if insert_candidate {
+            for inherits in policy.inherits.iter_mut().chain(
+                policy
+                    .policy_branches
+                    .iter_mut()
+                    .flat_map(|branch| &mut branch.inherits),
+            ) {
+                if inherits.operation == crate::query::InheritsOperation::Select {
+                    inherits.operation = crate::query::InheritsOperation::Update;
+                }
+            }
+        }
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+                .schema
+        };
+        let policy_shape =
+            policy.validate_with_schema_version(policy_schema, policy_schema_version)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            policy_schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
-    async fn policy_query_allows_candidate_with_provenance_for_schema(
+    pub(in crate::node) async fn policy_query_allows_candidate_with_provenance_for_schema(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
@@ -878,32 +954,22 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
         role: PolicyDecisionRole,
+        created_sources: Option<BTreeMap<SourceId, Vec<CurrentRow>>>,
         transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
-        let mut policy = policy.clone();
-        if insert_candidate {
-            for inherits in &mut policy.inherits {
-                if inherits.operation == crate::query::InheritsOperation::Select {
-                    inherits.operation = crate::query::InheritsOperation::Update;
-                }
-            }
-            for branch in &mut policy.policy_branches {
-                for inherits in &mut branch.inherits {
-                    if inherits.operation == crate::query::InheritsOperation::Select {
-                        inherits.operation = crate::query::InheritsOperation::Update;
-                    }
-                }
-            }
-        }
-        let policy_schema = self
+        let policy_shape = self.candidate_policy_shape_for_schema(
+            policy_schema_version,
+            policy,
+            insert_candidate,
+        )?;
+        let schema = self
             .catalogue
-            .schema_for_version(policy_schema_version)
-            .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?;
-        let policy_shape = policy
-            .clone()
-            .validate_with_schema_version(policy_schema, policy_schema_version)?;
+            .catalogue_schemas
+            .get(&policy_schema_version)
+            .map(|entry| &entry.schema)
+            .unwrap_or(&self.catalogue.schema);
         let (policy_shape, binding, input) =
-            self.inline_policy_subplan_input(&policy_shape, policy_schema)?;
+            self.inline_policy_subplan_input(&policy_shape, schema)?;
         let root_source = root_source_id(policy_shape.query().table.as_str());
         let policy =
             self.authorization_subplan_policy(identity, policy_shape.query().table.as_str(), role);
@@ -930,7 +996,18 @@ where
         )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
-        let program = if !transaction_overlay.is_active() {
+        let program = if let Some(created_sources) = created_sources {
+            Box::pin(
+                self.compile_query_program_request_with_authorized_created_sources(
+                    request,
+                    inline_sources,
+                    access_paths,
+                    created_sources,
+                    transaction_overlay.clone(),
+                ),
+            )
+            .await?
+        } else if !transaction_overlay.is_active() {
             Box::pin(
                 self.compile_query_program_request_with_inline_sources_and_access_paths(
                     request,
@@ -1751,7 +1828,16 @@ mod authorization_scope_compiler_tests {
     use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
-    use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+    use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
+
+    fn open_test_storage(path: &std::path::Path, refs: &[&str]) -> groove::storage::BoxedStorage {
+        crate::local_executor::block_on(crate::storage_codec_profile::open_node_storage(
+            &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+            path.to_path_buf(),
+            refs.iter().map(|name| (*name).to_owned()).collect(),
+        ))
+        .unwrap()
+    }
 
     fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {
         crate::schema::JazzSchema::new(&builder.build())
@@ -1832,8 +1918,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([0x71; 16]), schema, storage).unwrap();
         let support = |node: &mut NodeState<_>, identity: AuthorSubject, role: &str| {
             node.set_test_provider_claims(
@@ -2055,8 +2140,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage).unwrap();
         let identity = AuthorSubject::for_test_bytes([3; 16]);
         node.set_test_provider_claims(
@@ -2136,8 +2220,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([0x51; 16]), schema, storage).unwrap();
         let identity = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
             .unwrap()
@@ -2221,8 +2304,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let refs = base.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node =
             NodeState::new(NodeUuid::from_bytes([0x31; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
@@ -2332,8 +2414,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let refs = base.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node =
             NodeState::new(NodeUuid::from_bytes([0x41; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
@@ -2422,8 +2503,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([0x9a; 16]), schema, storage).unwrap();
         let author = AuthorSubject::for_test_bytes([0x9b; 16]);
         node.set_test_provider_claims(
@@ -2499,8 +2579,7 @@ mod authorization_scope_compiler_tests {
         let dir = tempfile::tempdir().unwrap();
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let storage = open_test_storage(dir.path(), &refs);
         let mut node = NodeState::new(NodeUuid::from_bytes([0x9a; 16]), schema, storage).unwrap();
         let alice = AuthorSubject::for_test_bytes([0x9b; 16]);
         let bob = AuthorSubject::for_test_bytes([0x9c; 16]);

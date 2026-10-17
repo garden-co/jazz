@@ -120,6 +120,37 @@ static OPEN_STORES: Mutex<Registry> = Mutex::new(Registry {
 pub(crate) struct Registration(u64);
 
 impl Registration {
+    /// Exclude reporters while expanding the sole live database handle. The
+    /// registry's weak pointer must also be absent for `Arc::get_mut`.
+    pub(crate) fn with_db_mut<T>(
+        &self,
+        db: &mut Arc<DB>,
+        operation: impl FnOnce(&mut DB) -> T,
+    ) -> T {
+        let mut registry = OPEN_STORES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = registry
+            .stores
+            .iter_mut()
+            .find(|store| store.id == self.0)
+            .expect("an open store retains its memory registration");
+        store.db = Weak::new();
+        struct Restore<'a> {
+            store: &'a mut OpenStore,
+            db: &'a mut Arc<DB>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.store.db = Arc::downgrade(self.db);
+            }
+        }
+        let restore = Restore { store, db };
+        operation(
+            Arc::get_mut(restore.db).expect("reporters released the exclusive database handle"),
+        )
+    }
+
     pub(crate) fn new(db: &Arc<DB>) -> Self {
         let mut registry = OPEN_STORES
             .lock()

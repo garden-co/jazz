@@ -276,7 +276,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
-                opening_pending,
+                opening_pending: _,
                 ..
             },
         supporting_rows: program_fact_adds,
@@ -468,7 +468,7 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x93), schema.clone());
     let row_uuid = row(0x91);
 
-    let (base, base_unit) = bob
+    let (_base, base_unit) = bob
         .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_uuid, 10).cells(
             BTreeMap::from([
                 ("title".to_owned(), Value::String("base".to_owned())),

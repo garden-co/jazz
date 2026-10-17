@@ -14,7 +14,6 @@ use jazz::tools::{
     SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -280,7 +279,7 @@ fn make_context(
         data_dir,
         storage: ClientStorage::Persistent,
         storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         )),
         account_id: None,
         jwt_token: Some(jwt_token),

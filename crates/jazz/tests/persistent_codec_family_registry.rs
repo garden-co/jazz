@@ -140,6 +140,10 @@ fn expected_profile_ids() -> BTreeMap<&'static str, Vec<String>> {
                 .collect(),
         ),
         (
+            "jazz-epoch-2-additions",
+            vec!["jazz.node-storage.v3".to_owned()],
+        ),
+        (
             "server-catalogue-root",
             JAZZ_CATALOGUE_STORAGE_CODECS
                 .iter()
@@ -169,7 +173,11 @@ fn validate_registry_with_profiles(
         if !matches!(
             family.profile.as_deref(),
             None | Some(
-                "groove-root" | "account-root" | "jazz-node-root" | "server-catalogue-root"
+                "groove-root"
+                    | "account-root"
+                    | "jazz-node-root"
+                    | "jazz-epoch-2-additions"
+                    | "server-catalogue-root"
             )
         ) {
             return Err(format!("{} has an unknown codec profile", family.id));
@@ -231,6 +239,7 @@ fn validate_registry_with_profiles(
         // and the node-local touched-row list retired `...v3`.
         "jazz.history-version-current.v4",
         "jazz.subscription-watermark.v1",
+        "groove.storage-admission-receipt.v1",
         "jazz.idb-page.v1",
         "jazz.wire-frame.v1",
         "jazz.binding-abi.v1",
@@ -250,6 +259,30 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
 #[test]
 fn authoritative_persistent_codec_family_registry_is_complete_and_current() {
     validate_registry(&registry()).expect("codec registry must remain complete and current");
+}
+
+#[test]
+fn epoch_two_profile_replaces_node_layout_marker_and_preserves_other_codecs() {
+    let registry = registry();
+    let mut registered = profile_ids(&registry, "groove-root");
+    registered.extend(profile_ids(&registry, "jazz-node-root"));
+    let legacy = jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap();
+    registered.sort();
+    assert_eq!(
+        registered,
+        legacy.codec_ids().map(str::to_owned).collect::<Vec<_>>()
+    );
+    registered.retain(|id| id != "jazz.node-storage.v2");
+    registered.extend(profile_ids(&registry, "jazz-epoch-2-additions"));
+    registered.sort();
+    assert_eq!(
+        registered,
+        jazz::storage_codec_profile::epoch_2_storage_codec_profile()
+            .unwrap()
+            .codec_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

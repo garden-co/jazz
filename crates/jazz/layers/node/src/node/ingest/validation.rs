@@ -2,6 +2,22 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Reject partial evidence before a malformed receipt can mutate clocks,
+    /// aliases, parked units, or an existing transaction's fate.
+    pub(super) async fn validate_incoming_exclusive_evidence(
+        &mut self,
+        tx: &Transaction,
+    ) -> Result<(), Error> {
+        if let Err(error) = super::exclusive_read_evidence::validate_presence(tx) {
+            return if self.query_transaction(tx.tx_id).await?.is_some() {
+                Err(Error::ConflictingCommitUnit(tx.tx_id))
+            } else {
+                Err(error.into())
+            };
+        }
+        Ok(())
+    }
+
     pub(super) async fn ingest_transaction_and_versions(
         &mut self,
         tx: Transaction,
@@ -11,7 +27,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true, false,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            true,
+            false,
         )
         .await
     }
@@ -25,7 +47,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, false, true,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            false,
+            true,
         )
         .await
     }
@@ -39,7 +67,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true, true,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            true,
+            true,
         )
         .await
     }
@@ -223,6 +257,7 @@ where
         is_partial: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>, Option<RejectedTransaction>), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         // Provenance operation identities participate in merge deduplication.
         // Admit them before accepting staged values or writing any derived
         // transaction/current state, on every local, remote, and view ingress.
@@ -298,6 +333,9 @@ where
             && stored_tx
                 .as_ref()
                 .is_some_and(|stored| !stored.is_partial);
+        if stored_tx.as_ref().is_some_and(|stored| !super::exclusive_read_evidence::compatible(&stored.tx, &tx)) {
+            return Err(Error::ConflictingCommitUnit(tx.tx_id));
+        }
         let storage_tx = if preserve_authoritative_cardinality {
             &stored_tx.as_ref().expect("checked above").tx
         } else {
@@ -513,7 +551,10 @@ where
     /// but a known schema must never accept a descriptor borrowed from another
     /// version: that would make the omitted trailing columns indistinguishable
     /// from an authored value and reintroduce partial-row sync semantics.
-    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(&self, versions: &[V]) -> Option<String> {
+    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(
+        &self,
+        versions: &[V],
+    ) -> Option<String> {
         for version in versions {
             let version = version.borrow();
             for (field, physical_ms) in [
@@ -556,11 +597,9 @@ where
                     version.table()
                 ));
             }
-            if let Some(reason) = Self::malformed_authored_branch_key_reason(
-                &schema.schema,
-                table,
-                version,
-            ) {
+            if let Some(reason) =
+                Self::malformed_authored_branch_key_reason(&schema.schema, table, version)
+            {
                 return Some(reason);
             }
         }
@@ -654,7 +693,8 @@ where
                     "row version provenance exceeds packed HLC physical-millisecond range",
                 ));
             }
-            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
+            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some()
+            {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry a valid authored branch key",
                 ));
@@ -711,7 +751,10 @@ where
 
         let authored_variants = versions
             .iter()
-            .map(|version| { let version = version.borrow(); (version.table().to_owned(), version.schema_version()) })
+            .map(|version| {
+                let version = version.borrow();
+                (version.table().to_owned(), version.schema_version())
+            })
             .collect::<BTreeSet<_>>();
         let mut registered_mapping = false;
         for (table, schema_version) in authored_variants {
@@ -737,6 +780,7 @@ where
         tx: Transaction,
         fate: Fate,
     ) -> Result<(), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
         if self.query_transaction(tx.tx_id).await?.is_some() {
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;

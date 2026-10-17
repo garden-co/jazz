@@ -26,6 +26,8 @@ pub use groove;
 use jazz_model::row_input;
 use jazz_model::{model, query, schema, tx};
 use jazz_node::{node, peer};
+#[cfg(test)]
+use jazz_protocol::storage_codec_profile;
 use jazz_protocol::{authorization_scope, protocol, protocol_limits, wire};
 #[cfg(test)]
 use jazz_types::account_registry;

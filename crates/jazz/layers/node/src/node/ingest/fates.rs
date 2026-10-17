@@ -43,7 +43,8 @@ where
             self.open_tx.pending_foreign_transactions.remove(&tx_id);
         }
         let mut stored = self
-            .query_transaction(tx_id).await?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         let already_accepted = matches!(stored.fate, Fate::Accepted);
         let previous_global_time = stored.global_time;
@@ -176,7 +177,8 @@ where
                 .await?;
         }
         let rejected_payload = if cleanup_rejected_versions {
-            self.remove_rejected_local_versions(tx_id, &stored, &mut batch).await?
+            self.remove_rejected_local_versions(tx_id, &stored, &mut batch)
+                .await?
         } else {
             None
         };
@@ -206,7 +208,12 @@ where
         tx: &Transaction,
         versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        let Some(base_snapshot) = &tx.base_snapshot else {
+        let (Some(base_snapshot), Some(row_reads), Some(absent_reads), Some(_predicate_reads)) = (
+            &tx.base_snapshot,
+            tx.row_read_set.as_deref(),
+            tx.absent_read_set.as_deref(),
+            tx.predicate_read_set.as_deref(),
+        ) else {
             return Ok(false);
         };
         // Point-read records carry names, not schema IDs. A retained alias is
@@ -214,19 +221,10 @@ where
         // ponytail: scans retained schemas per distinct read table; index alias
         // agreement at catalogue activation if this becomes a measured cost.
         let mut read_schemas = BTreeMap::new();
-        for table in tx
-            .row_read_set
-            .as_deref()
-            .unwrap_or(&[])
+        for table in row_reads
             .iter()
             .map(|read| read.table.as_str())
-            .chain(
-                tx.absent_read_set
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|read| read.table.as_str()),
-            )
+            .chain(absent_reads.iter().map(|read| read.table.as_str()))
         {
             if read_schemas.contains_key(table) {
                 continue;
@@ -265,13 +263,15 @@ where
                 return Ok(false);
             }
         }
-        for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
-            let current = self.visible_global_row_tx_id_now_memoized(
-                read_schemas[absent.table.as_str()],
-                &absent.table,
-                absent.row_uuid,
-                &mut visible_row_memo,
-            ).await;
+        for absent in absent_reads {
+            let current = self
+                .visible_global_row_tx_id_now_memoized(
+                    read_schemas[absent.table.as_str()],
+                    &absent.table,
+                    absent.row_uuid,
+                    &mut visible_row_memo,
+                )
+                .await;
             if current.is_some() {
                 return Ok(false);
             }
@@ -283,7 +283,7 @@ where
         // (garden-co/jazz#3694). The row proofs above are all still current.
         let identity = tx.permission_subject.unwrap_or(tx.made_by);
         let mut proven = BTreeMap::<&str, BTreeSet<RowUuid>>::new();
-        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
+        for read in row_reads {
             proven
                 .entry(read.table.as_str())
                 .or_default()
@@ -554,10 +554,7 @@ where
         Ok(at_base != at_now)
     }
 
-    fn aggregate_query_outputs_equivalent(
-        left: &[CurrentRow],
-        right: &[CurrentRow],
-    ) -> bool {
+    fn aggregate_query_outputs_equivalent(left: &[CurrentRow], right: &[CurrentRow]) -> bool {
         if left.len() != right.len() {
             return false;
         }
@@ -631,9 +628,9 @@ where
                 .snapshot_content_witness(shape.schema_version(), &table, row_uuid, snapshot)
                 .await
             else {
-                    return Err(Error::InvalidStoredValue(
-                        "historical query output row must have visible content",
-                    ));
+                return Err(Error::InvalidStoredValue(
+                    "historical query output row must have visible content",
+                ));
             };
             set.insert((row_uuid, tx_id));
         }
@@ -647,9 +644,11 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
-        Ok(Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
-            .await?
-            .is_none())
+        Ok(
+            Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
+                .await?
+                .is_none(),
+        )
     }
 
     /// The rejection a commit unit's write policies call for, if any:
@@ -695,8 +694,8 @@ where
             // require exactly one canonical intent per physical row/head.
             let mut branch_coordinates = BTreeSet::new();
             for version in &branch_versions {
-                let Ok(table_id) = self
-                    .physical_table_id_for_schema(version.schema_version(), version.table())
+                let Ok(table_id) =
+                    self.physical_table_id_for_schema(version.schema_version(), version.table())
                 else {
                     return Ok(Some(RejectionReason::AuthorizationDenied));
                 };
@@ -715,13 +714,16 @@ where
                     .iter()
                     .copied()
                     .filter(|version| {
-                    version.schema_version() == intent.authored_schema
-                        && version.row_uuid() == intent.row_uuid
-                        && version.branch_key() == &intent.head
-                        && self
-                            .physical_table_id_for_schema(version.schema_version(), version.table())
-                            .ok()
-                            == Some(intent.physical_table_id)
+                        version.schema_version() == intent.authored_schema
+                            && version.row_uuid() == intent.row_uuid
+                            && version.branch_key() == &intent.head
+                            && self
+                                .physical_table_id_for_schema(
+                                    version.schema_version(),
+                                    version.table(),
+                                )
+                                .ok()
+                                == Some(intent.physical_table_id)
                     })
                     .collect::<Vec<_>>();
                 if matching_versions.is_empty() {
@@ -766,15 +768,13 @@ where
             }
         }
         Ok(
-            match Box::pin(self.commit_unit_write_policies_allow(
-                versions,
-                permission_subject,
-                tx.tx_id,
-            ))
-            .await?
+            match Box::pin(self.commit_unit_write_policies_allow(versions, permission_subject, tx))
+                .await?
             {
                 crate::node::policy::UnitWritePolicyDecision::Allowed => None,
-                crate::node::policy::UnitWritePolicyDecision::Denied => Some(RejectionReason::AuthorizationDenied),
+                crate::node::policy::UnitWritePolicyDecision::Denied => {
+                    Some(RejectionReason::AuthorizationDenied)
+                }
                 crate::node::policy::UnitWritePolicyDecision::Unsupported(reason) => {
                     Some(RejectionReason::MalformedCommit(reason))
                 }
@@ -992,7 +992,8 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                self.ingest_relay_commit_unit_once(unit.tx, unit.versions).await?;
+                self.ingest_relay_commit_unit_once(unit.tx, unit.versions)
+                    .await?;
             }
         }
         Ok(())
@@ -1107,7 +1108,6 @@ where
         let _ = affected;
         Ok(rejected_payload)
     }
-
 }
 
 /// The cheap identity part of commit-unit admission: the permission subject

@@ -27,18 +27,10 @@ fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Va
     )
 }
 
-/// Internal because the contract is the durable audit row: a pending
-/// exclusive transaction keeps its read evidence, the unit rebuilt from
-/// storage after a reopen is the unit that was published, and the evidence
-/// is dropped once the authority settles the fate.
-///
-/// ```
-/// client ──read / query / absent / write──► commit (pending, evidence stored)
-///    │ reopen                                          │
-///    └── commit_unit_for == published unit ──► core ──accepted──► evidence cleared
-/// ```
+/// Reopening before and after authority settlement must recover the exact
+/// published exclusive commit unit, including its captured read evidence.
 #[test]
-fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
+fn exclusive_evidence_survives_reopen_before_and_after_settlement() {
     let (client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     commit_mergeable_global(
@@ -90,6 +82,18 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
 
+    // The previous modern producer wrote these same canonical four slots in
+    // epoch-one stores. Admission must accept them without rewriting evidence.
+    let alias = client.node_aliases[&tx_id.node];
+    let raw = crate::local_executor::block_on(client.database.primary_key_get_raw(
+        PENDING_TRANSACTIONS_TABLE,
+        &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
+    ))
+    .unwrap()
+    .unwrap();
+    super::super::exclusive_read_evidence::validate_epoch_one_transaction_record(raw.record())
+        .unwrap();
+
     // A duplicate of the same pending unit without evidence must not erase
     // the evidence this node still needs to retransmit.
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
@@ -113,7 +117,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
     let mut client = reopen_node_at(&client_dir, node(1), schema());
     assert_eq!(client.commit_unit_for(tx_id).unwrap(), unit);
 
-    let updates = core.apply_sync_message_settled(unit).unwrap();
+    let updates = core.apply_sync_message_settled(unit.clone()).unwrap();
     let [
         fate @ SyncMessage::FateUpdate {
             fate: Fate::Accepted,
@@ -128,13 +132,14 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
         client.transaction_state_settled(tx_id).unwrap().0,
         Fate::Accepted
     );
-    // The batch that stored the seq deleted the pending record, evidence
-    // included.
-    assert_eq!(pending_record_evidence_slots(&client, tx_id), None);
-    let SyncMessage::CommitUnit { tx, .. } = client.commit_unit_for(tx_id).unwrap() else {
-        panic!("expected commit unit");
-    };
-    assert_eq!(tx.base_snapshot, None);
+    assert_eq!(client.commit_unit_for(tx_id).unwrap(), unit);
+    drop(client);
+    let mut settled = reopen_node_at(&client_dir, node(1), schema());
+    assert_eq!(settled.commit_unit_for(tx_id).unwrap(), unit);
+    assert_eq!(
+        settled.transaction_state_settled(tx_id).unwrap().0,
+        Fate::Accepted
+    );
 }
 
 /// Internal fixture: no current writer can put evidence on a mergeable row,
@@ -155,27 +160,8 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     let mut exclusive = stored.tx.clone();
     exclusive.kind = TxKind::Exclusive;
     exclusive.base_snapshot = Some(snapshot);
-    let [base, ..] =
-        super::super::exclusive_read_evidence::evidence_slot_values(&exclusive, true).unwrap();
-    assert_eq!(
-        pending_transaction_values(
-            stored.node_alias,
-            &stored.tx,
-            &TransactionRecordStatus::new(Fate::Pending, None, stored.durability),
-        )
-        .unwrap(),
-        None,
-        "a mergeable transaction writes no pending record"
-    );
-    let mut values = vec![
-        Value::U64(tx_id.time.0),
-        Value::U64(stored.node_alias.0),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
-    ];
-    values[PendingTransactionRowRecord::FIELD_BASE_SNAPSHOT_IDX] = base;
+    let [base, rows, absent, predicates] = super::super::exclusive_read_evidence::evidence_slot_values(&exclusive).unwrap();
+    let values = vec![Value::U64(tx_id.time.0), Value::U64(stored.node_alias.0), base, rows, absent, predicates];
     let mut batch = writer.database.open_batch();
     batch.update(PENDING_TRANSACTIONS_TABLE, values);
     let applied = crate::local_executor::block_on(writer.database.apply_batch(batch)).unwrap();
@@ -204,7 +190,7 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
 /// ```
 #[test]
 fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence() {
-    let (_alice_dir, mut alice) = open_node_with_uuid(node(1));
+    let (alice_dir, mut alice) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let shape = Query::from("todos").validate(&schema()).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -223,6 +209,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
             .iter()
             .any(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
+    let original = alice.commit_unit_for(tx_id).unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
         .unwrap()
@@ -263,6 +250,15 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
             .collect::<Vec<_>>(),
         vec![(row(1), title_cells("one"))]
     );
+    let retained = alice.commit_unit_for(tx_id).unwrap();
+    let proof = |unit: &SyncMessage| {
+        let SyncMessage::CommitUnit { tx, .. } = unit else { panic!("expected commit unit") };
+        (tx.base_snapshot.clone(), tx.row_read_set.clone(), tx.absent_read_set.clone(), tx.predicate_read_set.clone())
+    };
+    assert_eq!(proof(&retained), proof(&original));
+    drop(alice);
+    let mut reopened = reopen_node_at(&alice_dir, node(1), schema());
+    assert_eq!(proof(&reopened.commit_unit_for(tx_id).unwrap()), proof(&original));
 }
 
 /// A relay stores downstream exclusive units it did not author. A genuine
@@ -286,7 +282,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
     let binding = shape
         .bind(BTreeMap::from([("title".to_owned(), v("x"))]))
         .unwrap();
-    let mut commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
+    let commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
         let open_id = OpenTransactionId::new();
         alice.open_exclusive(open_id).unwrap();
         assert!(
@@ -364,9 +360,13 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         relay.apply_sync_message_settled(fate).unwrap();
         assert_eq!(relay.transaction_state_settled(tx_id).unwrap().0, expected);
         assert!(
-            stored_exclusive_evidence_slots(&relay, tx_id)
-                .iter()
-                .all(|slot| *slot == Value::Nullable(None))
+            stored_exclusive_evidence_slots(&relay, tx_id).iter().all(|slot| {
+                if expected == Fate::Accepted {
+                    matches!(slot, Value::Nullable(Some(_)))
+                } else {
+                    *slot == Value::Nullable(None)
+                }
+            })
         );
     }
 }

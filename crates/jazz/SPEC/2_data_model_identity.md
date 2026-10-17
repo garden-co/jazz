@@ -481,14 +481,13 @@ without the record is corrupt storage. Provenance grows with the
 transaction's branch writes, so the transaction record stays the same size
 whatever the write count.
 
-**Pending record.** An unsettled transaction (no global time and not
-rejected) may have one `jazz_pending_transactions` record keyed like its
-transaction record: `(time, node_id, base_snapshot, row_read_set,
-absent_read_set, predicate_read_set)`, the last four nullable bytes holding
-its exclusive read evidence. It exists only when one of those fields is
-non-null, and the batch that records the transaction's seq or rejection
-deletes it. A settled transaction therefore keeps no read evidence; a stored
-copy without it still matches a redelivery that carries it.
+**Pending record.** An exclusive transaction may have one historically named
+`jazz_pending_transactions` record keyed like its transaction record:
+`(time, node_id, base_snapshot, row_read_set, absent_read_set,
+predicate_read_set)`, the last four nullable bytes holding its exclusive read
+evidence. In node-storage v3 this immutable proof remains after acceptance or
+rejection. Entirely absent or redacted evidence has no record. An upgrade
+cannot reconstruct proof already deleted by an older node.
 
 **History horizon.** `jazz_history_horizon` holds at most one record, `(id: U8
 = 0, horizon: U64)`: the seq at or below which this store's history was
@@ -536,16 +535,15 @@ whole row set and writes no partial list. Releasing changes no record layout:
 a store whose settled transactions still have lists reads them as before.
 
 The pending record's four evidence slots hold exclusive read evidence in the
-`jazz.exclusive-read-evidence.v2` family, and only while it can still be
-retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
+`jazz.exclusive-read-evidence.v2` family across settlement. Exclusive snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
 authored or relays an `Exclusive` transaction whose fate is still `Pending`
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 `predicate_read_set` in these slots, so a unit rebuilt from storage after a
 restart (outbox or relay recovery) is byte-for-byte the unit that was
-committed. The batch that records a settled fate deletes the pending record;
-the slots are not an audit or revalidation log. Every other row, and any
-exclusive row whose evidence v1 cannot represent, writes all four null, and a
+committed. The batch that records a settled fate retains this record. Every
+other row, and any exclusive row whose evidence v2 cannot represent, has no
+evidence record, and a
 missing snapshot still fails authority validation. Each non-null slot is the
 Groove typed-record v1 bytes of one fixed descriptor led by a format byte:
 `(format_v1 = 1, owner, global_base, local_base, dots[(time, node)])`,
@@ -739,3 +737,15 @@ and sync machinery.
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
 - 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.
 - 🔶 [#3281](https://github.com/garden-co/jazz/issues/3281) — Stores written by the DAG history layout (`jazz.history-version-current.v1`) are refused at open. Should Core and relays convert them, and should clients discard and resync (losing unsynced pending writes) instead of surfacing the refusal?
+
+### E13 retained exclusive proof
+
+In epoch two (`jazz.node-storage.v3`), the pending record's four evidence
+slots remain in the historically named `jazz_pending_transactions` table
+across acceptance and rejection. Its four proof slots retain exclusive read evidence
+using `jazz.exclusive-read-evidence.v2`: snapshot, row-read and absent-read
+slots keep format byte 1; predicate-read slots use format byte 2 and preserve
+the canonical aggregate-result codec described above observations. Settlement releases touched-row
+lists independently. Complete redaction has no evidence record. Source epoch
+one records whose proof was already removed remain absent after upgrade;
+missing observations are never invented. A changed proof on replay is refused.

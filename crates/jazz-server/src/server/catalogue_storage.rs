@@ -392,16 +392,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalogue.rocksdb");
         let mut storage = CatalogueKvStorage::open(
-            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
             path.clone(),
         )
         .unwrap();
         let expected = check_batch_rejection_is_atomic(&mut storage);
         storage.flush().unwrap();
         storage.close().unwrap();
-        let reopened =
-            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
-                .unwrap();
+        let reopened = CatalogueKvStorage::open(
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
+            path,
+        )
+        .unwrap();
         assert_eq!(reopened.scan_catalogue_entries().unwrap(), expected);
         reopened.close().unwrap();
     }
@@ -458,7 +460,7 @@ mod tests {
         }
 
         let catalogue = CatalogueKvStorage::open(
-            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
             path.clone(),
         )
         .unwrap();
@@ -467,9 +469,11 @@ mod tests {
             vec![entry.clone()]
         );
         catalogue.close().unwrap();
-        let reopened =
-            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
-                .unwrap();
+        let reopened = CatalogueKvStorage::open(
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
+            path,
+        )
+        .unwrap();
         assert_eq!(reopened.scan_catalogue_entries().unwrap(), vec![entry]);
         reopened.close().unwrap();
     }
@@ -507,9 +511,11 @@ mod tests {
             ))
             .unwrap();
         }
-        let catalogue =
-            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
-                .unwrap();
+        let catalogue = CatalogueKvStorage::open(
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
+            path,
+        )
+        .unwrap();
         assert!(catalogue.scan_catalogue_entries().is_err());
         catalogue.close().unwrap();
     }

@@ -448,7 +448,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let member_row = row(0x71);
     let todo_row = row(0x72);
 
-    let hidden_member_tx = accept_global(
+    let _hidden_member_tx = accept_global(
         &mut core,
         MergeableCommit::new("members", member_row, 10).cells(BTreeMap::from([
             ("name".to_owned(), Value::String("hidden owner".to_owned())),

@@ -75,6 +75,8 @@ pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 pub struct JazzSchema {
     public_schema: PublicSchema,
     runtime: RuntimeSchema,
+    /// Conservative, schema-owned dispatch metadata; never a policy decision.
+    has_authorized_created_insert_sources: bool,
 }
 
 impl PartialEq for JazzSchema {
@@ -104,6 +106,7 @@ impl JazzSchema {
             table.read_policy = None;
             table.write_policies = Default::default();
         }
+        schema.has_authorized_created_insert_sources = false;
         schema
     }
 
@@ -150,6 +153,8 @@ impl JazzSchema {
             table.read_policy = selected.read_policy.clone();
             table.write_policies = selected.write_policies.clone();
         }
+        schema.has_authorized_created_insert_sources =
+            selected.has_authorized_created_insert_sources;
         schema
     }
 
@@ -165,10 +170,23 @@ impl JazzSchema {
 
     #[doc(hidden)]
     pub fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
+        let has_authorized_created_insert_sources = runtime.tables.iter().any(|table| {
+            table
+                .write_policies
+                .insert_check
+                .as_ref()
+                .is_some_and(Query::uses_authorized_created_sources)
+        });
         Self {
             public_schema,
             runtime,
+            has_authorized_created_insert_sources,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn may_have_authorized_created_insert_sources(&self) -> bool {
+        self.has_authorized_created_insert_sources
     }
 
     #[doc(hidden)]
@@ -179,6 +197,9 @@ impl JazzSchema {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
+        // Tests may replace a policy through this mutable escape hatch. A
+        // conservative positive only requests exact operation selection.
+        self.has_authorized_created_insert_sources = true;
         &mut self.runtime
     }
 
@@ -1413,9 +1434,8 @@ fn nodes_table() -> GrooveTableSchema {
 /// cardinality, fate, seq and durability. Everything else lives beside it
 /// (SPEC 2 §2.8):
 ///
-/// - fields needed only until the transaction has a seq or a rejection
-///   (`permission_subject` and the exclusive read evidence) in
-///   `jazz_pending_transactions`, deleted by the batch that settles it;
+/// - exclusive read evidence in `jazz_pending_transactions` (the historical
+///   table name), retained across acceptance and rejection in node-storage v3;
 /// - calculated-merge and branch-write provenance, which grows with the number
 ///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
 /// - the rejection reason in one nullable record that costs a byte on every
@@ -1459,14 +1479,12 @@ fn transactions_table() -> GrooveTableSchema {
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
 }
 
-/// The rejection reason of a rejected transaction: its reason tag, the
-/// transaction whose rejection cascaded to it, and a diagnostic detail.
-/// `jazz_pending_transactions`: what a transaction needs only until it has a
-/// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
-/// record. A record exists only for an unsettled transaction that has
-/// something to keep here; the batch that stores its seq or rejection deletes
-/// it. Slots 2 to 5 hold its exclusive read evidence
-/// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
+/// Exclusive commit-unit proof, keyed `(time, node_id)`. The historical name
+/// `jazz_pending_transactions` is retained to allow a metadata-only upgrade.
+/// Slots 2 to 5 use `jazz.exclusive-read-evidence.v2`; node-storage v3 retains
+/// them for the transaction's lifetime, including acceptance and rejection.
+/// Entirely redacted or legacy missing proof has no record. Settlement still
+/// releases touched-row bookkeeping independently.
 fn pending_transactions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_pending_transactions",

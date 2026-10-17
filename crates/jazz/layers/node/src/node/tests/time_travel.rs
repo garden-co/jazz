@@ -25,13 +25,13 @@ fn query_rows_at_matches_oracle_across_winners_deletes_and_restores() {
         "cut before the first version must be empty"
     );
 
-    let (base, s1) = commit_global_and_oracle(
+    let (_base, s1) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,
         MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("base")),
     );
-    let (second, s2) = commit_global_and_oracle(
+    let (_second, s2) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,
@@ -74,7 +74,7 @@ fn query_rows_at_lowers_filters_against_historical_current_rows() {
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let mut oracle = Oracle::new();
     let row_uuid = row(6);
-    let (base, s1) = commit_global_and_oracle(
+    let (_base, s1) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,
@@ -121,7 +121,7 @@ fn query_rows_at_for_link_evaluates_read_policy_at_historical_cut() {
     let mut bob_cells = title_cells("owned by bob");
     bob_cells.insert("owner".to_owned(), Value::Uuid(bob.test_uuid()));
 
-    let (first, s1) = commit_global_and_oracle(
+    let (_first, s1) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,
@@ -166,7 +166,7 @@ fn historical_read_handle_reads_exact_position_locally_when_history_complete() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let mut oracle = Oracle::new();
     let row_uuid = row(3);
-    let (base, s1) = commit_global_and_oracle(
+    let (_base, s1) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,
@@ -197,7 +197,7 @@ fn historical_read_at_time_resolves_latest_settle_position_by_tx_time() {
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let mut oracle = Oracle::new();
     let row_uuid = row(4);
-    let (base, s1) = commit_global_and_oracle(
+    let (_base, s1) = commit_global_and_oracle(
         &mut writer,
         &mut core,
         &mut oracle,

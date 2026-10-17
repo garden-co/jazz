@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use groove::storage::OrderedKvStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz_storage_rocksdb::{RocksDbStorage, process_memory_usage};
 
 /// Memtable bytes written to an open store show up in the report, and leave
@@ -44,6 +44,10 @@ fn reports_open_stores_and_releases_closed_ones() {
     for _ in 0..50 {
         let storage = RocksDbStorage::open(dir.path(), &["records"])
             .expect("a store closed while reporting can be reopened");
+        let storage = ready(storage.reopen(vec!["records".into(), "expanded".into()]))
+            .expect("family expansion retains the admitted handle while reporting");
+        ready(storage.set("expanded".into(), b"key".to_vec(), vec![9; 256 * 1024])).unwrap();
+        assert!(process_memory_usage().unwrap().memtable_bytes >= 256 * 1024);
         drop(storage);
     }
     stop.store(true, Ordering::Relaxed);

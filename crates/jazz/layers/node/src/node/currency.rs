@@ -1226,12 +1226,10 @@ where
             .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
             .map(GlobalTime);
         let key = [Value::U64(tx_id.time.0), Value::U64(expected_alias.0)];
-        let pending = if global_time.is_none() && !matches!(fate, Fate::Rejected(_)) {
+        let pending = {
             self.database
                 .primary_key_get_raw(PENDING_TRANSACTIONS_TABLE, &key)
                 .await?
-        } else {
-            None
         };
         let evidence = match &pending {
             Some(raw) => {
@@ -1259,11 +1257,6 @@ where
                 if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
                     return Err(Error::InvalidStoredValue(
                         "mergeable transaction carries exclusive read evidence",
-                    ));
-                }
-                if !matches!(fate, Fate::Pending) && slots.iter().any(Option::is_some) {
-                    return Err(Error::InvalidStoredValue(
-                        "settled transaction keeps exclusive read evidence",
                     ));
                 }
                 super::exclusive_read_evidence::decode_evidence_slots(
