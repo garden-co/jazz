@@ -1114,7 +1114,7 @@ function buildForwardLenses<
 }
 
 export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<any>): SchemaAst {
-  return compileSchemaDefinition(definition as SchemaDefinition);
+  return definitionToSchema(definition as SchemaDefinition);
 }
 
 /**

@@ -1590,7 +1590,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding(operation);
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeInsertOptions(table._schema, table._table, optionsSnapshot);
+    const normalized = normalizeSelectorOptions(table._schema, table._table, optionsSnapshot);
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
     if (operation === "insert" && standaloneWriteRetries.has(this)) {
       const retryOptions = { ...optionsSnapshot, id: preview.id };
@@ -1873,10 +1873,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         ),
       );
       const updateOptions = structuredClone(
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
       );
       const insertOptions = structuredClone(
-        normalizeInsertOptions(table._schema, table._table, {
+        normalizeSelectorOptions(table._schema, table._table, {
           id,
           ...(options?.branch !== undefined && { branch: options.branch }),
         }),
@@ -2081,7 +2081,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (operation === "upsert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeUpdateOptions(table._schema, table._table, optionsSnapshot);
+    const normalized = normalizeViewOptions(table._schema, table._table, optionsSnapshot);
     if (operation === "upsert" && standaloneWriteRetries.has(this)) {
       const retryValues = structuredClone(updates);
       const retryOptions = optionsSnapshot;
@@ -2153,7 +2153,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           return io.insertInternal(
             table._table,
             updates,
-            normalizeInsertOptions(table._schema, table._table, {
+            normalizeSelectorOptions(table._schema, table._table, {
               id,
               ...(optionsSnapshot?.updatedAt !== undefined && {
                 updatedAt: optionsSnapshot.updatedAt,
@@ -3934,7 +3934,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ?? {};
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const equality = encryptedSchemas.has(query._schema)
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;

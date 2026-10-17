@@ -1813,13 +1813,11 @@ pub struct RelationSnapshot {
 
 impl CurrentRow {
     fn with_content_witness(mut self, content: &VersionRow) -> Self {
-        self.content_witness = (content.layer() == VersionLayer::Content).then(|| {
-            (
-                content.schema_version_alias(),
-                content.tx_time(),
-                content.tx_node_alias(),
-            )
-        });
+        self.content_witness = Some((
+            content.schema_version_alias(),
+            content.tx_time(),
+            content.tx_node_alias(),
+        ));
         self
     }
 
