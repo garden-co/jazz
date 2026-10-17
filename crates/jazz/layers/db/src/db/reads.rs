@@ -319,6 +319,166 @@ where
     /// under the row evaluation's node lock, never reconstructed from rows.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
+    pub async fn all_e2ee_settled_serialized_query_for_binding<F, E>(
+        &self,
+        query: &[u8],
+        mut opts: ReadOpts,
+        open_tx: OpenTransactionId,
+        e2ee_snapshot_at_begin: bool,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_expired: E,
+        release_coverage: F,
+    ) -> Result<BindingSettledRead, Error>
+    where
+        F: Fn(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        ensure_default_read_view(&opts)?;
+        let coverage_tier = read_coverage_tier(&opts);
+        let _ = std::mem::take(&mut opts.first_load);
+        // An accepted-at-begin publishing read retains the original transaction's
+        // evidence in both Full and LocalOnly propagation modes. Ordinary Full reads
+        // retain their historical settlement-at-read behavior. A private LocalOnly
+        // observation keeps the existing strict fresh snapshot restriction.
+        let child = if e2ee_snapshot_at_begin {
+            let mut node = self.lock_for_transaction_operation(open_tx).await?;
+            let child = OpenTransactionId::new();
+            node.open_e2ee_observation_child(open_tx, child)?;
+            Some(child)
+        } else if opts.tier == ReadTier::LocalOnly {
+            self.lock_for_transaction_operation(open_tx)
+                .await?
+                .restrict_e2ee_observation_snapshot(open_tx)
+                .await?;
+            None
+        } else {
+            None
+        };
+        // Cancellation may drop this future while storage holds the owner.
+        // Queue cleanup instead of borrowing/locking the node in Drop.
+        struct ObservationCleanup<C: FnOnce()> {
+            cleanup: Option<C>,
+        }
+        impl<C: FnOnce()> Drop for ObservationCleanup<C> {
+            fn drop(&mut self) {
+                if let Some(cleanup) = self.cleanup.take() {
+                    cleanup();
+                }
+            }
+        }
+        let cleanup_db = self.clone_for_owner_operation();
+        let mut cleanup = ObservationCleanup {
+            cleanup: child.map(|child| {
+                move || {
+                    cleanup_db.enqueue_abandon_transaction_handle(child);
+                }
+            }),
+        };
+        let mut settlements = Vec::new();
+        let result = self
+            .all_serialized_query_once(
+                query,
+                opts.clone(),
+                coverage_tier,
+                Some(open_tx),
+                request_scope.clone(),
+                author,
+                require_coverage,
+                &coverage_expired,
+                &release_coverage,
+                Some(&mut settlements),
+            )
+            .await?;
+        let SerializedReadResult::Rows(rows) = result else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "E2EE settlement reads require ordinary stored rows",
+            ));
+        };
+        let observed = if let Some(child) = child {
+            // Coverage belongs to the real parent read. This child is a
+            // private comparison at the captured accepted cut, which may be
+            // older than the authority's current completeness frontier.
+            let mut observation_opts = opts.clone();
+            observation_opts.tier = ReadTier::LocalOnly;
+            let mut observed_settlements = Vec::new();
+            let result = self
+                .all_serialized_query_once(
+                    query,
+                    observation_opts,
+                    DurabilityTier::Local,
+                    Some(child),
+                    request_scope.clone(),
+                    author,
+                    false,
+                    &coverage_expired,
+                    &release_coverage,
+                    Some(&mut observed_settlements),
+                )
+                .await?;
+            let SerializedReadResult::Rows(rows) = result else {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "E2EE settlement reads require ordinary stored rows",
+                ));
+            };
+            if rows.len() != observed_settlements.len()
+                || !self
+                    .lock_for_transaction_operation(open_tx)
+                    .await?
+                    .e2ee_observation_covers_settlements(child, &observed_settlements)?
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Authority settlement unavailable at the original snapshot",
+                ));
+            }
+            Some((rows, observed_settlements))
+        } else {
+            None
+        };
+        if let Some((observed_rows, observed_settlements)) = observed {
+            if rows.len() != settlements.len() {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Authority settlement unavailable",
+                ));
+            }
+            let mut observed = observed_rows
+                .iter()
+                .zip(&observed_settlements)
+                .collect::<Vec<_>>();
+            let mut actual = rows.iter().zip(&settlements).collect::<Vec<_>>();
+            observed.sort_by_key(|(row, _)| row.row_uuid());
+            actual.sort_by_key(|(row, _)| row.row_uuid());
+            if observed != actual
+                || observed
+                    .windows(2)
+                    .any(|pair| pair[0].0.row_uuid() == pair[1].0.row_uuid())
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Local history differs from accepted history at the original snapshot",
+                ));
+            }
+        }
+        if let Some(child) = child {
+            // Parent tombstone/admission is checked again after any suspended
+            // query work. Its genuine read evidence stays in the parent.
+            self.lock_for_transaction_operation(open_tx)
+                .await?
+                .abandon_tx(child)?;
+            cleanup.cleanup = None;
+        }
+        Ok(BindingSettledRead { rows, settlements })
+    }
+
+    /// Opt-in paired read: content witnesses and authority fates are captured
+    /// under the row evaluation's node lock, never reconstructed from rows.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn all_settled_serialized_query_for_binding<F, E>(
         &self,
         query: &[u8],
@@ -692,8 +852,31 @@ where
                 None
             };
             let outcome = async {
-                let mut next = Box::pin(stream.next_event());
+                // A rejection cannot satisfy freshness. Observe terminal events
+                // while waiting, retaining the opening until its fresh authority
+                // coverage arrives before exposing any rows.
+                let mut opening = None;
                 let event = std::future::poll_fn(|cx| {
+                    loop {
+                        match Stream::poll_next(Pin::new(&mut stream), cx) {
+                            Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. }))
+                            | Poll::Ready(Some(event @ SubscriptionEvent::Closed)) => {
+                                return Poll::Ready(Ok(Some(event)));
+                            }
+                            Poll::Ready(None) => return Poll::Ready(Ok(None)),
+                            Poll::Ready(Some(
+                                event @ SubscriptionEvent::Delta { reset: true, .. },
+                            )) => {
+                                opening = Some(event);
+                            }
+                            Poll::Ready(Some(event @ SubscriptionEvent::Delta { .. })) => {
+                                if opening.is_none() {
+                                    return Poll::Ready(Ok(Some(event)));
+                                }
+                            }
+                            Poll::Pending => break,
+                        }
+                    }
                     if coverage_expired() {
                         return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
@@ -711,10 +894,12 @@ where
                     {
                         return Poll::Pending;
                     }
-                    std::future::Future::poll(next.as_mut(), cx).map(Ok)
+                    match opening.take() {
+                        Some(event) => Poll::Ready(Ok(Some(event))),
+                        None => Poll::Pending,
+                    }
                 })
                 .await?;
-                drop(next);
                 match event {
                     Some(SubscriptionEvent::Delta { reset: true, .. }) => {
                         let mut snapshot = stream.settled_receiver_local_snapshot()?;

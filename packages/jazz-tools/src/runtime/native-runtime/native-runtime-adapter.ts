@@ -1,3 +1,13 @@
+import type { CatalogueCache, CatalogueCacheScope } from "../catalogue-cache.js";
+import {
+  InitializationCapabilityError,
+  assertInitializationStatusBound,
+  createInitializationSeal,
+  decodeInitializationStatuses,
+  type InitializationSeal,
+  type InitializationTransactionStatus,
+  type ReservedTxId,
+} from "../provisional-initialization.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { formatUuid, parseUuid } from "../uuid.js";
@@ -172,16 +182,39 @@ type NativeQueryInput = Uint8Array;
 type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
 type NativeDbConstructor = {
-  openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemory(schema: Uint8Array, config: Uint8Array, cachedCatalogue?: Uint8Array): NativeDb;
   openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
-  openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistent?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    cachedCatalogue?: Uint8Array,
+  ): NativeDb;
   openPersistentAsBackend?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistentAccountOwner?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    storageOwner: string,
+    cachedCatalogue?: Uint8Array,
+  ): NativeDb;
+  openPersistentAccountOwnerWithSelfSignedProof?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    storageOwner: string,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+    cachedCatalogue?: Uint8Array,
+  ): NativeDb;
   openMemoryWithSelfSignedProof?(
     schema: Uint8Array,
     config: Uint8Array,
     token: string,
     appId: string,
     claimedAuthor: string,
+    cachedCatalogue?: Uint8Array,
   ): NativeDb;
   openPersistentWithSelfSignedProof?(
     dataPath: string,
@@ -190,6 +223,7 @@ type NativeDbConstructor = {
     token: string,
     appId: string,
     claimedAuthor: string,
+    cachedCatalogue?: Uint8Array,
   ): NativeDb;
 };
 
@@ -201,6 +235,12 @@ type NativeWriteOptions = {
 
 type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
 type NativeReadResult = Uint8Array | PendingNativeRead;
+type NativeInitializationSeal = { token: string; reservedTxId: string };
+type PendingNativeInitializationSeal = { poll(): NativeInitializationSeal | null; cancel(): void };
+type NativeInitializationSealResult = NativeInitializationSeal | PendingNativeInitializationSeal;
+type NativeCatalogueState = { capture?: Uint8Array | null; ready: boolean };
+type PendingNativeCatalogueState = { poll(): NativeCatalogueState | null; cancel(): void };
+type NativeCatalogueStateResult = NativeCatalogueState | PendingNativeCatalogueState;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
   poll(): string | null;
@@ -276,6 +316,28 @@ type NativeDb = {
   ): void;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
+  sealInitializationTransaction?(
+    id: string,
+  ): NativeInitializationSealResult | Promise<NativeInitializationSealResult>;
+  publishInitializationTransaction?(token: string): Write | Promise<Write>;
+  cancelInitializationTransaction?(token: string): void | Promise<void>;
+  initializationTransactionStatus?(
+    ids: string[],
+  ): string | PendingNativePermissionAdvice | Promise<string | PendingNativePermissionAdvice>;
+  recordInitializationInsertAbsence?(
+    id: string,
+    table: string,
+    rowId: Uint8Array,
+  ): void | NativeReadResult | Promise<void | NativeReadResult>;
+  takeAuthenticatedCatalogueState?():
+    | NativeCatalogueStateResult
+    | Promise<NativeCatalogueStateResult>;
+  validateCatalogueCaptureReplacement?(previous: Uint8Array, next: Uint8Array): void;
+  /** Qualify this schema view without draining the runtime owner's capture. */
+  hasAuthenticatedCatalogue?():
+    | boolean
+    | PendingNativeCatalogueState
+    | Promise<boolean | PendingNativeCatalogueState>;
   allSettlementMetadata?(
     query: Uint8Array,
     opts: unknown,
@@ -660,6 +722,8 @@ function openPersistentDb(
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   backendMode = false,
+  cachedCatalogue?: Uint8Array,
+  persistentAccountOwner?: string,
 ): NativeDb {
   try {
     return openPersistentNativeDb(
@@ -669,6 +733,8 @@ function openPersistentDb(
       config,
       selfSignedClientProof,
       backendMode,
+      cachedCatalogue,
+      persistentAccountOwner,
     );
   } catch (error) {
     throw asUnsupportedStorageCodecsError(error);
@@ -682,9 +748,41 @@ function openPersistentNativeDb(
   config: Uint8Array,
   selfSignedClientProof: NativeSelfSignedClientProof | undefined,
   backendMode: boolean,
+  cachedCatalogue?: Uint8Array,
+  persistentAccountOwner?: string,
 ): NativeDb {
   if (selfSignedClientProof && backendMode) {
     throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (persistentAccountOwner !== undefined) {
+    if (backendMode) throw new Error("An admitted account owner cannot use backend mode");
+    if (selfSignedClientProof) {
+      if (!Runtime.openPersistentAccountOwnerWithSelfSignedProof)
+        throw new Error(
+          "Native runtime does not support proof-admitted persistent account owners; rebuild the matching Jazz native artifact",
+        );
+      return Runtime.openPersistentAccountOwnerWithSelfSignedProof(
+        dataPath,
+        schema,
+        config,
+        persistentAccountOwner,
+        selfSignedClientProof.token,
+        selfSignedClientProof.appId,
+        selfSignedClientProof.claimedAuthor,
+        cachedCatalogue,
+      );
+    }
+    if (!Runtime.openPersistentAccountOwner)
+      throw new Error(
+        "Native runtime does not support admitted persistent account owners; rebuild the matching Jazz native artifact",
+      );
+    return Runtime.openPersistentAccountOwner(
+      dataPath,
+      schema,
+      config,
+      persistentAccountOwner,
+      cachedCatalogue,
+    );
   }
   if (backendMode) {
     if (!Runtime.openPersistentAsBackend) {
@@ -707,12 +805,13 @@ function openPersistentNativeDb(
       selfSignedClientProof.token,
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
+      cachedCatalogue,
     );
   }
   if (!Runtime.openPersistent) {
     throw new Error("Native runtime does not expose persistent storage");
   }
-  return Runtime.openPersistent(dataPath, schema, config);
+  return Runtime.openPersistent(dataPath, schema, config, cachedCatalogue);
 }
 
 function openMemoryDb(
@@ -721,6 +820,7 @@ function openMemoryDb(
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   backendMode = false,
+  cachedCatalogue?: Uint8Array,
 ): NativeDb {
   if (selfSignedClientProof && backendMode) {
     throw new Error("A native runtime cannot be both self-signed and backend-scoped");
@@ -733,7 +833,7 @@ function openMemoryDb(
     }
     return Runtime.openMemoryAsBackend(schema, config);
   }
-  if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
+  if (!selfSignedClientProof) return Runtime.openMemory(schema, config, cachedCatalogue);
   if (!Runtime.openMemoryWithSelfSignedProof) {
     throw new Error(
       "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
@@ -745,10 +845,22 @@ function openMemoryDb(
     selfSignedClientProof.token,
     selfSignedClientProof.appId,
     selfSignedClientProof.claimedAuthor,
+    cachedCatalogue,
   );
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly initializationSeals = new WeakMap<
+    InitializationSeal,
+    { token: string; id: OpenTransactionId }
+  >();
+  private initializationStatusOwner?: (
+    ids: readonly ReservedTxId[],
+  ) => Promise<readonly InitializationTransactionStatus[]>;
+  private catalogueCache?: { cache: CatalogueCache; scope: CatalogueCacheScope };
+  private pendingCatalogueCapture?: Uint8Array;
+  private cataloguePublication?: Promise<boolean>;
+  private catalogueReadinessOwner?: () => Promise<boolean>;
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly pendingNativeReadCancels = new Set<() => void>();
@@ -855,6 +967,7 @@ export class NativeRuntimeAdapter implements Runtime {
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
   private physicalCloseStarted = false;
+  private physicalCloseRetryable = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -866,13 +979,14 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof" | "scopeIsolatedRelay"
+      "selfSignedClientProof" | "scopeIsolatedRelay" | "catalogueCache"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
       db,
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
+      catalogueCache: opts?.catalogueCache,
     });
   }
 
@@ -900,6 +1014,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
     const bytes = await this.awaitNativeRead(this.db.tableIdentity(table));
+    await this.ownerRuntime.persistAuthenticatedCatalogue();
     if (bytes.length === 0) return null;
     if (bytes.length !== 16) throw new Error("Invalid catalogue table identity length");
     return formatUuid(bytes);
@@ -935,15 +1050,19 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: {
       persistentPath?: string;
+      persistentAccountOwner?: string;
       db?: NativeDb;
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
       scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
+      cachedCatalogue?: Uint8Array;
+      catalogueCache?: { cache: CatalogueCache; scope: CatalogueCacheScope };
       backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
+    this.catalogueCache = opts?.catalogueCache;
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
     this.readAuthorizationHost =
       opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
@@ -982,6 +1101,8 @@ export class NativeRuntimeAdapter implements Runtime {
         this.configBytes,
         opts?.selfSignedClientProof,
         opts?.backendMode,
+        opts?.cachedCatalogue,
+        opts?.persistentAccountOwner,
       );
     } else {
       if (!Runtime) {
@@ -993,6 +1114,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.configBytes,
         opts?.selfSignedClientProof,
         opts?.backendMode,
+        opts?.cachedCatalogue,
       );
     }
     if (opts?.owner) return;
@@ -1408,8 +1530,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (this.physicalCloseStarted) return;
-    if (this.closed && !this.foregroundLeaseQuiesced) return;
+    if (this.closed && !this.foregroundLeaseQuiesced && !this.physicalCloseRetryable) return;
     this.physicalCloseStarted = true;
+    const cataloguePublication = this.cataloguePublication;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
@@ -1424,6 +1547,16 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
+    try {
+      await cataloguePublication;
+      // A previous failed publication still owns its moved capture. Retry only
+      // those retained bytes; shutdown must never admit another observation.
+      await this.publishPendingCatalogueCapture();
+    } catch (error) {
+      this.physicalCloseStarted = false;
+      this.physicalCloseRetryable = true;
+      throw error;
+    }
     this.closeRuntimeState(true);
     await this.db.close?.();
     // wasm-bindgen futures may retain this receiver after logical closure.
@@ -2135,6 +2268,214 @@ export class NativeRuntimeAdapter implements Runtime {
     });
     return id;
   }
+  /** @internal A persistent foreground must consult its admitted durable host. */
+  setCatalogueReadinessOwner(owner: () => Promise<boolean>): void {
+    this.ownerRuntime.catalogueReadinessOwner = owner;
+  }
+
+  async hasAuthenticatedCatalogue(): Promise<boolean> {
+    if (this !== this.ownerRuntime) {
+      if (this.closed) throw new Error("Catalogue view is closed");
+      const qualify = this.db.hasAuthenticatedCatalogue;
+      if (!qualify) throw new InitializationCapabilityError("requested schema catalogue readiness");
+      const started = await qualify.call(this.db);
+      const ready =
+        typeof started === "boolean" ? started : (await this.awaitCataloguePending(started)).ready;
+      // Admission is monotone. Publish the latest owner capture after checking
+      // this view, including captures received while this view is unadmitted.
+      const published = await this.ownerRuntime.hasAuthenticatedCatalogue();
+      return ready && published && !this.closed && !this.ownerRuntime.closed;
+    }
+    if (this.closed) throw new Error("Catalogue owner is closed");
+    if (this.nonDurableClient && !this.catalogueReadinessOwner)
+      throw new InitializationCapabilityError("admitted durable catalogue owner");
+    if (this.db.takeAuthenticatedCatalogueState) {
+      if (!(await this.persistAuthenticatedCatalogue())) return false;
+      const ready = this.catalogueReadinessOwner ? await this.catalogueReadinessOwner() : true;
+      return !this.closed && ready;
+    }
+    // React Native exposes the durable relay's readiness, not a capture drain.
+    const operation = this.db.hasAuthenticatedCatalogue;
+    if (!operation) throw new InitializationCapabilityError("takeAuthenticatedCatalogueState");
+    const started = await operation.call(this.db);
+    const ready =
+      typeof started === "boolean" ? started : (await this.awaitCataloguePending(started)).ready;
+    if (!ready) return false;
+    return this.catalogueReadinessOwner ? this.catalogueReadinessOwner() : true;
+  }
+
+  private async persistAuthenticatedCatalogue(): Promise<boolean> {
+    if (this.cataloguePublication) return this.cataloguePublication;
+    if (this.closed) return false;
+    const take = this.db.takeAuthenticatedCatalogueState;
+    if (!take) {
+      if (this.catalogueCache)
+        throw new InitializationCapabilityError("authenticated catalogue capture/publication");
+      return false;
+    }
+    const store = this.catalogueCache;
+    if (store && !this.db.validateCatalogueCaptureReplacement)
+      throw new InitializationCapabilityError("authenticated catalogue capture/publication");
+    // Install the shared operation before observing core. Neither observation
+    // nor publication owns the tick gate: a pending observation may need it.
+    this.cataloguePublication = Promise.resolve().then(async () => {
+      for (;;) {
+        await this.publishPendingCatalogueCapture();
+        const started = await take.call(this.db);
+        const state = "poll" in started ? await this.awaitCataloguePending(started) : started;
+        if (store && state.capture) this.pendingCatalogueCapture = state.capture;
+        // Once admitted, a moved capture must cross the durable cache barrier
+        // even if close has stopped new observations in the meantime.
+        if (!store || !this.pendingCatalogueCapture) return !this.closed && state.ready;
+      }
+    });
+    try {
+      return await this.cataloguePublication;
+    } finally {
+      // Failure leaves the moved bytes retained for the next publication.
+      this.cataloguePublication = undefined;
+    }
+  }
+
+  private async publishPendingCatalogueCapture(): Promise<void> {
+    const capture = this.pendingCatalogueCapture;
+    const store = this.catalogueCache;
+    if (!capture || !store) return;
+    const validate = this.db.validateCatalogueCaptureReplacement;
+    if (!validate)
+      throw new InitializationCapabilityError("authenticated catalogue capture/publication");
+    await store.cache.publish(store.scope, capture, (previous, next) =>
+      validate.call(this.db, previous, next),
+    );
+    this.pendingCatalogueCapture = undefined;
+  }
+
+  /** Catalogue observation is admitted by its publication owner, not by the
+   * ordinary read lifetime. Keep polling and driving core during close without
+   * reopening public reads, transport pumps, or catalogue capture admission. */
+  private async awaitCataloguePending(
+    result: PendingNativeCatalogueState,
+  ): Promise<NativeCatalogueState> {
+    let progress: Promise<void> | undefined;
+    let progressFailed = false;
+    let progressError: unknown;
+    try {
+      for (;;) {
+        if (progressFailed) throw progressError;
+        const state = result.poll();
+        if (state !== null) {
+          // Retain moved bytes before cancellation or a joining tick can fail.
+          if (this.catalogueCache && state.capture) this.pendingCatalogueCapture = state.capture;
+          return state;
+        }
+        if (!progress) {
+          // Do not await a tick here: the observation may hold the owner lock
+          // that the tick needs, so its poll must continue independently.
+          progress = this.runCoreTick(true).then(
+            () => {
+              progress = undefined;
+            },
+            (error: unknown) => {
+              progressFailed = true;
+              progressError = error;
+            },
+          );
+        }
+        await sleep(0);
+      }
+    } finally {
+      result.cancel();
+      await progress;
+      if (progressFailed) throw progressError;
+    }
+  }
+
+  /** @internal Installed only by the admitted durable host transport. */
+  setInitializationStatusOwner(
+    owner: (ids: readonly ReservedTxId[]) => Promise<readonly InitializationTransactionStatus[]>,
+  ): void {
+    this.ownerRuntime.initializationStatusOwner = owner;
+  }
+
+  async recordInitializationInsertAbsence(
+    id: OpenTransactionId,
+    table: string,
+    rowId: string,
+  ): Promise<void> {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.recordInitializationInsertAbsence(id, table, rowId);
+    const pending = this.pendingTxs.get(id);
+    if (this.closed || pending?.kind !== "exclusive")
+      throw new Error("Initialization requires an open exclusive transaction");
+    const operation = this.db.recordInitializationInsertAbsence;
+    if (!operation) throw new InitializationCapabilityError("recordInitializationInsertAbsence");
+    await this.awaitNativeRead(
+      Promise.resolve(operation.call(this.db, id, table, parseUuid(rowId))).then(
+        (result) => result ?? new Uint8Array(),
+      ),
+    );
+  }
+
+  async sealInitializationTransaction(id: OpenTransactionId): Promise<InitializationSeal> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.sealInitializationTransaction(id);
+    const pending = this.pendingTxs.get(id);
+    if (this.closed || pending?.kind !== "exclusive")
+      throw new Error("Initialization requires an open exclusive transaction");
+    const operation = this.db.sealInitializationTransaction;
+    if (
+      !operation ||
+      !this.db.publishInitializationTransaction ||
+      !this.db.cancelInitializationTransaction
+    )
+      throw new InitializationCapabilityError("seal/publish/cancelInitializationTransaction");
+    const started = await operation.call(this.db, id);
+    const nativeSeal = "poll" in started ? await this.awaitNativePending(started) : started;
+    const seal = createInitializationSeal(nativeSeal.reservedTxId);
+    this.pendingTxs.delete(id);
+    this.initializationSeals.set(seal, { token: nativeSeal.token, id });
+    return seal;
+  }
+
+  async publishInitializationTransaction(seal: InitializationSeal): Promise<TxId> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.publishInitializationTransaction(seal);
+    const owned = this.initializationSeals.get(seal);
+    if (this.closed || !owned)
+      throw new Error("Initialization seal is foreign, closed or already consumed");
+    this.initializationSeals.delete(seal);
+    const write = await this.db.publishInitializationTransaction!(owned.token);
+    this.completedTxs.set(owned.id, { kind: "exclusive", state: "committed" });
+    const txId = recordWrite(write, this.writes);
+    this.pumpSubscriptions();
+    this.scheduleServerPump();
+    this.notifyPeerTransportWork();
+    if (this.nonDurableClient) this.trackLocalSettlement(txId);
+    return txId;
+  }
+
+  async cancelInitializationTransaction(seal: InitializationSeal): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.cancelInitializationTransaction(seal);
+    const owned = this.initializationSeals.get(seal);
+    if (!owned) throw new Error("Initialization seal is foreign or already consumed");
+    this.initializationSeals.delete(seal);
+    await this.db.cancelInitializationTransaction!(owned.token);
+    this.completedTxs.set(owned.id, { kind: "exclusive", state: "rolled_back" });
+  }
+
+  async initializationTransactionStatus(
+    ids: readonly ReservedTxId[],
+  ): Promise<readonly InitializationTransactionStatus[]> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.initializationTransactionStatus(ids);
+    assertInitializationStatusBound(ids);
+    if (this.closed) throw new Error("Initialization status owner is closed");
+    if (this.initializationStatusOwner) return this.initializationStatusOwner(ids);
+    if (this.nonDurableClient)
+      throw new InitializationCapabilityError("admitted durable initialization status owner");
+    const operation = this.db.initializationTransactionStatus;
+    if (!operation) throw new InitializationCapabilityError("initializationTransactionStatus");
+    const started = await operation.call(this.db, [...ids]);
+    const status = typeof started === "string" ? started : await this.awaitNativePending(started);
+    return decodeInitializationStatuses(status, ids);
+  }
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
@@ -2222,6 +2563,7 @@ export class NativeRuntimeAdapter implements Runtime {
             const reason = await nextWake;
             if (reason === "work") continue;
             if (!reason.ok) throw reason.error;
+            await this.persistAuthenticatedCatalogue();
             this.pumpSubscriptions();
             return;
           } catch (error) {
@@ -3108,6 +3450,13 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
+    return this.awaitNativePending(result, tier);
+  }
+
+  private async awaitNativePending<T>(
+    result: { poll(): T | null; cancel(): void },
+    tier?: string,
+  ): Promise<T> {
     const cancel = () => result.cancel();
     this.ownerRuntime.pendingNativeReadCancels.add(cancel);
     try {
@@ -3119,6 +3468,8 @@ export class NativeRuntimeAdapter implements Runtime {
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
+        // Cold owner work also needs ticks when there is no server transport.
+        this.ownerRuntime.scheduleCoreTick();
         this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
         await sleep(0);
@@ -3597,8 +3948,9 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private runCoreTick(): Promise<void> {
-    if (!this.coreProgressAllowed()) return Promise.resolve();
+  private runCoreTick(catalogueDrain = false): Promise<void> {
+    if (!this.coreProgressAllowed() && !(catalogueDrain && this.cataloguePublication))
+      return Promise.resolve();
     const operation = this.coreOperation;
     if (operation) {
       this.coreTickAgain = true;
@@ -3606,7 +3958,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // waiters must join a real tick before marking ingress as processed.
       return operation.kind === "tick"
         ? operation.completion
-        : operation.completion.then(() => this.runCoreTick());
+        : operation.completion.then(() => this.runCoreTick(catalogueDrain));
     }
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
@@ -3615,20 +3967,26 @@ export class NativeRuntimeAdapter implements Runtime {
       reject = onReject;
     });
     this.coreOperation = { kind: "tick", completion };
-    void this.driveCoreTicks().then(resolve, reject);
+    void this.driveCoreTicks(catalogueDrain).then(resolve, reject);
     return completion;
   }
 
-  private async driveCoreTicks(): Promise<void> {
+  private async driveCoreTicks(catalogueDrain = false): Promise<void> {
     let yielded = false;
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
         await this.db.tick();
-        this.pumpSubscriptions();
-        this.scheduleServerPump();
-        this.notifyPeerTransportWork();
-        if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
+        if (this.coreProgressAllowed()) {
+          this.pumpSubscriptions();
+          this.scheduleServerPump();
+          this.notifyPeerTransportWork();
+        }
+        if (
+          (!this.coreProgressAllowed() && !(catalogueDrain && this.cataloguePublication)) ||
+          !this.coreTickAgain
+        )
+          break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
           break;
@@ -3640,6 +3998,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (yielded && this.coreProgressAllowed()) {
       setTimeout(() => this.scheduleCoreTick(), 0);
+    }
+    // Core progress must complete independently of a capture waiting for the
+    // owner lock or host storage; transport pumps can then drive the next tick.
+    if (!this.closed && this.catalogueCache && !this.cataloguePublication) {
+      void this.persistAuthenticatedCatalogue().catch(reportAsyncRuntimeError);
     }
   }
 
@@ -4666,6 +5029,7 @@ function readOptions(
   const readOptions: Record<string, unknown> = {};
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
+  if (options.e2ee_snapshot_at_begin === true) readOptions.e2ee_snapshot_at_begin = true;
   if (
     typeof options.first_load_remote_wait_ms === "number" &&
     options.first_load_remote_wait_ms > 0
@@ -4790,6 +5154,14 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
 
 function readSupportedReadOptions(optionsJson: string): boolean | "with-rows" {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
+  if (parsed.e2ee_snapshot_at_begin != null && typeof parsed.e2ee_snapshot_at_begin !== "boolean")
+    throw new Error("E2EE snapshot-at-begin marker must be a boolean");
+  if (
+    parsed.e2ee_snapshot_at_begin === true &&
+    parsed.settlement_metadata !== true &&
+    parsed.settlement_metadata !== "with-rows"
+  )
+    throw new Error("E2EE snapshot-at-begin requires a settlement read");
   return parsed.settlement_metadata === "with-rows"
     ? "with-rows"
     : parsed.settlement_metadata === true;

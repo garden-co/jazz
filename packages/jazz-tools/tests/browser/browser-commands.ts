@@ -3,13 +3,28 @@ import { commands } from "vitest/browser";
 import type { JazzServerInfo } from "./testing-server.js";
 
 export interface JazzServerBrowserCommands {
-  jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
+  jazzServerInfo(appId?: string | null, gated?: boolean): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
   jazzServerJwtForUser(
     userId: string,
     claims?: Record<string, unknown>,
     appId?: string,
   ): Promise<string>;
+}
+
+export interface JazzServerNetworkBrowserCommands {
+  jazzServerBlockNetwork(serverUrl: string): Promise<void>;
+  jazzServerUnblockNetwork(serverUrl: string): Promise<void>;
+}
+
+export function jazzServerNetworkBrowserCommands(): JazzServerNetworkBrowserCommands {
+  if (
+    !hasFunction(commands, "jazzServerBlockNetwork") ||
+    !hasFunction(commands, "jazzServerUnblockNetwork")
+  ) {
+    throw new Error("Browser test project is missing the Jazz server network-gate commands.");
+  }
+  return commands as unknown as JazzServerNetworkBrowserCommands;
 }
 
 export interface JazzServerTransportControlBrowserCommands {

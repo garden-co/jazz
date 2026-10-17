@@ -103,7 +103,7 @@ export function applyDeviceRequestPermissions({
   roots.allowInsert.where((record) =>
     allOf([
       { accountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_account_identities.exists.where({
+      policy.__e2ee_account_identities.existsIncludingCreated.where({
         id: record.accountId,
         deviceId: record.deviceId,
         epochId: record.epochId,
@@ -120,7 +120,7 @@ export function applyDeviceRequestPermissions({
   keys.allowInsert.where((record) =>
     allOf([
       { "$createdBy.account": session.user.account },
-      policy.__e2ee_device_requests.exists.where({
+      policy.__e2ee_device_requests.existsIncludingCreated.where({
         id: record.deviceId,
         "$createdBy.account": session.user.account,
         publicKey: record.publicKey,
@@ -180,7 +180,7 @@ export function applyDeviceRequestPermissions({
   identities.allowInsert.where((identity) =>
     allOf([
       { id: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_device_requests.exists.where({
+      policy.__e2ee_device_requests.existsIncludingCreated.where({
         id: identity.deviceId,
         "$createdBy.account": session.user.account,
       }),

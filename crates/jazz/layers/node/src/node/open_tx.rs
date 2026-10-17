@@ -181,6 +181,88 @@ where
     }
 
     #[doc(hidden)]
+    pub fn seal_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.check_staged_transaction_identity(id, author, author)?;
+        self.open_tx_mut(id)?.initialization_seal = Some((reserved, nonce));
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn check_initialization_seal(
+        &self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .open_tx
+            .open_transactions
+            .get(&id)
+            .is_some_and(|tx| tx.initialization_seal == Some((reserved, nonce)))
+        {
+            Ok(())
+        } else {
+            Err(Error::OpenTransactionIdentityMismatch)
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn publish_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        self.check_initialization_seal(id, reserved, nonce)?;
+        self.open_tx
+            .open_transactions
+            .get_mut(&id)
+            .unwrap()
+            .initialization_seal = None;
+        let result = self.commit_exclusive_bound_at(id, reserved).await;
+        if result.is_err() {
+            // The seal has been consumed. Close under this same owner lock,
+            // before a later queued cleanup or ordinary operation can run.
+            self.open_tx.open_transactions.remove(&id);
+            self.open_tx.closed_batches.insert(id);
+        }
+        result
+    }
+
+    #[doc(hidden)]
+    pub async fn prepare_initialization_insert(
+        &mut self,
+        id: OpenTransactionId,
+        schema: SchemaVersionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        let tx = self.open_tx(id)?;
+        if !matches!(tx.kind, OpenTransactionKind::Exclusive { .. })
+            || tx
+                .writes
+                .iter()
+                .any(|write| write.table == table && write.row_uuid == row)
+        {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        }
+        self.tx_read_in_schema(id, schema, table, row).await?;
+        let observed = &self.open_tx(id)?.base_snapshot_rows[&(table.to_owned(), row)][&schema];
+        if observed.content_version.is_some() || observed.deletion_version.is_some() {
+            return Err(Error::InvalidMergeableCommit(
+                "initialization insert requires an absent coordinate",
+            ));
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
     pub fn check_staged_transaction_identity(
         &self,
         id: OpenTransactionId,
@@ -265,12 +347,35 @@ where
         // Every time applied past the frontier was recorded with its
         // transaction, so the base names them without a scan (#3390).
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
+        let mut accepted_e2ee_dots = Vec::new();
+        let mut accepted_e2ee_dot_positions = BTreeMap::new();
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            match self.clock.frontier_dots.get(&global_time) {
-                Some(tx_ids) => dots.extend(tx_ids.iter().copied()),
-                None => dots.extend(self.transaction_ids_for_global_time(global_time).await?),
+            // The frontier cache contains accepted Global positions; only an
+            // outstanding persistence acknowledgement can weaken them locally.
+            let positions = match self.clock.frontier_dots.get(&global_time) {
+                Some(tx_ids) => tx_ids
+                    .iter()
+                    .map(|tx_id| (*tx_id, !self.pending_persistence.contains(tx_id)))
+                    .collect(),
+                None => self.transaction_dots_for_global_time(global_time).await?,
+            };
+            for (tx_id, accepted) in positions {
+                dots.push(tx_id);
+                if accepted {
+                    accepted_e2ee_dots.push(tx_id);
+                    accepted_e2ee_dot_positions.insert(tx_id, global_time);
+                }
             }
         }
+        // Capture accepted witnesses before pending foreign dots are added.
+        // Their fate must never be reevaluated later to authorize this cut.
+        let accepted_e2ee_base_snapshot = Snapshot::exclusive_base(
+            self.node_uuid,
+            self.clock.committed_global_time,
+            TxTime(0),
+            accepted_e2ee_dots,
+        )
+        .map_err(Error::InvalidStoredValue)?;
         dots.extend(self.pending_foreign_transaction_ids().await?);
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -282,9 +387,12 @@ where
         self.open_tx.open_transactions.insert(
             id,
             OpenTransaction {
+                initialization_seal: None,
                 kind,
                 provisional_author,
                 base_snapshot,
+                accepted_e2ee_base_snapshot,
+                accepted_e2ee_dot_positions,
                 base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
@@ -1962,7 +2070,76 @@ where
         self.open_tx
             .open_transactions
             .get(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
+    }
+
+    /// Create an internal observation child from the parent's immutable
+    /// accepted-at-begin cut. The bound attribution/permission subject is
+    /// preserved; staged writes and read evidence are never inherited.
+    /// The caller must abandon this child, including on cancellation, and must
+    /// reread/compare results in the publishing parent to retain its read proof.
+    #[doc(hidden)]
+    pub fn open_e2ee_observation_child(
+        &mut self,
+        parent: OpenTransactionId,
+        child: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self.open_tx.open_transactions.contains_key(&child)
+            || self.open_tx.closed_batches.contains(&child)
+        {
+            return Err(Error::DuplicateOpenBatch(child));
+        }
+        let source = self.open_tx(parent)?;
+        if !matches!(source.kind, OpenTransactionKind::Exclusive { .. }) {
+            return Err(Error::InvalidStoredValue(
+                "E2EE observation parent must be exclusive",
+            ));
+        }
+        let mut observation = source.clone();
+        observation.base_snapshot = source.accepted_e2ee_base_snapshot.clone();
+        observation.base_snapshot_rows.clear();
+        observation.row_reads.clear();
+        observation.absent_reads.clear();
+        observation.predicate_reads.clear();
+        observation.source_narrowing = SourceNarrowing::default();
+        observation.narrowed_predicate_reads.clear();
+        observation.writes = StagedWrites::default();
+        observation.superseded_large_values.clear();
+        observation.user_metadata_json = None;
+        self.open_tx.open_transactions.insert(child, observation);
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn is_fresh_e2ee_observation(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
+        let tx = self.open_tx(tx_id)?;
+        Ok(matches!(&tx.kind, OpenTransactionKind::Exclusive { .. })
+            && tx.writes.len() == 0
+            && (tx.base_snapshot.local_base == TxTime(0)
+                || (tx.row_reads.is_empty()
+                    && tx.absent_reads.is_empty()
+                    && tx.predicate_reads.is_empty()
+                    && tx.base_snapshot_rows.is_empty())))
+    }
+
+    /// Verify observation witnesses against the captured authority cut/dots,
+    /// rather than allowing a zero-prefix sentinel or a newly accepted dot to
+    /// qualify solely through its current fate.
+    #[doc(hidden)]
+    pub fn e2ee_observation_covers_settlements(
+        &self,
+        child: OpenTransactionId,
+        settlements: &[(TxId, GlobalTime)],
+    ) -> Result<bool, Error> {
+        let observation = self.open_tx(child)?;
+        let snapshot = &observation.base_snapshot;
+        Ok(settlements.iter().all(|(witness, position)| {
+            if let Some(captured) = observation.accepted_e2ee_dot_positions.get(witness) {
+                return position == captured;
+            }
+            *position <= snapshot.global_base
+        }))
     }
 
     /// Restrict a fresh, read-only E2EE observation to locally accepted versions.
@@ -1973,20 +2150,12 @@ where
         &mut self,
         tx_id: OpenTransactionId,
     ) -> Result<(), Error> {
-        let tx = self.open_tx(tx_id)?;
-        if !matches!(&tx.kind, OpenTransactionKind::Exclusive { .. })
-            || tx.writes.len() != 0
-            || (tx.base_snapshot.local_base != TxTime(0)
-                && (!tx.row_reads.is_empty()
-                    || !tx.absent_reads.is_empty()
-                    || !tx.predicate_reads.is_empty()
-                    || !tx.base_snapshot_rows.is_empty()))
-        {
+        if !self.is_fresh_e2ee_observation(tx_id)? {
             return Err(Error::InvalidStoredValue(
                 "E2EE observation requires a fresh read-only transaction",
             ));
         }
-        let snapshot = tx.base_snapshot.clone();
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         // A zero local prefix excludes normal local writes. Refuse a non-accepted
         // zero-time record too, rather than assuming that sentinel cannot exist.
         if self
@@ -2022,6 +2191,7 @@ where
         self.open_tx
             .open_transactions
             .get_mut(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
@@ -2084,11 +2254,14 @@ where
         Ok(self.open_tx(tx_id)?.base_snapshot.clone())
     }
 
-    pub(super) async fn transaction_ids_for_global_time(
+    /// Indexed dots and whether each was accepted and durable at this exact
+    /// position. Capture status from the row already read by the index, before
+    /// pending foreign dots are added, without a second transaction lookup.
+    async fn transaction_dots_for_global_time(
         &mut self,
         global_time: GlobalTime,
-    ) -> Result<Vec<TxId>, Error> {
-        let mut tx_ids = Vec::new();
+    ) -> Result<Vec<(TxId, bool)>, Error> {
+        let mut dots = Vec::new();
         for raw in self
             .database
             .index_scan_raw(
@@ -2105,12 +2278,19 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "transaction node alias must exist",
                 ))?;
-            tx_ids.push(TxId::new(
+            let tx_id = TxId::new(
                 TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
                 node,
-            ));
+            );
+            // Match transaction_state's fail-closed status decoding and
+            // durability override for writes whose persistence is pending.
+            let accepted = !self.pending_persistence.contains(&tx_id)
+                && matches!(transaction_state_from_encoded_fields(record).ok(),
+                    Some((Fate::Accepted, Some(position), DurabilityTier::Global))
+                    if position == global_time);
+            dots.push((tx_id, accepted));
         }
-        Ok(tx_ids)
+        Ok(dots)
     }
 
     /// Pending transactions of other nodes that are present locally. Current reads already
@@ -2155,6 +2335,24 @@ where
             })
     }
 
+    async fn snapshot_covers_checked(
+        &mut self,
+        tx_id: TxId,
+        snapshot: &Snapshot,
+    ) -> Result<bool, Error> {
+        let global_time =
+            self.query_transaction_global_time(tx_id)
+                .await?
+                .ok_or(Error::InvalidStoredValue(
+                    "snapshot version has no transaction audit",
+                ))?;
+        Ok(
+            global_time.is_some_and(|global_time| global_time <= snapshot.global_base)
+                || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
+                || snapshot.dots.contains(&tx_id),
+        )
+    }
+
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
@@ -2163,11 +2361,11 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_winner(schema_version, table, row_uuid, snapshot)
-            .await;
+            .snapshot_winner_checked(schema_version, table, row_uuid, snapshot)
+            .await?;
         let deletion = self
-            .snapshot_winner(schema_version, table, row_uuid, snapshot)
-            .await;
+            .snapshot_winner_checked(schema_version, table, row_uuid, snapshot)
+            .await?;
         self.snapshot_row_from_winners(schema_version, table, content, deletion)
     }
 
@@ -2329,6 +2527,29 @@ where
         }
         current_version_index(&versions, &candidate_indices, &self.node_aliases)
             .map(|idx| versions[idx].clone())
+    }
+
+    async fn snapshot_winner_checked(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        snapshot: &Snapshot,
+    ) -> Result<Option<VersionRow>, Error> {
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await?;
+        let mut candidate_indices = Vec::new();
+        for (idx, version) in versions.iter().enumerate() {
+            let tx_id = self.version_tx_id(version)?;
+            if self.snapshot_covers_checked(tx_id, snapshot).await? {
+                candidate_indices.push(idx);
+            }
+        }
+        Ok(
+            current_version_index(&versions, &candidate_indices, &self.node_aliases)
+                .map(|idx| versions[idx].clone()),
+        )
     }
 
     pub(super) async fn snapshot_content_witness(
@@ -2526,12 +2747,19 @@ pub(super) enum OpenTransactionKind {
 
 #[derive(Clone)]
 pub(super) struct OpenTransaction {
+    /// Frozen work can only be published by its owning, single-use capability.
+    initialization_seal: Option<(TxId, OpenTransactionId)>,
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
     /// Author reflected by transaction-local provenance before commit.
     pub(super) provisional_author: AuthorSubject,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
+    /// Accepted authority witnesses captured at begin, excluding pending/local
+    /// prefixes. Internal observation children must reuse this immutable cut.
+    pub(super) accepted_e2ee_base_snapshot: Snapshot,
+    /// Exact acceptance positions of above-frontier dots at public begin.
+    pub(super) accepted_e2ee_dot_positions: BTreeMap<TxId, GlobalTime>,
     /// Base snapshot row derivations observed by point reads in this
     /// transaction, per row and then per schema version, so a write can drop
     /// every cached derivation of its row in one lookup.

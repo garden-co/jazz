@@ -14,7 +14,8 @@
   "type": "module",
   "main": "dist/index.js",
   "browser": {
-    "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js"
+    "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js",
+    "./dist/runtime/catalogue-cache-node.js": "./dist/runtime/catalogue-cache-node.browser.js"
   },
   "types": "dist/index.d.ts",
   "react-native": {

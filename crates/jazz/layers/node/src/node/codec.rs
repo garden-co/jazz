@@ -4822,6 +4822,20 @@ pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
     }
 }
 
+/// Decode status without auditing the transaction payload. Both point reads
+/// and indexed BEGIN snapshot reads use this same status-field validation.
+pub(super) fn transaction_state_from_encoded_fields(
+    record: BorrowedRecord<'_>,
+) -> Result<(Fate, Option<GlobalTime>, DurabilityTier), Error> {
+    Ok((
+        fate_from_encoded_fields(record)?,
+        record
+            .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime),
+        durability_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?)?,
+    ))
+}
+
 /// The fate of a stored `jazz_transactions` record. A rejected record carries
 /// exactly one rejection reason and any other record none.
 pub(super) fn fate_from_encoded_fields(record: BorrowedRecord<'_>) -> Result<Fate, Error> {

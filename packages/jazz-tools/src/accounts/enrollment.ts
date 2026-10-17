@@ -25,11 +25,24 @@ export interface BackendAccountHost {
   admitBackend(auth: BackendAuth): Promise<{ nodeId: string }>;
 }
 
+/** @internal Durable first-device ownership, not accepted account membership. */
+export interface FounderOwnership {
+  reserve(
+    scope: string,
+    deviceId: string,
+    retainedEpochId?: string,
+  ): Promise<Readonly<{ epochId: string | null }> | undefined>;
+  bind(scope: string, deviceId: string, epochId: string): Promise<void>;
+  close(scope: string, deviceId: string, retainedEpochId?: string): Promise<boolean>;
+}
+
 interface HandleCredentials {
   registry: string;
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
   localFirstSecret?: string;
+  generatedHere?: () => Promise<boolean>;
+  founderOwnership?: (assertValid: () => void) => FounderOwnership;
   /** A retained external assignment awaiting its first provider credential. */
   provisional?: boolean;
   /** The JWT the registry just accepted, offered once to the next context token request. */
@@ -67,12 +80,21 @@ export function isRetainedAccountAssignment(value: unknown): value is RetainedAc
 
 /** @internal Native key derivation stays in Rust; hosts prepare it before use. */
 export interface LocalFirstAccountFactory {
-  create(): { accountId: string; identity: AccountIdentity; auth: JWTAuth; secret?: string };
+  create(): {
+    accountId: string;
+    identity: AccountIdentity;
+    auth: JWTAuth;
+    secret?: string;
+    generatedHere?: () => Promise<boolean>;
+    founderOwnership?: (assertValid: () => void) => FounderOwnership;
+  };
   restore?(secret: string): {
     accountId: string;
     identity: AccountIdentity;
     auth: JWTAuth;
     secret?: string;
+    generatedHere?: () => Promise<boolean>;
+    founderOwnership?: (assertValid: () => void) => FounderOwnership;
   };
 }
 
@@ -127,17 +149,39 @@ function mintHandle(
   identity: AccountIdentity,
   auth: JWTAuth | undefined,
   localFirstSecret?: string,
+  generatedHere?: () => Promise<boolean>,
+  founderOwnership?: (assertValid: () => void) => FounderOwnership,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
   credentials.set(handle, {
     registry,
     auth,
     localFirstSecret,
+    generatedHere,
+    founderOwnership,
     provisional: auth === undefined,
     invalidated: new Set(),
     bound: new Set(),
   });
   return handle;
+}
+
+/** @internal Durable creation provenance is not an accepted membership assertion. */
+export async function accountGeneratedHere(handle: AccountHandle): Promise<boolean> {
+  const material = credentials.get(handle);
+  if (!material) throw new AccountAuthError("invalid_account_handle");
+  const generated = (await material.generatedHere?.()) ?? false;
+  if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
+  return generated;
+}
+
+/** @internal The adapter checks this handle at every store transform and await. */
+export function accountFounderOwnership(handle: AccountHandle): FounderOwnership | undefined {
+  const material = credentials.get(handle);
+  if (!material) throw new AccountAuthError("invalid_account_handle");
+  return material.founderOwnership?.(() => {
+    if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
+  });
 }
 
 function tokenStillFresh(token: string): boolean {
@@ -351,7 +395,15 @@ export function createAccountManagerWithRuntime(options: {
         unpin();
         const local = options.localFirst.create();
         return retain(
-          mintHandle(registry, local.accountId, local.identity, local.auth, local.secret),
+          mintHandle(
+            registry,
+            local.accountId,
+            local.identity,
+            local.auth,
+            local.secret,
+            local.generatedHere,
+            local.founderOwnership,
+          ),
         );
       },
       restoreLocalFirst(secret) {
@@ -359,7 +411,17 @@ export function createAccountManagerWithRuntime(options: {
         parseAuthSecret(secret);
         const local = options.localFirst.restore?.(secret);
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
-        return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
+        return retain(
+          mintHandle(
+            registry,
+            local.accountId,
+            local.identity,
+            local.auth,
+            secret,
+            local.generatedHere,
+            local.founderOwnership,
+          ),
+        );
       },
       async becomeBackend(auth) {
         unpin();
@@ -476,6 +538,8 @@ export function createAccountManagerWithRuntime(options: {
             restored.identity,
             restored.auth,
             options.restoredLocalFirstSecret,
+            restored.generatedHere,
+            restored.founderOwnership,
           ),
         )
       : retainedAccount

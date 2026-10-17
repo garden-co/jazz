@@ -1,0 +1,358 @@
+import { expect, vi } from "vitest";
+import { connect, createServer, type Socket } from "node:net";
+import { schema as s } from "../../schema-namespace.js";
+import { definePermissions } from "../../permissions/index.js";
+import { createDb } from "../../runtime/default-create-db.js";
+import { localAccountConfig } from "../../runtime/testing/account-fixtures.js";
+import { deploy, startLocalJazzServer } from "../../testing/index.js";
+import type { Db } from "../../runtime/db.js";
+import type { AccountStore } from "../../accounts/persistence.js";
+import { exportLocalFirstSecret } from "../../accounts/enrollment.js";
+import { deviceRequestApp } from "../device-requests.js";
+export type FounderScenario =
+  | "unknown-recipient"
+  | "provisional-update"
+  | "rejected-founder"
+  | "plaintext-transaction"
+  | "missing-pending-owner"
+  | "device-only-missing-owner"
+  | "device-only-unpromoted-owner";
+
+export const app = s.defineApp({
+  plaintext: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ title: s.string() }, {}),
+  notes: s
+    .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
+    .encrypted({ space: "projectId", columns: ["body"] }),
+  uploads: s
+    .table({ projectId: s.uuid(), bytes: s.bytes() }, { project: s.rel("projects", "projectId") })
+    .encrypted({ space: "projectId", columns: ["bytes"] }),
+});
+export const founderPermissions = definePermissions(app, ({ policy, session }) => {
+  policy.projects.allowRead.always();
+  policy.plaintext.allowRead.always();
+  policy.plaintext.allowInsert.always();
+  policy.projects.allowInsert.always();
+  policy.notes.allowRead.always();
+  policy.notes.allowInsert.always();
+  policy.notes.allowUpdate.always();
+  policy.uploads.allowRead.always();
+  policy.uploads.allowInsert.always();
+  policy.__e2ee_spaces.allowRead.always();
+  policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+  policy.__e2ee_space_grants.allowRead.always();
+  policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+  policy.__e2ee_space_deliveries.allowRead.always();
+  policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+});
+export function privateStore(): AccountStore {
+  let value: string | null = null;
+  return {
+    async read() {
+      return value;
+    },
+    async update(transform) {
+      value = transform(value);
+    },
+  };
+}
+export async function transportGate(targetUrl: string) {
+  const target = new URL(targetUrl);
+  const sockets = new Set<Socket>();
+  let blocked = false;
+  const server = createServer((socket) => {
+    if (blocked) {
+      socket.destroy();
+      return;
+    }
+    const upstream = connect({ host: target.hostname, port: Number(target.port) });
+    for (const stream of [socket, upstream]) {
+      sockets.add(stream);
+      stream.on("error", () => {});
+      stream.on("close", () => sockets.delete(stream));
+    }
+    socket.pipe(upstream).pipe(socket);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing transport gate address");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    block() {
+      blocked = true;
+      for (const socket of sockets) socket.destroy();
+    },
+    unblock() {
+      blocked = false;
+    },
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+  };
+}
+
+export async function runOfflineFounderScenario(scenario: FounderScenario) {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const gate = await transportGate(server.url);
+  const clients: Db[] = [];
+  try {
+    const warmAccount = await localAccountConfig(server.appId, gate.url);
+    let founderAccount = await localAccountConfig(server.appId, gate.url);
+    const permissions = founderPermissions;
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const warm = await createDb({ ...warmAccount, e2ee: { app, store: privateStore() } });
+    clients.push(warm);
+    // Warm the authenticated catalogue without creating an unused encrypted space.
+    await warm.all(app.projects, { tier: "remote" });
+    await warm.shutdown();
+    clients.pop();
+    gate.block();
+    let blockPromotion = scenario === "device-only-unpromoted-owner";
+    const backingStore = privateStore();
+    const store: AccountStore = {
+      read: () => backingStore.read(),
+      update: (transform) =>
+        backingStore.update((current) => {
+          const next = transform(current);
+          if (
+            blockPromotion &&
+            JSON.parse(next).initializationJournalV1?.some(
+              (entry: { promoted: boolean }) => entry.promoted,
+            )
+          )
+            throw new Error("Test storage refuses promotion acknowledgement");
+          return next;
+        }),
+    };
+    let founder = await createDb({ ...founderAccount, e2ee: { app, store } });
+    clients.push(founder);
+
+    if (
+      scenario === "missing-pending-owner" ||
+      scenario === "device-only-missing-owner" ||
+      scenario === "device-only-unpromoted-owner"
+    ) {
+      const entry = async () => JSON.parse((await store.read())!).initializationJournalV1[0];
+      const original = await entry();
+      expect(original).toMatchObject({
+        reservation: expect.any(String),
+        local: true,
+        outcome: "pending",
+      });
+      await founder.disconnect();
+      if (blockPromotion) {
+        gate.unblock();
+        await founder.reconnect();
+        await expect.poll(async () => (await entry()).outcome).toBe("accepted");
+      }
+      await expect(
+        (async () => {
+          const other = await createDb({
+            ...founderAccount,
+            e2ee: {
+              app: scenario === "missing-pending-owner" ? app : deviceRequestApp,
+              store,
+            },
+          });
+          clients.push(other);
+          await other.e2ee.devices.list();
+        })(),
+      ).rejects.toThrow();
+      expect(await entry()).toMatchObject({
+        reservation: original.reservation,
+        local: true,
+      });
+      expect((await entry()).promoted).not.toBe(true);
+      blockPromotion = false;
+      gate.unblock();
+      await founder.reconnect();
+      await founder.e2ee.devices.list();
+      await expect.poll(async () => (await entry()).promoted).toBe(true);
+      expect((await entry()).reservation).toBe(original.reservation);
+      expect(
+        await founder.all(
+          app.__e2ee_account_roots.where({ accountId: founderAccount.account.id }),
+          { tier: "remote" },
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          id: JSON.parse(original.proposal).rootId,
+          accountId: founderAccount.account.id,
+        }),
+      ]);
+      return;
+    }
+
+    if (scenario === "plaintext-transaction") {
+      await expect(
+        founder.transaction(async (tx) => {
+          expect(await tx.all(app.plaintext, { tier: "local-first" })).toEqual([]);
+        }),
+      ).rejects.toThrow();
+      const onError = vi.fn();
+      founder.onMutationError(onError);
+      for (const kind of ["mergeable", "exclusive"] as const) {
+        const tx =
+          kind === "exclusive" ? founder.beginExclusiveTransaction() : founder.beginTransaction();
+        tx.insert(app.plaintext, { title: "Must not publish", done: false });
+        tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+        await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
+        expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([]);
+      }
+      const callbackWrite = await founder.exclusiveTransaction((tx) => {
+        const row = tx.insert(app.plaintext, { title: "Mapped callback", done: false });
+        tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+        return row;
+      });
+      await expect(
+        callbackWrite.mapValue((row) => row.id).wait({ tier: "local" }),
+      ).rejects.toThrow();
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([]);
+      const valid = await founder
+        .insert(app.plaintext, { title: "Ordinary local write", done: false })
+        .wait({ tier: "local" });
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([valid]);
+      expect(onError).not.toHaveBeenCalled();
+      const unwaited = founder.beginExclusiveTransaction();
+      unwaited.insert(app.plaintext, { title: "Unwaited rejection", done: false });
+      unwaited.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+      const rejected = unwaited.commit();
+      await expect.poll(() => onError.mock.calls.length).toBe(1);
+      await expect(rejected.wait({ tier: "local" })).rejects.toThrow();
+      expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([valid]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      return;
+    }
+
+    if (scenario === "unknown-recipient") {
+      let pulls = 0;
+      await expect(
+        founder.streamingTransaction((plan) => {
+          const project = plan.insert(
+            app.projects,
+            { title: "Unavailable recipient" },
+            { initialRecipients: [crypto.randomUUID()] },
+          );
+          plan.insertStreaming(app.uploads, {
+            projectId: project.id,
+            bytes: (async function* () {
+              pulls++;
+              yield new Uint8Array([13, 21, 34]);
+            })(),
+          });
+        }),
+      ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready", retryable: true });
+      expect(pulls).toBe(0);
+      expect(await founder.all(app.projects, { tier: "local-first" })).toEqual([]);
+      expect(await founder.all(app.uploads, { tier: "local-first" })).toEqual([]);
+      expect(await founder.all(app.__e2ee_spaces, { tier: "local-first" })).toEqual([]);
+      return;
+    }
+
+    const tx = founder.beginExclusiveTransaction();
+    const project = tx.insert(app.projects, { title: "Pending founder space" });
+    const note = tx.insert(app.notes, {
+      projectId: project.id,
+      body: "Original offline message",
+    });
+    const commit = tx.commit();
+    await commit.wait({ tier: "local" });
+    const originalTxId = await commit.txId;
+    expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(
+      note,
+    );
+    const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "local-first",
+    });
+    expect(root?.accountId).toBe(founderAccount.account.id);
+
+    if (scenario === "provisional-update") {
+      await founder
+        .update(app.notes, note.id, { body: "Updated without replay" })
+        .wait({ tier: "local" });
+      expect(
+        await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" }),
+      ).toMatchObject({
+        id: note.id,
+        body: "Updated without replay",
+      });
+      const explicit = founder.beginTransaction();
+      explicit.update(app.notes, note.id, { body: "Must not be staged" });
+      await expect(explicit.commit().wait({ tier: "local" })).rejects.toMatchObject({
+        code: "e2ee_provisional_requires_exclusive",
+        retryable: true,
+      });
+      await explicit.rollback().catch(() => {});
+      expect(
+        await founder.one(app.notes.where({ id: note.id }), { tier: "local-first" }),
+      ).toMatchObject({
+        body: "Updated without replay",
+      });
+      await expect(
+        founder
+          .update(app.notes, crypto.randomUUID(), { body: "Never an upsert" })
+          .wait({ tier: "local" }),
+      ).rejects.toThrow();
+      expect(await founder.all(app.notes, { tier: "local-first" })).toEqual([
+        { ...note, body: "Updated without replay" },
+      ]);
+      gate.unblock();
+      await founder.reconnect();
+      await commit.wait({ tier: "global" });
+      expect(
+        await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+          tier: "remote",
+        }),
+      ).toMatchObject({ id: root!.id, epochId: root!.epochId });
+      expect(await commit.txId).toBe(originalTxId);
+    } else {
+      await founder.disconnect();
+      gate.unblock();
+      // An independent account store represents a remote device; sharing the
+      // original local store must not permit another automatic founder.
+      const winner = await createDb({
+        ...(await localAccountConfig(
+          server.appId,
+          gate.url,
+          exportLocalFirstSecret(founderAccount.account),
+        )),
+        e2ee: { app, store: privateStore() },
+      });
+      clients.push(winner);
+      await winner.insert(app.projects, { title: "Winning founder" }).wait({ tier: "global" });
+      const acceptedIdentity = await winner.one(
+        app.__e2ee_account_identities.where({ id: founderAccount.account.id }),
+        { tier: "remote" },
+      );
+      expect(acceptedIdentity).not.toBeNull();
+      await founder.reconnect();
+      await expect(commit.wait({ tier: "global" })).rejects.toThrow();
+      await expect(
+        founder
+          .insert(app.notes, { projectId: project.id, body: "Rejected descendant" })
+          .wait({ tier: "local" }),
+      ).rejects.toMatchObject({ code: "e2ee_initialization_not_ready" });
+      expect(await commit.txId).toBe(originalTxId);
+      expect(await founder.all(app.__e2ee_account_identities, { tier: "remote" })).toEqual([
+        acceptedIdentity,
+      ]);
+    }
+  } finally {
+    gate.unblock();
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await gate.close();
+    await server.stop();
+  }
+}

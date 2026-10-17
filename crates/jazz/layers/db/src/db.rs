@@ -79,6 +79,12 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKi
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures};
 
 pub mod channel_endpoint;
+mod initialization;
+#[doc(hidden)]
+pub use initialization::{
+    AuthenticatedCatalogueState, InitializationSeal, InitializationTransactionStatus, ReservedTxId,
+    validate_catalogue_capture_replacement,
+};
 mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
@@ -2311,6 +2317,12 @@ enum LocalReplayStatus {
     Complete,
     Blocked,
 }
+
+#[derive(Clone, Copy)]
+enum LocalReplayMode {
+    SubscriberPayloads,
+    InitializationOwner,
+}
 fn local_replay_unit_is_complete(unit: &SyncMessage) -> bool {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         return false;
@@ -2328,6 +2340,7 @@ async fn plan_local_replay_commit_units<S>(
     roots: &BTreeSet<TxId>,
     pending_transaction_ids: &BTreeSet<TxId>,
     retained_replay_units: &BTreeMap<TxId, SyncMessage>,
+    mode: LocalReplayMode,
 ) -> Result<
     (
         BTreeMap<TxId, LocalReplayStatus>,
@@ -2360,6 +2373,15 @@ where
                             continue;
                         }
                         None => {}
+                    }
+                    if matches!(mode, LocalReplayMode::InitializationOwner)
+                        && !pending_transaction_ids.contains(&tx_id)
+                        && node.is_durable_global_replay_ancestor(tx_id).await?
+                    {
+                        // A direct owner is not reconstructing a downstream
+                        // replica: a verified Global ancestor needs no payload.
+                        statuses.insert(tx_id, LocalReplayStatus::Complete);
+                        continue;
                     }
 
                     let unit = match overrides.remove(&tx_id) {
@@ -2512,6 +2534,7 @@ where
         &roots,
         &pending_set,
         &retained_replay_units,
+        LocalReplayMode::SubscriberPayloads,
     )
     .await?;
     drop(node_state);
@@ -3285,6 +3308,7 @@ pub use first_load::{FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
 use first_load::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
+pub(crate) use mutation_errors::mutation_error_details;
 mod mutations;
 pub use mutations::{
     JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
@@ -7193,4 +7217,4 @@ fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
 mod tests;
 
 #[cfg(test)]
-use crate::{protocol::VersionRecord, tx::Transaction};
+use crate::tx::Transaction;

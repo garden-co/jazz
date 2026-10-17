@@ -23,6 +23,7 @@
     "isolatedModules": true
   },
   "include": [
+    "../../../../packages/jazz-tools/src/types/fs-native-extensions.d.ts",
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",

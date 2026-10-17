@@ -15,6 +15,29 @@ where
             .map(|mapping| mapping.table_id)
             .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
     }
+    /// Resolve an admitted physical identity independently of this node's
+    /// original logical schema, which may predate an added or renamed table.
+    pub(super) fn physical_table_alias_for_identity(
+        &self,
+        physical: crate::ids::GlobalPhysicalTableId,
+    ) -> Result<PhysicalTableId, Error> {
+        let mut selected = None;
+        for mapping in self.catalogue.physical_mappings.values() {
+            let Some((name, _)) = mapping.identities.tables.iter()
+                .find(|(_, table)| table.id == physical) else { continue; };
+            let alias = mapping.tables.get(name).ok_or(Error::InvalidStoredValue(
+                "admitted physical identity lacks its local mapping",
+            ))?.table_id;
+            if selected.is_some_and(|previous| previous != alias) {
+                return Err(Error::InvalidStoredValue(
+                    "admitted physical identity has conflicting local aliases",
+                ));
+            }
+            selected = Some(alias);
+        }
+        selected.ok_or(Error::InvalidStoredValue("unknown admitted physical table identity"))
+    }
+
     /// Resolve storage publication names to logical tables across every known
     /// schema mapping. Local physical identities can differ from the identity
     /// retained by a maintained view, so targeted refresh uses these names.

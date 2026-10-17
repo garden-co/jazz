@@ -409,3 +409,118 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     assert_eq!(versions[0].table(), "notes");
     assert_eq!(versions[0].row_uuid(), row(0x3f));
 }
+
+/// The public peer refresh must use the admitted source identity even when
+/// the authority was opened before this table existed. Query rows alone do
+/// not exercise the known-state cursor's storage scan.
+#[test]
+fn known_state_refresh_reads_a_table_added_after_the_original_schema() {
+    let base = schema();
+    let evolved = todos_notes_schema();
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let mut core = open_reopen_refusing_node_with_schema(node(0x3e), base.clone());
+
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        )
+        .expect("valid migration lens"),
+        ["notes"],
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
+    })
+    .unwrap();
+    assert!(core.table_in_schema_ref("notes", evolved_payload.id).is_ok());
+
+    let note = row(0x3e);
+    assert!(
+        core.advisory_mergeable_write_allows(MergeableCommit::new("notes", note, 10).cells(
+            BTreeMap::from([("body".to_owned(), v("live add-table write"),)])
+        ))
+        .unwrap()
+    );
+    let tx_id =
+        core.commit_mergeable_settled(MergeableCommit::new("notes", note, 10).cells(
+            BTreeMap::from([("body".to_owned(), v("live add-table write"))]),
+        ))
+        .unwrap();
+    let shape = Query::from("notes").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    core.accept_global_for_test(tx_id).unwrap();
+
+    let rows = core
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        rows,
+        BTreeMap::from([(
+            note,
+            BTreeMap::from([("body".to_owned(), v("live add-table write"))])
+        )])
+    );
+
+    let mut readers = Vec::new();
+    for query in [
+        Query::from("notes"),
+        Query::from("notes").filter(eq(col("id"), lit(note.0))),
+    ] {
+        let shape = query.validate(&evolved).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(), binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        };
+        core.prepare_query_binding_for_link(
+            &shape, &binding, DurabilityTier::Global,
+            peer.permission_subject().unwrap(),
+        ).unwrap();
+        peer.declare_known_state(subscription, Some(crate::protocol::KnownStateDeclaration::Fast {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalTime(0),
+        }));
+        let update = peer.rehydrate_query(&mut core, &shape, &binding)
+            .expect("a new table must support a known-state refresh");
+        let SyncMessage::ViewUpdate(update) = update else { panic!("expected view update") };
+        assert!(update.supporting_rows.added_rows().iter().any(|input|
+            input.version_table.as_str() == "notes" && input.row == note
+        ));
+        readers.push((peer, shape, binding, subscription));
+    }
+    let deleted = core.commit_mergeable_settled(
+        MergeableCommit::new("notes", note, 20).deletion(DeletionEvent::Deleted),
+    ).unwrap();
+    core.accept_global_for_test(deleted).unwrap();
+    for (mut peer, shape, binding, subscription) in readers {
+        assert!(core.query_rows(&shape, &binding, DurabilityTier::Global).unwrap().is_empty());
+        peer.declare_known_state(subscription, Some(crate::protocol::KnownStateDeclaration::Fast {
+            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalTime(0),
+        }));
+        let update = peer.rehydrate_query(&mut core, &shape, &binding)
+            .expect("refresh must carry a new table's deletion payload");
+        assert!(version_bundles_for_update(&update).iter().flat_map(|bundle| &bundle.versions)
+            .any(|version| version.row_uuid() == note && version.deletion() == Some(DeletionEvent::Deleted)));
+    }
+}

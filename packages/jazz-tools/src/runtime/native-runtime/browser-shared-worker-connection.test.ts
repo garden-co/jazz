@@ -171,6 +171,8 @@ function runtimeBootstrapFixture(aliveDelayMs = 0) {
   );
   const connection = new SharedBrowserWorkerConnection(
     {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
       onLocalSettlementChange: () => () => undefined,
@@ -659,6 +661,8 @@ describe("browser SharedWorker realm identity", () => {
       },
     );
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
       onLocalSettlementChange: () => () => undefined,
@@ -871,6 +875,8 @@ describe("browser SharedWorker realm identity", () => {
       },
     );
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
       onPeerTransportWork: () => () => undefined,
       onLocalSettlementChange: () => () => undefined,

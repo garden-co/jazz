@@ -5003,6 +5003,7 @@ impl PhysicalIdentityManifest {
         }
         Ok(())
     }
+
     fn evolve(
         &self,
         source: &JazzSchema,

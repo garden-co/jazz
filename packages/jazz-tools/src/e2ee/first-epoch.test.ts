@@ -324,6 +324,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
         device,
         adapters.keyEnvelope,
         () => {},
+        true,
       ),
     ).toBe(device.id);
     expect(
@@ -348,6 +349,7 @@ it("repairs a missing initial root without granting authority to pre-root succes
       device,
       adapters.keyEnvelope,
       () => {},
+      true,
     );
     expect(await db.all(deviceRequestApp.__e2ee_account_roots, { tier: "remote" })).toHaveLength(1);
   } finally {

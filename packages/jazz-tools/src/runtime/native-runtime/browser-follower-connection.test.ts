@@ -44,6 +44,8 @@ async function createWatchdogFollower(port = new TestPort()) {
     tick: () => 0,
   };
   const runtime = {
+    setInitializationStatusOwner: vi.fn(),
+    setCatalogueReadinessOwner: vi.fn(),
     connectUpstreamPeer: vi.fn(() => transport),
     onPeerTransportWork: vi.fn(() => () => undefined),
     onLocalSettlementChange: vi.fn((listener: (pending: boolean) => void) => {
@@ -166,6 +168,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
         finishConnecting = resolve;
       });
       const runtime = {
+        setInitializationStatusOwner: vi.fn(),
+        setCatalogueReadinessOwner: vi.fn(),
         connectUpstreamPeer: vi.fn(() => pendingTransport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -217,6 +221,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
         tick: () => 0,
       };
       const runtime = {
+        setInitializationStatusOwner: vi.fn(),
+        setCatalogueReadinessOwner: vi.fn(),
         connectUpstreamPeer: vi.fn(() => transport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -424,6 +430,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -469,6 +477,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -528,6 +538,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => Promise.reject(failure),
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -576,6 +588,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -639,6 +653,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -693,6 +709,8 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setInitializationStatusOwner: vi.fn(),
+      setCatalogueReadinessOwner: vi.fn(),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
