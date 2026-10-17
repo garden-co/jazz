@@ -3570,7 +3570,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      if (this.closed) return;
+      if (!this.coreProgressAllowed()) return;
       if (this.coreOperation) {
         this.coreTickAgain = true;
         return;

@@ -89,3 +89,16 @@ it.each([
   const encoded = equalityValue(app.values, name, typed);
   expect(Array.from(encoded, (byte) => byte.toString(16).padStart(2, "0")).join("")).toBe(hex);
 });
+
+// Alice's durable ciphertext plaintext remains readable after a native wire
+// update; the decoder must neither mutate the ciphertext buffer nor accept
+// the binding transport discriminator as an unversioned E2EE representation.
+it("decodes the original E2EE value v1 discriminator and refuses transport bytes", async () => {
+  const { decodeE2eeValueV1 } = await import("./value-codec-v1.js");
+  const logical = encryptedSchemas.get(app.values._schema)!.logical;
+  const column = logical.values!.columns.find((entry) => entry.name === "text")!;
+  const original = Uint8Array.of(2, 104, 105);
+  expect(decodeE2eeValueV1([column], original)).toEqual([{ type: "Text", value: "hi" }]);
+  expect(original).toEqual(Uint8Array.of(2, 104, 105));
+  expect(() => decodeE2eeValueV1([column], Uint8Array.of(0, 104, 105))).toThrow("discriminator");
+});
