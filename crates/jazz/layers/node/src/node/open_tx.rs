@@ -215,18 +215,15 @@ where
         // No suspension after pending-write installation: cancellation cannot
         // leave a descriptor without its capability, even for stream-only rows.
         let tx = self.open_tx_mut(id)?;
-        let write = tx
+        let position = tx
             .writes
-            .iter_mut()
-            .find(|write| {
-                write.schema_version == schema
-                    && write.table == table
-                    && write.row_uuid == row
-                    && write.deletion.is_none()
+            .find_row_write(table, row, |write| {
+                write.schema_version == schema && write.deletion.is_none()
             })
             .ok_or(Error::InvalidMergeableCommit(
                 "staged upload has no owner write",
             ))?;
+        let write = tx.writes.get_mut(position);
         write.staged_cells.insert(column, stage);
         Ok(())
     }

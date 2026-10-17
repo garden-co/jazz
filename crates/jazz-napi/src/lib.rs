@@ -1936,16 +1936,9 @@ impl StagedStreamingMutation {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.attach_staged_streaming_value(tx, &mut staged))
-            }
-        }
-        .map_err(napi_error)
-        .map_err(BindingError::from)
+        core_block_on(db.core.attach_staged_streaming_value(tx, &mut staged))
+            .map_err(napi_error)
+            .map_err(BindingError::from)
     }
 
     #[napi]
@@ -1957,16 +1950,9 @@ impl StagedStreamingMutation {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.abort_staged_streaming_value(&mut staged))
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.abort_staged_streaming_value(&mut staged))
-            }
-        }
-        .map_err(napi_error)
-        .map_err(BindingError::from)
+        core_block_on(db.core.abort_staged_streaming_value(&mut staged))
+            .map_err(napi_error)
+            .map_err(BindingError::from)
     }
 }
 
@@ -2056,32 +2042,18 @@ impl StreamingMutation {
             .lifecycle
             .take_stream(self.stream_id)
             .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
-        let staged = match storage {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.stage_streaming_value_upload(
-                upload,
-                self.mutation,
-                &self.table,
-                self.row_id,
-                cells,
-                &self.column,
-                self.identity,
-                self.updated_at_ms,
-                self.head.clone(),
-                self.base.clone(),
-            )),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.stage_streaming_value_upload(
-                upload,
-                self.mutation,
-                &self.table,
-                self.row_id,
-                cells,
-                &self.column,
-                self.identity,
-                self.updated_at_ms,
-                self.head.clone(),
-                self.base.clone(),
-            )),
-        }
+        let staged = core_block_on(storage.core.stage_streaming_value_upload(
+            upload,
+            self.mutation,
+            &self.table,
+            self.row_id,
+            cells,
+            &self.column,
+            self.identity,
+            self.updated_at_ms,
+            self.head.clone(),
+            self.base.clone(),
+        ))
         .map_err(napi_error)?;
         Ok(StagedStreamingMutation {
             db: Rc::clone(&self.db),
@@ -5342,9 +5314,9 @@ mod tests {
                 .await
                 .unwrap();
             let lifecycle = StreamingOwnerLifecycle::new();
-            lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::Memory(Rc::clone(&owner)), abandoned);
+            lifecycle.enqueue_cleanup(0, NapiDbInnerStorage::memory(Rc::clone(&owner)), abandoned);
             let binding = NapiDb {
-                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::Memory(
+                inner: Rc::new(std::cell::RefCell::new(Some(NapiDbInnerStorage::memory(
                     Rc::clone(&owner),
                 )))),
                 owns_runtime: true,

@@ -534,18 +534,10 @@ impl WasmStagedStreamingMutation {
         };
         let db = self.db.clone();
         future_to_promise(async move {
-            match db {
-                WasmDbInner::Memory(db) => db
-                    .attach_staged_streaming_value(tx, &mut staged)
-                    .await
-                    .map_err(to_js_error)?,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db
-                    .attach_staged_streaming_value(tx, &mut staged)
-                    .await
-                    .map_err(to_js_error)?,
-                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
-            }
+            db.db
+                .attach_staged_streaming_value(tx, &mut staged)
+                .await
+                .map_err(to_js_error)?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -556,18 +548,11 @@ impl WasmStagedStreamingMutation {
         };
         let db = self.db.clone();
         future_to_promise(async move {
-            let aborted = match db {
-                WasmDbInner::Memory(db) => db
-                    .abort_staged_streaming_value(&mut staged)
-                    .await
-                    .map_err(to_js_error)?,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db
-                    .abort_staged_streaming_value(&mut staged)
-                    .await
-                    .map_err(to_js_error)?,
-                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
-            };
+            let aborted = db
+                .db
+                .abort_staged_streaming_value(&mut staged)
+                .await
+                .map_err(to_js_error)?;
             Ok(JsValue::from_bool(aborted))
         })
     }
@@ -664,40 +649,23 @@ impl WasmStreamingMutation {
             *state
         };
         future_to_promise(async move {
-            let staged = match &state.db {
-                WasmDbInner::Memory(db) => db
-                    .stage_streaming_value_upload(
-                        state.upload,
-                        state.mutation,
-                        &state.table,
-                        state.row_id,
-                        state.cells,
-                        &state.column,
-                        state.identity,
-                        state.updated_at_ms,
-                        state.head,
-                        state.base,
-                    )
-                    .await
-                    .map_err(to_js_error)?,
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => db
-                    .stage_streaming_value_upload(
-                        state.upload,
-                        state.mutation,
-                        &state.table,
-                        state.row_id,
-                        state.cells,
-                        &state.column,
-                        state.identity,
-                        state.updated_at_ms,
-                        state.head,
-                        state.base,
-                    )
-                    .await
-                    .map_err(to_js_error)?,
-                WasmDbInner::Closed => return Err(streaming_mutation_closed()),
-            };
+            let staged = state
+                .db
+                .db
+                .stage_streaming_value_upload(
+                    state.upload,
+                    state.mutation,
+                    &state.table,
+                    state.row_id,
+                    state.cells,
+                    &state.column,
+                    state.identity,
+                    state.updated_at_ms,
+                    state.head,
+                    state.base,
+                )
+                .await
+                .map_err(to_js_error)?;
             Ok(WasmStagedStreamingMutation {
                 db: state.db,
                 staged: RefCell::new(Some(staged)),
@@ -2542,7 +2510,8 @@ impl WasmDb {
             if owns_runtime {
                 let result = inner.db.close().await;
                 if result.as_ref().is_err_and(|error| {
-                    error.code == ErrorCode::WriteRejected && inner.db.close_has_deferred_upload_cleanup()
+                    error.code == ErrorCode::WriteRejected
+                        && inner.db.close_has_deferred_upload_cleanup()
                 }) {
                     *binding_inner.borrow_mut() = Some(inner);
                 }

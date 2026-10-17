@@ -1568,14 +1568,13 @@ export class JazzClient {
   ): Promise<StagedStreamingMutation> {
     if (!this.runtime.stageStreamingMutation)
       throw new Error("This runtime does not support staged streaming mutations");
-    const effectiveSession = this.resolveWriteSession(session, attribution);
     const staged = await this.runtime.stageStreamingMutation(
       mutation,
       table,
       values,
       column,
       source,
-      this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
+      this.writeContext(session, attribution, undefined, options),
       objectId ?? (options as InsertOptions | undefined)?.id,
     );
     stagedStreamingOwners.set(staged, this);

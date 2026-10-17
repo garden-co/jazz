@@ -1,13 +1,7 @@
 import { Utf8Decoder } from "../utf8.js";
 import { bytesToHex, formatUuidAt } from "../hex.js";
 import { parseUuid } from "../uuid.js";
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  NativeTerminalRootLayout,
-  Value,
-  WasmRow,
-} from "../../drivers/types.js";
+import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { isProvenanceMagicColumn } from "../../magic-columns.js";
 import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
