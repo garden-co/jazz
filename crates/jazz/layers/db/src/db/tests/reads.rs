@@ -6278,6 +6278,42 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
         terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
         [Value::U48(_)]
     ));
+
+    // The host binding knows no `U48`: the nested provenance widens to `U64`
+    // in the descriptors and bytes that leave for the host.
+    fn contains_u48(value_type: &ValueType) -> bool {
+        match value_type {
+            ValueType::U48 => true,
+            ValueType::Nullable(inner) | ValueType::Array(inner) => contains_u48(inner),
+            ValueType::Tuple(members) => members.iter().any(contains_u48),
+            ValueType::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| contains_u48(&field.value_type)),
+            _ => false,
+        }
+    }
+    let batches = crate::binding_codec::row_batches(&snapshot.rows).unwrap();
+    assert!(
+        batches
+            .iter()
+            .flat_map(|batch| &batch.descriptor)
+            .all(|field| !contains_u48(&field.value_type))
+    );
+    let published = crate::binding_codec::published_record(&snapshot.rows[0]).unwrap();
+    let nested = published
+        .descriptor
+        .bind(&published.raw)
+        .get("todosViaProject")
+        .unwrap();
+    let Value::Array(children) = nested else {
+        panic!("included todos publish as an array");
+    };
+    let [Value::Record(child)] = children.as_slice() else {
+        panic!("one included todo");
+    };
+    assert!(matches!(child.get("$createdAt"), Ok(Value::U64(_))));
+    assert!(matches!(child.get("$updatedAt"), Ok(Value::U64(_))));
 }
 
 /// Provenance timestamps are stored and compared as `U48`; ordering by them
