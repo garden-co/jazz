@@ -3150,46 +3150,47 @@ fn decode_typed_version_witness(
     } else {
         None
     };
-    let parts = VersionRowParts {
-        table: table.name.clone(),
-        branch_key,
-        row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
-        tx_node_alias: record_node_alias_idx(record, plan.tx_node_idx)?,
-        schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
-            record,
-            plan.schema_version_idx,
-        )?),
-        tx_time,
-        created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
-        // Current-row provenance is public Unix milliseconds. Witness state
-        // needs the corresponding history form only to identify/materialize
-        // the authored version, whose provenance HLC always has counter zero.
-        created_at: TxTime::from_physical_ms(record_u64_idx(record, plan.created_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness created_at_ms exceeds packed HLC range",
-                )
-            })?,
-        updated_by: RowAuthor::from_record(record.get_record(plan.updated_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
-        updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness updated_at_ms exceeds packed HLC range",
-                )
-            })?,
-        cells: BTreeMap::new(),
-        authored_columns,
-        deletion,
-        // A query witness identifies its image's write; it projects no
-        // merge fields.
-        seq: crate::time::GlobalTime(0),
-        base: crate::protocol::RowBase::default(),
-        counter_signs: Vec::new(),
-    };
+    let parts =
+        VersionRowParts {
+            table: table.name.clone(),
+            branch_key,
+            row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
+            tx_node_alias: record_node_alias_idx(record, plan.tx_node_idx)?,
+            schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
+                record,
+                plan.schema_version_idx,
+            )?),
+            tx_time,
+            created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
+            // Current-row provenance is public Unix milliseconds. Witness state
+            // needs the corresponding history form only to identify/materialize
+            // the authored version, whose provenance HLC always has counter zero.
+            created_at: TxTime::from_physical_ms(record_ms_idx(record, plan.created_at_idx)?)
+                .map_err(|_| {
+                    super::Error::InvalidStoredValue(
+                        "maintained witness created_at_ms exceeds packed HLC range",
+                    )
+                })?,
+            updated_by: RowAuthor::from_record(record.get_record(plan.updated_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
+            updated_at: TxTime::from_physical_ms(record_ms_idx(record, plan.updated_at_idx)?)
+                .map_err(|_| {
+                    super::Error::InvalidStoredValue(
+                        "maintained witness updated_at_ms exceeds packed HLC range",
+                    )
+                })?,
+            cells: BTreeMap::new(),
+            authored_columns,
+            deletion,
+            // A query witness identifies its image's write; it projects no
+            // merge fields.
+            seq: crate::time::GlobalTime(0),
+            base: crate::protocol::RowBase::default(),
+            counter_signs: Vec::new(),
+        };
     let values = history_values_from_parts(table, &parts)?;
     // Query witnesses already contain encoded nullable user cells. Copy those
     // fields into the history layout instead of allocating a cells map, cloning
@@ -3347,6 +3348,17 @@ fn record_node_alias_idx(
         Value::U32(value) => Ok(NodeAlias(value)),
         _ => Err(super::Error::InvalidStoredValue(
             "node alias field must be u32",
+        )),
+    }
+}
+
+/// A provenance timestamp: Unix milliseconds, a `U48` wherever it is stored
+/// or projected.
+fn record_ms_idx(record: BorrowedRecord<'_>, field_idx: usize) -> Result<u64, super::Error> {
+    match record.get_idx(field_idx)? {
+        Value::U48(value) => Ok(value),
+        _ => Err(super::Error::InvalidStoredValue(
+            "provenance timestamp field must be u48",
         )),
     }
 }

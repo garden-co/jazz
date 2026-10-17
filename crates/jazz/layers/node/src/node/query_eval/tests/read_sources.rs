@@ -367,10 +367,10 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .map(|(record, _)| {
             (
                 record
-                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .get_u48(record.descriptor().field_index("created_at").unwrap())
                     .unwrap(),
                 record
-                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .get_u48(record.descriptor().field_index("updated_at").unwrap())
                     .unwrap(),
             )
         })
@@ -402,10 +402,10 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .map(|(record, _)| {
             (
                 record
-                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .get_u48(record.descriptor().field_index("created_at").unwrap())
                     .unwrap(),
                 record
-                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .get_u48(record.descriptor().field_index("updated_at").unwrap())
                     .unwrap(),
             )
         })

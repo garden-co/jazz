@@ -4331,7 +4331,8 @@ fn core_subscription_event_to_napi(
                 encode_core_subscription_delta(added, updated, removed).map_err(napi_error)?;
             let terminal_operations = terminal_operations
                 .iter()
-                .map(core_terminal_operation_to_napi)
+                .map(jazz::binding_codec::published_terminal_operation)
+                .map(|operation| core_terminal_operation_to_napi(&operation))
                 .collect::<std::result::Result<_, _>>()?;
             Ok(Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_string(),

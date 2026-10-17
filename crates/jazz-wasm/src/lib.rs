@@ -3184,7 +3184,12 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                terminal_operations_to_js(&terminal_operations)?,
+                terminal_operations_to_js(
+                    &terminal_operations
+                        .iter()
+                        .map(jazz::binding_codec::published_terminal_operation)
+                        .collect::<Vec<_>>(),
+                )?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;

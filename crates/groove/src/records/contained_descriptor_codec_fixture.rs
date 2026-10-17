@@ -212,9 +212,6 @@ fn descriptor_codec_push_value_type(
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
             crate::large_values::LargeValueKind::Json,
         ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_JSON)),
-        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredU48)) => {
-            Err(Error::StoredU48TypeNotEncodable)
-        }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned {
             dictionary,
             ..

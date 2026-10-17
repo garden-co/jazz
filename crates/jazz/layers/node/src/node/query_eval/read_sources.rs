@@ -4820,9 +4820,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
         }))
         .chain([
             records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
-            records::DescriptorField::new("$createdAt", ValueType::U64),
+            records::DescriptorField::new("$createdAt", ValueType::U48),
             records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
-            records::DescriptorField::new("$updatedAt", ValueType::U64),
+            records::DescriptorField::new("$updatedAt", ValueType::U48),
             records::DescriptorField::new("tx_time", ValueType::U64),
             records::DescriptorField::new("tx_node_id", ValueType::U32),
         ])
@@ -4847,9 +4847,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
             records::DescriptorField::new("created_by", RowAuthor::value_type()),
-            records::DescriptorField::new("created_at", ValueType::U64),
+            records::DescriptorField::new("created_at", ValueType::U48),
             records::DescriptorField::new("updated_by", RowAuthor::value_type()),
-            records::DescriptorField::new("updated_at", ValueType::U64),
+            records::DescriptorField::new("updated_at", ValueType::U48),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
@@ -5945,9 +5945,9 @@ fn inline_current_record(
         "physical current source row is missing provenance",
     ))?;
     values.push(row_author_value(provenance.created_by)?);
-    values.push(Value::U64(provenance.created_at));
+    values.push(Value::U48(provenance.created_at));
     values.push(row_author_value(provenance.updated_by)?);
-    values.push(Value::U64(provenance.updated_at));
+    values.push(Value::U48(provenance.updated_at));
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
@@ -6238,9 +6238,9 @@ fn inline_current_values_with_source_metadata_and_deletion(
     ))?;
     values.extend([
         row_author_value(provenance.created_by)?,
-        Value::U64(provenance.created_at),
+        Value::U48(provenance.created_at),
         row_author_value(provenance.updated_by)?,
-        Value::U64(provenance.updated_at),
+        Value::U48(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
@@ -6259,9 +6259,9 @@ fn inline_current_values_with_source_metadata_and_deletion(
             Value::U64(schema_version_alias.0),
             Value::Nullable(None),
             row_author_value(provenance.created_by)?,
-            Value::U64(provenance.created_at),
+            Value::U48(provenance.created_at),
             row_author_value(provenance.updated_by)?,
-            Value::U64(provenance.updated_at),
+            Value::U48(provenance.updated_at),
         ]);
     }
     if let Some((_, branch_key)) = branch_witness {
@@ -6385,9 +6385,9 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             }))
             .chain([
                 ("$createdBy".to_owned(), RowAuthor::value_type()),
-                ("$createdAt".to_owned(), ValueType::U64),
+                ("$createdAt".to_owned(), ValueType::U48),
                 ("$updatedBy".to_owned(), RowAuthor::value_type()),
-                ("$updatedAt".to_owned(), ValueType::U64),
+                ("$updatedAt".to_owned(), ValueType::U48),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U32),
             ])

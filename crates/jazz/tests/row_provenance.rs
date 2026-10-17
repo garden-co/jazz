@@ -91,6 +91,8 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     assert_eq!(provenance.updated_at, updated_at);
     assert!(provenance.created_at < provenance.updated_at);
 
+    // The row record keeps the stored `U48` milliseconds; only the wire and
+    // the JS bindings widen them to `U64` (`INV-DATA-27`).
     let (descriptor, raw) = rows[0].encoded_record();
     let encoded = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
     let created_at_idx = descriptor
@@ -100,11 +102,11 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .field_index("$updatedAt")
         .expect("updatedAt field");
     assert_eq!(
-        encoded.get_u64(created_at_idx).expect("createdAt value"),
+        encoded.get_u48(created_at_idx).expect("createdAt value"),
         created_at
     );
     assert_eq!(
-        encoded.get_u64(updated_at_idx).expect("updatedAt value"),
+        encoded.get_u48(updated_at_idx).expect("updatedAt value"),
         updated_at
     );
 }

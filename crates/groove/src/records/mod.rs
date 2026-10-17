@@ -2221,14 +2221,6 @@ pub enum Error {
     UnsupportedInternedPlacement { field: String },
     #[error("a dictionary value cannot hold an indirect large value")]
     IndirectDictionaryValue,
-    #[error(
-        "a descriptor with a U64-stored-as-U48 column cannot be encoded: the 6-byte slot is storage-only"
-    )]
-    StoredU48TypeNotEncodable,
-    #[error(
-        "field {field} nests a U64-stored-as-U48 type; it is supported only for a top-level column, optionally nullable"
-    )]
-    UnsupportedStoredU48Placement { field: String },
 }
 
 #[cfg(test)]

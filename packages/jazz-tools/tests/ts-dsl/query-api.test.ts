@@ -1438,6 +1438,53 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
+    it("a live include keeps projected magic timestamps as later children arrive", async () => {
+      const startedAt = Date.now();
+      const { id: projectId } = insertProject(db, "Announcements");
+      const first = insertTodo(db, { projectId, title: "First" });
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let resolveInitial: (() => void) | undefined;
+      const initial = new Promise<void>((resolve) => {
+        resolveInitial = resolve;
+      });
+      const both = new Promise<{ id: string; $createdAt: Date; $updatedAt: Date }[]>(
+        (resolve, reject) => {
+          timeout = setTimeout(() => {
+            unsubscribe();
+            reject(new Error("Timed out waiting for the second included todo"));
+          }, 10_000);
+          unsubscribe = db.subscribe(
+            app.projects
+              .where({ id: { eq: projectId } })
+              .select("id")
+              .include({
+                todosViaProject: app.todos.select("id", "$createdAt", "$updatedAt"),
+              }),
+            (rows) => {
+              const children = rows[0]?.todosViaProject ?? [];
+              if (children.length === 1) resolveInitial?.();
+              if (children.length === 2) resolve(children);
+            },
+          );
+        },
+      );
+
+      await initial;
+      const second = insertTodo(db, { projectId, title: "Second" });
+      const children = await both;
+      if (timeout) clearTimeout(timeout);
+      unsubscribe();
+
+      expect(children.map((child) => child.id).sort()).toEqual([first.id, second.id].sort());
+      for (const child of children) {
+        expect(child.$createdAt).toBeInstanceOf(Date);
+        expect(child.$updatedAt).toBeInstanceOf(Date);
+        expect(child.$createdAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+        expect(child.$updatedAt.getTime()).toBeLessThanOrEqual(Date.now() + 60_000);
+      }
+    });
+
     it("subscribe preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);

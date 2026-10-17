@@ -2899,6 +2899,8 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::I32(value) => Ok(Value::Integer(value)),
         CoreValue::I64(value) => Ok(Value::BigInt(value)),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
+        // Stored provenance milliseconds widen to `U64` at this egress.
+        CoreValue::U48(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),

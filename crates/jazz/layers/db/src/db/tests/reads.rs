@@ -6272,12 +6272,87 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
     );
     assert!(matches!(
         terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$createdAt").as_slice(),
-        [Value::U64(_)]
+        [Value::U48(_)]
     ));
     assert!(matches!(
         terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
-        [Value::U64(_)]
+        [Value::U48(_)]
     ));
+
+    // The host binding knows no `U48`: the nested provenance widens to `U64`
+    // in the descriptors and bytes that leave for the host.
+    fn contains_u48(value_type: &ValueType) -> bool {
+        match value_type {
+            ValueType::U48 => true,
+            ValueType::Nullable(inner) | ValueType::Array(inner) => contains_u48(inner),
+            ValueType::Tuple(members) => members.iter().any(contains_u48),
+            ValueType::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| contains_u48(&field.value_type)),
+            _ => false,
+        }
+    }
+    let batches = crate::binding_codec::row_batches(&snapshot.rows).unwrap();
+    assert!(
+        batches
+            .iter()
+            .flat_map(|batch| &batch.descriptor)
+            .all(|field| !contains_u48(&field.value_type))
+    );
+    let published = crate::binding_codec::published_record(&snapshot.rows[0]).unwrap();
+    let nested = published
+        .descriptor
+        .bind(&published.raw)
+        .get("todosViaProject")
+        .unwrap();
+    let Value::Array(children) = nested else {
+        panic!("included todos publish as an array");
+    };
+    let [Value::Record(child)] = children.as_slice() else {
+        panic!("one included todo");
+    };
+    assert!(matches!(child.get("$createdAt"), Ok(Value::U64(_))));
+    assert!(matches!(child.get("$updatedAt"), Ok(Value::U64(_))));
+}
+
+/// Provenance timestamps are stored and compared as `U48`; ordering by them
+/// must follow their value, not fall back to row identity.
+#[test]
+fn order_by_provenance_timestamps_follows_their_values() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    for (byte, ms) in [(0x01, 3_000), (0x02, 1_000), (0x03, 2_000)] {
+        db.insert(
+            "todos",
+            doctest_support::todo_cells("ordered", false),
+            crate::db::InsertOptions {
+                row_id: Some(row(byte)),
+                updated_at_ms: Some(ms),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for column in ["$createdAt", "$updatedAt"] {
+        for (direction, expected) in [
+            (OrderDirection::Asc, vec![row(0x02), row(0x03), row(0x01)]),
+            (OrderDirection::Desc, vec![row(0x01), row(0x03), row(0x02)]),
+        ] {
+            for limit in [None, Some(2)] {
+                let mut query = db
+                    .table("todos")
+                    .select(["title", column])
+                    .order_by(column, direction);
+                if let Some(limit) = limit {
+                    query = query.limit(limit);
+                }
+                let prepared = db.prepare_query(&query).unwrap();
+                let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+                let expected = &expected[..limit.unwrap_or(expected.len())];
+                assert_eq!(row_ids(&rows), expected, "{column} {direction:?} {limit:?}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -6306,7 +6381,7 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
             .find(|(record, weight)| *weight > 0 && record.get_uuid(0).unwrap() == id.0)
             .unwrap()
             .0;
-        assert_eq!(record.get_u64(created_at).unwrap(), 1_234);
+        assert_eq!(record.get_u48(created_at).unwrap(), 1_234);
     }
 
     let query = db
@@ -6316,8 +6391,8 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
     let prepared = db.prepare_query(&query).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
     let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
-    assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
-    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("$createdAt"), Some(Value::U48(1_234)));
+    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U48(1_234)));
     assert_eq!(row.raw_field("user_done"), None);
 }
 
@@ -6354,8 +6429,8 @@ fn session_policy_read_retains_selected_provenance() {
         .unwrap();
     let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
     assert_eq!(row_ids(&rows), vec![id]);
-    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U64(1_234)));
-    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U48(1_234)));
+    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U48(1_234)));
     let batches = row_batches(&rows).expect("policy-read rows encode for the native binding");
     for name in ["$createdAt", "$updatedAt"] {
         assert!(

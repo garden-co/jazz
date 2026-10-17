@@ -316,7 +316,7 @@ fn first_result_preserves_explicit_public_provenance_and_projected_cells() {
     for field in ["$createdAt", "$updatedAt"] {
         assert_eq!(
             record
-                .get_u64(descriptor.field_index(field).expect("selected timestamp"))
+                .get_u48(descriptor.field_index(field).expect("selected timestamp"))
                 .unwrap(),
             1234
         );

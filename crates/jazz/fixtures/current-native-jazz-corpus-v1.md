@@ -21,7 +21,7 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 31 entries in the current storage format. The active
+The logical pack has 33 entries in the current storage format. The active
 schema selection lives in `jazz_catalogue`; the redundant write-pointer table
 and retired scope-relay repair ledger are no longer registered.
 
@@ -73,7 +73,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `95ed6800cc4438263c79a3489a3eebd8c5e9ffd22bbf48bb16d5488b125b9370` |
-| SQLite payload      | `4fc5cf8119b2c17f3c35b84eb0ccd2e59639b93f0e3fdb127784bf0eb6af486a` |
-| gzip SQLite archive | `a8b9e0fcd123a1935f0c349f8466010cb0f0497722aace2312f769ae4c810613` |
-| RocksDB archive     | `ec741e7d2b4b9f862ef077c6f6c2ccb4b1470057e4d1886c0dc8061e0913ad35` |
+| logical pack        | `41e4d8c066fd1d69b805222298a272b1fa65d63c5aaf900ed852d30fa46a37a0` |
+| SQLite payload      | `d3f92cb74553585e87ad77b7562a0135a1ce5c36015c3b87a0b93cceb428aa31` |
+| gzip SQLite archive | `d5f147c8f49779cfe3af9e841817f7a1b59a20e91c66028a113e8edca657b898` |
+| RocksDB archive     | `13a764fc200da6a82c351afb05566927485146d90b3d1eb50eb62faefd0ac5c3` |

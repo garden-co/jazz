@@ -23,11 +23,11 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
-        // Unix milliseconds in a 6-byte slot, like the current tables (SPEC 2
+        // Unix milliseconds as a native `U48`, like the current tables (SPEC 2
         // §2.3). The in-memory `TxTime` has logical counter zero.
-        6 => created_at: u64,
+        6 => created_at: groove::records::U48,
         7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
+        8 => updated_at: groove::records::U48,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
     }
@@ -41,9 +41,9 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
-        6 => created_at: u64,
+        6 => created_at: groove::records::U48,
         7 => updated_by: RowAuthor,
-        8 => updated_at: u64,
+        8 => updated_at: groove::records::U48,
         9 => global_time: Option<GlobalTime>,
         10 => _deletion: Option<DeletionEvent>,
         .. user_cells,
@@ -2518,9 +2518,9 @@ impl VersionRow {
                     3 => Value::U32(tx_node_alias.0),
                     4 => Value::U64(schema_version_alias.0),
                     5 => row_author_value(version.created_by())?,
-                    6 => Value::U64(created_at),
+                    6 => Value::U48(created_at),
                     7 => row_author_value(version.updated_by())?,
-                    8 => Value::U64(updated_at),
+                    8 => Value::U48(updated_at),
                     9 => nullable_deletion_value(deletion),
                     i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
                         let column = i - HistoryRowRecord::USER_CELLS;
@@ -2634,7 +2634,7 @@ impl VersionRow {
         TxTime::from_physical_ms(
             self.record
                 .borrowed()
-                .get_u64(idx)
+                .get_u48(idx)
                 .expect("valid created_at"),
         )
         .expect("stored created_at within the packed HLC range")
@@ -2657,7 +2657,7 @@ impl VersionRow {
         TxTime::from_physical_ms(
             self.record
                 .borrowed()
-                .get_u64(idx)
+                .get_u48(idx)
                 .expect("valid updated_at"),
         )
         .expect("stored updated_at within the packed HLC range")
@@ -4050,9 +4050,9 @@ pub(super) fn history_values_from_parts(
         Value::U32(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
         row_author_value(version.created_by)?,
-        Value::U64(version.created_at.physical_ms()),
+        Value::U48(version.created_at.physical_ms()),
         row_author_value(version.updated_by)?,
-        Value::U64(version.updated_at.physical_ms()),
+        Value::U48(version.updated_at.physical_ms()),
         nullable_deletion_value(version.deletion),
     ];
     for column in &table.columns {
@@ -4128,13 +4128,13 @@ fn history_values_from_wire(
     values.push(row_author_value(version.created_by())?);
     // Wire provenance carries public Unix milliseconds, and so does history.
     // Refuse at this ingestion boundary what the internal HLC cannot hold.
-    values.push(Value::U64(
+    values.push(Value::U48(
         TxTime::from_physical_ms(version.created_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .physical_ms(),
     ));
     values.push(row_author_value(version.updated_by())?);
-    values.push(Value::U64(
+    values.push(Value::U48(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
             .physical_ms(),
@@ -4290,9 +4290,9 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
         Value::U32(version.tx_node_alias().0),
         Value::U64(version.schema_version_alias().0),
         row_author_value(version.created_by())?,
-        Value::U64(version.created_at().physical_ms()),
+        Value::U48(version.created_at().physical_ms()),
         row_author_value(version.updated_by())?,
-        Value::U64(version.updated_at().physical_ms()),
+        Value::U48(version.updated_at().physical_ms()),
     ])
 }
 
@@ -4498,9 +4498,9 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
         ));
     }
     values.push(row_author_value(created.created_by())?);
-    values.push(Value::U64(created.created_at().physical_ms()));
+    values.push(Value::U48(created.created_at().physical_ms()));
     values.push(row_author_value(updated.updated_by())?);
-    values.push(Value::U64(updated.updated_at().physical_ms()));
+    values.push(Value::U48(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U32(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
@@ -4526,9 +4526,9 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
         ));
     }
     values.push(row_author_value(provenance.created_by)?);
-    values.push(Value::U64(provenance.created_at));
+    values.push(Value::U48(provenance.created_at));
     values.push(row_author_value(provenance.updated_by)?);
-    values.push(Value::U64(provenance.updated_at));
+    values.push(Value::U48(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U32(tx_node_alias.0));
@@ -4560,13 +4560,13 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
             .expect("stored provenance is a row author")
             .to_value(),
     );
-    values.push(Value::U64(provenance.created_at().physical_ms()));
+    values.push(Value::U48(provenance.created_at().physical_ms()));
     values.push(
         RowAuthor::from_persisted_subject(provenance.updated_by())
             .expect("stored provenance is a row author")
             .to_value(),
     );
-    values.push(Value::U64(provenance.updated_at().physical_ms()));
+    values.push(Value::U48(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U32(provenance.tx_node_alias().0));
 }
@@ -4660,9 +4660,9 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         .chain(
             [
                 ("$createdBy".to_owned(), RowAuthor::value_type()),
-                ("$createdAt".to_owned(), records::ValueType::U64),
+                ("$createdAt".to_owned(), records::ValueType::U48),
                 ("$updatedBy".to_owned(), RowAuthor::value_type()),
-                ("$updatedAt".to_owned(), records::ValueType::U64),
+                ("$updatedAt".to_owned(), records::ValueType::U48),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U32),
             ]

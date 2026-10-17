@@ -250,10 +250,133 @@ pub struct PublishedRecord<'a> {
 #[doc(hidden)]
 pub fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcard::Error> {
     let (descriptor, raw) = row.encoded_record();
+    let fields = row.publication_fields().iter().collect();
+    if let Some((descriptor, raw)) = widen_u48_fields(descriptor, raw) {
+        return Ok(PublishedRecord {
+            descriptor,
+            raw: Cow::Owned(raw),
+            fields,
+        });
+    }
     Ok(PublishedRecord {
         descriptor: *descriptor,
         raw: Cow::Borrowed(raw),
-        fields: row.publication_fields().iter().collect(),
+        fields,
+    })
+}
+
+/// The host binding knows no `U48`: provenance timestamps (`$createdAt`,
+/// `$updatedAt`) are stored and queried as `U48` milliseconds and widen to
+/// `U64` here, at egress, including inside nested records and arrays (an
+/// include's rows carry their own provenance). `None` when the record has no
+/// `U48` anywhere.
+fn widen_u48_fields(
+    descriptor: &groove::records::RecordDescriptor,
+    raw: &[u8],
+) -> Option<(groove::records::RecordDescriptor, Vec<u8>)> {
+    let wide = widen_u48_descriptor(descriptor)?;
+    let values = descriptor
+        .bind(raw)
+        .to_values()
+        .and_then(|values| {
+            values
+                .into_iter()
+                .map(widen_u48_value)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("a stored current row decodes field by field");
+    let raw = wide
+        .create(&values)
+        .expect("widening a U48 field keeps the record encodable");
+    Some((wide, raw))
+}
+
+fn widen_u48_type(value_type: &groove::records::ValueType) -> Option<groove::records::ValueType> {
+    use groove::records::ValueType;
+    match value_type {
+        ValueType::U48 => Some(ValueType::U64),
+        ValueType::Nullable(inner) => {
+            widen_u48_type(inner).map(|inner| ValueType::Nullable(Box::new(inner)))
+        }
+        ValueType::Array(inner) => {
+            widen_u48_type(inner).map(|inner| ValueType::Array(Box::new(inner)))
+        }
+        ValueType::Tuple(members) => {
+            let widened = members.iter().map(widen_u48_type).collect::<Vec<_>>();
+            widened.iter().any(Option::is_some).then(|| {
+                ValueType::Tuple(
+                    widened
+                        .into_iter()
+                        .zip(members)
+                        .map(|(wide, member)| wide.unwrap_or_else(|| member.clone()))
+                        .collect(),
+                )
+            })
+        }
+        ValueType::Record(descriptor) => {
+            widen_u48_descriptor(descriptor).map(|wide| ValueType::Record(Box::new(wide)))
+        }
+        _ => None,
+    }
+}
+
+fn widen_u48_descriptor(
+    descriptor: &groove::records::RecordDescriptor,
+) -> Option<groove::records::RecordDescriptor> {
+    let widened = descriptor
+        .fields()
+        .iter()
+        .map(|field| widen_u48_type(&field.value_type))
+        .collect::<Vec<_>>();
+    if widened.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(groove::records::RecordDescriptor::new_with_fields(
+        descriptor
+            .fields()
+            .iter()
+            .zip(widened)
+            .map(|(field, wide)| {
+                let mut field = field.clone();
+                if let Some(value_type) = wide {
+                    field.value_type = value_type;
+                }
+                field
+            }),
+    ))
+}
+
+fn widen_u48_value(
+    value: groove::records::Value,
+) -> Result<groove::records::Value, groove::records::Error> {
+    use groove::records::{OwnedRecord, Value};
+    Ok(match value {
+        Value::U48(value) => Value::U64(value),
+        Value::Nullable(Some(inner)) => Value::Nullable(Some(Box::new(widen_u48_value(*inner)?))),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(widen_u48_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Tuple(values) => Value::Tuple(
+            values
+                .into_iter()
+                .map(widen_u48_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Record(record) => match widen_u48_descriptor(record.descriptor()) {
+            Some(wide) => {
+                let values = record
+                    .to_values()?
+                    .into_iter()
+                    .map(widen_u48_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Value::Record(OwnedRecord::new(wide.create(&values)?, wide))
+            }
+            None => Value::Record(record),
+        },
+        value => value,
     })
 }
 
@@ -323,10 +446,17 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
 pub fn terminal_operations_to_json(
     operations: &[TerminalOperation],
 ) -> Result<serde_json::Value, serde_json::Error> {
-    let mut encoded = serde_json::to_value(operations)?;
     if operations.is_empty() {
-        return Ok(encoded);
+        return serde_json::to_value(operations);
     }
+    // Edit payloads are records of the collection their path names; the host
+    // decodes them with the widened descriptors it received, so widen any
+    // nested `U48` provenance here too.
+    let widened = operations
+        .iter()
+        .map(published_terminal_operation)
+        .collect::<Vec<_>>();
+    let mut encoded = serde_json::to_value(&widened)?;
     let encoded_operations = encoded
         .as_array_mut()
         .expect("terminal operations serialize as an array");
@@ -337,6 +467,41 @@ pub fn terminal_operations_to_json(
         wire.remove("root_descriptor");
     }
     Ok(encoded)
+}
+
+/// One terminal operation as it may leave the engine toward a host: nested
+/// `U48` provenance in its payload widens to `U64`, matching the descriptors
+/// [`row_batches`] publishes.
+#[doc(hidden)]
+pub fn published_terminal_operation(operation: &TerminalOperation) -> TerminalOperation {
+    use groove::ivm::{TerminalEdit, TerminalPathSegment};
+    use groove::records::ValueType;
+    let mut operation = operation.clone();
+    let mut descriptor = operation.root_descriptor;
+    for segment in &operation.path {
+        let TerminalPathSegment::Collection(name) = segment else {
+            continue;
+        };
+        let element = descriptor
+            .field_index(name)
+            .map(|index| &descriptor.fields()[index].value_type);
+        let Some(ValueType::Array(element)) = element else {
+            return operation;
+        };
+        let ValueType::Record(element) = element.as_ref() else {
+            return operation;
+        };
+        descriptor = **element;
+    }
+    match &mut operation.edit {
+        TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+            if let Some((_, raw)) = widen_u48_fields(&descriptor, value) {
+                *value = raw;
+            }
+        }
+        TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => {}
+    }
+    operation
 }
 
 #[cfg(test)]
