@@ -7813,3 +7813,157 @@ fn strict_serialized_one_shot_drops_deleted_held_row_but_keeps_unreadable_one() 
         "the deletion reaches alice's local store; the unreadable row stays cached"
     );
 }
+
+/// Repeated strict reads must obtain fresh authority receipts even when a
+/// live listener shares the query and the accepted answer remains empty.
+#[test]
+fn repeated_strict_serialized_one_shots_with_a_live_empty_stream_complete() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let core = open_core(0xc7, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let alice_db = open_db(0xd7, alice, &schema);
+    let bob_db = open_db(0xe7, bob, &schema);
+    alice_db.set_test_provider_claims(alice, test_provider_claims(alice));
+    bob_db.set_test_provider_claims(bob, test_provider_claims(bob));
+    let connect = |db: &Db, identity: AuthorSubject, node: u8| {
+        let (up, down) = duplex_with_admitted_session_context(
+            identity,
+            NodeUuid::from_bytes([node; 16]),
+            1,
+            NodeUuid::from_bytes([0xc7; 16]),
+            1,
+        );
+        let upstream = block_on(db.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, identity);
+        (upstream, subscriber)
+    };
+    let _alice_link = connect(&alice_db, alice, 0xd7);
+    let _bob_link = connect(&bob_db, bob, 0xe7);
+    let turn = || {
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+        core.tick().unwrap();
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+    };
+    let strict_one_shot = || -> BTreeSet<RowUuid> {
+        let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = alice_db.all_serialized_query(
+            &bytes,
+            global_subscribe_opts(),
+            None,
+            None,
+            None,
+            true,
+            || false,
+            |attachment| alice_db.detach_query(attachment),
+        );
+        let mut read = pin!(read);
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..200 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.expect("strict one-shot") {
+                    SerializedReadResult::Rows(rows) => {
+                        rows.iter().map(CurrentRow::row_uuid).collect()
+                    }
+                    SerializedReadResult::Relation(_) => panic!("todos is a row query"),
+                };
+            }
+            turn();
+        }
+        panic!("strict one-shot never settled");
+    };
+    let query = Query::from("todos");
+    let mut listener = prepared_subscribe(&alice_db, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..4 {
+        turn();
+    }
+    assert!(opened_rows(block_on(listener.next_event()).unwrap()).is_empty());
+    for attempt in 0..20 {
+        assert!(strict_one_shot().is_empty(), "repeat {attempt}");
+    }
+}
+
+/// An authority rejection is terminal even though it cannot produce the
+/// freshness receipt requested by this strict serialized read.
+#[test]
+fn strict_serialized_one_shot_surfaces_authority_rejection_without_coverage_timeout() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let client = open_db(0xd8, author, &schema);
+    client.set_test_provider_claims(author, test_provider_claims(author));
+    let (up, mut authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd8; 16]),
+        1,
+        NodeUuid::from_bytes([0xc8; 16]),
+        1,
+    );
+    let _link = block_on(client.connect_upstream(up));
+    let bytes = postcard::to_allocvec(&Query::from("items")).unwrap();
+    let read = client.all_serialized_query(
+        &bytes,
+        global_subscribe_opts(),
+        None,
+        None,
+        None,
+        true,
+        || false,
+        |attachment| client.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let mut rejected = false;
+    for _ in 0..100 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            assert!(rejected, "read must wait for the authority");
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("a rejected read cannot expose rows"),
+            };
+            assert_eq!(error.code, ErrorCode::Query);
+            assert!(error.message.contains("TableNotFound"), "{error:?}");
+            return;
+        }
+        client.tick().unwrap();
+        while let Some(message) = authority.try_recv() {
+            if let SyncMessage::Subscribe(subscribe) = message {
+                authority
+                    .send(SyncMessage::SubscribeRejected {
+                        subscription: subscribe.subscription,
+                        reason: SubscribeRejectReason::ServerFailure {
+                            code: crate::protocol::SubscribeServerFailureCode::TableNotFound,
+                        },
+                    })
+                    .unwrap();
+                rejected = true;
+            }
+        }
+        client.tick().unwrap();
+    }
+    panic!("authority rejection was hidden behind an impossible freshness receipt");
+}

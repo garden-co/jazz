@@ -852,8 +852,31 @@ where
                 None
             };
             let outcome = async {
-                let mut next = Box::pin(stream.next_event());
+                // A rejection cannot satisfy freshness. Observe terminal events
+                // while waiting, retaining the opening until its fresh authority
+                // coverage arrives before exposing any rows.
+                let mut opening = None;
                 let event = std::future::poll_fn(|cx| {
+                    loop {
+                        match Stream::poll_next(Pin::new(&mut stream), cx) {
+                            Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. }))
+                            | Poll::Ready(Some(event @ SubscriptionEvent::Closed)) => {
+                                return Poll::Ready(Ok(Some(event)));
+                            }
+                            Poll::Ready(None) => return Poll::Ready(Ok(None)),
+                            Poll::Ready(Some(
+                                event @ SubscriptionEvent::Delta { reset: true, .. },
+                            )) => {
+                                opening = Some(event);
+                            }
+                            Poll::Ready(Some(event @ SubscriptionEvent::Delta { .. })) => {
+                                if opening.is_none() {
+                                    return Poll::Ready(Ok(Some(event)));
+                                }
+                            }
+                            Poll::Pending => break,
+                        }
+                    }
                     if coverage_expired() {
                         return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
@@ -871,10 +894,12 @@ where
                     {
                         return Poll::Pending;
                     }
-                    std::future::Future::poll(next.as_mut(), cx).map(Ok)
+                    match opening.take() {
+                        Some(event) => Poll::Ready(Ok(Some(event))),
+                        None => Poll::Pending,
+                    }
                 })
                 .await?;
-                drop(next);
                 match event {
                     Some(SubscriptionEvent::Delta { reset: true, .. }) => {
                         let mut snapshot = stream.settled_receiver_local_snapshot()?;
