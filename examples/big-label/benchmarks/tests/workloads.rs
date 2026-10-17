@@ -46,3 +46,25 @@ fn batched_generated_id_ingest_preserves_values_and_indexed_label_order() {
         .collect::<Vec<_>>();
     assert_eq!(fixture.label_release_titles_and_order(3), expected);
 }
+
+#[test]
+fn live_release_view_hydrates_through_the_label_index() {
+    use jazz_example_big_label_benchmark::live_view::LiveViewFixture;
+    let fixture = LiveViewFixture::new(2_000);
+    let baseline = fixture.active_groove_subscriptions();
+    fixture.assert_selective_hydration();
+    fixture.assert_subscription_baseline(baseline, "test hydration");
+}
+
+#[test]
+fn sign_off_first_edit_compiles_and_hydrates_every_support_subscription() {
+    use jazz_example_big_label_benchmark::policy_graph::{self, PolicyGraphFixture};
+    for desks in [1, 2, 4] {
+        let fixture = PolicyGraphFixture::new(desks);
+        let mut node = fixture.open_node();
+        let subscriptions = policy_graph::open_update_support(&mut node);
+        // The 2^desks branches live inside the support views; the number of
+        // views to hydrate does not grow with the desks.
+        assert_eq!(subscriptions, 2, "{desks} desks: update support views");
+    }
+}

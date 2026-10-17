@@ -1,6 +1,9 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import Image from "next/image";
+import { Center } from "@astryxdesign/core/Center";
+import { Heading } from "@astryxdesign/core/Heading";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { auth } from "@/lib/auth";
 import { SignInForm } from "@/components/sign-in-form";
 
@@ -9,17 +12,16 @@ export default async function HomePage() {
   if (session) redirect("/dashboard");
 
   return (
-    <main className="page-center">
-      <Image
-        src="/jazz.svg"
-        alt="Jazz"
-        className="wordmark"
-        width={80}
-        height={24}
-        style={{ width: "100%", height: "auto" }}
-        loading="eager"
-      />
-      <SignInForm />
-    </main>
+    <Center minHeight="100dvh" padding={4}>
+      <VStack gap={6} align="center" width="100%" maxWidth={400}>
+        <VStack gap={2} align="center">
+          <Heading level={1}>Wequencer</Heading>
+          <Text color="secondary" justify="center">
+            A step sequencer your band edits together, in real time and offline.
+          </Text>
+        </VStack>
+        <SignInForm />
+      </VStack>
+    </Center>
   );
 }

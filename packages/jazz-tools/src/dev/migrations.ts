@@ -188,11 +188,14 @@ function renderSchemaWitness(schema: WasmSchema): string {
         tableSchema.indexed_columns === undefined
           ? ""
           : `.indexOnly(${JSON.stringify(tableSchema.indexed_columns)})`;
+      const compositeIndexes = (tableSchema.composite_indexes ?? [])
+        .map((columns) => `.compositeIndex(${JSON.stringify(columns)})`)
+        .join("");
       const branch =
         tableSchema.branchBy === undefined
           ? ""
           : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${branch}`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}`;
     });
 
   if (tableEntries.length === 0) {
@@ -208,84 +211,47 @@ type TableSuggestion = {
   properties: string[];
 };
 
-function renderArrayElementExpression(columnType: WasmColumnType): string {
-  return baseBuilderExpression(columnType);
-}
-
-function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
-  switch (column.column_type.type) {
-    case "Text":
-      return `s.add.string({ default: ${defaultExpression} })`;
-    case "Boolean":
-      return `s.add.boolean({ default: ${defaultExpression} })`;
-    case "Integer":
-      return `s.add.int({ default: ${defaultExpression} })`;
-    case "Double":
-      return `s.add.float({ default: ${defaultExpression} })`;
-    case "Timestamp":
-      return `s.add.timestamp({ default: ${defaultExpression} })`;
-    case "Bytea":
-      return `s.add.bytes({ default: ${defaultExpression} })`;
-    case "Json":
-      return column.column_type.schema
-        ? `s.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.add.json({ default: ${defaultExpression} })`;
-    case "Enum":
-      return `s.add.enum(${column.column_type.variants
-        .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { default: ${defaultExpression} })`;
-    case "EnumPayload":
-      throw new Error("Migration stub generation does not yet support payload enums.");
-    case "Uuid":
-      if (column.references) {
-        return `s.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
-      }
-      return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
-    case "Array":
-      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
-    case "BigInt":
-      return `s.add.bigint({ default: ${defaultExpression} })`;
-    case "Row":
-      throw new Error("Migration stub generation does not yet support row-valued columns.");
-  }
-}
-
-function renderDropOperationExpression(
+/**
+ * Render a migration column operation such as `m.add.string({ default: null })`.
+ * `drop` operations carry their default under `backwardsDefault`.
+ */
+function renderColumnOperationExpression(
+  operation: "add" | "drop",
   column: ColumnDescriptor,
   defaultExpression: string,
 ): string {
-  switch (column.column_type.type) {
+  const m = `m.${operation}`;
+  const defaultEntry = `${operation === "add" ? "default" : "backwardsDefault"}: ${defaultExpression}`;
+  const columnType = column.column_type;
+  switch (columnType.type) {
     case "Text":
-      return `s.drop.string({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.string({ ${defaultEntry} })`;
     case "Boolean":
-      return `s.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.boolean({ ${defaultEntry} })`;
     case "Integer":
-      return `s.drop.int({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.int({ ${defaultEntry} })`;
     case "Double":
-      return `s.drop.float({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.float({ ${defaultEntry} })`;
     case "Timestamp":
-      return `s.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.timestamp({ ${defaultEntry} })`;
     case "Bytea":
-      return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.bytes({ ${defaultEntry} })`;
     case "Json":
-      return column.column_type.schema
-        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
+      return columnType.schema
+        ? `${m}.json({ ${defaultEntry}, schema: ${jsonSchemaExpression(columnType.schema)} })`
+        : `${m}.json({ ${defaultEntry} })`;
     case "Enum":
-      return `s.drop.enum(${column.column_type.variants
+      return `${m}.enum(${columnType.variants
         .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
+        .join(", ")}, { ${defaultEntry} })`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      if (column.references) {
-        return `s.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
-      }
-      return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
+      return `${m}.ref(${column.references ? JSON.stringify(column.references) : '"TODO_TABLE"'}, { ${defaultEntry} })`;
     case "Array":
-      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
+      return `${m}.array({ of: ${baseBuilderExpression(columnType.element)}, ${defaultEntry} })`;
     case "BigInt":
-      return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
+      return `${m}.bigint({ ${defaultEntry} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -322,7 +288,7 @@ function inferTableSuggestions(
     const column = toColumns.get(columnName)!;
     if (column.nullable) {
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderAddOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, "null")},`,
       );
     } else {
       comments.push(
@@ -335,7 +301,7 @@ function inferTableSuggestions(
     const column = fromColumns.get(columnName)!;
     if (column.nullable) {
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderDropOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, "null")},`,
       );
     } else {
       comments.push(
@@ -478,7 +444,7 @@ function renderMigrationBody(
         ? renameSuggestions
             .map(
               (renameSuggestion) =>
-                `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
+                `${renameSuggestion.newTableName}: m.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
             )
             .join("\n")
         : undefined,
@@ -517,9 +483,9 @@ export function renderMigrationStub(input: {
   sections.push(`  from: ${renderSchemaWitness(rendered.witnessFrom)},`);
   sections.push(`  to: ${renderSchemaWitness(rendered.witnessTo)},`);
 
-  return `import { schema as s } from "jazz-tools";
+  return `import { schema as s, migration as m } from "jazz-tools";
 
-export default s.defineMigration({
+export default m.defineMigration({
 ${sections.join("\n")}
 });
 `;

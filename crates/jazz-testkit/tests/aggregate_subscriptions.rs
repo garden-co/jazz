@@ -1,3 +1,4 @@
+use jazz::tools::test_support::AllowAll;
 use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ fn metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -33,6 +35,7 @@ fn count_named_metrics_schema() -> Schema {
                 .column("count", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -44,6 +47,7 @@ fn mixed_metrics_schema() -> Schema {
                 .column("score", ColumnType::Integer)
                 .column("high", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -54,6 +58,7 @@ fn nullable_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .nullable_column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -64,6 +69,7 @@ fn bigint_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -74,6 +80,7 @@ fn double_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Double),
         )
+        .allow_all()
         .build()
 }
 
@@ -84,6 +91,7 @@ fn counter_schema(count_type: ColumnType) -> Schema {
                 .column("name", ColumnType::Text)
                 .column("count", count_type),
         )
+        .allow_all()
         .build();
     let table = schema
         .get_mut(&TableName::new("counters"))
@@ -619,13 +627,13 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (a1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
                 .expect("insert a1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
             .await;
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_edge_done");
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_global_done");
             }
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(1)]], "count after a1")
@@ -646,7 +654,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (b1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 7))
                 .expect("insert b1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -665,7 +673,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
 
             let delete_tx = writer.delete("metrics", b1).expect("delete b1 and empty b");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[delete_tx.expect("ordinary mutation commits immediately")],
             )
@@ -673,7 +681,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (_b2, _, insert_tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 5))
                 .expect("repopulate b");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[insert_tx.expect("ordinary mutation commits immediately")],
             )
@@ -689,7 +697,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
 
             let tx = writer.delete("metrics", a1).expect("delete a1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -748,7 +756,7 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
             let (_, _, tx) = writer
                 .insert("metrics", row_input!("count" => "group", "score" => 1))
                 .expect("insert grouped sum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -828,7 +836,7 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                     .expect("insert mixed aggregate metric");
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&writer, &txs).await;
+            support::wait_for_global_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![vec![
@@ -973,7 +981,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 rows.push(row);
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&writer, &txs).await;
+            support::wait_for_global_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![
@@ -1000,7 +1008,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
             let tx = writer
                 .delete("metrics", rows[2])
                 .expect("delete gone group");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1029,7 +1037,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     row_input!("bucket" => "changed", "score" => Value::Null),
                 )
                 .expect("replace changed aggregate group");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1092,7 +1100,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let (first, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 10))
                 .expect("insert first metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1107,7 +1115,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let (second, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 7))
                 .expect("insert second metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1122,7 +1130,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let tx = writer
                 .delete("metrics", first)
                 .expect("delete first metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1137,7 +1145,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let tx = writer
                 .delete("metrics", second)
                 .expect("delete second metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1196,7 +1204,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
                     row_input!("bucket" => "same", "score" => Value::Double(max)),
                 )
                 .expect("insert first maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1216,7 +1224,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
                     row_input!("bucket" => "same", "score" => Value::Double(max)),
                 )
                 .expect("insert second maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1242,7 +1250,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
             let tx = writer
                 .delete("metrics", first)
                 .expect("delete first maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1259,7 +1267,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
             let tx = writer
                 .delete("metrics", second)
                 .expect("delete second maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1298,8 +1306,8 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
                 .sum("score")
                 .group_by("bucket");
 
-            insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::EdgeServer).await;
-            insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::EdgeServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", -11, DurabilityTier::GlobalServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", 7, DurabilityTier::GlobalServer).await;
             let mut stream = ObservedSubscription::new(
                 client
                     .subscribe(query.clone())
@@ -1318,7 +1326,7 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
                 )
                 .await;
 
-            insert_bigint_metric_at_tier(&writer, "same", 3, DurabilityTier::EdgeServer).await;
+            insert_bigint_metric_at_tier(&writer, "same", 3, DurabilityTier::GlobalServer).await;
             stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::BigInt(-1)]],
@@ -1355,8 +1363,9 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                 .avg("score")
                 .group_by("bucket");
 
-            insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::EdgeServer).await;
-            insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::EdgeServer).await;
+            insert_double_metric_at_tier(&writer, "same", 1.5, DurabilityTier::GlobalServer).await;
+            insert_double_metric_at_tier(&writer, "same", -0.25, DurabilityTier::GlobalServer)
+                .await;
             let mut sum_stream = ObservedSubscription::new(
                 client
                     .subscribe(sum_query.clone())
@@ -1393,7 +1402,7 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                 )
                 .await;
 
-            insert_double_metric_at_tier(&writer, "same", 0.5, DurabilityTier::EdgeServer).await;
+            insert_double_metric_at_tier(&writer, "same", 0.5, DurabilityTier::GlobalServer).await;
             sum_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Double(1.75)]],
@@ -1432,8 +1441,8 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             )
             .await
             .expect("connect client");
-            insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&writer, "same", 10, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&writer, "same", 4, DurabilityTier::GlobalServer).await;
             let min_query = jazz::query::Query::from("metrics")
                 .min("score")
                 .group_by("bucket");
@@ -1474,7 +1483,7 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
                     "initial multi-row max",
                 )
                 .await;
-            insert_metric_at_tier(&writer, "same", 1, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&writer, "same", 1, DurabilityTier::GlobalServer).await;
             min_stream
                 .wait_for_values(
                     vec![vec![Value::Text("same".to_owned()), Value::Integer(1)]],
@@ -1505,12 +1514,12 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
             .await
             .expect("connect client");
 
-            insert_metric_at_tier(&client, "positive", 10, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "positive", 7, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "negative", -4, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "negative", -6, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "mixed", -5, DurabilityTier::EdgeServer).await;
-            insert_metric_at_tier(&client, "mixed", 8, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "positive", 10, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "positive", 7, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "negative", -4, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "negative", -6, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "mixed", -5, DurabilityTier::GlobalServer).await;
+            insert_metric_at_tier(&client, "mixed", 8, DurabilityTier::GlobalServer).await;
 
             wait_for_values(
                 &client,
@@ -1789,7 +1798,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             let (counter_id, _, tx) = alice
                 .insert("counters", row_input!("name" => "shared", "count" => 0))
                 .expect("insert counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1826,12 +1835,12 @@ async fn integer_counter_columns_merge_signed_public_values() {
                     vec![("count".to_owned(), Value::Integer(5))],
                 )
                 .expect("bob updates counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[alice_tx.expect("ordinary mutation commits immediately")],
             )
             .await;
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bob,
                 &[bob_tx.expect("ordinary mutation commits immediately")],
             )
@@ -1886,7 +1895,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
                     row_input!("name" => "shared", "count" => Value::BigInt(base)),
                 )
                 .expect("insert counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1923,12 +1932,12 @@ async fn bigint_counter_columns_merge_signed_public_values() {
                     vec![("count".to_owned(), Value::BigInt(base + 5))],
                 )
                 .expect("bob updates counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[alice_tx.expect("ordinary mutation commits immediately")],
             )
             .await;
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bob,
                 &[bob_tx.expect("ordinary mutation commits immediately")],
             )
@@ -2015,7 +2024,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     row_input!("owner_id" => admin_id.clone(), "score" => 10),
                 )
                 .expect("insert admin row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -2038,7 +2047,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             let tx = admin
                 .delete("metrics", admin_row)
                 .expect("delete admin row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -2057,6 +2066,84 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 "one-shot spy count remains zero after invisible delete",
             )
             .await;
+        })
+        .await;
+}
+
+/// Like the spy test, but the owner also subscribes to the same count, so both
+/// bindings share one server program. The spy's count must stay 0 and its
+/// store must not receive the owner's rows.
+#[tokio::test]
+async fn shared_count_spy_with_concurrent_owner_subscription() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = policy_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let mut clients = Vec::new();
+            for name in ["review-owner", "review-spy"] {
+                let id = test_user_id(name);
+                let mut ctx = server.make_client_context_for_user(schema.clone(), id.clone());
+                ctx.backend_secret = None;
+                support::enroll_test_context(&mut ctx)
+                    .await
+                    .expect("enroll");
+                clients.push((id, jazz_testkit::connect(ctx).await.expect("connect")));
+            }
+            let (owner_id, owner) = &clients[0];
+            let (_spy_id, spy) = &clients[1];
+            let count_query = jazz::query::Query::from("metrics").count();
+            let mut owner_stream = ObservedSubscription::new(
+                owner
+                    .subscribe(count_query.clone())
+                    .await
+                    .expect("owner subscribe"),
+                &count_query,
+                aggregate_descriptor([("count", ValueType::U64)]),
+            );
+            let mut spy_stream = ObservedSubscription::new(
+                spy.subscribe(count_query.clone())
+                    .await
+                    .expect("spy subscribe"),
+                &count_query,
+                aggregate_descriptor([("count", ValueType::U64)]),
+            );
+            owner_stream
+                .wait_for_values(vec![vec![Value::Timestamp(0)]], "owner initial")
+                .await;
+            spy_stream
+                .wait_for_values(vec![vec![Value::Timestamp(0)]], "spy initial")
+                .await;
+            let (_row, _, tx) = owner
+                .insert(
+                    "metrics",
+                    row_input!("owner_id" => owner_id.clone(), "score" => 10),
+                )
+                .expect("insert owner row");
+            support::wait_for_global_txs(owner, &[tx.expect("commit")]).await;
+            owner_stream
+                .wait_for_values(vec![vec![Value::Timestamp(1)]], "owner sees own row")
+                .await;
+            spy_stream
+                .assert_values_remain(
+                    vec![vec![Value::Timestamp(0)]],
+                    Duration::from_millis(500),
+                    "spy count must ignore owner's row while owner shares the graph",
+                )
+                .await;
+            let held = spy
+                .query(
+                    jazz::query::Query::from("metrics"),
+                    jazz::tools::ReadTier::LocalOnly,
+                )
+                .await
+                .map(jazz::tools::test_support::ordinary_rows)
+                .expect("spy local read");
+            assert!(
+                held.is_empty(),
+                "spy store received the owner's rows: {held:?}"
+            );
         })
         .await;
 }

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "./fixtures.js";
 import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV } from "./test-constants.js";
 
-const SERVER_URL = process.env.JAZZ_INSPECTOR_TEST_SERVER_URL!;
+const SERVER_URL = process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL!;
 const SCHEMA_HASH = process.env.PUBLISHED_SCHEMA_HASH;
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 

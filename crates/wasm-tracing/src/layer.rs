@@ -14,14 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tracing::{Level, Subscriber};
-#[cfg(feature = "tracing-log")]
-use tracing_log::NormalizeEvent as _;
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
-use crate::{
-    debug1, debug4, error1, error4, log1, log4, prelude::*, recorder::StringRecorder,
-    thread_display_suffix, warn1, warn4,
-};
+use crate::{log4, prelude::*, recorder::StringRecorder};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -281,7 +276,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             return;
         }
 
-        let mut new_debug_record = StringRecorder::new(self.config.show_fields);
+        let mut new_debug_record = StringRecorder::default();
         attrs.record(&mut new_debug_record);
 
         if let Some(span_ref) = ctx.span(id) {
@@ -305,13 +300,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             return;
         }
 
-        let mut recorder = StringRecorder::new(self.config.show_fields);
+        let mut recorder = StringRecorder::default();
         event.record(&mut recorder);
-        #[cfg(feature = "tracing-log")]
-        let normalized_meta = event.normalized_metadata();
-        #[cfg(feature = "tracing-log")]
-        let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
-        #[cfg(not(feature = "tracing-log"))]
         let meta = event.metadata();
         let level = meta.level();
         if should_collect_entry {
@@ -326,22 +316,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             return;
         }
 
-        let origin = if self.config.show_origin {
-            meta.file()
-                .and_then(|file| {
-                    meta.line().map(|ln| {
-                        format!(
-                            "{}{}:{}",
-                            self.config.origin_base_url.as_deref().unwrap_or_default(),
-                            file,
-                            ln
-                        )
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let origin = meta
+            .file()
+            .zip(meta.line())
+            .map(|(file, ln)| format!("{file}:{ln}"))
+            .unwrap_or_default();
 
         let fields = ctx
             .lookup_current()
@@ -358,33 +337,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     })
             })
             .unwrap_or_default();
-        if self.config.color {
-            log_with_color(
-                format!(
-                    "%c{}%c {}{}%c{}{}",
-                    level,
-                    origin,
-                    thread_display_suffix(),
-                    recorder,
-                    fields
-                ),
-                level,
-                self.config.use_console_methods,
-            );
-        } else {
-            log(
-                format!(
-                    "{} {}{} {}{}",
-                    level,
-                    origin,
-                    thread_display_suffix(),
-                    recorder,
-                    fields
-                ),
-                level,
-                self.config.use_console_methods,
-            );
-        }
+        log_with_color(format!("%c{level}%c {origin}%c{recorder}{fields}"), level);
     }
 
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
@@ -409,21 +362,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     .get::<StringRecorder>()
                     .map(|r| r.to_string())
                     .unwrap_or_default();
-                let message =
-                    format!("▶ \"{}\"{}{}", meta.name(), thread_display_suffix(), fields,);
-                if self.config.color {
-                    log_with_color(
-                        format!("%c{}%c {}", level, message),
-                        level,
-                        self.config.use_console_methods,
-                    );
-                } else {
-                    log(
-                        format!("{} {}", level, message),
-                        level,
-                        self.config.use_console_methods,
-                    );
-                }
+                log_with_color(format!("%c{level}%c ▶ \"{}\"{fields}", meta.name()), level);
             }
         }
     }
@@ -510,31 +449,8 @@ fn unix_nano_now() -> UnixNano {
     }
 }
 
-fn log(message: String, level: &Level, use_console_methods: bool) {
-    if use_console_methods {
-        match *level {
-            Level::TRACE | Level::DEBUG => debug1(message),
-            Level::INFO => log1(message),
-            Level::WARN => warn1(message),
-            Level::ERROR => error1(message),
-        }
-    } else {
-        log1(message)
-    }
-}
-
-fn log_with_color(message: String, level: &Level, use_console_methods: bool) {
-    let level_log = if use_console_methods {
-        match *level {
-            Level::TRACE | Level::DEBUG => debug4,
-            Level::INFO => log4,
-            Level::WARN => warn4,
-            Level::ERROR => error4,
-        }
-    } else {
-        log4
-    };
-    level_log(
+fn log_with_color(message: String, level: &Level) {
+    log4(
         message,
         level.color(),
         "color: gray; font-style: italic",
@@ -694,7 +610,7 @@ mod trace_entry_tests {
             let peer_kind = "server";
             let peer_id = "00000000-0000-0000-0000-000000000000";
             let payload = "RowBatchCreated";
-            let tier = "edge";
+            let tier = "global";
             let _entered = tracing::debug_span!(
                 "sync.send",
                 peer_kind = peer_kind,
@@ -722,7 +638,7 @@ mod trace_entry_tests {
             fields.get("payload").map(String::as_str),
             Some("RowBatchCreated"),
         );
-        assert_eq!(fields.get("tier").map(String::as_str), Some("edge"));
+        assert_eq!(fields.get("tier").map(String::as_str), Some("global"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 const DAY_SECONDS: u64 = 86_400;
 const WINDOW_START: u64 = 1_700_000_000;

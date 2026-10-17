@@ -27,7 +27,10 @@ enum Request {
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
     closed: std::sync::atomic::AtomicBool,
-    changes: tokio::sync::watch::Sender<u64>,
+    /// Template receiver. The only sender lives on the owner thread, so the
+    /// watch closes (and every subscriber re-checks and fails closed) if that
+    /// thread exits for any reason, including a panic.
+    changes: tokio::sync::watch::Receiver<u64>,
 }
 
 impl AccountRegistryOwner {
@@ -35,20 +38,14 @@ impl AccountRegistryOwner {
         durable: Option<(Arc<dyn StorageFactory>, PathBuf)>,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
-        let (changes, _) = tokio::sync::watch::channel(0u64);
-        let notify = changes.clone();
+        let (notify, changes) = tokio::sync::watch::channel(0u64);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
             .spawn(move || {
                 let storage: Result<BoxedStorage, String> = match durable {
                     Some((factory, path)) => {
-                        let profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-                            .and_then(|profile| {
-                                // Versions this isolated root's journal keys and closed
-                                // descriptor; values use ordinary Groove records.
-                                profile.with_additional_codecs(["jazz.account-journal.v1"])
-                            });
+                        let profile = jazz::storage_codec_profile::account_storage_codec_profile();
                         profile
                             .map_err(|error| error.to_string())
                             .and_then(|profile| {
@@ -84,20 +81,36 @@ impl AccountRegistryOwner {
                     match request {
                         Request::Execute(command, response) => {
                             let result = jazz::db::block_on(registry.execute(&command));
-                            if result.is_ok() {
+                            // Announce a success, and any `Unavailable` failure:
+                            // it may come after the journal append (for example
+                            // a failed durable flush) and leaves the registry
+                            // poisoned, so live sockets must re-check rather than
+                            // trust their last lookup. `Decision` errors are
+                            // rejected before any write and change nothing, so
+                            // they stay silent (a spammed denied request must not
+                            // force a lookup on every live socket).
+                            if announces(&result) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result);
                         }
                         Request::LoginOrRegister(principal, response) => {
                             let result = jazz::db::block_on(registry.login_or_register(&principal));
-                            if result.as_ref().is_ok_and(|result| result.created) {
+                            let created = result.as_ref().is_ok_and(|result| result.created);
+                            if created || matches!(result, Err(RegistryError::Unavailable(_))) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result.map(|result| result.assignment));
                         }
                         Request::Login(principal, response) => {
-                            let _ = response.send(jazz::db::block_on(registry.login(&principal)));
+                            let result = jazz::db::block_on(registry.login(&principal));
+                            // A lookup never mutates, but an `Unavailable` one
+                            // poisons the registry (for example on detecting a
+                            // concurrent authority): make live sockets re-check.
+                            if matches!(result, Err(RegistryError::Unavailable(_))) {
+                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            }
+                            let _ = response.send(result);
                         }
                         Request::Close(response) => {
                             let result = jazz::db::block_on(registry.close())
@@ -121,7 +134,9 @@ impl AccountRegistryOwner {
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changes.subscribe()
+        let mut changes = self.changes.clone();
+        changes.mark_unchanged();
+        changes
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -173,6 +188,11 @@ impl Drop for AccountRegistryOwner {
         let _ = self.close();
     }
 }
+/// Whether a registry command result may have changed what `login` answers.
+fn announces<T>(result: &Result<T, RegistryError>) -> bool {
+    !matches!(result, Err(RegistryError::Decision(_)))
+}
+
 fn unavailable() -> RegistryError {
     RegistryError::Unavailable("registry owner stopped".into())
 }
@@ -200,6 +220,41 @@ mod tests {
         owner.close().unwrap();
     }
 
+    // Live sockets skip their per-message registry lookup while this watch is
+    // unchanged (#3387). A request the registry rejects before any write (a
+    // `Decision` error) changes nothing and must stay silent, so denied
+    // requests cannot force a lookup on every live socket; the watch must close
+    // once the owner thread is gone. (`Unavailable` failures are announced;
+    // the websocket failed-flush test covers them.)
+    #[tokio::test]
+    async fn changes_skip_rejected_requests_and_close_with_the_owner() {
+        let owner = AccountRegistryOwner::open(None).unwrap();
+        let mut changes = owner.subscribe();
+        assert!(!changes.has_changed().unwrap());
+        let unknown = Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "nobody".into(),
+        };
+        let failed = owner
+            .execute(AccountCommand::Revoke {
+                approver: unknown.clone(),
+                target: unknown.clone(),
+            })
+            .await;
+        assert!(
+            matches!(failed, Err(RegistryError::Decision(_))),
+            "an unassigned approver cannot revoke: {failed:?}"
+        );
+        assert!(owner.login(unknown).await.is_err(), "no assignment exists");
+        assert!(!changes.has_changed().unwrap(), "rejections change nothing");
+        owner.close().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while changes.changed().await.is_ok() {}
+        })
+        .await
+        .expect("the watch closes when the owner thread exits");
+    }
+
     // The registry owner must reject even an empty old-preview root at the
     // manifest boundary, before attempting command replay.
     #[test]
@@ -208,8 +263,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("accounts.rocksdb");
         let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-            .unwrap()
+        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
             .with_additional_codecs(["jazz.account-command.v1"])
             .unwrap();
         jazz::db::block_on(async {

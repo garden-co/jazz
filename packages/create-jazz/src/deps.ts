@@ -235,24 +235,31 @@ export async function resolveRemoteDeps(
   const parsed = parseWorkspaceYaml(await wsRes.text(), workspaceUrl);
   const workspaceConfig = buildWorkspaceConfig(parsed);
 
-  // Race packages/ and crates/ in parallel; take the first ok response.
-  // Non-404 failures surface as errors rather than silently falling through.
+  // Inspect both workspace locations together, but prefer packages/ over crates/
+  // regardless of which response settles first.
   const fetchPackageVersion: FetchPackageVersion = async (name) => {
-    const responses = await Promise.all(
+    const results = await Promise.allSettled(
       WORKSPACE_SUBDIRS.map((subdir) => fetchOnce(`${rawBase}/${subdir}/${name}/package.json`)),
     );
-    for (const res of responses) {
-      if (!res.ok) continue;
-      const pkg = (await res.json()) as { version?: unknown };
+
+    for (const result of results) {
+      if (result.status !== "fulfilled" || !result.value.ok) continue;
+      const pkg = (await result.value.json()) as { version?: unknown };
       if (typeof pkg.version !== "string" || !pkg.version) {
         throw new Error(`Package "${name}" has no version field in upstream package.json`);
       }
       return pkg.version;
     }
-    const transient = responses.find((r) => !r.ok && r.status !== 404);
-    if (transient) {
+
+    const failure = results.find(
+      (result) =>
+        result.status === "rejected" ||
+        (result.status === "fulfilled" && result.value.status !== 404),
+    );
+    if (failure?.status === "rejected") throw failure.reason;
+    if (failure?.status === "fulfilled") {
       throw new Error(
-        `GitHub returned ${transient.status} when looking up "${name}" in upstream repo`,
+        `GitHub returned ${failure.value.status} when looking up "${name}" in upstream repo`,
       );
     }
     throw new Error(`Package "${name}" not found in upstream repo`);

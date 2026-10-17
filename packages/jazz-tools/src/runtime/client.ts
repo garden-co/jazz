@@ -23,6 +23,15 @@ import {
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
+import type { RemoteLinkState } from "./remote-link-state.js";
+import { toError } from "./util.js";
+import { parseUuidBytes } from "./hex.js";
+
+/** @internal Runtime operations bound to the currently executing preparation. */
+export type TransactionPreparationIO = Pick<
+  JazzClient,
+  "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
+>;
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -77,19 +86,14 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       return envelope(5, payload); // Groove I64
     }
     case "Uuid": {
-      const hex = value.value.replaceAll("-", "");
-      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
-      return envelope(
-        7, // Groove UUID
-        Uint8Array.from({ length: 16 }, (_, index) =>
-          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
-        ),
-      );
+      const bytes = parseUuidBytes(value.value);
+      if (!bytes) throw new Error(`invalid branch UUID ${value.value}`);
+      return envelope(7, bytes); // Groove UUID
     }
     case "Text": {
       const text = new TextEncoder().encode(value.value);
       const payload = new Uint8Array(1 + text.length);
-      payload[0] = 2; // Groove stored-scalar Primitive case
+      payload[0] = 0; // Groove stored-scalar Primitive case
       payload.set(text, 1);
       return envelope(6, payload); // Groove String
     }
@@ -129,6 +133,8 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
  *
  * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
  * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ * Plain-record `headers` keys are matched case-insensitively; conflicting case variants
+ * are rejected. Web `Headers` objects retain their native lookup behavior.
  */
 export interface RequestLike {
   header?: (name: string) => string | undefined;
@@ -152,6 +158,14 @@ export type AuthUpdate =
 export interface Runtime {
   readonly preparationOwner?: object;
   readCanEstablishAbsence?(sessionJson?: string, transaction?: OpenTransactionId): boolean;
+  /** @internal Live reachability of the upstream server, for read scheduling only. */
+  remoteLinkState?(): RemoteLinkState;
+  /** @internal Observe {@link Runtime.remoteLinkState} changes. */
+  onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
+  /** @internal Report the host's view of the server link to the core read gate. */
+  setRemoteLinkHint?(state: RemoteLinkState): void;
+  /** @internal Construct a provisional row without staging or accepting a write. */
+  previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
     table: string,
     values: InsertValues,
@@ -283,6 +297,7 @@ export interface TransactionalRuntime extends Runtime {
     id: OpenTransactionId,
     sessionJson?: string | null,
   ): OpenTransactionId;
+  /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
 }
@@ -332,41 +347,71 @@ export interface AuthConfig {
  * Persistence tier for durability guarantees.
  *
  * - `local`: Persisted in local durable storage
- * - `edge`: Persisted at edge server
- * - `global`: Persisted at global server
+ * - `global`: Authorized and durably accepted by Core
  */
-export type DurabilityTier = "local" | "edge" | "global";
-/** Product-facing policy for reads. It deliberately does not change write durability. */
+export type DurabilityTier = "local" | "global";
+/**
+ * Product-facing policy for reads. It deliberately does not change write durability.
+ *
+ * There are two tiers: `LocalFirst` and `Remote`. A local-first read can also
+ * wait a bounded time for the server on its initial load; see
+ * {@link QueryExecutionOptions.firstLoadRemoteWaitMs}.
+ */
 export const ReadTier = {
-  /** Cached local knowledge and pending writes; still syncs while connected. */
+  /**
+   * Cached local knowledge and pending writes; still syncs while connected.
+   * Set `firstLoadRemoteWaitMs` to let the initial load wait for the server first.
+   */
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
-  /** Remote scope plus pending scoped edits/new inserts online; local knowledge after explicit disconnect. */
-  RemoteIfPossible: "remote-if-possible",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
-/** @deprecated Read APIs also accept these legacy durability names unchanged. */
-export type LegacyReadDurabilityTier = DurabilityTier;
-export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
-/** @internal Inspector-only tier that never subscribes upstream. */
-type InternalQueryReadTier = QueryReadTier | "local-only";
+
 /**
- * Controls when a write is visible to subscriptions.
- *
- * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
- * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
- * - With `"deferred"`, all delivery is held until the tier confirms.
- * Default is `"immediate"`.
+ * @internal A local-first read's server wait, or `undefined` for none.
+ * Throws for a value that is not a non-negative number of milliseconds.
  */
-export type LocalUpdatesMode = "immediate" | "deferred";
+export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
+  }
+  const ms = Math.floor(value);
+  return ms > 0 ? ms : undefined;
+}
+
+// Keep removed names here solely to provide migration guidance at the public API boundary.
+const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
+  edge: 'The "edge" tier was removed. Use ReadTier.Remote ("remote") for server-confirmed reads.',
+  "remote-if-possible":
+    'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.',
+  "local-first-unless-empty":
+    'The "local-first-unless-empty" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs.',
+  local:
+    'The "local" read tier was removed. Use ReadTier.LocalFirst ("local-first"); write waits keep "local".',
+  global:
+    'The "global" read tier was removed. Use ReadTier.Remote ("remote"); write waits keep "global".',
+  core: 'The "core" read tier was removed. Use ReadTier.Remote ("remote").',
+};
+
 /**
- * Controls where the subscription reads data from.
- *
- * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
- * - With `"local-only"`, only local storage is queried and no server communication happens.
+ * @internal Throw for anything but a product read tier. Read options accept
+ * only `ReadTier.LocalFirst` and `ReadTier.Remote`; removed names get a
+ * migration message.
  */
-export type QueryPropagation = "full" | "local-only";
+export function rejectRemovedReadTier(tier: unknown): void {
+  if (tier === undefined || tier === null || isPublicQueryReadTier(tier)) return;
+  const removed = typeof tier === "string" ? REMOVED_READ_TIERS[tier] : undefined;
+  throw new Error(
+    removed ?? `Unknown read tier ${JSON.stringify(tier)}; expected "local-first" or "remote".`,
+  );
+}
+/**
+ * @internal Tiers internal callers may pass: the product tiers and the
+ * inspector-only tier that never subscribes upstream.
+ */
+export type InternalReadTier = ReadTier | "local-only";
 /**
  * Whether this query should be shown in the inspector.
  * Useful for helpers and framework internals that create subscriptions
@@ -391,12 +436,47 @@ export interface BranchView {
   base?: BranchViewBase;
 }
 
-export interface QueryExecutionOptions {
-  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
-  tier?: QueryReadTier;
+/**
+ * The read tier and the options only that tier accepts: `tier` discriminates
+ * the shape, so a first-load wait on a `ReadTier.Remote` read does not type-check.
+ */
+export type ReadTierOptions =
+  | {
+      /**
+       * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
+       *
+       * Reads default to local-first in browsers and React Native, and without a
+       * configured server; other environments with a server default to remote.
+       */
+      tier?: typeof ReadTier.LocalFirst;
+      /**
+       * How long the initial load may wait for the server's answer, in
+       * milliseconds. Defaults to `0`, which shows local data at once.
+       *
+       * While the client is online (connected, or its connection attempt is still
+       * young), a subscription's first callback, or a one-shot read, waits up to
+       * this long for the server's answer and then shows it; if the server has not
+       * answered in time, it shows the local result. Offline, without a server,
+       * or after `db.disconnect()` it never waits. Later changes behave as usual
+       * for local-first: local writes show immediately and remote changes as
+       * they arrive.
+       */
+      firstLoadRemoteWaitMs?: number;
+    }
+  | {
+      /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
+      tier: typeof ReadTier.Remote;
+      /**
+       * Only local-first reads wait for the server on their first load; a
+       * remote read always waits for the server. Ignored at runtime if given.
+       */
+      firstLoadRemoteWaitMs?: never;
+    };
+
+export type QueryExecutionOptions = ReadTierOptions & {
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
-}
+};
 
 /**
  * Copy the product-facing subset of query options before crossing a public
@@ -412,38 +492,34 @@ export function publicQueryExecutionOptions(
 ): QueryExecutionOptions | undefined {
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
-  const result: QueryExecutionOptions = {};
+  rejectRemovedReadTier(candidate.tier);
+  const result: InternalQueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
+  const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
+    (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
+  );
+  if (firstLoadRemoteWaitMs !== undefined) result.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
-  return result;
+  // The runtime ignores a Remote read's wait; the types reject it.
+  return result as QueryExecutionOptions;
 }
 
 /** @internal `local-only` is deliberately excluded from the product surface. */
-export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
-  return (
-    value === ReadTier.LocalFirst ||
-    value === ReadTier.Remote ||
-    value === ReadTier.RemoteIfPossible ||
-    value === "local" ||
-    value === "edge" ||
-    value === "global"
-  );
+export function isPublicQueryReadTier(value: unknown): value is ReadTier {
+  return value === ReadTier.LocalFirst || value === ReadTier.Remote;
 }
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
-  tier?: InternalQueryReadTier;
-  localUpdates?: LocalUpdatesMode;
-  propagation?: QueryPropagation;
+  tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
-  runtimeSettledTier?: DurabilityTier | null;
 };
 
 export interface ResolvedQueryExecutionOptions {
-  tier: DurabilityTier;
-  localUpdates: LocalUpdatesMode;
-  propagation: QueryPropagation;
+  tier: InternalReadTier;
+  /** Server wait of a local-first read; absent when it does not wait. */
+  firstLoadRemoteWaitMs?: number;
   visibility: QueryVisibility;
   branch?: BranchView;
 }
@@ -569,52 +645,36 @@ export interface ConnectRuntimeOptions {
 
 type QueryExecutionDefaultsContext = {
   serverUrl?: string;
-  defaultDurabilityTier?: DurabilityTier;
 };
-
-export function resolveDefaultDurabilityTier(
-  context: QueryExecutionDefaultsContext,
-): DurabilityTier {
-  if (context.defaultDurabilityTier) {
-    return context.defaultDurabilityTier;
-  }
-
-  if (isBrowserRuntime()) {
-    return "local";
-  }
-
-  // In non-browser environments, default to edge when connected to a server.
-  // For local/in-memory runtimes without a server, keep local semantics.
-  return context.serverUrl ? "edge" : "local";
-}
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
-  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
+  const tier =
+    options?.tier ??
+    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
+      ? ReadTier.Remote
+      : ReadTier.LocalFirst);
+  if (tier !== "local-only") rejectRemovedReadTier(tier);
+  const firstLoadRemoteWaitMs =
+    tier === ReadTier.LocalFirst
+      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
+      : undefined;
   return {
-    tier: resolveReadTier(selectedTier),
-    localUpdates:
-      options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
-    propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
+    tier,
+    ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
 }
 
-/** @internal Low-level runtimes retain the legacy three-tier wire contract. */
-export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
-  if (tier === "local-only") return "local";
-  return tier === ReadTier.LocalFirst
-    ? "local"
-    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
-      ? "edge"
-      : tier;
-}
-
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function isReactNativeRuntime(): boolean {
+  return typeof navigator !== "undefined" && navigator.product === "ReactNative";
 }
 
 function getScheduler(): (task: () => void) => void {
@@ -631,10 +691,11 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
+function encodeQueryExecutionOptions(
+  options: ResolvedInternalQueryExecutionOptions,
+): string | undefined {
   const payload: {
-    propagation?: QueryPropagation;
-    local_updates?: LocalUpdatesMode;
+    first_load_remote_wait_ms?: number;
     transaction_id?: string;
     read_view?: {
       source: {
@@ -647,14 +708,11 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
       };
     };
   } = {};
-  if ((options.propagation ?? "full") !== "full") {
-    payload.propagation = options.propagation;
-  }
-  if ((options.localUpdates ?? "immediate") !== "immediate") {
-    payload.local_updates = options.localUpdates;
-  }
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
+  }
+  if (options.firstLoadRemoteWaitMs !== undefined && options.firstLoadRemoteWaitMs > 0) {
+    payload.first_load_remote_wait_ms = options.firstLoadRemoteWaitMs;
   }
   if (options.branch) {
     const base = options.branch.base;
@@ -668,12 +726,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     };
   }
 
-  if (
-    !payload.propagation &&
-    !payload.local_updates &&
-    !payload.transaction_id &&
-    !payload.read_view
-  ) {
+  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
     return undefined;
   }
 
@@ -779,6 +832,18 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
   return target;
 }
 
+/** Validate JavaScript callers before passing a wait tier to the runtime. */
+function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+  if (tier === "local" || tier === "global") return tier;
+  const message =
+    tier === "edge"
+      ? 'The "edge" write tier was removed. Use wait({ tier: "global" }) instead.'
+      : `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global".`;
+  // Choosing a wait tier happens after applying the write. Rejecting the wait
+  // must not be mistaken for a rejected write and prompt a duplicate insert.
+  throw new TypeError(`${message} The write was already applied: do not retry it.`);
+}
+
 /**
  * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
@@ -791,6 +856,9 @@ export class WriteHandle<T = void, WaitResult = void> {
   constructor(txId: TxId | Promise<TxId>, client: JazzClient, value = undefined as T) {
     this.value = value;
     this.txId = Promise.resolve(txId);
+    // Fire-and-forget callers may wait later, or never. Observe rejection now
+    // without replacing txId: a later wait must still receive the original error.
+    this.txId.catch(() => {});
     this.#client = client;
   }
 
@@ -800,8 +868,9 @@ export class WriteHandle<T = void, WaitResult = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
-    const ready = writeWaitReadiness.get(this)?.(options.tier);
-    return this.#client.waitForTransaction(this.txId, options.tier, ready) as Promise<WaitResult>;
+    const tier = resolveWriteWaitTier(options.tier);
+    const ready = writeWaitReadiness.get(this)?.(tier);
+    return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
   }
 
   protected client(): JazzClient {
@@ -878,16 +947,36 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
   }
 }
 
-/**
- * High-level Jazz client.
- */
+const transactionAdmission = new WeakMap<JazzClient, () => Promise<void>>();
+
+/** @internal Scope an opening prerequisite without adding a public client method. */
+export function withTransactionAdmission<T>(
+  client: JazzClient,
+  prepare: () => Promise<void>,
+  begin: () => T,
+): T {
+  const previous = transactionAdmission.get(client);
+  transactionAdmission.set(client, prepare);
+  try {
+    return begin();
+  } finally {
+    if (previous) transactionAdmission.set(client, previous);
+    else transactionAdmission.delete(client);
+  }
+}
+
+/** High-level Jazz client. */
 export class JazzClient {
+  private readonly transactionPreparations = new Map<
+    OpenTransactionId,
+    { pending?: Promise<void>; committing: boolean; unopened?: boolean }
+  >();
   private runtime: Runtime;
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
-  private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
+  private discarded = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -944,13 +1033,11 @@ export class JazzClient {
   private constructor(
     runtime: Runtime,
     context: AppContext,
-    defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
-    this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
 
     if (runtimeOptions?.onAuthFailure) {
@@ -979,7 +1066,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
-    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
+    return new JazzClient(runtime, context, runtimeOptions);
   }
 
   beginTransaction(
@@ -989,12 +1076,38 @@ export class JazzClient {
     reservedId?: OpenTransactionId,
   ): OpenTransactionId {
     const id = reservedId ?? createOpenTransactionId();
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    return requireTransactionalRuntime(this.runtime).beginTransaction(
+    const prerequisite = transactionAdmission.get(this);
+    if (prerequisite) {
+      const context = this.writeContext(session, attribution);
+      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+        committing: false,
+        unopened: true,
+      };
+      this.transactionPreparations.set(id, state);
+      state.pending = Promise.resolve().then(async () => {
+        const assertCurrent = () => {
+          if (this.discarded) throw new Error("Client discarded before transaction admission");
+          if (this.shutdownPromise)
+            throw new Error("Client shut down before transaction admission");
+          if (this.transactionPreparations.get(id) !== state)
+            throw new Error("Transaction was rolled back before admission");
+        };
+        assertCurrent();
+        await prerequisite();
+        assertCurrent();
+        requireTransactionalRuntime(this.runtime).beginTransaction(kind, id, context);
+        state.unopened = false;
+      });
+      state.pending.catch(() => {});
+      return id;
+    }
+    const opened = requireTransactionalRuntime(this.runtime).beginTransaction(
       kind,
       id,
-      this.encodeWriteContext(effectiveSession, attribution),
+      this.writeContext(session, attribution),
     );
+    this.transactionPreparations.set(opened, { committing: false });
+    return opened;
   }
 
   /** @internal Shared across schema clients attached to one runtime owner. */
@@ -1017,12 +1130,144 @@ export class JazzClient {
     this.runtime.onMutationError(listener);
   }
 
+  /**
+   * @internal Register deferred physical preparation before returning a mutation.
+   * Callbacks must use the underlying runtime, not re-enter this client's
+   * transaction reads or commit (which wait for the registered preparation).
+   */
+  prepareTransaction(
+    id: OpenTransactionId,
+    prepare: (io: TransactionPreparationIO) => Promise<void>,
+  ): Promise<void> {
+    const state = this.transactionPreparations.get(id);
+    if (!state || state.committing) {
+      throw new Error("Cannot prepare a transaction that is closed or committing");
+    }
+    state.pending = (state.pending ?? Promise.resolve()).then(async () => {
+      if (this.transactionPreparations.get(id) !== state) {
+        throw new Error("Transaction was rolled back before preparation");
+      }
+      let active = true;
+      const assertActive = () => {
+        if (!active || this.transactionPreparations.get(id) !== state)
+          throw new Error("Transaction preparation is no longer active");
+      };
+      try {
+        await prepare({
+          queryInternal: (query, options, session) => {
+            assertActive();
+            return this.queryWithoutPreparation(
+              query,
+              { ...options, openTransactionId: id },
+              session,
+            );
+          },
+          insertInternal: (table, values, options, session, attribution) => {
+            assertActive();
+            const writeContext = this.writeContext(session, attribution, id, options);
+            const row = this.runtime.insert(table, values, writeContext, options?.id);
+            return { ...row, values: row.values as Value[] };
+          },
+          updateInternal: (
+            table,
+            objectId,
+            updates,
+            updatedAt,
+            session,
+            attribution,
+            _transaction,
+            branch,
+          ) => {
+            assertActive();
+            const writeContext = this.writeContext(session, attribution, id, { updatedAt, branch });
+            return this.runtime.update(table, objectId, updates, writeContext);
+          },
+          upsertInternal: (table, objectId, values, options, session, attribution) => {
+            assertActive();
+            const writeContext = this.writeContext(session, attribution, id, options);
+            return this.runtime.upsert(table, objectId, values, writeContext);
+          },
+          restoreInternal: (table, objectId, values, options, session, attribution) => {
+            assertActive();
+            const writeContext = this.writeContext(session, attribution, id, options);
+            const row = this.runtime.restore(table, objectId, values, writeContext);
+            return { ...row, values: row.values as Value[] };
+          },
+        });
+      } finally {
+        active = false;
+      }
+    });
+    // Registration owns failures even if the caller never commits or waits.
+    state.pending.catch(() => {});
+    return state.pending;
+  }
+
+  private stageMutation(
+    id: OpenTransactionId | undefined,
+    values: InsertValues,
+    write: (values: InsertValues) => MutationResult,
+  ): MutationResult {
+    if (!id || !this.transactionPreparations.get(id)?.pending) return write(values);
+    const snapshot = structuredClone(values);
+    this.prepareTransaction(id, async () => {
+      write(snapshot);
+    });
+    return { kind: "staged", openTransactionId: id };
+  }
+
+  private stageRowMutation(
+    id: OpenTransactionId | undefined,
+    table: string,
+    values: InsertValues,
+    objectId: string | undefined,
+    write: (values: InsertValues, objectId?: string) => InsertResult,
+  ): InsertResult {
+    if (!id || !this.transactionPreparations.get(id)?.pending) return write(values, objectId);
+    const snapshot = structuredClone(values);
+    // The returned logical row must not share mutable bytes with the queued write.
+    const row = this.previewInsertInternal(table, snapshot, objectId);
+    this.prepareTransaction(id, async () => {
+      write(snapshot, row.id);
+    });
+    return { ...row, kind: "staged", openTransactionId: id };
+  }
+
+  /** @internal Prepare a return value without publishing or staging a physical row. */
+  previewInsertInternal(table: string, values: InsertValues, objectId?: string): Row {
+    if (!this.runtime.previewInsert) throw new Error("This runtime cannot prepare an inserted row");
+    return this.runtime.previewInsert(table, structuredClone(values), objectId);
+  }
+
   commitTransaction(id: OpenTransactionId): WriteHandle {
-    const txId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
+    const state = this.transactionPreparations.get(id);
+    if (state?.committing) throw new Error("Transaction is already committing");
+    const runtime = requireTransactionalRuntime(this.runtime);
+    const submitted = state?.pending
+      ? state.pending.then(() => runtime.commitTransaction(id))
+      : runtime.commitTransaction(id);
+    if (typeof submitted === "string") {
+      this.transactionPreparations.delete(id);
+      return new WriteHandle(submitted, this);
+    }
+    if (state) state.committing = true;
+    const txId = Promise.resolve(submitted).then(
+      (committed) => {
+        this.transactionPreparations.delete(id);
+        return committed;
+      },
+      (error) => {
+        if (state) state.committing = false;
+        throw error;
+      },
+    );
     return new WriteHandle(txId, this);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
+    const unopened = this.transactionPreparations.get(id)?.unopened;
+    this.transactionPreparations.delete(id);
+    if (unopened) return Promise.resolve(true);
     return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
   }
 
@@ -1042,7 +1287,7 @@ export class JazzClient {
     return this;
   }
 
-  private updateAuthSnapshot(update: AuthUpdate): void {
+  private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -1060,7 +1305,9 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      if (updateRuntime) {
+        this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      }
     } catch (error) {
       this.context.jwtToken = previousJwtToken;
       this.context.cookieSession = previousCookieSession;
@@ -1072,6 +1319,11 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.updateAuthSnapshot({ mode: "bearer", jwtToken });
+  }
+
+  /** @internal Accept an auth update already applied by the owning connection. */
+  acceptAuthUpdate(update: AuthUpdate): void {
+    this.updateAuthSnapshot(update, false);
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
@@ -1090,10 +1342,7 @@ export class JazzClient {
   private normalizeQueryExecutionOptions(
     options?: InternalQueryExecutionOptions,
   ): ResolvedInternalQueryExecutionOptions {
-    const resolved = resolveEffectiveQueryExecutionOptions(
-      { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
-      options,
-    );
+    const resolved = resolveEffectiveQueryExecutionOptions(this.context, options);
     if (!options?.openTransactionId) {
       return resolved;
     }
@@ -1103,13 +1352,24 @@ export class JazzClient {
     };
   }
 
-  private encodeWriteContext(
-    session?: Session,
+  /**
+   * Resolve the writing session and encode the runtime write context. An
+   * insert/restore branch selector is lowered to a head-only branch view.
+   */
+  private writeContext(
+    explicitSession?: Session,
     attribution?: string,
     openTransactionId?: OpenTransactionId,
-    updatedAt?: number,
-    branch?: BranchView,
+    {
+      updatedAt,
+      branch: selected,
+    }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
   ): string | undefined {
+    // An explicit attribution without a session writes as no session, not the client's.
+    const session =
+      explicitSession ||
+      (attribution === undefined ? (this.resolvedSession ?? undefined) : undefined);
+    const branch = selected && ("head" in selected ? selected : { head: selected });
     if (
       !session &&
       attribution === undefined &&
@@ -1149,16 +1409,6 @@ export class JazzClient {
       };
     }
     return JSON.stringify(payload);
-  }
-
-  private resolveWriteSession(session?: Session, attribution?: string): Session | undefined {
-    if (session) {
-      return session;
-    }
-    if (attribution !== undefined) {
-      return undefined;
-    }
-    return this.resolvedSession ?? undefined;
   }
 
   /**
@@ -1261,18 +1511,7 @@ export class JazzClient {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      undefined,
-      options?.updatedAt,
-      options?.branch
-        ? mutation === "insert"
-          ? { head: options.branch as BranchSelector }
-          : (options.branch as BranchView)
-        : undefined,
-    );
+    const writeContext = this.writeContext(session, attribution, undefined, options);
     const result = await this.runtime.streamingMutation(
       mutation,
       table,
@@ -1299,15 +1538,14 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): InsertResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    const row = this.stageRowMutation(
       openTransactionId,
-      options?.updatedAt,
-      options?.branch ? { head: options.branch } : undefined,
+      table,
+      values,
+      options?.id,
+      (prepared, objectId) => this.runtime.insert(table, prepared, writeContext, objectId),
     );
-    const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
       ...row,
       values: row.values as Value[],
@@ -1341,15 +1579,10 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): InsertResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      options?.updatedAt,
-      options?.branch ? { head: options.branch } : undefined,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    const row = this.stageRowMutation(openTransactionId, table, values, objectId, (prepared) =>
+      this.runtime.restore(table, objectId, prepared, writeContext),
     );
-    const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
       ...row,
       values: row.values as Value[],
@@ -1383,15 +1616,10 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      options?.updatedAt,
-      options?.branch,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.stageMutation(openTransactionId, values, (prepared) =>
+      this.runtime.upsert(table, objectId, prepared, writeContext),
     );
-    return this.runtime.upsert(table, objectId, values, writeContext);
   }
 
   /**
@@ -1411,6 +1639,18 @@ export class JazzClient {
     options?: InternalQueryExecutionOptions,
     session?: Session,
   ): Promise<Row[]> {
+    const preparation = options?.openTransactionId
+      ? this.transactionPreparations.get(options.openTransactionId)?.pending
+      : undefined;
+    if (preparation) await preparation;
+    return this.queryWithoutPreparation(query, options, session);
+  }
+
+  private async queryWithoutPreparation(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession
@@ -1420,9 +1660,7 @@ export class JazzClient {
     const results = await this.runtime.query(
       query,
       sessionJson,
-      options?.runtimeSettledTier === null
-        ? undefined
-        : (options?.runtimeSettledTier ?? normalizedOptions.tier),
+      normalizedOptions.tier,
       optionsJson,
     );
     return results as Row[];
@@ -1488,18 +1726,10 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (openTransactionId || branch) {
-      throw new Error(
-        "Partial-value updates are not yet supported inside transactions or branch views.",
-      );
+    if (branch) {
+      throw new Error("Partial-value updates are not yet supported in branch views.");
     }
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      undefined,
-      updatedAt,
-    );
+    const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }
@@ -1519,15 +1749,13 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, {
       updatedAt,
       branch,
+    });
+    return this.stageMutation(openTransactionId, updates, (prepared) =>
+      this.runtime.update(table, objectId, prepared, writeContext),
     );
-    return this.runtime.update(table, objectId, updates, writeContext);
   }
 
   /**
@@ -1672,15 +1900,13 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, {
       updatedAt,
       branch,
+    });
+    return this.stageMutation(openTransactionId, {}, () =>
+      this.runtime.delete(table, objectId, writeContext),
     );
-    return this.runtime.delete(table, objectId, writeContext);
   }
 
   /**
@@ -1769,7 +1995,7 @@ export class JazzClient {
         } catch (error) {
           // User callback failures must not escape through the native tick or
           // leave a live source publishing behind the terminal notification.
-          terminate(error instanceof Error ? error : new Error(String(error)), true);
+          terminate(toError(error), true);
         }
       });
     } catch (error) {
@@ -1851,10 +2077,7 @@ export class JazzClient {
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
-    return (
-      rejectionFromRuntimeWaitError(error) ??
-      (error instanceof Error ? error : new Error(String(error)))
-    );
+    return rejectionFromRuntimeWaitError(error) ?? toError(error);
   }
 
   /**
@@ -1879,6 +2102,7 @@ export class JazzClient {
 
   /** @internal Abandon runtime work after external storage invalidation/reset. */
   discard(): void {
+    this.discarded = true;
     this.runtime.discard?.();
   }
 

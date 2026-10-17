@@ -18,7 +18,6 @@ use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::Schema;
-use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::policy_graph_fixture::{
     MEMBER_SEED_ROWS_COMPACT_JSON, MEMBER_SEED_ROWS_JSON, MemberSeedDump, MemberSeedManifest,
@@ -72,7 +71,7 @@ fn assert_core_visibility(
     identity: BenchIdentity,
 ) {
     let read_opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for table in seeded.subscription_tables() {
@@ -183,7 +182,7 @@ fn t105_access_debug(seeded: &Seeded, member: AuthorSubject) -> String {
     let rows = jazz::db::block_on(seeded.core.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -235,7 +234,7 @@ fn visible_rows(seeded: &Seeded, table: &str, author: AuthorSubject) -> Vec<Curr
     jazz::db::block_on(seeded.core.all_for_identity(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
         author,
@@ -380,7 +379,6 @@ impl Fixture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BenchTopology {
     TwoNode,
-    ThreeHop,
 }
 
 impl BenchTopology {
@@ -390,9 +388,10 @@ impl BenchTopology {
             .as_str()
         {
             "2node" | "two-node" | "direct" => Self::TwoNode,
-            "3hop" | "three-hop" | "relay" => Self::ThreeHop,
             other => {
-                panic!("unsupported JAZZ_POLICY_GRAPH_TOPOLOGY {other:?}; expected 2node or 3hop")
+                panic!(
+                    "unsupported JAZZ_POLICY_GRAPH_TOPOLOGY {other:?}; expected 2node (server-edge topology was removed)"
+                )
             }
         }
     }
@@ -400,7 +399,6 @@ impl BenchTopology {
     fn label(self) -> &'static str {
         match self {
             Self::TwoNode => "2node",
-            Self::ThreeHop => "3hop",
         }
     }
 }
@@ -429,7 +427,7 @@ impl BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Db<RocksDbStorage>,
+    core: Db,
     schema: JazzSchema,
     member: AuthorSubject,
     claims: BTreeMap<String, Value>,
@@ -446,7 +444,7 @@ impl Seeded {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -644,7 +642,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[SeedRow]) {
+fn write_seed_rows(core: &Node, schema: &JazzSchema, rows: &[SeedRow]) {
     let node = core.node();
     for (idx, row) in rows.iter().enumerate() {
         let table = find_table(schema, &row.table);
@@ -691,6 +689,7 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
         ColumnType::U16 => Value::U16(json_u64(value) as u16),
         ColumnType::U32 => Value::U32(json_u64(value) as u32),
         ColumnType::U64 => Value::U64(json_u64(value)),
+        ColumnType::U48 => Value::U48(json_u64(value)),
         ColumnType::I32 => {
             Value::I32(i32::try_from(json_i64(value)).expect("expected i32-range integer cell"))
         }
@@ -892,12 +891,7 @@ fn run_cold(
     match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(2), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     }
 }
@@ -911,24 +905,14 @@ fn run_warm(
     let first = match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(4), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     };
 
     let second = match config.topology {
         BenchTopology::TwoNode => {
             let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, None, client, expected, config)
-        }
-        BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(6), AuthorSubject::SYSTEM);
-            let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
-            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+            run_connect_and_subscribe(seeded, client, expected, config)
         }
     };
     assert!(
@@ -942,64 +926,23 @@ fn run_warm(
 
 fn run_connect_and_subscribe(
     seeded: &Seeded,
-    relay_node: Option<DbNode>,
     client: DbNode,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
     let start = Instant::now();
-    let _relay_upstream;
-    let _core_sub;
-    let _client_upstream;
-    let _relay_sub;
-    let active_relay;
-    let client_counters;
-    match relay_node {
-        Some(relay_node) => {
-            let relay_core = duplex_counted();
-            let client_relay = duplex_counted();
-            let counters = ClientTransportCounters {
-                right_inbound: Rc::clone(&client_relay.right_inbound),
-                right_to_left: Rc::clone(&client_relay.right_to_left),
-            };
-            _relay_upstream = Some(jazz::db::block_on(
-                relay_node.db.connect_upstream(relay_core.left_transport),
-            ));
-            _core_sub = seeded
-                .core
-                .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
-            _client_upstream =
-                jazz::db::block_on(client.db.connect_upstream(client_relay.left_transport));
-            _relay_sub = Some(relay_node.db.accept_edge_subscriber_with_claims(
-                client_relay.right_transport,
-                config.identity.author(seeded),
-                seeded.claims.clone(),
-            ));
-            relay_node
-                .db
-                .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
-            active_relay = Some(relay_node);
-            client_counters = counters;
-        }
-        None => {
-            let client_core = duplex_counted();
-            let counters = ClientTransportCounters {
-                right_inbound: Rc::clone(&client_core.right_inbound),
-                right_to_left: Rc::clone(&client_core.right_to_left),
-            };
-            _relay_upstream = None;
-            _client_upstream =
-                jazz::db::block_on(client.db.connect_upstream(client_core.left_transport));
-            _core_sub = seeded.core.accept_edge_subscriber_with_claims(
-                client_core.right_transport,
-                config.identity.author(seeded),
-                seeded.claims.clone(),
-            );
-            _relay_sub = None;
-            active_relay = None;
-            client_counters = counters;
-        }
-    }
+    let client_core = duplex_counted();
+    let client_counters = ClientTransportCounters {
+        right_inbound: Rc::clone(&client_core.right_inbound),
+        right_to_left: Rc::clone(&client_core.right_to_left),
+    };
+    let _client_upstream =
+        jazz::db::block_on(client.db.connect_upstream(client_core.left_transport));
+    let _core_sub = seeded.core.accept_subscriber_with_claims(
+        client_core.right_transport,
+        config.identity.author(seeded),
+        seeded.claims.clone(),
+    );
     client
         .db
         .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
@@ -1008,7 +951,7 @@ fn run_connect_and_subscribe(
     let subscribe_start = Instant::now();
     let mut subscriptions = Vec::new();
     let read_opts = ReadOpts {
-        tier: DurabilityTier::Global,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for table in subscription_tables(&config.fixture) {
@@ -1052,12 +995,6 @@ fn run_connect_and_subscribe(
         let core_tick = jazz::db::block_on(seeded.core.tick_stats()).expect("core tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
         accumulate_tick_stats(core_tick);
-        if let Some(relay) = &active_relay {
-            let relay_start = Instant::now();
-            let relay_tick = jazz::db::block_on(relay.db.tick_stats()).expect("relay tick");
-            server_open_bundle_ms += relay_start.elapsed().as_millis();
-            accumulate_tick_stats(relay_tick);
-        }
 
         let _queued_to_client = client_counters.right_inbound.borrow().len();
         let client_start = Instant::now();
@@ -1396,15 +1333,11 @@ fn open_history_complete_db_at(
     schema: JazzSchema,
     node_uuid: NodeUuid,
     author: AuthorSubject,
-) -> Db<RocksDbStorage> {
+) -> Db {
     open_db_at(path, schema, node_uuid, author, true)
 }
 
-fn open_history_complete_node_at(
-    path: &Path,
-    schema: JazzSchema,
-    node_uuid: NodeUuid,
-) -> Node<RocksDbStorage> {
+fn open_history_complete_node_at(path: &Path, schema: JazzSchema, node_uuid: NodeUuid) -> Node {
     let storage = open_storage_at(path, &schema);
     let state = jazz::db::block_on(NodeState::new_history_complete(node_uuid, schema, storage))
         .expect("open seed node");
@@ -1417,7 +1350,7 @@ fn open_db_at(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     history_complete: bool,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let storage = open_storage_at(path, &schema);
     let config = DbConfig {
         schema,

@@ -93,7 +93,7 @@ async function atPhase<T>(phase: string, operation: () => Promise<T>): Promise<T
 
 export async function seed(): Promise<void> {
   await atPhase("seed header edge acknowledgement", () =>
-    db.insert(recoveryApp.headers, { version: 0 }, { id: markerId }).wait({ tier: "edge" }),
+    db.insert(recoveryApp.headers, { version: 0 }, { id: markerId }).wait({ tier: "global" }),
   );
   await atPhase("items local-first read", () => db.all(recoveryApp.items, { tier: "local-first" }));
 }

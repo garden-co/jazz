@@ -19,13 +19,13 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::public_schema::RelValueRef;
+use jazz::tools::public_schema::RelationValueRef;
 use jazz::tools::{
     ColumnType, ObjectId, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
 
-type DirectDb = Db<MemoryStorage>;
+type DirectDb = Db;
 
 const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
@@ -53,7 +53,7 @@ fn reachable_policy_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::Literal(PublicValue::Uuid(ObjectId::from_uuid(USER_TEAM.0))),
+        RelationValueRef::literal(PublicValue::Uuid(ObjectId::from_uuid(USER_TEAM.0))),
     );
     schema_fixture::compile(
         SchemaBuilder::new()

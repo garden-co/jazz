@@ -17,6 +17,7 @@ import {
   INDEXEDDB_REPLICA_NODE_BYTES,
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
+  UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
 
 async function ownReclamation(store: IndexedDbPageStore) {
@@ -61,6 +62,29 @@ describe("IndexedDbPageStore", () => {
     expect(await store.metadata()).toEqual(metadata);
     expect(await store.readPage(7)).toEqual(new Uint8Array([1, 2, 3]));
     expect(await store.readPage(3)).toEqual(new Uint8Array([4, 5]));
+    store.close();
+  });
+
+  it("reads several pages in request order, with null for absent ids", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 7, nextPageId: 8 },
+      pages: new Map([
+        [7, new Uint8Array([1, 2, 3])],
+        [3, new Uint8Array([4, 5])],
+      ]),
+    });
+
+    expect(await store.readPages([3, 5, 7, 3])).toEqual([
+      new Uint8Array([4, 5]),
+      null,
+      new Uint8Array([1, 2, 3]),
+      new Uint8Array([4, 5]),
+    ]);
+    expect(await store.readPages([])).toEqual([]);
+    await expect(store.readPages([1, -1])).rejects.toThrow();
     store.close();
   });
 
@@ -587,6 +611,44 @@ describe("IndexedDbPageStore", () => {
       await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
         "Missing or invalid IndexedDB storage epoch manifest",
       );
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([1]).buffer,
+      );
+      raw.close();
+    }
+  });
+
+  it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
+    const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
+    const withoutNodeFormat = required.filter(
+      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v2",
+    );
+    for (const [requiredCodecIds, missing, unknown] of [
+      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v2"], []],
+      [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
+      [required.filter((codec) => codec !== "jazz.node-storage.v2"), ["jazz.node-storage.v2"], []],
+      [required.filter((codec) => codec !== "groove.dictionary.v1"), ["groove.dictionary.v1"], []],
+      [
+        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
+        [],
+        ["jazz.subscription-program-fact-key.v1"],
+      ],
+    ] as const) {
+      const name = databaseName();
+      await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
+      const refusal = await IndexedDbPageStore.open(name).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(UnsupportedStorageCodecsError);
+      expect(refusal).toMatchObject({
+        name: "UnsupportedStorageCodecsError",
+        code: "unsupported_storage_codecs",
+        missing,
+        unknown,
+      });
       const raw = await openRawDatabase(name);
       const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
       expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(

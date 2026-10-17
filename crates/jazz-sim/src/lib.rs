@@ -8,14 +8,14 @@ pub mod profiling;
 pub mod public_schema_fixture;
 pub mod view_accounting;
 
+use distributions::Lcg;
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst};
 use jazz::query::{QUERY_NAMESPACE, Query, ShapeId};
 use jazz::schema::JazzSchema;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    WIRE_PROTOCOL_VERSION, WireFrame, decode_frame, decode_sync_message, encode_sync_message,
 };
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
@@ -65,16 +65,6 @@ impl BenchProfile {
         }
     }
 
-    /// True when the benchmark should choose interactive defaults.
-    pub fn is_fast(self) -> bool {
-        self == Self::Fast
-    }
-
-    /// True when the benchmark should choose profiler-friendly defaults.
-    pub fn is_profile(self) -> bool {
-        self == Self::Profile
-    }
-
     /// Select a default value for the active benchmark scale.
     pub fn select<T>(self, fast: T, profile: T, full: T) -> T {
         match self {
@@ -86,11 +76,6 @@ impl BenchProfile {
 }
 
 const GLOBAL_TRANSPORT_CODEC_ENV: &str = "JAZZ_TRANSPORT_CODEC";
-
-/// True when benchmark configs should use fast interactive defaults.
-pub fn fast_bench_profile() -> bool {
-    BenchProfile::from_env().is_fast()
-}
 
 /// Active benchmark scale from `JAZZ_BENCH_PROFILE`.
 pub fn bench_profile() -> BenchProfile {
@@ -131,8 +116,6 @@ pub enum NodeRole {
     Writer,
     /// Workload reader.
     Reader,
-    /// Edge node that terminates a client identity and relays to core.
-    Edge,
     /// Store-and-forward relay.
     Relay,
     /// Fate authority.
@@ -192,24 +175,6 @@ impl Topology {
             profile,
         });
         self
-    }
-
-    /// Add a bidirectional client↔edge↔core line.
-    pub fn client_edge_core_line(
-        self,
-        client: impl Into<String>,
-        edge: impl Into<String>,
-        core: impl Into<String>,
-        client_edge_profile: PeerProfile,
-        edge_core_profile: PeerProfile,
-    ) -> Self {
-        let client = client.into();
-        let edge = edge.into();
-        let core = core.into();
-        self.link(client.clone(), edge.clone(), client_edge_profile.clone())
-            .link(edge.clone(), client, client_edge_profile)
-            .link(edge.clone(), core.clone(), edge_core_profile.clone())
-            .link(core, edge, edge_core_profile)
     }
 
     fn link_profile(&self, from: &str, to: &str) -> Option<&PeerProfile> {
@@ -534,6 +499,7 @@ pub struct DeterministicDriver {
     queue: BinaryHeap<ScheduledEvent>,
     inboxes: BTreeMap<NodeName, VecDeque<DeliveredMessage>>,
     paused_links: BTreeMap<(NodeName, NodeName), PausedLink>,
+    effective_deadlines: BTreeMap<NodeName, BTreeMap<NodeName, u64>>,
     transport_codec: SimulatorTransportCodec,
     metrics: Metrics,
 }
@@ -549,6 +515,7 @@ impl DeterministicDriver {
             queue: BinaryHeap::new(),
             inboxes: BTreeMap::new(),
             paused_links: BTreeMap::new(),
+            effective_deadlines: BTreeMap::new(),
             transport_codec: SimulatorTransportCodec::default(),
             metrics: Metrics::default(),
         }
@@ -662,7 +629,27 @@ impl DeterministicDriver {
     }
 
     fn schedule_delivered_with_profile(&mut self, profile: PeerProfile, message: DeliveredMessage) {
-        let deliver_at_ms = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let nominal_deadline = self.clock.now_ms() + profile.latency_ms(&mut self.rng);
+        let deliver_at_ms = match self.effective_deadlines.get_mut(message.from.as_str()) {
+            Some(destinations) => match destinations.get_mut(message.to.as_str()) {
+                Some(previous_deadline) => {
+                    let deliver_at_ms = nominal_deadline.max(*previous_deadline);
+                    *previous_deadline = deliver_at_ms;
+                    deliver_at_ms
+                }
+                None => {
+                    destinations.insert(message.to.clone(), nominal_deadline);
+                    nominal_deadline
+                }
+            },
+            None => {
+                let mut destinations = BTreeMap::new();
+                destinations.insert(message.to.clone(), nominal_deadline);
+                self.effective_deadlines
+                    .insert(message.from.clone(), destinations);
+                nominal_deadline
+            }
+        };
         let event = ScheduledEvent {
             deliver_at_ms,
             event_id: self.next_event_id,
@@ -899,56 +886,75 @@ pub fn loopback_transport_message(
             let encode_start = Instant::now();
             let encoded_payload =
                 encode_sync_message(&message).expect("simulator sync-message encode");
-            let encoded_frame = match codec {
-                SimulatorTransportCodec::WireFrames => {
-                    let envelope = WireEnvelope::new(
-                        WIRE_PROTOCOL_VERSION,
-                        FEATURE_SYNC_MESSAGE_PAYLOAD,
-                        encoded_payload.clone(),
-                    );
-                    Some(
-                        encode_frame(&WireFrame::Message(envelope))
-                            .expect("simulator frame encode"),
+            let encoded_len = encoded_payload.len();
+            let mut encode_time = encode_start.elapsed();
+            let mut decode_time = std::time::Duration::ZERO;
+            let payload = if codec == SimulatorTransportCodec::WireFrames {
+                let context = jazz::wire::WireInboundContext::new(WIRE_PROTOCOL_VERSION, 0, None);
+                let mut sender =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())
+                        .unwrap();
+                let mut receiver =
+                    jazz::wire::stream_backend::OrderedChannelBackend::new(context).unwrap();
+                sender
+                    .enqueue(
+                        1,
+                        0,
+                        jazz::wire::channels::ChannelClass::Writes,
+                        encoded_payload,
                     )
-                }
-                SimulatorTransportCodec::Native | SimulatorTransportCodec::WireBytes => None,
-            };
-            let encode_us = encode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            metrics.incr("transport_codec_encode_count", 1);
-            metrics.incr("transport_codec_encode_total_us", encode_us);
-            metrics.incr(
-                "transport_codec_encoded_bytes",
-                encoded_payload.len() as u64,
-            );
-            if let Some(frame) = &encoded_frame {
-                metrics.incr("transport_codec_encoded_frame_bytes", frame.len() as u64);
-            }
-            metrics.record_latency("transport_codec_encode", encode_us);
-
-            let decode_start = Instant::now();
-            let payload = match encoded_frame {
-                Some(frame_bytes) => {
-                    match decode_frame(&frame_bytes).expect("simulator frame decode") {
-                        WireFrame::Message(envelope) => envelope.payload,
-                        WireFrame::Hello(_)
-                        | WireFrame::Error(_)
-                        | WireFrame::MessageFragment(_) => {
-                            panic!("simulator frame decode returned non-message frame")
-                        }
+                    .unwrap();
+                let mut payload = None;
+                let mut frame_bytes = 0;
+                while sender.has_pending() {
+                    let start = Instant::now();
+                    let frame = sender
+                        .peek_outbound()
+                        .unwrap()
+                        .expect("loopback returns credits every frame");
+                    sender.accept_outbound().unwrap();
+                    encode_time += start.elapsed();
+                    frame_bytes += frame.len() as u64;
+                    let start = Instant::now();
+                    let WireFrame::Channel(envelope) =
+                        decode_frame(&frame).expect("simulator frame decode")
+                    else {
+                        panic!("simulator expected channel frame");
+                    };
+                    if let Some(received) = receiver.receive(envelope, frame.len()).unwrap() {
+                        assert!(payload.is_none());
+                        payload = Some(received.payload);
+                    }
+                    decode_time += start.elapsed();
+                    let credits = receiver.channel_credits();
+                    let mut credits = credits.lock().unwrap();
+                    while let Some(grant) = credits.peek_grant().unwrap() {
+                        let WireFrame::ChannelCredit(grant) = decode_frame(&grant).unwrap() else {
+                            unreachable!()
+                        };
+                        sender
+                            .channel_credits()
+                            .lock()
+                            .unwrap()
+                            .receive_credit(grant)
+                            .unwrap();
+                        credits.accept_grant().unwrap();
                     }
                 }
-                None => encoded_payload,
+                metrics.incr("transport_codec_encoded_frame_bytes", frame_bytes);
+                payload.expect("simulator received complete message")
+            } else {
+                encoded_payload
             };
+            let start = Instant::now();
             let decoded = decode_sync_message(&payload).expect("simulator sync-message decode");
-            let decode_us = decode_start
-                .elapsed()
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX);
+            decode_time += start.elapsed();
+            let encode_us = encode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            let decode_us = decode_time.as_micros().try_into().unwrap_or(u64::MAX);
+            metrics.incr("transport_codec_encode_count", 1);
+            metrics.incr("transport_codec_encode_total_us", encode_us);
+            metrics.incr("transport_codec_encoded_bytes", encoded_len as u64);
+            metrics.record_latency("transport_codec_encode", encode_us);
             metrics.incr("transport_codec_decode_count", 1);
             metrics.incr("transport_codec_decode_total_us", decode_us);
             metrics.record_latency("transport_codec_decode", decode_us);
@@ -1052,35 +1058,44 @@ fn empty_schema() -> JazzSchema {
     JazzSchema::empty()
 }
 
-#[derive(Clone, Debug)]
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed ^ 0x9e37_79b9_7f4a_7c15,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
-}
-
-fn git_output<const N: usize>(args: [&str; N]) -> String {
+fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
     Command::new("git")
         .args(args)
         .output()
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_default()
+        .and_then(git_output_from_output)
+}
+
+fn git_output_from_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+fn git_status() -> (bool, bool) {
+    match git_output(["status", "--porcelain"]) {
+        Some(status) => {
+            let dirty = if retain_result_dirty_ignored() {
+                status.lines().any(|line| {
+                    let path = line.get(3..).unwrap_or_default();
+                    !(path.starts_with("benchmarks/results/")
+                        || path.starts_with("\"benchmarks/results/"))
+                })
+            } else {
+                !status.is_empty()
+            };
+            (true, dirty)
+        }
+        None => (false, true),
+    }
+}
+
+#[cfg(test)]
+fn git_dirty() -> bool {
+    git_status().1
 }
 
 fn hostname() -> String {
@@ -1101,6 +1116,7 @@ fn hostname() -> String {
 struct ProcessMetadata {
     git_sha: String,
     git_dirty: bool,
+    git_status_available: bool,
     hostname: String,
     knobs: BTreeMap<String, String>,
 }
@@ -1108,22 +1124,15 @@ struct ProcessMetadata {
 static PROCESS_METADATA: OnceLock<ProcessMetadata> = OnceLock::new();
 
 fn process_metadata() -> &'static ProcessMetadata {
-    PROCESS_METADATA.get_or_init(|| ProcessMetadata {
-        git_sha: git_output(["rev-parse", "HEAD"]),
-        git_dirty: git_dirty(),
-        hostname: hostname(),
-        knobs: knob_env(),
-    })
-}
-
-fn git_dirty() -> bool {
-    let status = git_output(["status", "--porcelain"]);
-    if !retain_result_dirty_ignored() {
-        return !status.is_empty();
-    }
-    status.lines().any(|line| {
-        let path = line.get(3..).unwrap_or_default();
-        !(path.starts_with("benchmarks/results/") || path.starts_with("\"benchmarks/results/"))
+    PROCESS_METADATA.get_or_init(|| {
+        let (git_status_available, git_dirty) = git_status();
+        ProcessMetadata {
+            git_sha: git_output(["rev-parse", "HEAD"]).unwrap_or_default(),
+            git_dirty,
+            git_status_available,
+            hostname: hostname(),
+            knobs: knob_env(),
+        }
     })
 }
 
@@ -1138,6 +1147,10 @@ fn insert_process_metadata(fields: &mut Map<String, Value>) {
     let metadata = process_metadata();
     fields.insert("git_sha".to_owned(), json!(metadata.git_sha));
     fields.insert("git_dirty".to_owned(), json!(metadata.git_dirty));
+    fields.insert(
+        "git_status_available".to_owned(),
+        json!(metadata.git_status_available),
+    );
     fields.insert("hostname".to_owned(), json!(metadata.hostname));
     fields.insert("knobs".to_owned(), json!(metadata.knobs));
 }
@@ -1353,6 +1366,29 @@ mod tests {
         assert!(driver.metrics.counters["transport_codec_encoded_bytes"] > 0);
     }
 
+    /// Alice's simulated channel transfer returns credits while Bob consumes
+    /// extents, so a message larger than the physical window still completes.
+    /// This codec-level test is needed because the simulator owns its loopback.
+    #[test]
+    fn wire_frame_transport_codec_returns_credits_for_large_messages() {
+        let message = SyncMessage::SessionClaims {
+            identity: jazz::ids::AuthorSubject::for_test_bytes([0x42; 16]),
+            claims: BTreeMap::from([(
+                "data".to_owned(),
+                jazz::groove::records::Value::Bytes(vec![0x42; 5 * 1024 * 1024]),
+            )]),
+        };
+        let mut metrics = Metrics::default();
+        assert_eq!(
+            loopback_transport_message(
+                SimulatorTransportCodec::WireFrames,
+                message.clone(),
+                &mut metrics
+            ),
+            message
+        );
+    }
+
     #[test]
     fn deterministic_wire_frame_transport_codec_loopbacks_message() {
         let mut driver = DeterministicDriver::new(two_node_topology(), 42)
@@ -1422,6 +1458,280 @@ mod tests {
             driver.metrics.counters["transport_codec_encoded_frame_bytes"]
                 > driver.metrics.counters["transport_codec_encoded_bytes"]
         );
+    }
+    #[test]
+    fn deterministic_jitter_preserves_per_link_fifo() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("adversarial", 0, 1, 0)),
+            1,
+        );
+        let first = register_shape_message("first");
+        let second = register_shape_message("second");
+
+        driver.send("a", "b", first.clone());
+        driver.send("a", "b", second.clone());
+
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+    }
+
+    #[test]
+    fn deterministic_jitter_preserves_fifo_across_pause_resume() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("adversarial", 0, 1, 0)),
+            1,
+        );
+        let first = register_shape_message("active-first");
+        let second = register_shape_message("queued-second");
+        let third = register_shape_message("active-third");
+
+        driver.send("a", "b", first.clone());
+        driver.pause_link("a", "b", PauseMode::Queue);
+        driver.send("a", "b", second.clone());
+        driver.resume_link("a", "b");
+        driver.send("a", "b", third.clone());
+
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+        assert_eq!(driver.recv("b").message, third);
+    }
+
+    #[test]
+    fn deterministic_jitter_equal_deadlines_keep_event_id_order_without_extra_delay() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .link("a", "b", PeerProfile::new("equal", 0, 0, 0)),
+            1,
+        );
+        let first = register_shape_message("equal-first");
+        let second = register_shape_message("equal-second");
+        let third = register_shape_message("equal-third");
+
+        driver.send("a", "b", first.clone());
+        driver.send("a", "b", second.clone());
+        driver.send("a", "b", third.clone());
+
+        assert_eq!(
+            driver.queued_schedule(),
+            vec![
+                (0, 0, "a".into(), "b".into()),
+                (0, 1, "a".into(), "b".into()),
+                (0, 2, "a".into(), "b".into()),
+            ]
+        );
+        assert_eq!(driver.recv("b").message, first);
+        assert_eq!(driver.recv("b").message, second);
+        assert_eq!(driver.recv("b").message, third);
+        assert_eq!(driver.now_ms(), 0);
+    }
+
+    #[test]
+    fn deterministic_jitter_keeps_directed_links_independent() {
+        let mut driver = DeterministicDriver::new(
+            Topology::default()
+                .node("a", empty_schema(), NodeRole::Writer)
+                .node("b", empty_schema(), NodeRole::Reader)
+                .node("c", empty_schema(), NodeRole::Writer)
+                .link("a", "b", PeerProfile::new("a-to-b", 0, 1, 0))
+                .link("c", "b", PeerProfile::new("c-to-b", 0, 1, 0))
+                .link("b", "a", PeerProfile::new("b-to-a", 0, 1, 0)),
+            1,
+        );
+        let a_to_b = register_shape_message("a-to-b");
+        let c_to_b = register_shape_message("c-to-b");
+        let b_to_a = register_shape_message("b-to-a");
+
+        driver.send("a", "b", a_to_b.clone());
+        driver.send("c", "b", c_to_b.clone());
+        driver.send("b", "a", b_to_a.clone());
+
+        assert_eq!(driver.recv("b").message, c_to_b);
+        assert_eq!(driver.recv("b").message, a_to_b);
+        assert_eq!(driver.recv("a").message, b_to_a);
+    }
+
+    #[test]
+    fn deterministic_jitter_schedule_is_repeatable_across_boundaries() {
+        fn run() -> (
+            Vec<(u64, u64, String, String)>,
+            Vec<SyncMessage>,
+            Vec<SyncMessage>,
+        ) {
+            let mut driver = DeterministicDriver::new(
+                Topology::default()
+                    .node("a", empty_schema(), NodeRole::Writer)
+                    .node("b", empty_schema(), NodeRole::Reader)
+                    .node("c", empty_schema(), NodeRole::Writer)
+                    .link("a", "b", PeerProfile::new("a-to-b", 0, 1, 0))
+                    .link("c", "b", PeerProfile::new("c-to-b", 1, 1, 0)),
+                7,
+            );
+            let first = register_shape_message("repeat-first");
+            let second = register_shape_message("repeat-second");
+            let third = register_shape_message("repeat-third");
+            let fourth = register_shape_message("repeat-fourth");
+
+            driver.send("a", "b", first.clone());
+            driver.pause_link("a", "b", PauseMode::Queue);
+            driver.send("a", "b", second.clone());
+            driver.send("c", "b", third.clone());
+            driver.resume_link("a", "b");
+            driver.send("a", "b", fourth.clone());
+            let schedule = driver.queued_schedule();
+
+            let first_at_b = driver.recv("b").message;
+            let second_at_b = driver.recv("b").message;
+            let third_at_b = driver.recv("b").message;
+            let fourth_at_b = driver.recv("b").message;
+            (
+                schedule,
+                vec![first_at_b, second_at_b],
+                vec![third_at_b, fourth_at_b],
+            )
+        }
+
+        assert_eq!(run(), run());
+    }
+    #[test]
+    fn git_output_conversion_rejects_failed_exit_and_invalid_utf8() {
+        let failed = Command::new("git")
+            .arg("--definitely-not-a-git-option")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert_eq!(git_output_from_output(failed), None);
+
+        let mut invalid_utf8 = Command::new("git").arg("--version").output().unwrap();
+        assert!(invalid_utf8.status.success());
+        invalid_utf8.stdout = vec![0xff];
+        assert_eq!(git_output_from_output(invalid_utf8), None);
+    }
+
+    #[test]
+    fn git_status_failure_is_reported_dirty() {
+        const CHILD: &str = "JAZZ_SIM_GIT_STATUS_FAILURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(git_dirty(), "failed `git status` must be reported dirty");
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-git-status-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(
+            !status.status.success(),
+            "temporary non-repository must make `git status` fail",
+        );
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::git_status_failure_is_reported_dirty"])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+        assert!(
+            result.status.success(),
+            "child test should observe failed git status as dirty:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "expected child harness to run this regression:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+    }
+
+    #[test]
+    fn successful_empty_git_status_is_available_without_a_commit() {
+        const CHILD: &str = "JAZZ_SIM_EMPTY_STATUS_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let fields = metadata_fields("test", "test", 0, "s");
+            assert_eq!(fields["git_dirty"], false);
+            assert_eq!(fields["git_status_available"], true);
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "jazz-sim-empty-git-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp_dir).unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .status()
+            .unwrap();
+        assert!(
+            initialized.success(),
+            "temporary repository should initialize"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::successful_empty_git_status_is_available_without_a_commit",
+            ])
+            .env(CHILD, "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+
+        assert!(
+            result.status.success(),
+            "child test should distinguish successful empty status from missing HEAD:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
     }
 }
 

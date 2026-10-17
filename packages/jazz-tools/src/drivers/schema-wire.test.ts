@@ -66,6 +66,46 @@ describe("serializeRuntimeSchema", () => {
     });
   });
 
+  it.each([NaN, Infinity, -Infinity])("rejects non-finite Double defaults (%s)", (value) => {
+    const schema: WasmSchema = {
+      values: {
+        columns: [
+          {
+            name: "amount",
+            column_type: { type: "Double" },
+            nullable: false,
+            default: { type: "Double", value },
+          },
+        ],
+      },
+    };
+
+    expect(() => serializeRuntimeSchema(schema)).toThrow(/non-finite number/i);
+  });
+
+  it("preserves Null and finite Double defaults", () => {
+    const schema: WasmSchema = {
+      values: {
+        columns: [
+          {
+            name: "nullValue",
+            column_type: { type: "Double" },
+            nullable: true,
+            default: { type: "Null" },
+          },
+          {
+            name: "finiteValue",
+            column_type: { type: "Double" },
+            nullable: false,
+            default: { type: "Double", value: 1.25 },
+          },
+        ],
+      },
+    };
+
+    expect(JSON.parse(serializeRuntimeSchema(schema)).schema).toEqual(schema);
+  });
+
   it("marks loaded policy bundles explicitly", () => {
     const schema: WasmSchema = {};
 

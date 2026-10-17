@@ -10,6 +10,7 @@ use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
 use jazz::tools::OpenTransactionId;
+use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::fixture::{
@@ -131,7 +132,7 @@ fn run_domination(config: &Config) {
         let (dir, mut core) = open_node(node(210), schema());
         let _dir = dir;
         for idx in 0..heads {
-            let unit = commit_unit(node((idx + 1) as u8), row(1), idx as u64, Vec::new());
+            let unit = commit_unit(node((idx + 1) as u8), row(1), idx as u64);
             let fate = core_ingest(&mut core, &unit);
             assert_accepted(&fate);
         }
@@ -197,7 +198,7 @@ fn run_ingest_rate(config: &Config) {
     let mut hist = NsHist::new();
     let mut bytes = 0_u64;
     for idx in 0..config.iterations {
-        let unit = commit_unit(node(10), row(10_000 + idx), idx as u64, Vec::new());
+        let unit = commit_unit(node(10), row(10_000 + idx), idx as u64);
         bytes += commit_unit_bytes(&unit);
         let start = Instant::now();
         let fate = core_ingest(&mut core, &unit);
@@ -235,7 +236,6 @@ fn run_commit_unit(config: &Config) {
                         &table,
                         schema_version,
                         row(20_000 + iter * rows_per_unit + idx),
-                        Vec::new(),
                         AuthorSubject::system_at(node((rows_per_unit % 200) as u8 + 1)),
                         iter as u64,
                         AuthorSubject::system_at(node((rows_per_unit % 200) as u8 + 1)),
@@ -413,7 +413,7 @@ fn run_validation_entries(config: &Config) {
     );
 }
 
-fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
+fn seed_local_rows(node_: &mut NodeState, rows: usize) {
     for idx in 0..rows {
         let _ = commit_mergeable_unit_settled(
             node_,
@@ -425,18 +425,12 @@ fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
     }
 }
 
-fn commit_unit(
-    node_uuid: NodeUuid,
-    row_uuid: RowUuid,
-    idx: u64,
-    parents: Vec<jazz::tx::TxId>,
-) -> SyncMessage {
+fn commit_unit(node_uuid: NodeUuid, row_uuid: RowUuid, idx: u64) -> SyncMessage {
     let (_dir, mut node_) = open_node(node_uuid, schema());
     commit_mergeable_unit_settled(
         &mut node_,
         MergeableCommit::new(TABLE, row_uuid, 1_000 + idx)
             .made_by(AuthorSubject::SYSTEM)
-            .parents(parents)
             .cells(cells(&format!("v-{idx}"))),
     )
     .expect("commit unit")
@@ -460,7 +454,7 @@ fn commit_deletion_unit(
     .1
 }
 
-fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -515,7 +509,8 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Uuid),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
 }
 
@@ -523,20 +518,13 @@ fn table_schema() -> TableSchema {
     schema().tables()[0].clone()
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let node = open_node_at(temp_dir.path(), node_uuid, schema);
     (temp_dir, node)
 }
 
-fn open_node_at(
-    path: &std::path::Path,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+fn open_node_at(path: &std::path::Path, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)

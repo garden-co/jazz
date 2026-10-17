@@ -1,33 +1,215 @@
-:root {
-  background: #111;
-  color: #f8f2e5;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-}
+/* RecordPlayer's own layout. Colours, spacing, radii and type are theme tokens. */
+
 body {
   margin: 0;
+  background: var(--color-background-body);
 }
-main {
-  max-width: 48rem;
-  margin: auto;
-  padding: 5rem 1.5rem;
+
+.rp-page {
+  inline-size: 100%;
+  max-inline-size: 72rem;
+  margin-inline: auto;
 }
-.eyebrow {
-  color: #e8b34f;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  font-size: 0.8rem;
+
+/* Signed-in pages end with the sticky player; keep content clear of it. */
+.rp-page:has(.rp-player) {
+  padding-block-end: var(--spacing-4);
 }
-h1 {
-  font-size: clamp(3rem, 10vw, 6rem);
-  margin: 0.3rem 0;
+
+.rp-sign-in {
+  max-inline-size: 30rem;
+  margin: var(--spacing-8) auto;
 }
-.record {
-  width: 11rem;
+
+/* CoverFlow-style shelf: one horizontal scroller, covers turn towards the selection. */
+.rp-shelf {
+  display: flex;
+  gap: var(--spacing-4);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  perspective: 60rem;
+  padding: var(--spacing-4) var(--spacing-2);
+  scrollbar-width: thin;
+}
+
+.rp-shelf-item {
+  flex: none;
+  inline-size: 11rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  scroll-snap-align: center;
+  transform-style: preserve-3d;
+  transition:
+    transform 240ms ease,
+    opacity 240ms ease;
+}
+
+.rp-shelf-item[data-side="left"] {
+  transform: rotateY(28deg) scale(0.88);
+  transform-origin: right center;
+  opacity: 0.75;
+}
+
+.rp-shelf-item[data-side="right"] {
+  transform: rotateY(-28deg) scale(0.88);
+  transform-origin: left center;
+  opacity: 0.75;
+}
+
+.rp-shelf-item:hover {
+  opacity: 1;
+}
+
+.rp-shelf-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: var(--spacing-1);
+  border-radius: var(--radius-container);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rp-shelf-item {
+    transition: none;
+  }
+}
+
+.rp-cover {
+  display: block;
   aspect-ratio: 1;
-  border-radius: 50%;
-  background: repeating-radial-gradient(#181818 0 4px, #303030 5px 6px);
-  box-shadow:
-    0 0 0 1.8rem #28211c,
-    0 0 0 2rem #dfa84e;
-  margin: 2rem 0;
+  border-radius: var(--radius-container);
+  object-fit: cover;
+  background: var(--color-background-muted);
+  flex: none;
+}
+
+.rp-cover[data-size="sm"] {
+  inline-size: var(--size-element-lg);
+  border-radius: var(--radius-inner);
+}
+
+.rp-cover[data-size="md"] {
+  inline-size: 10rem;
+}
+
+.rp-cover[data-size="lg"] {
+  inline-size: 100%;
+}
+
+.rp-cover-placeholder {
+  display: flex;
+  align-items: flex-end;
+  padding: var(--spacing-3);
+  box-sizing: border-box;
+  border: 1px solid var(--color-border);
+}
+
+.rp-cover-title {
+  font-family: var(--font-family-heading);
+  font-size: var(--text-heading-4-size);
+  line-height: var(--text-heading-4-leading);
+  font-weight: var(--font-weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.rp-cover-placeholder[data-hue="blue"] {
+  background: var(--color-background-blue);
+  color: var(--color-text-blue);
+}
+.rp-cover-placeholder[data-hue="cyan"] {
+  background: var(--color-background-cyan);
+  color: var(--color-text-cyan);
+}
+.rp-cover-placeholder[data-hue="green"] {
+  background: var(--color-background-green);
+  color: var(--color-text-green);
+}
+.rp-cover-placeholder[data-hue="orange"] {
+  background: var(--color-background-orange);
+  color: var(--color-text-orange);
+}
+.rp-cover-placeholder[data-hue="pink"] {
+  background: var(--color-background-pink);
+  color: var(--color-text-pink);
+}
+.rp-cover-placeholder[data-hue="purple"] {
+  background: var(--color-background-purple);
+  color: var(--color-text-purple);
+}
+.rp-cover-placeholder[data-hue="red"] {
+  background: var(--color-background-red);
+  color: var(--color-text-red);
+}
+.rp-cover-placeholder[data-hue="teal"] {
+  background: var(--color-background-teal);
+  color: var(--color-text-teal);
+}
+.rp-cover-placeholder[data-hue="yellow"] {
+  background: var(--color-background-yellow);
+  color: var(--color-text-yellow);
+}
+
+/* Playlists: a narrow list beside the detail, stacked on phones. Astryx Grid
+   only lays out equal columns. */
+.rp-split {
+  display: grid;
+  grid-template-columns: minmax(0, 16rem) minmax(0, 1fr);
+  gap: var(--spacing-6);
+  align-items: start;
+}
+
+@media (max-width: 48rem) {
+  .rp-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.rp-title-input {
+  max-inline-size: 24rem;
+}
+
+/* The player bar sticks to the bottom of the viewport while the page scrolls. */
+.rp-player {
+  position: sticky;
+  inset-block-end: 0;
+  z-index: 1;
+  margin-block-start: var(--spacing-6);
+}
+
+.rp-player-track {
+  min-inline-size: 0;
+  flex: 1 1 14rem;
+}
+
+.rp-player-text {
+  min-inline-size: 0;
+}
+
+.rp-player-seek {
+  flex: 3 1 18rem;
+}
+
+.rp-player-volume {
+  flex: 0 1 10rem;
+}
+
+.rp-grow {
+  flex: 1;
+  min-inline-size: 4rem;
+}
+
+@media (max-width: 40rem) {
+  .rp-shelf-item {
+    inline-size: 8.5rem;
+  }
+  .rp-cover[data-size="md"] {
+    inline-size: 7rem;
+  }
 }

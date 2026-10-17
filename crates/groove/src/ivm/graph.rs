@@ -21,6 +21,21 @@ use thiserror::Error;
 
 use super::op_types::*;
 
+mod join_chains;
+
+/// Snapshot-only index-key filter: an indexed row is hydrated only when its
+/// `source_column` UUID also appears in the candidate index's `candidate_column`.
+/// The candidate side is a conservative superset; the ordinary graph still
+/// checks the complete join, visibility, policy, and deletion rules.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexCandidateFilter {
+    pub table: String,
+    pub index: String,
+    pub scan: StaticScanSpec,
+    pub source_column: String,
+    pub candidate_column: String,
+}
+
 /// User-facing graph construction API before deduplication.
 ///
 /// Builders refer to table and field names directly; the runtime resolves those
@@ -150,6 +165,22 @@ use super::op_types::*;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {
+    /// Prevalidated operator definitions with instance-owned source bindings.
+    TypedTemplate {
+        program: Arc<super::template::TypedGraphTemplate>,
+        inputs: Vec<Arc<GraphBuilder>>,
+        predicates: Vec<PredicateExpr>,
+        scalars: Arc<[super::template::TemplateScalarArgument]>,
+    },
+    /// A typed, compilation-only input of an immutable query template. Binding
+    /// supplies a descriptor-checked graph, not rows or authority. Compilation
+    /// rechecks its output contract and emits no execution operator. An
+    /// unbound slot cannot execute. Neither slots nor bindings are serialized.
+    TemplateInput {
+        slot: u32,
+        output: RecordDescriptor,
+        input: Option<Arc<GraphBuilder>>,
+    },
     Table {
         table: String,
         scan: Option<StaticScanSpec>,
@@ -173,6 +204,7 @@ pub enum GraphBuilder {
         /// Row projection sources intersect these encoded index entries before
         /// fetching table records, so surviving rows are decoded only once.
         intersections: Vec<(String, StaticScanSpec)>,
+        candidate_filter: Option<IndexCandidateFilter>,
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
@@ -258,6 +290,17 @@ pub enum GraphBuilder {
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
+    },
+    /// The rows of a stored table whose primary key, after `scan`'s static
+    /// prefix, starts with the key of some row of `keys`: a semi-join of the
+    /// table by `keys`, computed by probing the table's storage once per live
+    /// key instead of arranging the whole table. See [`GraphBuilder::lookup`].
+    Lookup {
+        keys: Arc<GraphBuilder>,
+        keys_on: Vec<FieldRef>,
+        table: String,
+        scan: Option<StaticScanSpec>,
+        variant_projection: Option<String>,
     },
     ArgMaxBy {
         input: Arc<GraphBuilder>,
@@ -556,6 +599,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: None,
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -570,6 +614,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -587,6 +632,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: Some(projection_target.into()),
         }
     }
@@ -605,6 +651,26 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: intersections.into_iter().collect(),
+            candidate_filter: None,
+            row_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Snapshot-only row source with a conservative index-key semijoin before
+    /// full-row hydration. A retained source must use the ordinary live graph.
+    pub fn variant_index_candidate_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+        candidate_filter: IndexCandidateFilter,
+        projection_target: impl Into<String>,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: Vec::new(),
+            candidate_filter: Some(candidate_filter),
             row_projection: Some(projection_target.into()),
         }
     }
@@ -714,6 +780,14 @@ impl GraphBuilder {
             }
             pending.push((graph, true));
             match graph {
+                Self::TypedTemplate { inputs, .. } => {
+                    pending.extend(inputs.iter().map(|input| (input.as_ref(), false)));
+                }
+                Self::TemplateInput { input, .. } => {
+                    if let Some(input) = input {
+                        pending.push((input, false));
+                    }
+                }
                 Self::Filter { input, .. }
                 | Self::Project { input, .. }
                 | Self::StreamingChecksum { input, .. }
@@ -724,7 +798,8 @@ impl GraphBuilder {
                 | Self::ArgMinBy { input, .. }
                 | Self::TopBy { input, .. }
                 | Self::CollectBy { input, .. }
-                | Self::Aggregate { input, .. } => pending.push((input, false)),
+                | Self::Aggregate { input, .. }
+                | Self::Lookup { keys: input, .. } => pending.push((input, false)),
                 Self::Union { inputs } => {
                     pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
                 }
@@ -756,6 +831,112 @@ impl GraphBuilder {
             }
         }
         ordered
+    }
+
+    /// Visit immediate immutable inputs without walking or cloning their DAGs.
+    pub(crate) fn visit_inputs<'a>(&'a self, mut visit: impl FnMut(&'a Arc<Self>)) {
+        match self {
+            Self::TypedTemplate { inputs, .. } => inputs.iter().for_each(visit),
+            Self::TemplateInput { input, .. } => {
+                if let Some(input) = input {
+                    visit(input);
+                }
+            }
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::StreamingChecksum { input, .. }
+            | Self::UnwrapNullable { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::VariantProject { input, .. }
+            | Self::ArgMaxBy { input, .. }
+            | Self::ArgMinBy { input, .. }
+            | Self::TopBy { input, .. }
+            | Self::CollectBy { input, .. }
+            | Self::Aggregate { input, .. }
+            | Self::Lookup { keys: input, .. } => visit(input),
+            Self::Union { inputs } => inputs.iter().for_each(visit),
+            Self::Join { left, right, .. }
+            | Self::SemiJoin { left, right, .. }
+            | Self::AntiJoin { left, right, .. } => {
+                visit(left);
+                visit(right);
+            }
+            Self::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                visit(seed);
+                visit(step);
+                if let Some(witness) = step_witness {
+                    visit(witness);
+                }
+            }
+            Self::RecursiveStepWitness { recursive } => visit(recursive),
+            Self::Table { .. }
+            | Self::InlineRecords { .. }
+            | Self::InputSource { .. }
+            | Self::Index { .. }
+            | Self::FrontierSource { .. }
+            | Self::BindingSource { .. } => {}
+        }
+    }
+
+    /// Rewrite immediate inputs only; the caller owns traversal and sharing.
+    pub(crate) fn map_inputs(&self, mut map: impl FnMut(&Arc<Self>) -> Arc<Self>) -> Self {
+        let mut graph = self.clone();
+        match &mut graph {
+            Self::TypedTemplate { inputs, .. } => {
+                for input in inputs {
+                    *input = map(input);
+                }
+            }
+            Self::TemplateInput { input, .. } => {
+                if let Some(input) = input {
+                    *input = map(input);
+                }
+            }
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::StreamingChecksum { input, .. }
+            | Self::UnwrapNullable { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::VariantProject { input, .. }
+            | Self::ArgMaxBy { input, .. }
+            | Self::ArgMinBy { input, .. }
+            | Self::TopBy { input, .. }
+            | Self::CollectBy { input, .. }
+            | Self::Aggregate { input, .. }
+            | Self::Lookup { keys: input, .. } => *input = map(input),
+            Self::Union { inputs } => inputs.iter_mut().for_each(|input| *input = map(input)),
+            Self::Join { left, right, .. }
+            | Self::SemiJoin { left, right, .. }
+            | Self::AntiJoin { left, right, .. } => {
+                *left = map(left);
+                *right = map(right);
+            }
+            Self::Recursive {
+                seed,
+                step,
+                step_witness,
+                ..
+            } => {
+                *seed = map(seed);
+                *step = map(step);
+                if let Some(witness) = step_witness {
+                    *witness = map(witness);
+                }
+            }
+            Self::RecursiveStepWitness { recursive } => *recursive = map(recursive),
+            Self::Table { .. }
+            | Self::InlineRecords { .. }
+            | Self::InputSource { .. }
+            | Self::Index { .. }
+            | Self::FrontierSource { .. }
+            | Self::BindingSource { .. } => {}
+        }
+        graph
     }
 
     pub fn join(
@@ -817,6 +998,48 @@ impl GraphBuilder {
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
         }
+    }
+
+    /// Probe a stored table by the keys of another relation.
+    ///
+    /// `right` must be a [`GraphBuilder::Table`] source (as built by
+    /// [`Self::table`], [`Self::table_scan`] with a point or prefix scan, or
+    /// [`Self::variant_source_scan`]); otherwise this returns `None`. The
+    /// result is the rows of `right` whose primary key, after the scan's
+    /// static prefix, starts with the values of `keys_on` of some row of
+    /// `keys`. The key fields map positionally onto the following primary-key
+    /// columns and must have their value types.
+    ///
+    /// Keys have set semantics: a key selects its rows while its count is
+    /// positive. Hydration reads one storage prefix per distinct live key,
+    /// and maintenance probes only keys that become live, so the work is
+    /// proportional to the keys and to changes touching them, never to the
+    /// table's size. The relation stays live: a key leaving or entering
+    /// `keys`, and any insert, update or delete of a matching table row,
+    /// updates the result.
+    ///
+    /// `semi_join(left, lookup(t, left, on), on, pk)` and the `anti_join`
+    /// analogue are the keyed lookup semi- and anti-joins.
+    pub fn lookup(
+        right: GraphBuilder,
+        keys: GraphBuilder,
+        keys_on: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Option<Self> {
+        let Self::Table {
+            table,
+            scan,
+            variant_projection,
+        } = right
+        else {
+            return None;
+        };
+        Some(Self::Lookup {
+            keys: Arc::new(keys),
+            keys_on: keys_on.into_iter().map(FieldRef::name).collect(),
+            table,
+            scan,
+            variant_projection,
+        })
     }
 
     pub fn arg_max_by(
@@ -1376,15 +1599,22 @@ impl ProjectField {
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
             | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
-            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
-                None
-            }
+            ProjectExpr::Literal(_)
+            | ProjectExpr::TypedLiteral { .. }
+            | ProjectExpr::Null(_)
+            | ProjectExpr::TemplateArgument { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
+    /// Process-local scalar argument with its exact output contract.
+    /// Ordinary graph installation rejects unbound arguments.
+    TemplateArgument {
+        slot: u32,
+        value_type: ValueType,
+    },
     Field(FieldRef),
     RecordField {
         source: FieldRef,
@@ -1493,32 +1723,160 @@ fn collect_projection_output_type(
 /// Deduplicated DAG of IVM node descriptors.
 #[derive(Clone, Debug, Default)]
 pub struct IvmGraph {
+    activations: super::activation::ActivationCache,
+    execution_layouts: super::execution_layout::ExecutionLayoutCache,
     /// Deduplicated node specs. The `NodeId` is derived from the full
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
     table_sources: HashMap<String, HashSet<NodeId>>,
     binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
     frontier_sources: HashMap<String, HashSet<NodeId>>,
+    /// Route barriers below shared prepared-shape terminals (#3288).
+    routes: super::routes::RouteIndex,
+    /// Nodes inserted since the runtime last drained them. Every new node is
+    /// unretained until an operation adds a retainer, so graph GC starts its
+    /// incremental sweep from these.
+    added_since_drain: Vec<NodeId>,
 }
 
 impl IvmGraph {
+    pub(crate) fn routes(&self) -> &super::routes::RouteIndex {
+        &self.routes
+    }
+
+    /// Mark `barrier` (a bound route filter over `terminal`) so activation
+    /// stops there and the tick routes `terminal`'s delta by key instead.
+    pub(crate) fn add_route_barrier(
+        &mut self,
+        terminal: NodeId,
+        barrier: NodeId,
+        field_indices: Vec<usize>,
+        field_types: Vec<ValueType>,
+        key: Vec<u8>,
+        root_ordering_node: Option<NodeId>,
+    ) {
+        if self.routes.add(
+            terminal,
+            barrier,
+            field_indices,
+            field_types,
+            key,
+            root_ordering_node,
+        ) {
+            self.activations.clear();
+        }
+    }
+
+    pub(crate) fn release_route_barrier(&mut self, barrier: NodeId) {
+        if self.routes.release(barrier) {
+            self.activations.clear();
+        }
+    }
+
+    /// Every descendant of `roots`, including those behind route barriers.
+    pub(crate) fn downstream_through_routes(
+        &self,
+        roots: impl IntoIterator<Item = NodeId>,
+    ) -> std::collections::HashSet<NodeId> {
+        let mut reached = std::collections::HashSet::new();
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if reached.insert(id)
+                && let Some(node) = self.nodes.get(&id)
+            {
+                pending.extend(node.children.iter().copied());
+            }
+        }
+        reached
+    }
+
+    /// Descendants of changed sources, crossing route barriers. Hydration uses
+    /// this: a binding change must invalidate every bound suffix it reaches.
+    pub(crate) fn affected_nodes_through_routes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> std::collections::HashSet<NodeId> {
+        let sources = self.source_nodes(tables, bindings);
+        self.downstream_through_routes(sources)
+    }
+
+    pub(crate) fn execution_layout(
+        &self,
+        roots: impl IntoIterator<Item = NodeId>,
+    ) -> Result<std::sync::Arc<super::execution_layout::ExecutionLayout>, NodeId> {
+        self.execution_layouts.get(self, roots)
+    }
+
+    pub(crate) fn execution_layout_counters(&self) -> (u64, u64) {
+        self.execution_layouts.counters()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn dedup_node(&mut self, descriptor: NodeDescriptor, durability: NodeDurability) -> NodeId {
-        self.validate_node(&descriptor)
-            .expect("invalid IVM graph node descriptor");
-
         let id = descriptor.node_id();
         if let Some(existing) = self.nodes.get(&id) {
+            // An existing node was validated when inserted, against the same
+            // input ids; node outputs are immutable per id, so validation of
+            // an equal descriptor cannot differ.
             assert_eq!(
                 existing.descriptor, descriptor,
                 "IVM node id collision for incompatible descriptors"
             );
             return id;
         }
+        self.validate_node(&descriptor)
+            .expect("invalid IVM graph node descriptor");
+        self.insert_new_node(id, descriptor, durability)
+    }
 
+    /// [`Self::dedup_node`] from borrowed parts: the owned descriptor is only
+    /// built when the node is new. Identity and collision checks are the same.
+    pub(crate) fn dedup_node_parts(
+        &mut self,
+        operator: &OpType,
+        inputs: Vec<NodeId>,
+        output: NodeOutput,
+        durability: NodeDurability,
+    ) -> NodeId {
+        let id = NodeDescriptor::node_id_of(operator, &inputs, &output);
+        if let Some(existing) = self.nodes.get(&id) {
+            assert!(
+                existing.descriptor.operator == *operator
+                    && existing.descriptor.inputs == inputs
+                    && existing.descriptor.output == output,
+                "IVM node id collision for incompatible descriptors"
+            );
+            return id;
+        }
+        let descriptor = NodeDescriptor {
+            operator: operator.clone(),
+            inputs,
+            output,
+        };
+        self.validate_node(&descriptor)
+            .expect("invalid IVM graph node descriptor");
+        self.insert_new_node(id, descriptor, durability)
+    }
+
+    fn insert_new_node(
+        &mut self,
+        id: NodeId,
+        descriptor: NodeDescriptor,
+        durability: NodeDurability,
+    ) -> NodeId {
+        self.added_since_drain.push(id);
+        // A durable node changes whether every route barrier above it keeps
+        // ordinary activation, including in plans that never reached its
+        // inputs because they stopped at such a barrier.
+        if matches!(durability, NodeDurability::Durable { .. }) {
+            self.activations.clear();
+        } else {
+            self.activations.added(&descriptor.inputs);
+        }
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
@@ -1535,6 +1893,14 @@ impl IvmGraph {
             OpType::IndexSource(source) => {
                 self.table_sources
                     .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            // A lookup is also a source of its probed table: that table's
+            // deltas must activate it even when its keys did not change.
+            OpType::Lookup(lookup) => {
+                self.table_sources
+                    .entry(lookup.source.table.clone())
                     .or_default()
                     .insert(id);
             }
@@ -1584,7 +1950,10 @@ impl IvmGraph {
         self.nodes.get(&id)
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+    #[cfg(test)]
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+        self.activations.clear();
+        self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
     }
 
@@ -1596,9 +1965,30 @@ impl IvmGraph {
         &self,
         tables: impl IntoIterator<Item = &'a str>,
         bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
-    ) -> std::collections::HashSet<NodeId> {
-        let mut affected = std::collections::HashSet::new();
-        let mut pending = tables
+    ) -> std::sync::Arc<std::collections::HashSet<NodeId>> {
+        std::sync::Arc::clone(
+            &self
+                .activation_plan(tables, bindings)
+                .expect("graph source reachability is valid")
+                .affected,
+        )
+    }
+
+    pub(crate) fn activation_plan<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> Result<std::sync::Arc<super::activation::ActivationPlan>, NodeId> {
+        let sources = self.source_nodes(tables, bindings);
+        self.activations.get(self, sources)
+    }
+
+    fn source_nodes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> Vec<NodeId> {
+        tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
             .chain(bindings.into_iter().flat_map(|binding| {
@@ -1609,16 +1999,12 @@ impl IvmGraph {
                 )
             }))
             .flat_map(|nodes| nodes.iter().copied())
-            .collect::<Vec<_>>();
-        while let Some(node) = pending.pop() {
-            if !affected.insert(node) {
-                continue;
-            }
-            if let Some(graph_node) = self.nodes.get(&node) {
-                pending.extend(graph_node.children.iter().copied());
-            }
-        }
-        affected
+            .collect()
+    }
+
+    /// Nodes inserted since the previous call, including ones removed since.
+    pub(crate) fn take_added_nodes(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.added_since_drain)
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
@@ -1637,9 +2023,14 @@ impl IvmGraph {
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
+        self.activations.removed(id);
+        if self.routes.remove(id) {
+            self.activations.clear();
+        }
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
+        self.execution_layouts.invalidate(Some(id));
 
         for input in node.descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(&input) {
@@ -1652,6 +2043,9 @@ impl IvmGraph {
             }
             OpType::IndexSource(source) => {
                 remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::Lookup(lookup) => {
+                remove_source_node(&mut self.table_sources, &lookup.source.table, id);
             }
             OpType::BindingSource(source) => {
                 remove_source_node(&mut self.binding_sources, &source.key, id);
@@ -1760,10 +2154,18 @@ impl NodeDescriptor {
     }
 
     pub fn node_id(&self) -> NodeId {
+        Self::node_id_of(&self.operator, &self.inputs, &self.output)
+    }
+
+    /// The identity of a descriptor with these fields, hashed exactly as the
+    /// derived `Hash` does (fields in declaration order), without owning one.
+    pub(crate) fn node_id_of(operator: &OpType, inputs: &[NodeId], output: &NodeOutput) -> NodeId {
         // Keep node ids deterministic across runs. They are still guarded by a
         // descriptor equality check on deduplication, so collisions fail loudly.
         let mut hasher = StableNodeHasher::default();
-        self.hash(&mut hasher);
+        operator.hash(&mut hasher);
+        inputs.hash(&mut hasher);
+        output.hash(&mut hasher);
         NodeId(hasher.finish())
     }
 
@@ -2273,6 +2675,21 @@ impl NodeDescriptor {
                 },
             ),
             OpType::RecursiveStepWitness(_) => expect_arity(&self.inputs, 1),
+            OpType::Lookup(lookup) => {
+                expect_arity(&self.inputs, 1)?;
+                if lookup.key_descriptor != input_outputs[0] {
+                    return Err(GraphValidationError::JoinInputDescriptorMismatch);
+                }
+                for &field_idx in &lookup.key_fields {
+                    if field_idx >= input_outputs[0].fields().len() {
+                        return Err(GraphValidationError::FieldIndexOutOfBounds {
+                            index: field_idx,
+                            len: input_outputs[0].fields().len(),
+                        });
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -2365,6 +2782,9 @@ pub enum OpType {
     Join(JoinOp),
     SemiJoin(JoinOp),
     AntiJoin(JoinOp),
+    /// A table source probed by the keys of its only input
+    /// ([`GraphBuilder::Lookup`]).
+    Lookup(LookupOp),
     Union,
     Negate,
     Distinct,
@@ -2420,11 +2840,16 @@ pub enum NodeDurability {
 pub struct DurableStorage {
     pub column_family: String,
     pub key_prefix: Vec<u8>,
+    /// Human-readable name of the durable object, used in errors
+    /// (`table.index` for a schema index, whose key prefix is a numeric id).
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Retainer {
     Subscription(String),
+    /// Keeps a pending first-result graph alive, without demanding tick maintenance.
+    Hydration(String),
     PreparedShape(String),
     DurableSchemaObject(String),
 }
@@ -2482,6 +2907,36 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    // Internal: node identity must stay byte-identical to the derived descriptor
+    // hash, because ids are stable across runs; not observable via public APIs.
+    fn borrowed_part_identity_matches_the_derived_descriptor_hash() {
+        use std::hash::{Hash, Hasher};
+        let source = NodeDescriptor::new(
+            OpType::TableSource(TableSourceOp {
+                table: "albums".to_owned(),
+                scan: None,
+                variant_projection: None,
+            }),
+            [],
+            output(),
+        );
+        let parent = NodeDescriptor::new(source.operator.clone(), [source.node_id()], output());
+        for descriptor in [source, parent] {
+            let mut hasher = StableNodeHasher::default();
+            descriptor.hash(&mut hasher);
+            assert_eq!(descriptor.node_id(), NodeId(hasher.finish()));
+            assert_eq!(
+                NodeDescriptor::node_id_of(
+                    &descriptor.operator,
+                    &descriptor.inputs,
+                    &descriptor.output
+                ),
+                descriptor.node_id()
+            );
+        }
     }
 
     #[test]
@@ -2585,6 +3040,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "albums".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums".to_owned(),
                 },
             },
         );
@@ -2762,6 +3218,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "indices".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums.albums_by_title".to_owned(),
                 },
                 key_fields: vec![1],
                 unique: false,

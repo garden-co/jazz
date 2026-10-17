@@ -4,7 +4,7 @@ use super::*;
 use jazz::db::{StreamingMutationKind, StreamingValueUpload, WriteHandle};
 use std::cell::{Cell, RefCell};
 
-type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle<MemoryStorage>>>>>;
+type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle>>>>;
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
@@ -18,7 +18,7 @@ impl MutationHandles {
         self.uploads.borrow().len()
     }
 
-    pub(super) fn new(db: &Db<MemoryStorage>) -> Self {
+    pub(super) fn new(db: &Db) -> Self {
         let errors = Rc::new(RefCell::new(Vec::new()));
         let captured = Rc::clone(&errors);
         db.on_mutation_error(Rc::new(move |event| {
@@ -31,7 +31,7 @@ impl MutationHandles {
         }
     }
 
-    pub(super) fn close(&mut self, db: &Db<MemoryStorage>) -> Result<(), RelayError> {
+    pub(super) fn close(&mut self, db: &Db) -> Result<(), RelayError> {
         db.clear_mutation_error_callback();
         // Unfinished uploads exist solely in this foreground's MemoryStorage.
         // Closing drops its pending operations and Db; no unfinished scalar is
@@ -40,6 +40,10 @@ impl MutationHandles {
         self.writes.borrow_mut().clear();
         self.errors.borrow_mut().clear();
         Ok(())
+    }
+
+    pub(super) fn has_errors(&self) -> bool {
+        !self.errors.borrow().is_empty()
     }
 }
 
@@ -73,7 +77,7 @@ fn poll_write_state_once(
     }
 }
 
-fn register_write(writes: &Writes, write: WriteHandle<MemoryStorage>) -> TransactionId {
+fn register_write(writes: &Writes, write: WriteHandle) -> TransactionId {
     let id = TransactionId::from_committed_tx(write.mergeable_tx_id());
     writes.borrow_mut().insert(id, Rc::new(write));
     id
@@ -138,7 +142,17 @@ impl RelayWorker {
         };
         let updated_at_ms = options.updated_at_ms;
         let row_id = row_id.map(RowUuid::from_bytes);
+        let client_id = client;
         let client = self.foreground_client_mut(client)?;
+        // Synchronous class, as on NAPI and WASM: a closed Db and an unknown
+        // table. Everything decided by row state (including a resident
+        // tombstone) is discovered while applying and reaches the write handle.
+        client
+            .db
+            .precheck_mutation_admission(&table)
+            .map_err(RelayError::Db)?;
+        self.ensure_direct_mutation_capacity(client_id)?;
+        let client = self.foreground_client_mut(client_id)?;
         let write = match mutation {
             ForegroundMutationKind::Insert => client.db.enqueue_insert(
                 table,
@@ -206,15 +220,12 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
-        client.db.drive_queued_mutation_once();
-        if let Some(error) = client
-            .db
-            .take_queued_mutation_failure(write.mergeable_tx_id())
-        {
-            return Err(RelayError::Db(error));
-        }
+        // Applying, IVM and relay pumping happen in the owner drive turn that
+        // follows this command's reply, not while the JS caller waits.
         let row_id = write.row_uuid();
-        Ok((register_write(&client.mutations.writes, write), row_id))
+        let id = register_write(&client.mutations.writes, write);
+        self.drive.request(0);
+        Ok((id, row_id))
     }
 
     fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
@@ -225,6 +236,28 @@ impl RelayWorker {
             return Err(RelayError::ForegroundCommand(
                 "foreground operation capacity exceeded".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// The direct-mutation arm of the foreground capacity policy above.
+    /// Streaming operations are bounded by their retained futures; direct
+    /// mutations by the core owner queue they are admitted into. At the cap,
+    /// admission applies backpressure by applying queued work inline (the
+    /// calling JS turn pays for the excess of a burst), and rejects, admitting
+    /// nothing, only when the queue cannot make progress.
+    fn ensure_direct_mutation_capacity(&self, client: u64) -> Result<(), RelayError> {
+        let client = self.foreground_client(client)?;
+        let mut polls = 0;
+        while client.db.queued_mutation_count() >= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
+            if polls == NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS {
+                return Err(RelayError::ForegroundCommand(
+                    "backpressure: direct mutation queue is full; retry after the next native turn"
+                        .into(),
+                ));
+            }
+            client.db.drive_queued_mutation_once();
+            polls += 1;
         }
         Ok(())
     }

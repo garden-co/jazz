@@ -56,7 +56,7 @@ async fn remote_whole_json_row_matches_explicit_projection() {
             let (id, _, tx) = client
                 .insert("documents", row_input!("payload" => raw))
                 .expect("insert JSON document");
-            jazz_testkit::wait_for_edge_txs(&client, &[tx.expect("insert transaction")]).await;
+            jazz_testkit::wait_for_global_txs(&client, &[tx.expect("insert transaction")]).await;
             for query in [
                 jazz::query::Query::from("documents"),
                 jazz::query::Query::from("documents").select(["payload"]),

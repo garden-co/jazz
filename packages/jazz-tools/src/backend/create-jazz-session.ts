@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
@@ -34,10 +35,11 @@ import {
 } from "../web/create-jazz-client.js";
 import {
   JazzContext,
-  deterministicBytes,
   type BackendContextConfig,
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
+import { formatUuidAt } from "../runtime/hex.js";
 
 export type JazzSessionConfig = Omit<
   BackendContextConfig,
@@ -50,7 +52,7 @@ export type JazzSessionConfig = Omit<
   | "serverUrl"
 > & {
   app: BackendSchemaInput;
-  permissions?: BackendContextConfig["permissions"];
+  permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
   initial?: "local-first" | BackendAuth;
@@ -74,10 +76,10 @@ function uuidBytes(uuid: string): Uint8Array {
 function backendNodeId(config: JazzSessionConfig): string {
   if (config.driver.type === "memory") return randomUUID();
   // Preserve the existing persistent backend node identity across this API migration.
-  const hex = Buffer.from(
+  return formatUuidAt(
     deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.driver.dataPath}:node`),
-  ).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    0,
+  );
 }
 
 /** Each selected user opens an ordinary native client, never a backend facade. */
@@ -94,13 +96,13 @@ class NodeUserRuntimeSource extends RuntimeSource {
   }
   override createClient({ config, schema, onAuthFailure }: RuntimeClientContext): RuntimeClient {
     const declaredSchema = resolveSchemaSource(this.host.app);
-    if (serializeRuntimeSchema(declaredSchema) !== serializeRuntimeSchema(schema)) {
+    if (
+      serializeRuntimeSchema(mergePermissionsIntoWasmSchema(declaredSchema, {})) !==
+      serializeRuntimeSchema(mergePermissionsIntoWasmSchema(schema, {}))
+    ) {
       throw new Error("Node session query schema does not match its configured app");
     }
-    const runtimeSchema =
-      this.host.permissions && !Object.values(schema).some((table) => table.policies !== undefined)
-        ? mergePermissionsIntoWasmSchema(schema, this.host.permissions)
-        : schema;
+    const runtimeSchema = mergePermissionsIntoWasmSchema(schema, this.host.permissions);
     const trustedReservedSession = getTrustedReservedSession(config);
     const session = resolveClientInternalSessionSync({ ...config, trustedReservedSession });
     if (!session) throw new Error("Node user runtime requires an admitted account");
@@ -134,7 +136,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         readAuthorizationHost: "client-local",
       },
     );
-    const context: AppContext = { ...config, schema: runtimeSchema, tier: "local" };
+    const context: AppContext = { ...config, schema: runtimeSchema };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
   }
@@ -165,6 +167,11 @@ export async function createJazzSession(
       throw new Error(`Use session account actions instead of ${key}`);
   }
   if (!config.app) throw new Error("Node createJazzSession requires app");
+  if (config.permissions == null) {
+    throw new Error(
+      "createJazzSession requires an explicit permissions bundle. Pass {} to deny all access.",
+    );
+  }
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
   const memoryClocks = new WeakMap<AccountHandle, bigint | undefined>();
   const accounts = await prepareAccountManager({
@@ -175,14 +182,10 @@ export async function createJazzSession(
       mintLocalFirstToken(authSecretSeedForMinting(secret), audience, 3600),
     backend: {
       async admitBackend({ backendSecret }) {
-        const response = await fetch(`${registry.slice(0, -"/accounts".length)}/backend/admit`, {
-          method: "POST",
-          headers: { "X-Jazz-Backend-Secret": backendSecret },
-          redirect: "error",
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (response.status !== 204)
-          throw new Error(`Backend admission failed (${response.status})`);
+        await admitBackendSecret(
+          `${registry.slice(0, -"/accounts".length)}/backend/admit`,
+          backendSecret,
+        );
         return { nodeId: backendNodeId(config) };
       },
     },

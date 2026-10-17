@@ -1,5 +1,5 @@
-//! Deterministic permissioned-resource example: native Core → Edge → Client.
-//! Workload revision 1 preserves the historical shallow-history fixture.
+//! Deterministic permissioned-resource example: Core → device-local relay → Client.
+//! Workload revision 2 retains the shallow-history fixture with Core-only authority.
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 pub use alloc_metrics::CountingAllocator as SelectedAllocator;
 #[cfg(feature = "bench-alloc-sites")]
@@ -34,8 +34,8 @@ use jazz::tools::{
     TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::wire::{
-    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression, WireStreamDecoder,
-    WireStreamEncoder, compress_sync_payload, current_wire_features,
+    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression,
+    current_wire_features,
 };
 use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
 use jazz_sim::view_accounting::version_bundle_refs;
@@ -723,7 +723,7 @@ enum BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Node<BoxedStorage>,
+    core: Node,
     ordinary_user: RowUuid,
     visible_groups: BTreeSet<RowUuid>,
     table_rows: BTreeMap<String, Vec<RowUuid>>,
@@ -830,6 +830,8 @@ pub struct RunSummary {
 #[derive(Clone, Default)]
 struct AttributionSummary {
     phase_timing: JsonValue,
+    conversions: JsonValue,
+    table_writes: JsonValue,
     core_tick_ns: u64,
     relay_tick_ns: u64,
     client_tick_ns: u64,
@@ -861,6 +863,9 @@ struct AttributionSummary {
 
 #[derive(Clone, Default)]
 struct OperatorAttribution {
+    pipeline_calls: [u64; 2],
+    pipeline_input_records: [u64; 2],
+    pipeline_stage_visits: [u64; 2],
     map_buffer_capacity: u64,
     map_buffer_used: u64,
     map_calls: [u64; 2],
@@ -882,6 +887,12 @@ impl OperatorAttribution {
         self.map_buffer_capacity += after.map_buffer_capacity - before.map_buffer_capacity;
         self.map_buffer_used += after.map_buffer_used - before.map_buffer_used;
         for index in 0..2 {
+            self.pipeline_calls[index] +=
+                after.pipeline_calls[index] - before.pipeline_calls[index];
+            self.pipeline_input_records[index] +=
+                after.pipeline_input_records[index] - before.pipeline_input_records[index];
+            self.pipeline_stage_visits[index] +=
+                after.pipeline_stage_visits[index] - before.pipeline_stage_visits[index];
             self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
             self.map_input_records[index] +=
                 after.map_input_records[index] - before.map_input_records[index];
@@ -917,12 +928,12 @@ struct SubscriptionTimeline {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<BoxedStorage>,
+    db: Db,
 }
 
 struct DbClient {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<BoxedStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -966,7 +977,7 @@ impl SyncCapture {
                 view.supporting_rows.added_rows().len() + view.supporting_rows.removed_rows().len(),
             ),
             SyncMessage::CurrentRowsReceipt(receipt) => (&receipt.version_carriers, 0),
-            SyncMessage::CommitUnit { .. } | SyncMessage::AuthorityPublication(_) => panic!(
+            SyncMessage::CommitUnit { .. } => panic!(
                 "extend SQL capture for non-view version delivery before comparing this fixture"
             ),
             _ => return,
@@ -979,7 +990,7 @@ impl SyncCapture {
                     .collect::<BTreeMap<_, _>>();
                 json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
                     "schema": version.schema_version(), "branch": version.branch_key(),
-                    "parents": version.parents(), "cells": cells,
+                    "cells": cells,
                     "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
             }).collect::<Vec<_>>();
             json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),
@@ -1077,6 +1088,77 @@ impl ProbeAttribution {
     }
 }
 
+// Exercise the same persistent channel codec and bounded credit flow as live
+// traffic. Byte counts exclude outer frame metadata, matching the probe fields.
+struct ChannelCodec {
+    sender: jazz::wire::stream_backend::OrderedChannelBackend,
+    receiver: jazz::wire::stream_backend::OrderedChannelBackend,
+}
+
+impl ChannelCodec {
+    fn new(features: u64) -> Result<Self, String> {
+        let context =
+            jazz::wire::WireInboundContext::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, None);
+        Ok(Self {
+            sender: jazz::wire::stream_backend::OrderedChannelBackend::new(context.clone())?,
+            receiver: jazz::wire::stream_backend::OrderedChannelBackend::new(context)?,
+        })
+    }
+
+    fn round_trip(&mut self, payload: &[u8]) -> Result<(Vec<u8>, u64, u64, u64), String> {
+        self.sender
+            .enqueue(
+                1,
+                0,
+                jazz::wire::channels::ChannelClass::Writes,
+                payload.to_vec(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        let mut decoded = None;
+        let (mut bytes, mut encode_ns, mut decode_ns) = (0, 0, 0);
+        while self.sender.has_pending() {
+            let start = Instant::now();
+            let frame = self
+                .sender
+                .peek_outbound()?
+                .ok_or("loopback stalled despite returning credits")?;
+            self.sender.accept_outbound()?;
+            encode_ns += start.elapsed().as_nanos() as u64;
+            let start = Instant::now();
+            let jazz::wire::WireFrame::Channel(envelope) =
+                jazz::wire::decode_frame(&frame).map_err(|error| error.to_string())?
+            else {
+                return Err("expected channel extent".into());
+            };
+            bytes += envelope.extent.payload.len() as u64;
+            if let Some(message) = self.receiver.receive(envelope, frame.len())? {
+                decoded = Some(message.payload);
+            }
+            decode_ns += start.elapsed().as_nanos() as u64;
+            let credits = self.receiver.channel_credits();
+            let mut credits = credits.lock().unwrap();
+            while let Some(grant) = credits.peek_grant()? {
+                let jazz::wire::WireFrame::ChannelCredit(grant) =
+                    jazz::wire::decode_frame(&grant).map_err(|error| error.to_string())?
+                else {
+                    return Err("expected channel credit".into());
+                };
+                self.sender
+                    .channel_credits()
+                    .lock()
+                    .unwrap()
+                    .receive_credit(grant)?;
+                credits.accept_grant()?;
+            }
+        }
+        let decoded = decoded.ok_or("channel did not complete message")?;
+        if decoded != payload {
+            return Err("channel round trip changed payload".into());
+        }
+        Ok((decoded, bytes, encode_ns, decode_ns))
+    }
+}
+
 #[derive(Default)]
 struct CodecProbe {
     raw_bytes: u64,
@@ -1087,62 +1169,52 @@ struct CodecProbe {
     streaming_lz4_bytes: Option<u64>,
     streaming_lz4_encode_ns: u64,
     streaming_lz4_decode_ns: u64,
-    zstd_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
-    lz4_stream: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    zstd_stream: Option<ChannelCodec>,
+    lz4_stream: Option<ChannelCodec>,
 }
 
 impl CodecProbe {
     fn record(&mut self, payload: &[u8]) {
         self.raw_bytes += payload.len() as u64;
-        if let Ok((compressed, active)) =
-            compress_sync_payload(payload.to_vec(), FEATURE_PAYLOAD_ZSTD)
-        {
+        // Independent block compression remains a diagnostic comparison only;
+        // it is not an alternative Jazz wire path.
+        if let Ok(compressed) = zstd::bulk::compress(payload, 0) {
             *self.per_message_zstd_bytes.get_or_insert(0) += compressed.len() as u64;
-            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
         }
-        if self.zstd_stream.is_none()
-            && let (Ok(encoder), Ok(decoder)) = (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD),
-            )
-        {
-            self.zstd_stream = Some((encoder, decoder));
-            self.streaming_zstd_bytes = Some(0);
-        }
-        if let Some((encoder, decoder)) = &mut self.zstd_stream {
-            let encode_start = Instant::now();
-            if let Ok(chunk) = encoder.encode_message(payload) {
-                self.streaming_zstd_encode_ns += encode_start.elapsed().as_nanos() as u64;
-                *self.streaming_zstd_bytes.get_or_insert(0) += chunk.len() as u64;
-                let decode_start = Instant::now();
-                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_ZSTD);
-                self.streaming_zstd_decode_ns += decode_start.elapsed().as_nanos() as u64;
+        for (features, stream, bytes, encode_ns, decode_ns) in [
+            (
+                FEATURE_PAYLOAD_ZSTD,
+                &mut self.zstd_stream,
+                &mut self.streaming_zstd_bytes,
+                &mut self.streaming_zstd_encode_ns,
+                &mut self.streaming_zstd_decode_ns,
+            ),
+            (
+                FEATURE_PAYLOAD_LZ4,
+                &mut self.lz4_stream,
+                &mut self.streaming_lz4_bytes,
+                &mut self.streaming_lz4_encode_ns,
+                &mut self.streaming_lz4_decode_ns,
+            ),
+        ] {
+            if stream.is_none() {
+                *stream = ChannelCodec::new(features).ok();
             }
-        }
-        if self.lz4_stream.is_none()
-            && let (Ok(encoder), Ok(decoder)) = (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4),
-            )
-        {
-            self.lz4_stream = Some((encoder, decoder));
-            self.streaming_lz4_bytes = Some(0);
-        }
-        if let Some((encoder, decoder)) = &mut self.lz4_stream {
-            let encode_start = Instant::now();
-            if let Ok(chunk) = encoder.encode_message(payload) {
-                self.streaming_lz4_encode_ns += encode_start.elapsed().as_nanos() as u64;
-                *self.streaming_lz4_bytes.get_or_insert(0) += chunk.len() as u64;
-                let decode_start = Instant::now();
-                let _ = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4);
-                self.streaming_lz4_decode_ns += decode_start.elapsed().as_nanos() as u64;
+            if let Some(codec) = stream {
+                if let Ok((_, size, encoding, decoding)) = codec.round_trip(payload) {
+                    *bytes.get_or_insert(0) += size;
+                    *encode_ns += encoding;
+                    *decode_ns += decoding;
+                } else {
+                    *stream = None;
+                }
             }
         }
     }
 }
 
 struct DuplexTransport {
-    clean_wire: Option<(WireStreamEncoder, WireStreamDecoder)>,
+    clean_wire: Option<ChannelCodec>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     metrics: Rc<TransportMetrics>,
@@ -1197,18 +1269,11 @@ impl Transport for DuplexTransport {
                 .known_state_subscribes
                 .set(self.metrics.known_state_subscribes.get() + 1);
         }
-        let message = if let Some((encoder, decoder)) = &mut self.clean_wire {
+        let message = if let Some(codec) = &mut self.clean_wire {
             let bytes = jazz::wire::encode_sync_message(&message).expect("encode clean transport");
-            let bytes = encoder
-                .encode_message(&bytes)
-                .expect("compress clean transport");
-            self.metrics
-                .bytes
-                .set(self.metrics.bytes.get() + bytes.len() as u64);
-            let bytes = decoder
-                .decode_message(&bytes, FEATURE_PAYLOAD_ZSTD)
-                .expect("decompress clean transport");
-            jazz::wire::decode_sync_message(&bytes).expect("decode clean transport")
+            let (decoded, size, _, _) = codec.round_trip(&bytes).expect("channel clean transport");
+            self.metrics.bytes.set(self.metrics.bytes.get() + size);
+            jazz::wire::decode_sync_message(&decoded).expect("decode clean transport")
         } else {
             #[cfg(feature = "cold-settle-attribution")]
             let probe_start = Instant::now();
@@ -1242,14 +1307,7 @@ impl Transport for DuplexTransport {
 }
 
 fn duplex_counted(diagnostics: bool) -> CountedDuplex {
-    let wire = || {
-        (!diagnostics).then(|| {
-            (
-                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
-                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
-            )
-        })
-    };
+    let wire = || (!diagnostics).then(|| ChannelCodec::new(FEATURE_PAYLOAD_ZSTD).unwrap());
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
     let left_to_right = Rc::new(TransportMetrics::default());
@@ -1274,15 +1332,19 @@ fn duplex_counted(diagnostics: bool) -> CountedDuplex {
 }
 
 fn schema() -> JazzSchema {
+    // This fixture exposes supporting directories and grant rows to every reader;
+    // resource rows and their children retain the restricted policies below.
     let mut schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new(ORG)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .column("label", PublicColumnType::Text)
                 .column("created_at", PublicColumnType::Timestamp)
                 .column("settings", PublicColumnType::Text),
         )
         .table(
             TableSchemaBuilder::new(GROUP)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("org_id", ORG)
                 .column("label", PublicColumnType::Text)
                 .nullable_column("description", PublicColumnType::Text)
@@ -1291,12 +1353,14 @@ fn schema() -> JazzSchema {
         )
         .table(
             TableSchemaBuilder::new(GROUP_ACCESS)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("group_id", GROUP)
                 .column("user_id", PublicColumnType::Uuid)
                 .column("role", public_role_type("group_access_role")),
         )
         .table(
             TableSchemaBuilder::new(GROUP_ENTRY)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("member_id", GROUP)
                 .fk_column("target_id", GROUP)
                 .column("administrator", PublicColumnType::Boolean)
@@ -1304,6 +1368,7 @@ fn schema() -> JazzSchema {
         )
         .table(
             TableSchemaBuilder::new(PROFILE)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("group_id", GROUP)
                 .column("email", PublicColumnType::Text)
                 .column("display", PublicColumnType::Text)
@@ -1319,6 +1384,7 @@ fn schema() -> JazzSchema {
             .table(resource_table(spec.table).policies(TablePolicies::new().with_select(policy)));
         schema = schema.table(
             TableSchemaBuilder::new(&access_table)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("resource", spec.table)
                 .fk_column("team", GROUP)
                 .column(
@@ -1349,6 +1415,7 @@ fn schema() -> JazzSchema {
         let table = format!("empty_child_{child_slot}");
         schema = schema.table(
             TableSchemaBuilder::new(&table)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .column("parent_id", PublicColumnType::Uuid)
                 .column("label", PublicColumnType::Text)
                 .column("value_text", PublicColumnType::Text)
@@ -1410,6 +1477,12 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let seed_start = Instant::now();
     let plan = build_seed_plan(config);
     let cache_key = seed_cache_key(schema, config);
+    // Correctness tests run concurrently: never share a mutable seed cache.
+    #[cfg(test)]
+    let isolated_cache = tempfile::tempdir().unwrap();
+    #[cfg(test)]
+    let cache_dir = isolated_cache.path().join(&cache_key);
+    #[cfg(not(test))]
     let cache_dir = seed_cache_root().join(&cache_key);
     let fresh_seed = std::env::var_os("JAZZ_CUSTOMER_FRESH_SEED").is_some();
     let cache_hit = !fresh_seed && cache_dir.join(SEED_CACHE_READY).is_file();
@@ -1709,7 +1782,7 @@ fn export_sql_fixture(config: &Config, path: &std::path::Path) {
     .unwrap();
 }
 
-fn write_seed_plan(core: &Node<BoxedStorage>, plan: &SeedPlan) {
+fn write_seed_plan(core: &Node, plan: &SeedPlan) {
     for write in &plan.writes {
         seed_db(core, &write.table, write.row, write.cells.clone());
     }
@@ -1879,7 +1952,7 @@ fn run_cold(
     let relay = open_db_node(
         node(2),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::new(tempfile::tempdir().unwrap())),
     );
     let client = open_client_db(
@@ -1902,7 +1975,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1920,7 +1993,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorSubject::SYSTEM,
+        config.client_author(seeded),
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1931,9 +2004,15 @@ fn run_warm(
         None,
     );
     first = run_connect_and_subscribe("warm", seeded, relay, client, expected, config);
-    assert!(
-        first.relay_known_state_declared > 0,
-        "warm relay reconnect must declare known-state to core"
+    // A reopened relay resumes a row-local view from its durable "Q at W"
+    // watermark: the settled seq is stored, and the held set is exactly the
+    // persisted rows that match Q, so Core's catch-up from W is exact. Every
+    // policy-dependent view (recursive resource access, inherited children)
+    // must still reacquire its scope from Core with no declaration.
+    assert_eq!(
+        first.relay_known_state_declared,
+        row_local_subscription_tables().len() as u64,
+        "reopened relay must declare known state for exactly its row-local views"
     );
     first
 }
@@ -1951,6 +2030,7 @@ fn run_connect_and_subscribe(
         jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
+        jazz::groove::cold_settle_attribution::conversions::reset();
         if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
             eprintln!("ARRANGEMENT_CAPTURE_BEGIN\t{label}");
         }
@@ -1969,8 +2049,8 @@ fn run_connect_and_subscribe(
         eprintln!("SQL sync capture enabled: discard this run's timing");
         fs::create_dir_all(&root).unwrap();
         for (name, metrics) in [
-            ("core-edge", &relay_core.right_to_left),
-            ("edge-client", &client_relay.right_to_left),
+            ("core-relay", &relay_core.right_to_left),
+            ("relay-client", &client_relay.right_to_left),
         ] {
             let path = Path::new(&root).join(format!("{name}.jsonl"));
             *metrics.capture.borrow_mut() = Some(SyncCapture {
@@ -1986,9 +2066,14 @@ fn run_connect_and_subscribe(
         }
     }
     let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
-    let _core_sub = seeded
-        .core
-        .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
+    // Both hops belong to the same device reader. Core authorizes the scope;
+    // the local persistence relay forwards only its authorized input versions.
+    let _core_sub = seeded.core.accept_scope_isolated_relay_subscriber_for_test(
+        relay_core.right_transport,
+        config.client_author(seeded),
+        BTreeMap::new(),
+        1,
+    );
     let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
     let _relay_sub = relay
         .db
@@ -2053,9 +2138,13 @@ fn run_connect_and_subscribe(
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let core_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("core");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.core")
             .in_scope(|| block_on(seeded.core.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(seeded.core.tick()).unwrap();
         tick_wall_us[0] += core_tick_start.elapsed().as_micros();
@@ -2076,9 +2165,13 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let relay_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("relay");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.relay")
             .in_scope(|| block_on(relay.db.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(relay.db.tick()).unwrap();
         tick_wall_us[1] += relay_tick_start.elapsed().as_micros();
@@ -2099,9 +2192,13 @@ fn run_connect_and_subscribe(
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let client_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("client");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.client")
             .in_scope(|| block_on(client.db.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(client.db.tick()).unwrap();
         tick_wall_us[2] += client_tick_start.elapsed().as_micros();
@@ -2179,6 +2276,28 @@ fn run_connect_and_subscribe(
     #[cfg(feature = "cold-settle-attribution")]
     {
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
+        attribution.conversions = JsonValue::Array(
+            jazz::groove::cold_settle_attribution::conversions::snapshot()
+                .into_iter()
+                .map(|((role, site), work)| {
+                    json!({
+                        "role": role,
+                        "site": site,
+                        "calls": work.calls,
+                        "distinct_versions": work.distinct,
+                        "bytes": work.bytes,
+                    })
+                })
+                .collect(),
+        );
+        attribution.table_writes = JsonValue::Array(
+            jazz::groove::cold_settle_attribution::conversions::table_writes()
+                .into_iter()
+                .map(|((role, table), (writes, bytes))| {
+                    json!({"role": role, "table": table, "writes": writes, "bytes": bytes})
+                })
+                .collect(),
+        );
         if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
             path.push(format!(".{label}.json"));
             jazz_sim::phase_attribution::write_timeline(std::path::Path::new(&path))
@@ -2186,10 +2305,10 @@ fn run_connect_and_subscribe(
         }
     }
     if label == "warm" {
-        // Warm readiness is relay-local, but the benchmark also asserts that
-        // the hot relay declares known state when it reconnects upstream. Drive
-        // one post-readiness relay/core cycle so the queued coverage subscribe
-        // reaches the core without changing the client readiness condition.
+        // Drain a post-readiness relay/core cycle before inspecting reconnect
+        // diagnostics. Persisted rows and row-local "Q at W" watermarks
+        // survive reopening; every other known-state receipt does not, so the
+        // restarted relay must reacquire policy-dependent scope from Core.
         #[cfg(feature = "cold-settle-attribution")]
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
@@ -2256,6 +2375,10 @@ fn run_connect_and_subscribe(
             )
         })
         .unwrap_or_default();
+    let actual_rows = subscriptions
+        .iter()
+        .map(|sub| (sub.name.clone(), sub.rows.clone()))
+        .collect();
     let timelines = subscriptions
         .into_iter()
         .map(|sub| SubscriptionTimeline {
@@ -2357,7 +2480,7 @@ fn run_connect_and_subscribe(
     }
     RunSummary {
         _keepalive: None,
-        actual_rows: BTreeMap::new(),
+        actual_rows,
         expected_rows_by_table: None,
         tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
@@ -2520,7 +2643,30 @@ fn subscription_tables() -> Vec<String> {
     tables
 }
 
-fn seed_db(core: &Node<BoxedStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+/// Subscribed tables whose select policy is `PolicyExpr::True`, so their
+/// views are row-local: membership depends only on each row's own image.
+/// Mirrors `schema()`; the resource tables and their inheriting children are
+/// policy-dependent and excluded.
+fn row_local_subscription_tables() -> Vec<String> {
+    let mut tables = vec![
+        ORG.to_owned(),
+        GROUP.to_owned(),
+        GROUP_ACCESS.to_owned(),
+        GROUP_ENTRY.to_owned(),
+        PROFILE.to_owned(),
+    ];
+    tables.extend(RESOURCE_SPECS.iter().map(|spec| spec.access_table()));
+    let child_tables = RESOURCE_SPECS
+        .iter()
+        .filter(|spec| spec.child_rows.is_some())
+        .count();
+    tables.extend((child_tables..CHILD_TABLES).map(|slot| format!("empty_child_{slot}")));
+    let subscribed = subscription_tables();
+    assert!(tables.iter().all(|table| subscribed.contains(table)));
+    tables
+}
+
+fn seed_db(core: &Node, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
     let mut node = block_on(node.lock());
     let (tx_id, _) = jazz_sim::fixture::commit_mergeable_unit_settled(
@@ -2542,7 +2688,7 @@ fn open_db_node(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "edge");
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "relay");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2553,6 +2699,7 @@ fn open_db_node(
         id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node_uuid)))),
     }))
     .unwrap();
+    db.set_relay_authority_session_owner_for_test();
     DbNode { _dir: dir, db }
 }
 
@@ -2834,9 +2981,14 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert("workload_revision".to_owned(), json!(2));
+    fields.insert(
+        "topology".to_owned(),
+        json!("core-device-local-relay-client"),
+    );
     fields.insert("storage_mode".to_owned(), json!(storage_mode()));
     fields.insert(
-        "node_tick_wall_us_core_edge_client".to_owned(),
+        "node_tick_wall_us_core_relay_client".to_owned(),
         json!(summary.tick_wall_us),
     );
     fields.insert(
@@ -3155,8 +3307,21 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "settle_phase_timing".to_owned(),
         attribution.phase_timing.clone(),
     );
+    fields.insert(
+        "representation_conversions".to_owned(),
+        attribution.conversions.clone(),
+    );
+    fields.insert(
+        "physical_table_writes".to_owned(),
+        attribution.table_writes.clone(),
+    );
     let operator_json = |operators: &OperatorAttribution| {
         json!({
+            "fused_pipeline": {
+                "calls": operators.pipeline_calls,
+                "input_records": operators.pipeline_input_records,
+                "row_stage_visits": operators.pipeline_stage_visits,
+            },
             "map_project": {
                 "calls": operators.map_calls,
                 "new_buffer_capacity_bytes": operators.map_buffer_capacity,
@@ -3252,32 +3417,19 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
         };
     };
     let raw_payload = Some(bytes.clone());
-    let features = current_wire_features();
-    let encode_start = Instant::now();
-    let compressed = compress_sync_payload(bytes, features);
-    let encode_ns = encode_start.elapsed().as_nanos() as u64;
-    match compressed {
-        Ok((compressed, active)) => {
-            let decode_start = Instant::now();
-            let _ = jazz::wire::decompress_sync_payload(&compressed, active);
-            let decode_ns = decode_start.elapsed().as_nanos() as u64;
-            EncodedMessageMeasurement {
-                bytes: compressed.len() as u64,
-                #[cfg(feature = "cold-settle-attribution")]
-                serialize_ns,
-                compress_encode_ns: encode_ns,
-                compress_decode_ns: decode_ns,
-                raw_payload,
-            }
-        }
-        Err(_) => EncodedMessageMeasurement {
-            bytes: 0,
-            #[cfg(feature = "cold-settle-attribution")]
-            serialize_ns,
-            compress_encode_ns: encode_ns,
-            compress_decode_ns: 0,
-            raw_payload,
-        },
+    let result =
+        ChannelCodec::new(current_wire_features()).and_then(|mut codec| codec.round_trip(&bytes));
+    let (size, encode_ns, decode_ns) = match result {
+        Ok((_, size, encode_ns, decode_ns)) => (size, encode_ns, decode_ns),
+        Err(_) => (0, 0, 0),
+    };
+    EncodedMessageMeasurement {
+        bytes: size,
+        #[cfg(feature = "cold-settle-attribution")]
+        serialize_ns,
+        compress_encode_ns: encode_ns,
+        compress_decode_ns: decode_ns,
+        raw_payload,
     }
 }
 
@@ -3451,5 +3603,60 @@ mod tests {
         let result = fixture.first_sync();
         result.verify();
         assert!(result.rows() > 0);
+    }
+
+    #[test]
+    fn device_local_relay_preserves_exact_scope_after_reopen() {
+        let mut fixture = Fixture::new(0.01);
+        fixture.config.diagnostics = true;
+        let mut result = run_warm(
+            &fixture.schema,
+            &fixture.seeded,
+            &fixture.expected,
+            &fixture.config,
+        );
+        result.expected_rows_by_table = Some(Rc::clone(&fixture.expected_rows_by_table));
+        result.verify();
+    }
+
+    #[test]
+    fn device_local_relay_does_not_grant_unrelated_reader_member_access() {
+        let mut fixture = Fixture::new(0.01);
+        let member_rows = fixture.expected.values().sum::<usize>();
+        fixture.config.identity = BenchIdentity::Spy;
+        fixture.expected = expected_visible_counts(&fixture.seeded, BenchIdentity::Spy);
+        let mut expected = expected_visible_rows(&fixture.seeded, BenchIdentity::Spy);
+        let tables = subscription_tables();
+        expected.retain(|table, _| tables.contains(table));
+        fixture.expected_rows_by_table = Rc::new(expected);
+        let result = fixture.first_sync();
+        result.verify();
+        assert!(result.rows() < member_rows);
+    }
+}
+
+/// Alice's benchmark transport delivers several messages to Bob through one
+/// persistent channel, including an incompressible message larger than its
+/// physical credit window. This checks the benchmark adapter's byte plumbing;
+/// application-level query tests cannot observe its credit exchange.
+#[cfg(test)]
+#[test]
+fn channel_codec_preserves_messages_across_credit_windows() {
+    let mut codec = ChannelCodec::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+    let mut state = 0x1234_5678_9abc_def0_u64;
+    let large = (0..5 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect::<Vec<_>>();
+    for payload in [b"first".as_slice(), large.as_slice(), b"last"] {
+        let (decoded, encoded, _, _) = codec.round_trip(payload).unwrap();
+        assert_eq!(decoded, payload);
+        if payload.len() == large.len() {
+            assert!(encoded > 4 * 1024 * 1024);
+        }
     }
 }

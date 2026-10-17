@@ -2,6 +2,223 @@
 
 use super::*;
 
+/// Readiness belongs to a receiver, not to global idleness or the fact that
+/// some earlier empty snapshot was delivered. Controlled storage makes the
+/// cold boundary deterministic; all assertions use the Database API.
+#[futures_test::test]
+async fn subscription_progress_tracks_cold_hydration_without_blocking_a_warm_sibling() {
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::U64(1), Value::String("cold".into())],
+    );
+    seed.insert("artists", vec![Value::U64(1), Value::String("warm".into())]);
+    database.commit_batch(seed).await.unwrap();
+    let warm = database
+        .subscribe_one_sink(GraphBuilder::table("artists"))
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&warm),
+        [(vec![Value::U64(1), Value::String("warm".into())], 1)]
+    );
+    assert!(!database.subscription_has_pending_progress(warm.id()));
+
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let cold = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    database.drive_ready_progress().await.unwrap();
+    assert!(database.has_pending_progress());
+    assert!(database.subscription_has_pending_progress(cold.id()));
+    assert!(!database.subscription_has_pending_progress(warm.id()));
+    assert!(cold.try_recv().is_err());
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    database.drive_progress().await.unwrap();
+    assert!(!database.subscription_has_pending_progress(cold.id()));
+    assert_eq!(
+        expect_try_recv_vals(&cold),
+        [(
+            vec![Value::U64(1), Value::U64(1), Value::String("cold".into())],
+            1
+        )]
+    );
+    assert!(database.unsubscribe(cold.id()));
+    assert!(
+        database.subscription_has_pending_progress(cold.id()),
+        "a retired ID proves no readiness"
+    );
+    assert!(!database.subscription_has_pending_progress(warm.id()));
+}
+
+/// A finished evaluation may still owe a durable notification to its receiver.
+#[futures_test::test]
+async fn subscription_progress_includes_undelivered_durable_notifications() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().unwrap().is_empty());
+    assert!(!database.subscription_has_pending_progress(subscription.id()));
+    let row = vec![Value::U64(1), Value::String("durable".into())];
+    let mut batch = database.open_batch();
+    batch.insert("albums", row.clone());
+    batch.deliver_notifications(NotificationTiming::AfterPersistence);
+    let applied = database.apply_batch(batch).await.unwrap();
+    assert!(
+        !database.has_pending_progress(),
+        "evaluation itself has completed"
+    );
+    assert!(
+        database.subscription_has_pending_progress(subscription.id()),
+        "computed is not delivered"
+    );
+    assert!(subscription.try_recv().is_err());
+    database
+        .finish_persistence(applied.persist().await)
+        .unwrap();
+    assert!(!database.subscription_has_pending_progress(subscription.id()));
+    assert_eq!(expect_try_recv_vals(&subscription), [(row, 1)]);
+}
+
+/// Reusing graph wiring must not reuse yesterday's readiness or row values.
+/// A union with the same input twice also checks dependency-edge multiplicity.
+#[futures_test::test]
+async fn reusable_execution_layout_keeps_each_write_and_subscription_fresh() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut db = Database::new(albums_schema(), storage).await.unwrap();
+    let twice = GraphBuilder::union([GraphBuilder::table("albums"), GraphBuilder::table("albums")]);
+    let alice = db.subscribe_one_sink(twice.clone()).await.unwrap();
+    let bob = db.subscribe_one_sink(twice.clone()).await.unwrap();
+    assert!(alice.try_recv().unwrap().is_empty());
+    assert!(bob.try_recv().unwrap().is_empty());
+
+    let mut previous: Option<Vec<Value>> = None;
+    let mut warm_stats = None;
+    for version in 0..8 {
+        let row = vec![Value::U64(1), Value::String(format!("version-{version}"))];
+        let mut batch = db.open_batch();
+        if previous.is_none() {
+            batch.insert("albums", row.clone());
+        } else {
+            batch.update("albums", row.clone());
+        }
+        db.commit_batch(batch).await.unwrap();
+        let mut expected = Vec::new();
+        if let Some(old) = previous.take() {
+            expected.push((old.clone(), -1));
+            expected.push((old, -1));
+        }
+        expected.push((row.clone(), 1));
+        expected.push((row.clone(), 1));
+        assert_eq!(expect_try_recv_vals(&alice), expected);
+        assert_eq!(expect_try_recv_vals(&bob), expected);
+        let stats = db.execution_layout_stats();
+        if let Some((builds, hits)) = warm_stats {
+            assert_eq!(stats.builds, builds, "unchanged graph reuses its layouts");
+            assert!(stats.hits > hits);
+        }
+        warm_stats = Some((stats.builds, stats.hits));
+        previous = Some(row);
+    }
+
+    // Retiring one consumer cannot retire the other consumer's shared graph.
+    assert!(db.unsubscribe(alice.id()));
+    let mut batch = db.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(1));
+    db.commit_batch(batch).await.unwrap();
+    let removed = previous.unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&bob),
+        [(removed.clone(), -1), (removed, -1)]
+    );
+    assert!(db.unsubscribe(bob.id()));
+
+    // After all consumers leave, a new subscription sees current empty state,
+    // not readiness/results from either previously installed evaluation.
+    let carol = db.subscribe_one_sink(twice).await.unwrap();
+    assert!(carol.try_recv().unwrap().is_empty());
+    let row = vec![Value::U64(2), Value::String("new".into())];
+    let mut batch = db.open_batch();
+    batch.insert("albums", row.clone());
+    db.commit_batch(batch).await.unwrap();
+    assert_eq!(expect_try_recv_vals(&carol), [(row.clone(), 1), (row, 1)]);
+}
+
+/// Alice cancels or completes a cold first-result read while Bob waits on the
+/// same source. Releasing Alice must unblock Bob without retiring his graph.
+/// cold read -> live attach -> cancel/complete -> Bob receives seed -> write -> delta.
+#[futures_test::test]
+async fn first_result_cold_completion_and_cancellation_preserve_live_successors() {
+    use crate::db::SubscriptionLifetime;
+
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+        let mut db = Database::new(albums_artists_schema(), storage.clone())
+            .await
+            .unwrap();
+        let seed = vec![Value::U64(1), Value::U64(1), Value::String("seed".into())];
+        let mut batch = db.open_batch();
+        batch.insert("albums", seed.clone());
+        db.commit_batch(batch).await.unwrap();
+        storage.evict_all();
+        control.pause_on(TestStorageOperation::ScanOpen);
+        let alice = db
+            .subscribe_with_lifetime(
+                [("albums", GraphBuilder::table("albums"))],
+                SubscriptionLifetime::FirstResult,
+                None,
+            )
+            .unwrap();
+        let bob = db
+            .subscribe_one_sink(GraphBuilder::table("albums"))
+            .await
+            .unwrap();
+        assert!(db.has_pending_progress());
+        if cancel {
+            assert!(db.unsubscribe(alice.id()));
+        }
+        control.resume_operation(TestStorageOperation::ScanOpen);
+        for _ in 0..64 {
+            db.drive_ready_progress().await.unwrap();
+            if !db.has_pending_progress() {
+                break;
+            }
+        }
+        assert!(!db.has_pending_progress());
+        if !cancel {
+            assert_eq!(
+                alice.try_recv().unwrap().sinks["albums"]
+                    .to_values()
+                    .unwrap(),
+                [(seed.clone(), 1)]
+            );
+        }
+        assert!(matches!(alice.try_recv(), Err(TryRecvError::Disconnected)));
+        assert_eq!(bob.try_recv().unwrap().to_values().unwrap(), [(seed, 1)]);
+        let added = vec![Value::U64(2), Value::U64(1), Value::String("later".into())];
+        let mut batch = db.open_batch();
+        batch.insert("albums", added.clone());
+        db.commit_batch(batch).await.unwrap();
+        for _ in 0..64 {
+            db.drive_ready_progress().await.unwrap();
+            if !db.has_pending_progress() {
+                break;
+            }
+        }
+        assert_eq!(bob.try_recv().unwrap().to_values().unwrap(), [(added, 1)]);
+    }
+}
+
 /// A non-blocking owner turn must leave a real wake route behind for cold
 /// hydration. Merely noticing pending work on a later manually-driven tick is
 /// insufficient for event-driven hosts: no unrelated transport activity is
@@ -174,6 +391,107 @@ async fn cold_subscription_open_retains_the_supplied_owner_waker() {
     assert!(
         subscription.try_recv().is_ok(),
         "the resumed subscription publishes its seeded snapshot"
+    );
+}
+
+/// A later direct opening (a one-shot read or an authorization check in a
+/// worker) polls the runtime with its own transient waker. Leaf futures keep
+/// only their latest poller's waker, so without the owner bridge that poll
+/// took over an older cold hydration's continuation: once storage became
+/// ready nobody was woken and every later owner turn queued behind the stalled
+/// hydration (#3816).
+#[futures_test::test]
+async fn direct_opening_keeps_the_owner_wake_of_an_earlier_cold_hydration() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    control.wake_latest_poller_only();
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("owner wake album".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("direct artist".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let albums = database
+        .subscribe_with_waker(
+            [("albums", GraphBuilder::table("albums"))],
+            Some(&owner_waker),
+        )
+        .unwrap();
+    for _ in 0..8 {
+        if control.observed().contains(&TestStorageOperation::ScanOpen) {
+            break;
+        }
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+    }
+    // One more owner turn attaches the owner's waker to the paused scan.
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+
+    let artists = database
+        .subscribe_one_sink(GraphBuilder::table("artists"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+
+    let wakes_before_resume = wakes.0.load(Ordering::Acquire);
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(
+        wakes.0.load(Ordering::Acquire) > wakes_before_resume,
+        "the resumed cold hydration still wakes its runtime owner after a direct opening polled it"
+    );
+
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert!(albums.try_recv().is_ok(), "the cold hydration completes");
+    assert_eq!(
+        expect_try_recv_vals(&artists),
+        [(
+            vec![Value::U64(1), Value::String("direct artist".to_owned())],
+            1
+        )]
     );
 }
 
@@ -2001,6 +2319,278 @@ async fn input_source_deltas_are_atomic_and_proportional_to_changed_records() {
     );
 }
 
+/// Shared arrangements are advanced by their producer, while four distinct
+/// consumers independently publish the same atomic left/right transition.
+#[futures_test::test]
+async fn shared_arrangement_transitions_preserve_all_consumers_and_simultaneous_changes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]).unwrap())
+        .await
+        .unwrap();
+    let ld = RecordDescriptor::new([("id", ColumnType::U64), ("key", ColumnType::U64)]);
+    let rd = RecordDescriptor::new([("key", ColumnType::U64)]);
+    let left = database.allocate_input_source(ld);
+    let right_a = database.allocate_input_source(rd);
+    let right_b = database.allocate_input_source(rd);
+    let mut antis = Vec::new();
+    let mut semis = Vec::new();
+    for right in [right_a, right_b] {
+        let l = GraphBuilder::input_source(left, ld);
+        let r = GraphBuilder::input_source(right, rd);
+        antis.push(
+            database
+                .subscribe_one_sink(GraphBuilder::anti_join(
+                    l.clone(),
+                    r.clone(),
+                    ["key"],
+                    ["key"],
+                ))
+                .await
+                .unwrap(),
+        );
+        semis.push(
+            database
+                .subscribe_one_sink(GraphBuilder::semi_join(l, r, ["key"], ["key"]))
+                .await
+                .unwrap(),
+        );
+    }
+    for subscription in antis.iter().chain(&semis) {
+        assert!(subscription.recv().unwrap().is_empty());
+    }
+    let row = |id| ld.create(&[Value::U64(id), Value::U64(7)]).unwrap();
+    let expected = |id, weight| (vec![Value::U64(id), Value::U64(7)], weight);
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: left,
+            descriptor: ld,
+            adds: vec![row(1), row(2)],
+            removes: vec![],
+        }])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(1, 1), expected(2, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert!(subscription.try_recv().is_err());
+    }
+
+    // Visibility is unchanged: only the changed records may be published.
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: left,
+            descriptor: ld,
+            adds: vec![row(3)],
+            removes: vec![row(1)],
+        }])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(1, -1), expected(3, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert!(subscription.try_recv().is_err());
+    }
+
+    let blocker = rd.create(&[Value::U64(7)]).unwrap();
+    database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: right_b,
+                descriptor: rd,
+                adds: vec![blocker.clone()],
+                removes: vec![],
+            },
+            InputSourceDelta {
+                id: left,
+                descriptor: ld,
+                adds: vec![row(4)],
+                removes: vec![row(2)],
+            },
+            InputSourceDelta {
+                id: right_a,
+                descriptor: rd,
+                adds: vec![blocker.clone()],
+                removes: vec![],
+            },
+        ])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(2, -1), expected(3, -1)]
+        );
+    }
+    for subscription in &semis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, 1), expected(4, 1)]
+        );
+    }
+
+    database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: right_a,
+                descriptor: rd,
+                adds: vec![],
+                removes: vec![blocker.clone()],
+            },
+            InputSourceDelta {
+                id: right_b,
+                descriptor: rd,
+                adds: vec![],
+                removes: vec![blocker],
+            },
+        ])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, 1), expected(4, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, -1), expected(4, -1)]
+        );
+    }
+}
+
+/// Consumers may decode different columns without changing the shared
+/// arrangement's record identity when reconstructing previous input rows.
+#[futures_test::test]
+async fn shared_arrangement_keeps_large_value_identity_across_aggregate_updates() {
+    use bytes::Bytes;
+    struct Resolver(std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>);
+    impl crate::chunks::MissingChunkResolver for Resolver {
+        fn resolve(
+            &self,
+            request: crate::chunks::ChunkRequest,
+        ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+            Box::pin(async move {
+                self.0
+                    .get(&request)
+                    .cloned()
+                    .ok_or(crate::chunks::ChunkError::Unavailable)
+            })
+        }
+    }
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_auto_direct_family_enabled(false);
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let text = "a".repeat(crate::large_values::INLINE_VALUE_MAX_BYTES * 2);
+    let prepared =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::String, text.as_bytes())
+            .unwrap();
+    database.set_missing_chunk_resolver(Rc::new(Resolver(
+        prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    crate::chunks::ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect(),
+    )));
+    let descriptor =
+        RecordDescriptor::new([("id", ColumnType::U64), ("payload", ColumnType::String)]);
+    let source = database.allocate_input_source(descriptor);
+    let make_graph = |count_rows: bool| {
+        GraphBuilder::aggregate(
+            GraphBuilder::input_source(source, descriptor),
+            Vec::<String>::new(),
+            [AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: (!count_rows).then(|| PlanExpr::Field("payload".into())),
+                distinct: false,
+                output_name: Some("count".into()),
+                output_identity: None,
+            }],
+        )
+    };
+    let count = database
+        .subscribe_one_sink(make_graph(false))
+        .await
+        .unwrap();
+    assert_eq!(expect_recv_vals(&count), [(vec![Value::U64(0)], 1)]);
+    let rows = database.subscribe_one_sink(make_graph(true)).await.unwrap();
+    assert_eq!(expect_recv_vals(&rows), [(vec![Value::U64(0)], 1)]);
+    let row = |id| {
+        descriptor
+            .create(&[
+                Value::U64(id),
+                Value::Large(Box::new(prepared.value_ref.clone())),
+            ])
+            .unwrap()
+    };
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![row(1), row(2)],
+            removes: vec![],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&count),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(2)], 1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&rows),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(2)], 1)]
+    );
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![],
+            removes: vec![row(1)],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&count),
+        [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], -1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&rows),
+        [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], -1)]
+    );
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![],
+            removes: vec![row(2)],
+        }])
+        .await
+        .unwrap();
+    for subscription in [&count, &rows] {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [(vec![Value::U64(0)], 1), (vec![Value::U64(1)], -1)]
+        );
+    }
+}
+
 /// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
 /// graph so direct queries, maintained subscriptions, and runtime-owned
 /// covered inputs all observe the same identity transition; no caller creates
@@ -2422,6 +3012,7 @@ async fn input_source_retirement_rejects_foreign_runtime_identity() {
     ));
 }
 
+mod incremental_attach;
 mod parameters;
 mod prepared;
 
@@ -2497,6 +3088,7 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
         ready: Rc::clone(&ready),
     }));
     let graph = GraphBuilder::table("objects").streaming_checksum("payload", "checksum", 64, 64);
+    let baseline = database.ivm_runtime.stats().graph_nodes;
     let old = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(old.recv().unwrap().is_empty());
 
@@ -2548,11 +3140,18 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
         "one subscription owns one checksum node"
     );
     let checksum_node = checksum_nodes[0];
+    let subscribed = database.ivm_runtime.stats().graph_nodes;
+    assert!(subscribed > baseline);
 
     assert!(database.unsubscribe(old.id()));
     assert!(
         database.ivm_runtime.graph().node(checksum_node).is_some(),
         "a parked incremental evaluation retains its checksum graph node after its final subscriber stops"
+    );
+    assert_eq!(
+        database.ivm_runtime.stats().graph_nodes,
+        subscribed,
+        "queued work keeps its whole input slice, not just the node it parked on"
     );
     ready.set(true);
     database.drive_progress().await.unwrap();
@@ -2560,5 +3159,10 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
     assert!(
         database.ivm_runtime.graph().node(checksum_node).is_none(),
         "the checksum node is reclaimed once its parked evaluation drains"
+    );
+    assert_eq!(
+        database.ivm_runtime.stats().graph_nodes,
+        baseline,
+        "draining the queue releases the whole slice"
     );
 }

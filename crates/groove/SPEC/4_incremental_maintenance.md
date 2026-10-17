@@ -154,6 +154,23 @@ serializing a rendered list is cheap. The output-size work must be pinned by an
 explicit scale canary before this target becomes `now`; observational
 equivalence alone does not establish the mechanism law.
 
+**Root terminal ranks.** The root collector's public-order and emitted-identity
+indexes use in-memory path-copying balanced trees. A private edit copies only
+the affected search paths; untouched key bytes and subtrees remain shared with
+the predecessor. Payload-only edits preserve both index roots. These are
+collector bookkeeping indexes, not a new durable arrangement or wire encoding.
+
+Positional terminal edits address the sequence after preceding edits in the
+same batch. Remove departed roots first. For each retained root whose order key
+changes, remove its old key, rank the replacement among the current keys, and
+insert it before emitting its move. Unprocessed roots still carry their old
+keys. Insert new roots against that same incrementally updated index. Thus
+mixed moves and inserts do not need complete sequence or position-map copies;
+two valid edit sequences need not use identical intermediate indices. Only
+actually emitted occurrences contribute to ranks; negative maintenance state
+and never-emitted groups remain excluded. This does not change finite-window
+selection, occurrence identity/tie-breaking, or snapshot isolation.
+
 ### 4.3 Arrangements: shared, logically-timed state
 
 Arrangements are shared indexes for incrementally maintaining joins,

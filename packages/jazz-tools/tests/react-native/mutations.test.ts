@@ -8,7 +8,7 @@ const app = schema.defineApp({
 
 describe("React Native public mutations through the real foreground C ABI", () => {
   it("keeps omitted cells, rejects tombstone upserts, and restores replacement content", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const row = await db
         .insert(app.documents, { title: "original", done: false })
@@ -72,13 +72,18 @@ describe("React Native public mutations through the real foreground C ABI", () =
       });
       await db.delete(app.documents, row.id).wait({ tier: "local" });
       expect(await db.all(app.documents)).toEqual([]);
-      // Native bindings can reject local admission synchronously; the row
-      // remains tombstoned at either the setup or settlement boundary.
-      await expect(async () =>
-        db
-          .upsert(app.documents, row.id, { title: "must stay hidden", done: false })
-          .wait({ tier: "local" }),
-      ).rejects.toThrow(`row already deleted: ${row.id}`);
+      // Row-state failures never throw from the call (#3273, decision (b)):
+      // the write handle rejects, and the row stays tombstoned.
+      let tombstoneUpsert: ReturnType<typeof db.upsert> | undefined;
+      expect(() => {
+        tombstoneUpsert = db.upsert(app.documents, row.id, {
+          title: "must stay hidden",
+          done: false,
+        });
+      }).not.toThrow();
+      await expect(tombstoneUpsert!.wait({ tier: "local" })).rejects.toThrow(
+        `row already deleted: ${row.id}`,
+      );
       expect(await db.all(app.documents)).toEqual([]);
       await db
         .restore(app.documents, row.id, { title: "restored", done: false })
@@ -88,7 +93,7 @@ describe("React Native public mutations through the real foreground C ABI", () =
   });
 
   it("preserves caller timestamps across insert, update, upsert, and restore", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const start = 1_704_067_200_123;
       const row = await db
@@ -114,7 +119,7 @@ describe("React Native public mutations through the real foreground C ABI", () =
 });
 
 it("streams inserts, updates, and upserts through the core upload sink", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const inserted = await db.insertStreaming(app.documents, {
       title: (async function* () {
@@ -152,7 +157,7 @@ it("streams inserts, updates, and upserts through the core upload sink", async (
 });
 
 it("aborts a failed stream without publishing partial rows and allows the next upload", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     await expect(
       db.insertStreaming(app.documents, {
@@ -189,7 +194,7 @@ it("applies typed text, bytes, and JSON diffs atomically with replacement cells"
       {},
     ),
   });
-  await withNativeRelayFixture(rich, async (fixture) => {
+  await withNativeRelayFixture(rich, {}, async (fixture) => {
     const db = await fixture.createDb();
     const prefix = "a".repeat(70_000);
     const payload = new Uint8Array(70_006).fill(7);
@@ -256,7 +261,7 @@ it("applies typed text, bytes, and JSON diffs atomically with replacement cells"
 });
 
 it("settles an empty standalone update without changing the row", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db
       .insert(app.documents, { title: "unchanged", done: false })
@@ -273,7 +278,7 @@ it("preserves branch head/base targets and restores only the selected head", asy
       .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
       .branchBy("branch"),
   });
-  await withNativeRelayFixture(branches, async (fixture) => {
+  await withNativeRelayFixture(branches, {}, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db
       .insert(

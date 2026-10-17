@@ -68,7 +68,7 @@ jobs:
           set +e
           started="$(date -u +%FT%TZ)"
           timeout --kill-after=30s "${PRECOMPILE_TIMEOUT_SECONDS}s" \
-            cargo test -p jazz --lib --no-default-features \
+            cargo test -p jazz-node --lib --no-default-features \
               --features testing,transport-compression-zstd --no-run \
             >"$SOAK_DIR/precompile.log" 2>&1
           status=$?
@@ -154,7 +154,7 @@ jobs:
               const key = `continuous-simulation-soak:${f.suite}:${f.seed}:${c.sync_commits}:${c.differential_steps}:${c.churn_depths}:${c.effective_timeout_seconds}`, marker = `<!-- ${key} -->`;
               const env = f.suite === "sync" ? `JAZZ_SEED=${f.seed} JAZZ_COMMIT_COUNT=${c.sync_commits}` : `JAZZ_SEED=${f.seed} JAZZ_DIFFERENTIAL_STEP_COUNT=${c.differential_steps} JAZZ_DIFFERENTIAL_CHURN_DEPTHS=${c.churn_depths}`;
               const test = f.suite === "sync" ? "node::tests::sync::convergence_and_fates::m3_seeded_sync_interleavings_converge_against_oracle -- --exact" : "node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored";
-                const replay = f.suite === "soak" ? "Re-run the trusted workflow with a larger bounded budget." : f.suite === "precompile" ? "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target} timeout --kill-after=30s 900s cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run" : `CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${c.effective_timeout_seconds}s env ${env} cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd ${test}`;
+                const replay = f.suite === "soak" ? "Re-run the trusted workflow with a larger bounded budget." : f.suite === "precompile" ? "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target} timeout --kill-after=30s 900s cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run" : `CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${c.effective_timeout_seconds}s env ${env} cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd ${test}`;
               const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`, body = `🤖 Nightly simulation soak failed.\n${marker}\n\nSHA: \`${sha}\`\nResult: \`${f.status}\`\n\nReplay:\n\`\`\`sh\n${replay}\n\`\`\`\n\n[Run](${url}) · [Artifacts](${url}#artifacts)`;
               const existing = issues.find(i => i.body?.includes(marker));
               if (existing) await github.rest.issues.update({ ...context.repo, issue_number: existing.number, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body, state: "open" }); else await github.rest.issues.create({ ...context.repo, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body });

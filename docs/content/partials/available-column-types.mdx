@@ -24,3 +24,5 @@ native engine. Use `s.float()` when a wider or fractional numeric range is requi
 > **JSON columns are atomic.** The entire value is replaced on every write. Use `s.json()` for untyped JSON, or `s.json(schema)` with a [Zod](https://zod.dev)-compatible schema for typed validation. For structured data that needs per-field updates, use separate columns or a related table instead.
 
 > Declare relationships separately in the second argument to `s.table`, using `s.rel("targetTable", "localUuidColumn")` and `s.reverse("sourceTable", "forwardRelationName")`. UUID columns have no naming convention.
+
+JSON pointer selections require a JSON column (`s.json()`). Text columns containing JSON text are not JSON columns. JSON is validated when written; pointer reads can therefore skip unrelated chunks in a large value. Array indices must be canonical (`0`, `1`, …); `/01` does not select array index 1, but can select an object property named `"01"`.

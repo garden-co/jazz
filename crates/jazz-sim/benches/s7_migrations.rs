@@ -10,15 +10,13 @@ use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Tran
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
-use jazz::peer::PeerState;
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
+use jazz::tools::test_support::AllowAll;
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
@@ -34,9 +32,9 @@ fn main() {
 
 pub fn smoke() {
     let (schemas, lenses) = schema_chain();
-    let mut writer_v1 = open_client(node(1), node(101), schemas[0].clone());
-    let mut writer_v4 = open_client(node(4), node(104), schemas[3].clone());
-    let mut offline_v1 = open_client(node(5), node(105), schemas[0].clone());
+    let mut writer_v1 = open_client(node(1), schemas[0].clone());
+    let mut writer_v4 = open_client(node(4), schemas[3].clone());
+    let mut offline_v1 = open_client(node(5), schemas[0].clone());
     let (_core_dir, mut core) = open_node(node(250), schemas[0].clone());
 
     publish_chain(&mut core, &schemas, &lenses);
@@ -54,8 +52,7 @@ pub fn smoke() {
         row(1),
         BTreeMap::from([("title".to_owned(), v("live-v1"))]),
     );
-    let mut edge_acceptance_us = Vec::new();
-    deliver_client_unit(&mut writer_v1, &mut core, v1_unit, &mut edge_acceptance_us);
+    deliver_client_unit(&mut core, v1_unit);
 
     let v4_unit = commit_client_mergeable(
         &mut writer_v4,
@@ -66,11 +63,11 @@ pub fn smoke() {
             ("search_name".to_owned(), v("live-v4")),
         ]),
     );
-    deliver_client_unit(&mut writer_v4, &mut core, v4_unit, &mut edge_acceptance_us);
+    deliver_client_unit(&mut core, v4_unit);
 
     // Phase 4: the client has been offline since v1; its queued write lands
     // after the core has advanced to v4 and must be translated into v4 storage.
-    deliver_client_unit(&mut offline_v1, &mut core, queued, &mut edge_acceptance_us);
+    deliver_client_unit(&mut core, queued);
 
     assert_eq!(
         rows_for_schema(&mut core, &schemas[0]),
@@ -109,15 +106,10 @@ pub fn smoke() {
             ),
         ])
     );
-    emit_edge_phase_summaries(&edge_acceptance_us);
     emit_lens_tax_metrics();
 }
 
-fn publish_chain(
-    core: &mut NodeState<RocksDbStorage>,
-    schemas: &[JazzSchema; 4],
-    lenses: &[MigrationLens],
-) {
+fn publish_chain(core: &mut NodeState, schemas: &[JazzSchema; 4], lenses: &[MigrationLens]) {
     // Non-genesis schemas are admitted only as ordered lineage bundles.  The
     // harness is the authority here, so it exercises the same trusted
     // catalogue ingress used by a core after the sequencer has ordered them.
@@ -140,21 +132,11 @@ fn publish_chain(
         .unwrap();
         settle_outcome(core, outcome).unwrap();
     }
-    let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
-        SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 4,
-                schema: schemas[3].version_id(),
-            },
-        },
-    ))
-    .unwrap();
-    settle_outcome(core, outcome).unwrap();
+    jazz::db::block_on(core.activate_schema_for_test(4, schemas[3].clone())).unwrap();
 }
 
 fn rows_for_schema(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let shape = Query::from("todos").validate(schema).unwrap();
@@ -171,12 +153,9 @@ fn rows_for_schema(
 
 struct ClientHarness {
     _dir: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
-    _edge_dir: tempfile::TempDir,
-    edge: NodeState<RocksDbStorage>,
-    edge_peer: PeerState,
+    db: Db,
     outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
 }
 
 struct QueueTransport {
@@ -219,56 +198,9 @@ fn commit_client_mergeable(
         .expect("db client should upload mergeable commit unit")
 }
 
-fn deliver_client_unit(
-    client: &mut ClientHarness,
-    core: &mut NodeState<RocksDbStorage>,
-    unit: SyncMessage,
-    edge_acceptance_us: &mut Vec<u64>,
-) {
-    if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
-        let start = std::time::Instant::now();
-        // The locally constructed peer is SYSTEM and has no admitted claims.
-        let policy_claims = BTreeMap::new();
-        let outcome = jazz::db::block_on(client.edge_peer.ingest_edge_mergeable_commit_unit(
-            &mut client.edge,
-            tx,
-            versions,
-            u64::MAX,
-            u64::MAX,
-            policy_claims,
-        ))
-        .unwrap();
-        settle_outcome(&mut client.edge, outcome).unwrap();
-        edge_acceptance_us.push(start.elapsed().as_micros() as u64);
-    } else {
-        unreachable!();
-    }
+fn deliver_client_unit(core: &mut NodeState, unit: SyncMessage) {
+    assert!(matches!(&unit, SyncMessage::CommitUnit { .. }));
     apply_sync_message_settled(core, unit).unwrap();
-}
-
-fn emit_edge_phase_summaries(edge_acceptance_us: &[u64]) {
-    let mut sorted = edge_acceptance_us.to_vec();
-    sorted.sort_unstable();
-    let mut acceptance = metadata_fields("s7_migrations", "synchronous", 0x5700_0001, "s7-local");
-    acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
-    acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(percentile(&sorted, 50)),
-    );
-    acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(percentile(&sorted, 95)),
-    );
-    acceptance.insert("durability_tier".to_owned(), json!("Edge"));
-    emit_json_line("s7_migrations", &JsonValue::Object(acceptance).to_string());
-
-    let mut hydration = metadata_fields("s7_migrations", "synchronous", 0x5700_0001, "s7-local");
-    hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
-    hydration.insert("scope".to_owned(), json!("migration_schema_catalog"));
-    hydration.insert("hydration_rows".to_owned(), json!(3));
-    hydration.insert("hydration_bytes".to_owned(), json!(0));
-    hydration.insert("hydration_floor_bytes".to_owned(), json!(0));
-    emit_json_line("s7_migrations", &JsonValue::Object(hydration).to_string());
 }
 
 fn emit_lens_tax_metrics() {
@@ -279,7 +211,7 @@ fn emit_lens_tax_metrics() {
     let (_core_dir, mut core) = open_node(node(251), schemas[0].clone());
     publish_chain(&mut core, &schemas, &lenses);
 
-    let mut native_writer = open_client(node(40), node(140), schemas[3].clone());
+    let mut native_writer = open_client(node(40), schemas[3].clone());
     for idx in 0..ROWS {
         let value = format!("native-{idx}");
         let unit = commit_client_mergeable(
@@ -363,7 +295,7 @@ fn emit_lens_tax_metrics() {
 }
 
 fn measured_query_us(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
     iterations: usize,
     expected_rows: usize,
@@ -383,16 +315,12 @@ fn measured_query_us(
 }
 
 fn measured_write_us(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
     row_offset: u64,
     rows: usize,
 ) -> Vec<u64> {
-    let mut writer = open_client(
-        node((row_offset / 1_000) as u8),
-        node((row_offset / 1_000 + 100) as u8),
-        schema.clone(),
-    );
+    let mut writer = open_client(node((row_offset / 1_000) as u8), schema.clone());
     let mut timings = Vec::with_capacity(rows);
     for idx in 0..rows {
         let value = format!("write-{row_offset}-{idx}");
@@ -445,7 +373,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     let v1 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v2 = compile_public_schema(
         SchemaBuilder::new()
@@ -454,12 +383,14 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v3 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("name", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v4 = compile_public_schema(
         SchemaBuilder::new()
@@ -468,7 +399,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("name", PublicColumnType::Text)
                     .column("search_name", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let lenses = vec![
         MigrationLens::new(
@@ -520,10 +452,7 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     ([v1, v2, v3, v4], lenses)
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -537,7 +466,7 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> ClientHarness {
+fn open_client(node_uuid: NodeUuid, schema: JazzSchema) -> ClientHarness {
     let (dir, db) = open_db(
         node_uuid,
         schema.clone(),
@@ -547,13 +476,9 @@ fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
     })));
-    let (edge_dir, edge) = open_node(edge_uuid, schema);
     ClientHarness {
         _dir: dir,
         db,
-        _edge_dir: edge_dir,
-        edge,
-        edge_peer: PeerState::new(),
         outbound,
         _upstream: upstream,
     }
@@ -563,7 +488,7 @@ fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorSubject,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

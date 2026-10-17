@@ -25,7 +25,8 @@
         "todo-client-localfirst-svelte-docs#build",
         "todo-client-localfirst-vue-docs#build",
         "todo-client-localfirst-expo-docs#build",
-        "todo-server-ts-docs#build"
+        "todo-server-ts-docs#build",
+        "todo-effect-docs#build"
       ],
       "outputs": [".next/**", "!.next/cache/**"]
     },
@@ -51,6 +52,7 @@
         "$TURBO_ROOT$/crates/idb-tree/**",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
+        "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/jazz-native-transport/**",
         "$TURBO_ROOT$/crates/jazz-native-relay/**",
         "$TURBO_ROOT$/crates/jazz-otel/**",
@@ -89,6 +91,7 @@
         "$TURBO_ROOT$/crates/idb-tree/**",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
+        "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock",
@@ -118,6 +121,7 @@
         "$TURBO_ROOT$/crates/idb-tree/**",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
+        "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock",
@@ -171,6 +175,7 @@
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
+        "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/jazz-native-transport/**",
         "$TURBO_ROOT$/crates/jazz-otel/**",
         "$TURBO_ROOT$/crates/jazz-server/**",

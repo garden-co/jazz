@@ -7,9 +7,15 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
 
-import { mergePermissionsIntoWasmSchema } from "jazz-tools/testing";
+import type { WasmSchema } from "jazz-tools/backend";
+import type { CompiledPermissions } from "jazz-tools/permissions";
+
+import { startTransportFaultProxy } from "./transport-fault-proxy.js";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
+import { renderScaffoldedPnpmConfig } from "./pnpm-config.js";
+
+export { renderScaffoldedPnpmConfig } from "./pnpm-config.js";
 
 const APP_NAME = "test-app";
 
@@ -388,42 +394,12 @@ async function packWorkspaceTarballs(
   return tarballs;
 }
 
-/**
- * Pinned upstream versions the harness needs to override regardless of what
- * any individual starter's transitive resolution lands on.
- *
- * `kysely`: `@better-auth/kysely-adapter@1.6.12` declares
- * `peerDependencies.kysely: "^0.28.17 || ^0.29.0"` but still imports
- * `DEFAULT_MIGRATION_LOCK_TABLE` and `DEFAULT_MIGRATION_TABLE` from kysely —
- * symbols kysely removed in 0.29.0 (a legitimate breaking change under
- * pre-1.0 semver). The widened peer range opts the adapter into a kysely it
- * doesn't actually work with, and the SSR-bundled starters (next-*,
- * sveltekit-*) crash trying to resolve the missing exports. Pinning to the
- * last 0.28.x keeps the e2e build green until upstream catches up.
- */
-const UPSTREAM_PINS: Record<string, string> = {
-  kysely: "0.28.17",
-};
-
-/**
- * pnpm 10+ stopped reading the `pnpm` field in package.json — it emits
- * `[WARN] The "pnpm" field in package.json is no longer read by pnpm` and
- * ignores anything underneath, including `overrides`. The canonical home is
- * `pnpm-workspace.yaml` (yes, even in a non-workspace single-project setup).
- *
- * Build-script approval is handled at install time via `--ignore-scripts`
- * rather than `onlyBuiltDependencies` here, because the allowlist mechanism
- * has shifted between pnpm 10 and 11 and skipping postinstalls is safe for
- * the e2e harness — the few packages affected ship working binaries via
- * optionalDependencies.
- */
 function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, string>): void {
-  const overrideLines = [
-    ...Object.entries(tarballs).map(([pkg, tgz]) => `  "${pkg}": "file:${tgz}"`),
-    ...Object.entries(UPSTREAM_PINS).map(([pkg, v]) => `  "${pkg}": "${v}"`),
-  ].join("\n");
-  const yaml = `overrides:\n${overrideLines}\n`;
-  fs.writeFileSync(path.join(appDir, "pnpm-workspace.yaml"), yaml, "utf-8");
+  fs.writeFileSync(
+    path.join(appDir, "pnpm-workspace.yaml"),
+    renderScaffoldedPnpmConfig(tarballs),
+    "utf-8",
+  );
 }
 
 function replaceExactly(
@@ -510,14 +486,14 @@ function writeEnvFile(
   fs.writeFileSync(path.join(appDir, ".env"), lines.join("\n") + "\n", "utf-8");
 }
 
-export async function loadStarterSchema(
+export async function loadStarterArtifacts(
   appDir: string,
   config: ReturnType<typeof getStarterConfig>,
-): Promise<ReturnType<typeof mergePermissionsIntoWasmSchema>> {
+): Promise<{ schema: WasmSchema; permissions: CompiledPermissions }> {
   const schemaFile = path.join(appDir, config.schemaPath);
   const module = (await import(pathToFileURL(schemaFile).href)) as {
     app?: {
-      wasmSchema?: Parameters<typeof mergePermissionsIntoWasmSchema>[0];
+      wasmSchema?: WasmSchema;
     };
   };
   if (!module.app?.wasmSchema) {
@@ -526,14 +502,14 @@ export async function loadStarterSchema(
 
   const permissionsFile = path.join(path.dirname(schemaFile), "permissions.ts");
   const permissionsModule = (await import(pathToFileURL(permissionsFile).href)) as {
-    default?: Parameters<typeof mergePermissionsIntoWasmSchema>[1];
+    default?: CompiledPermissions;
   };
   if (!permissionsModule.default) {
     throw new Error(
       `Starter permissions module ${permissionsFile} does not export default permissions`,
     );
   }
-  return mergePermissionsIntoWasmSchema(module.app.wasmSchema, permissionsModule.default);
+  return { schema: module.app.wasmSchema, permissions: permissionsModule.default };
 }
 
 export async function runStarter(opts: RunStarterOptions): Promise<RunStarterResult> {
@@ -541,6 +517,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
   const config = getStarterConfig(opts.starter);
   const durations: PhaseTiming[] = [];
   let server: LocalJazzServerHandle | undefined;
+  let transportProxy: Awaited<ReturnType<typeof startTransportFaultProxy>> | undefined;
   const ownsWorkDir = opts.workDir === undefined;
   const workDir = opts.workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `cje2e-${opts.starter}-`));
   fs.mkdirSync(workDir, { recursive: true });
@@ -631,7 +608,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     patchInstalledJazzNapi(appDir, opts.repoRoot, harnessFingerprint);
     assertInstalledBrokerWorkerArtifacts(appDir);
 
-    const starterSchema = await loadStarterSchema(appDir, config);
+    const artifacts = await loadStarterArtifacts(appDir, config);
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
@@ -645,7 +622,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     server = await startLocalJazzServer({
       inMemory: true,
       allowLocalFirstAuth: true,
-      schema: starterSchema,
+      ...artifacts,
       ...(usesExternalJwt
         ? {
             jwksUrl: `${config.appOrigin}/api/auth/jwks`,
@@ -654,7 +631,23 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
           }
         : {}),
     });
-    writeEnvFile(appDir, opts.starter, server, config);
+    if (opts.starter === "next-betterauth" && !opts.skipE2E) {
+      transportProxy = await startTransportFaultProxy(server.url);
+      // Internal fault controls belong to the harness, not the generated starter's tests.
+      fs.copyFileSync(
+        path.join(
+          opts.repoRoot,
+          "packages/create-jazz-e2e/fixtures/next-betterauth-transport-loss.spec.ts",
+        ),
+        path.join(appDir, "e2e/transport-loss.spec.ts"),
+      );
+    }
+    writeEnvFile(
+      appDir,
+      opts.starter,
+      transportProxy ? { ...server, url: transportProxy.url } : server,
+      config,
+    );
 
     await recordPhase("build", () =>
       runChild("pnpm", ["build"], {
@@ -683,6 +676,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
           env: {
             ...process.env,
             JAZZ_E2E_PROD: "1",
+            JAZZ_E2E_TRANSPORT_CONTROL_URL: transportProxy?.controlUrl ?? "",
             JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE: opts.cancelReopenSubscriptionProbe
               ? "1"
               : "",
@@ -703,6 +697,13 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   } finally {
+    if (transportProxy) {
+      try {
+        await transportProxy.stop();
+      } catch {
+        // Continue cleaning up the underlying server and temporary project.
+      }
+    }
     if (server) {
       try {
         await server.stop();

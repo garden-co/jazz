@@ -50,9 +50,9 @@ StoredScalar<kind> = enum {
     logical_hash,
     root: { object_hash, locator },
     byte_length,
-    utf16_length?,
+    /* string/JSON only: */ utf16_length,
     edit_tail: [ { offset, delete_length, insert_bytes,
-                   utf16_offset, delete_utf16_length, insert_utf16_length } ],
+                   /* string/JSON only: */ utf16_offset, delete_utf16_length } ],
   },
 }
 
@@ -62,29 +62,44 @@ LargeValueRef {
   logical_hash,
   root: NodeRef { object_hash, locator },
   byte_length,
-  utf16_length?,
+  /* string/JSON only: */ utf16_length,
   edit_tail,
 }
 ```
 
-The enum case tags are stable: `Primitive = 2`, `Chunked = 3`. Tags 0 and 1
-are permanently reserved so persisted values from the superseded private
-`[tag] + payload` codec fail closed instead of colliding with a canonical
-length-prefixed record. Its payloads use only Groove's canonical primitive,
+The `groove.large-value.v2` scalar enum has exactly two cases:
+`Primitive = 0`, `Chunked = 1`. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
+
+Scalar tag history. Under `groove.large-value.v1` the cases were
+`Primitive = 2`, `Chunked = 3`, and tags 0 and 1 were permanently reserved:
+they had belonged to the superseded private `[tag] + payload` codec, whose
+inline bytes `[0] + payload` could otherwise collide with a canonical
+length-prefixed record, so v1 decoders rejected them. `groove.large-value.v2`
+retires that reservation and reuses 0 and 1 for the only two cases; tags 2 and
+3 are now unknown and rejected. The reuse is safe only because no v1 or older
+scalar can reach a v2 decoder: a root that declares `groove.large-value.v1`
+(or predates it) is refused at manifest admission with
+`UnsupportedStorageCodecs` before any scalar is read, and peers that encode
+v1 scalars on the wire must be refused at the wire-version handshake. The v2
+tags change Jazz bytes that embed scalars (row payloads, `BranchKey` column
+values), so the wire version must move with this family; see
+`dev/proofs/storage-format-cleanup-compatibility.md`.
 Every engine-owned record field has a permanent, one-based numeric record-slot
-identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
-`{ 1: offset, 2: delete_length, 3: insert_bytes, 4: utf16_offset,
-5: delete_utf16_length, 6: insert_utf16_length }`, and `LargeValueRef` is
+identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`.
+Byte edits are `{ 1: offset, 2: delete_length, 3: insert_bytes }`;
+string/JSON edits additionally have `{ 4: utf16_offset, 5: delete_utf16_length }`.
+The enclosing value kind selects the edit layout without another tag.
+`LargeValueRef` is
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
-5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
-refactor. Implementations normalize source declarations by ID, then materialize
-each ID as its actual record ordinal. A skipped or retired ID remains a
-reserved `Nullable<bytes>` slot encoded exactly as `null`; readers reject a
-nonempty reserved slot and writers never compact it away. Thus source reorder
-is harmless, while renumbering `locator:2` to `locator:3`, an edit field, or a
-reference field changes canonical physical bytes and rejects the old layout.
+5: edit_tail }`, with required `6: utf16_length` for string/JSON descriptors. Changing an ID is a format change, not a refactor. Implementations normalize source declarations by ID, then materialize
+each ID as its actual record ordinal. IDs MUST be contiguous starting at one;
+empty layouts, zero IDs, duplicates and gaps are rejected when the schema is
+constructed. Source reorder is harmless. Changing a field's ordinal or
+removing a field requires an explicitly versioned format change; no nullable
+placeholders are synthesized. All current layouts are contiguous, so removing
+the unused reserved-slot machinery changes no persisted bytes or versions.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
 its primitive backing is string as well. The ordinary enum schema is
@@ -98,13 +113,26 @@ Borrowed inline access validates the enum framing and logical kind directly;
 this preserves decode/recreate acceptance without constructing owned values.
 Owned primitive decoding copies that same raw payload after logical validation;
 it does not construct field maps or re-encode a record. Primitive encoding may
-pass the raw payload directly to the ordinary variant-record encoder for tag 2.
+pass the raw payload directly to the ordinary variant-record encoder for tag 0.
 These are specialized implementations of the same enum/record layout, not a
 separate scalar format; byte fixtures compare them with the generic codecs.
 Every independently addressed immutable tree node carries and authenticates its
 own format and kind before traversal. Internal raw string/bytes backing primitives
 only terminate this self-hosting enum encoding and are impossible at the public
 schema or logical-operator boundary.
+
+The descriptor's UTF-16 length is omitted for bytes and required for string/JSON.
+The value kind selects this layout; there is no nullable flag or reserved null
+payload. In-memory descriptors retain `None` for bytes and `Some(length)` for
+text. This saves nine bytes per binary descriptor and one per text descriptor.
+
+The edit's inserted UTF-16 length is not persisted: decoding derives it from
+`insert_bytes` for string/JSON values and sets it to zero for byte values.
+The in-memory `ReplaceEdit::insert_utf16_length` remains available to traversal
+and validation. For string/JSON edits, the other UTF-16 coordinates remain stored because
+deriving them requires reading the base text. Byte edits omit these two always-zero
+coordinates and restore them as zero in memory, saving another sixteen bytes
+per byte edit.
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
@@ -179,7 +207,7 @@ and exact aggregate metrics:
 ```text
 NodeRef { object_hash, locator }
 Leaf    { format, kind, bytes }
-Branch  { format, kind, children: [{ node_ref, byte_length, utf16_length? }] }
+Branch  { format, kind, children: [{ node_ref, byte_length, /* text only */ utf16_length }] }
 ```
 
 Leaves are selected by a versioned FastCDC-like content-defined chunker with
@@ -214,7 +242,7 @@ MUST reject a node whose embedded format differs. A decoder MUST NOT try the
 current codec after an unknown, malformed, or mismatched format fails.
 
 V1 is the only supported case in the format dispatch table. Its stored-scalar
-arm remains the schema-known `Primitive = 2 | Chunked = 3` enum: schema lowers
+arm remains the schema-known `Primitive = 0 | Chunked = 1` enum: schema lowers
 the bytes/string/JSON kind, so neither arm adds a client-controlled kind tag.
 V1's permanent numeric identities are:
 
@@ -224,9 +252,16 @@ Leaf        = { 1: format:u8, 2: kind:u8, 3: bytes:bytes }
 Branch      = { 1: format:u8, 2: kind:u8, 3: children:[BranchChild] }
 BranchChild = {
   1: object_hash:bytes32, 2: locator:bytes32, 3: byte_length:u64,
-  4: utf16_length:u64?, 5: logical_hash:bytes32
+  4: logical_hash:bytes32
+  // string/JSON only: 5: utf16_length:u64
 }
 ```
+
+Branch nodes select their child layout from the fixed `kind` byte before
+binding children. Binary children omit UTF-16 length; string/JSON children
+store a required `u64`, with no nullable flag. In-memory metrics retain their
+optional representation. This saves nine bytes per binary child and one per
+text child. Branch bytes and object hashes change; leaf bytes are unchanged.
 
 These records use ordinary normative Groove enum/record/scalar encoding. V1
 has no serde/postcard envelope or private node tag. Exact v1 fixtures cover a
@@ -254,18 +289,18 @@ For the bytes leaf above, locator `44` repeated 32 times, logical hash
 insert:"e", utf16:* = 0 }`, the descriptor fixture is:
 
 ```text
-00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065
+00010a000000000000003100000075000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000065
 ```
 
-The same value wrapped in the bytes schema's ordinary `Chunked = 3` scalar arm
-is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
+The same value wrapped in the bytes schema's ordinary `Chunked = 1` scalar arm
+is exactly the preceding bytes with its leading `00` enum tag replaced by `01`.
 
 `INV-LARGE-11`: descriptor-led format dispatch and canonical v1 fixture
 validation MUST fail closed before a malformed physical representation can
 change lifecycle state or disclose an authenticated child capability.
 
 V1 dispatch is joint: the outer descriptor's `format_version` is selected
-before its root record, every nested edit record, or the `Chunked = 3`
+before its root record, every nested edit record, or the `Chunked = 1`
 stored-scalar payload is interpreted. The schema-known scalar kind still
 supplies bytes/string/JSON context; it is not a version selector and never
 supplies a client-controlled kind tag. A future version therefore needs one
@@ -374,7 +409,11 @@ evaluation closure.
 Postcard decoding alone is insufficient because it accepts a valid value with
 trailing bytes. Every path that interprets node structure MUST require an exact
 byte-for-byte canonical re-encoding, including metadata-only traversal before
-the caller has an expected logical kind. Evaluation additionally verifies the
+the caller has an expected logical kind. The comparison may stream canonical
+segments rather than allocate a second complete encoding. In V1, a leaf is
+exactly the canonical enum tag `0`, its two fixed `u8` fields and its sole raw
+bytes field; that field consumes the remaining payload and has no offset or
+length table. This equivalence is pinned against the ordinary record encoder. Evaluation additionally verifies the
 expected object hash, format, kind, logical hash, and metrics.
 
 The authenticated structure is a DAG, not necessarily a tree physically: one
@@ -417,6 +456,18 @@ length effects are recomputed against the source value produced by preceding
 edits. An untrusted staged descriptor is replayed from its immutable base before
 publication so forged text coordinates, partial JSON edits, and noncanonical
 tails fail closed.
+
+Peer uploads and fresh preparations are re-read completely before their
+staging receipt is issued. A text or bytes descriptor that Groove itself
+derives from a published base (append, splice, consolidation) inherits the
+base's validity instead: finalization authenticates the base descriptor
+against its root node (the root being active, i.e. holding a staging receipt
+or a durable reference), authenticates the newly staged nodes, proves every other reachable node is an edge of the base tree with the
+same logical hash and metrics, checks the root's tail-free metrics, and
+replays the tail. It falls back to the complete pass when the base root is
+not active or reuse cannot be proven, and JSON always
+takes the complete pass. Either way a published descriptor is fully valid, so
+a local edit costs O(edit + tree depth) rather than O(value).
 
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages
@@ -531,6 +582,11 @@ Operators request only evidence needed to decide their own output:
 
 An operator may discover additional requests after earlier chunks arrive. This
 is progress, not a retry of a visible operation.
+
+JSON pointer reads require a JSON semantic value; arbitrary String values are
+not admitted as JSON documents. Array components use canonical nonnegative
+indices (`0` or a nonzero digit followed by digits); object keys such as `"01"`
+remain literal keys.
 
 JSON validity is enforced when a JSON value is prepared for publication. Reads
 assume that write-admission invariant rather than revalidating every unread
@@ -701,11 +757,10 @@ contains `{ 1: id:bytes16, 2: value_ref:LargeValueRef,
 3: receipt_id:bytes16?, 4: encoded_bytes:u64, 5: node_count:u64,
 6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent,
 one-based physical record slots and source declaration order is not semantic.
-If a future layout retires or skips an ID, it MUST retain every gap as a
-reserved `Nullable<bytes>` record slot encoded exactly as `null`; readers MUST
-reject a nonempty reserved slot and writers MUST NOT compact it away. Thus
-renumbering a field (for example `children:3` to `children:4`) changes the
-record layout and cannot be silently normalized by declaration-name sorting.
+IDs MUST be contiguous starting at one; schema construction rejects empty
+layouts, zero IDs, duplicates and gaps. Removing or renumbering a field requires
+an explicitly versioned format change, rather than retaining an implicit
+nullable placeholder. Current metadata encodings are unchanged.
 Each value is exactly its normal
 Groove record encoding: there is no metadata magic prefix, private type tag,
 or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
@@ -720,13 +775,29 @@ whose key alone carries the identity.
 ID is duplicated in the canonical value and MUST match byte-for-byte before
 scan/recovery, acceptance, finalization, resume, or eviction. A valid value
 copied under a different or malformed key is corruption, not an alias or replay.
-The promotion journals apply the same rule in both directions:
-`completed-upload/<upload-id>` MUST contain that exact embedded upload ID, and
-`completed-receipt/<receipt-id>` MUST contain that exact embedded receipt ID.
-Every staging preflight, forward retry lookup, and reverse
-acceptance/eviction cleanup validates its selected key suffix before any
-metadata or refcount mutation; copying either canonical record under another
-key cannot create an alias.
+The promotion journals bind both directions without duplicating the upload
+record. `completed-upload/<upload-id>` contains a dedicated canonical record:
+`{ 1: id:bytes16, 2: receipt_id:bytes16, 3: descriptor:LargeValueRef,
+4: encoded_bytes:u64, 5: node_count:u64 }`. It MUST contain that exact embedded
+upload ID. Receipt ID and descriptor are required; completion retains neither
+the pending chunk list nor its creation timestamp. Retry also checks the
+descriptor and accounting against the staged receipt.
+This layout belongs to the unreleased `groove.large-value.v2` contract;
+the preceding pending-record completion layout is unsupported, without a
+fallback reader or another storage/wire version bump.
+`completed-receipt/<receipt-id>` contains exactly the 16 raw upload-ID bytes:
+no record envelope, length prefix, descriptor, accounting, or chunk list.
+For example, upload ID `a6` repeated 16 times produces exactly sixteen `a6`
+bytes under its receipt key, independent of how many chunks were uploaded.
+
+Promotion writes the forward record, reverse binding and staged receipt in
+the same atomic batch. Forward retry lookup requires the reverse binding to
+name its upload ID. Reverse acceptance/eviction cleanup loads the referenced
+forward record, validates its upload key, and requires its receipt ID to equal
+the reverse key's receipt ID. Missing, malformed, or mismatched bindings fail
+before metadata or refcount mutation. Copying either entry to another key
+cannot create an alias. Both paths still perform two journal point reads.
+
 The descriptor field is canonical opaque `LargeValueRef` bytes at this metadata
 boundary, so its V1 dispatcher runs before nested descriptor fields are bound.
 Descriptor-keyed uploads derive their initial pending key with

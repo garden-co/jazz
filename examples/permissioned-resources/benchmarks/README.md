@@ -3,10 +3,27 @@
 [metadata.ts](metadata.ts) is the structured source for the timeline's description,
 timing boundaries, fixed Member identity and visible-row throughput unit.
 
-Workload revision 1 preserves the existing shallow-history fixture and permission
+Workload revision 2 preserves the existing shallow-history fixture and permission
 relationships. Thirty-nine subscriptions produce 27,518 visible rows at full
 scale: resources, permission inputs and child rows inheriting their parent's
-access. Core, Edge and Client use RocksDB, and the client starts empty.
+access. Core, device-local persistence relay and Client use RocksDB, and the client starts empty.
+Both device hops use the benchmark reader's identity; Core authorizes the scope,
+and the relay retains authorized input versions rather than acting as a server
+authority. The relay remains in the measured topology, as in the separate browser
+fanout benchmark (whose foreground is non-durable).
+
+The new `first_sync_local_relay_27518_rocksdb` identity starts a fresh baseline.
+Do not interpret differences from the retired `first_sync_27518_rocksdb` server-edge
+workload as a like-for-like optimization. Its metadata remains for historical runs.
+
+The local profile's warm phase closes and reopens the persistence relay. Its row
+cache survives, and so does the durable "Q at W" watermark of each row-local view
+(a table whose select policy is `true`): the reopened relay declares known state
+for exactly those views and lets Core catch up from W. Policy-dependent views
+(recursive resource access, inherited children) keep no known state across a
+restart and reacquire their scope from Core. Reopen checks therefore require
+exactly the row-local declarations and exact resulting row membership; they are
+not same-process reconnect measurements.
 
 Core seeding is outside the wall-time measurement. Receiver opening, connection,
 query preparation, subscription and settling until every expected row is present
@@ -34,6 +51,10 @@ receipts must not be presented as clean wall-time measurements.
 comparison drivers and historical research receipts. No workload implementation
 remains in `crates/jazz-sim/benches` or `dev/benchmarks`; generic simulation helpers
 remain in `jazz-sim`.
+
+Historical reference tools consuming `core-edge.jsonl` / `edge-client.jsonl`
+describe the retired topology. New captures are `core-relay.jsonl` /
+`relay-client.jsonl`; do not feed these into an old authority model unchanged.
 
 The clean wall-time transport performs one message encode, zstd streaming roundtrip,
 and message decode per delivery. It does not run diagnostic codec comparisons.

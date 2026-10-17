@@ -1,26 +1,20 @@
 # Jazz Testing Guidelines - Rust
 
-Always prefer black-boxed integration tests that exercise public APIs over unit tests or white-box tests.
-
-- Canonical crate gate: `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`, with a `-j`
-  appropriate for the box (see `AGENTS.md`; the former fixed `-j 2` was a
-  laptop-specific linker-OOM workaround, not a property of the build).
-  This runs integration tests with Rust's default per-binary parallelism; fixtures
-  must isolate app ids, ports, storage, and client state unless a test explicitly
-  constructs a shared topology.
-- Use public schema and permission builders (`SchemaBuilder`and `TableSchema::builder`).
-  - Do not use JSON-like schema, permission, or query definitions.
-- Set up the correct database topology.
-  - If a single runtime is enough for the test, use `JazzClient::test_client`.
-  - Otherwise use a `JazzServer` and connect `TestingClient`s to it
-  - To simulate untrusted clients, create them with
-    `JazzClient::connect_with_row_policy_mode(..., RowPolicyMode::PermissiveLocal)`.
+- Prefer black-boxed integration tests that exercise public APIs over unit or
+  white-box tests. When a lower-level test is genuinely needed, say why in the
+  test every time.
+- Build schemas, permissions and queries with the public builders, never with
+  JSON-like definitions.
 - Assert user-visible effects through public client APIs: query rows,
-  subscription deltas, accepted/rejected write settlement, or visible row state.
-  - Use higher-level utils like `wait_for_query` to wait for results
-- Use `row_input!` for inserts.
+  subscription deltas, write settlement, visible row state.
+- Fixtures isolate app ids, ports, storage and client state; tests run in
+  parallel.
+- Give each test a `///` doc comment stating the contract it exercises and the
+  actors involved (human names: `alice`, `bob`, `mallory`), with an ASCII flow
+  sketch when the causal order is non-trivial:
 
-## What Should Stay Internal
-
-Keep lower-level tests when the behavior is not meaningfully observable through public APIs.
-Never do this silently: explicitly call out why an internal test is needed every time you write one.
+  ```
+  writer ──insert──► server ──broadcast──► subscriber
+                        │
+                        └── policy check ──✗── intruder
+  ```

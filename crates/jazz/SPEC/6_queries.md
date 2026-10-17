@@ -141,6 +141,19 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
+Accepted non-null scalar-double predicates (`eq`, `ne`, `lt`, `lte`, `gt`,
+`gte`) MUST use numeric partial ordering, including when both operands are
+literals. Bare doubles and doubles wrapped in `Nullable(Some(...))` have the
+same comparison semantics: negative values retain numeric order and `-0.0`
+equals `+0.0`. A direct unordered comparison (a NaN operand) is false for every
+operator, including `ne`. Fully resolved constant `Not` and `Not(In)` predicates
+MUST complement the folded boolean result, so negating an unordered constant
+comparison is true rather than another false comparison with an inverted
+operator. This does not change row-dependent NaN or SQL-null negation semantics.
+The scalar predicate rule does not change structural literal identity
+(`Eq`/`Hash`/`Ord`), canonical raw-bit encodings, null semantics, or comparisons
+of composite values.
+
 The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
 public query spelling is intentionally not standardized yet; see the linked
 open question below rather than treating any current partial alias as API.
@@ -158,7 +171,7 @@ universal `_id` contract from support in an individual query form.
 **Implementation status (2026-07-27).** Parameterized `!=` predicates are
 accepted for maintained subscriptions; the behavior is covered by
 `maintained_subscription_view_ne_param_stays_maintained` in
-`crates/jazz/src/peer.rs`.
+`crates/jazz/layers/node/src/peer.rs`.
 
 An `array_subquery` names an output relation (`column_name`), an inner table,
 and a correlation from a parent-scope column to an inner-table column. It may
@@ -208,10 +221,20 @@ Supported matrix:
 | Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
-clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates (including parameters) must
-match the column's whole-value type except for the narrow compatibility
-coercions listed above. Integer literals are the one scalar compatibility rule:
+clear type error. For a supported text or array `contains` haystack and a known
+mismatched needle, validation MUST report the expected and actual needle types:
+expected is `String` for text or the declared array member type (including
+member nullability), while actual preserves operand nullability. Outer
+haystack nullability is ignored only when selecting text/array semantics.
+When the opposite operand supplies enough type information, validation MUST
+infer an unknown `Operand::Param`'s type. Claims are not parameter bindings:
+statically known claim types participate in normal checking, while provider or
+session claims without a declared static type MUST remain dynamically typed
+until execution.
+`contains` on a scalar non-text column is never interpreted as stringification,
+and `in` candidates (including parameters) must match the column's whole-value
+type except for the narrow compatibility coercions listed above. Integer
+literals are the one scalar compatibility rule:
 for equality, ordering, and `in`, an Integer (`I32`) literal is widened when
 compared with a BigInt (`I64`) column, and a BigInt literal is narrowed for an
 Integer column only when its value is representable as `I32`. This normalization
@@ -223,6 +246,14 @@ a singleton array or a `contains` predicate. Compatibility coercions may recurse
 into an array-valued literal only when they preserve that array shape. Any
 broader literal-vs-column coercion needs an explicit spec decision before
 implementation.
+
+For equality comparisons (`eq`/`ne`), an empty array literal may be compared
+directly with a column whose schema-resolved type is `Array<T>` after removing
+its outer nullability wrapper, if present, in either operand order. This is a
+validation-only exception for the untyped empty literal: it does not apply
+through an inferred parameter, and it does not rewrite either operand or its
+canonical bytes. Nonempty literals must satisfy the ordinary element-type
+compatibility rules above. Ordered comparisons remain invalid for arrays.
 
 `in` is whole-value membership and `contains` is single-element membership;
 neither is an array subset/superset operator. A scalar `in` candidate for an
@@ -258,6 +289,42 @@ validation. Its identity is content-addressed independently of the shape:
 `BindingId = Uuid::new_v5(QUERY_NAMESPACE, canonical_binding_bytes(values))`,
 with values encoded in parameter-name order. Binding rejects missing, unknown,
 or type-mismatched params (`INV-QUERY-3`).
+
+Parameter types are finalised before type-sensitive predicate checks. Direct
+column comparisons in either operand order anchor a parameter's complete type.
+The six binary comparisons (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`) also propagate
+that type between independently valued parameter names when their complete
+underlying descriptors match exactly. Across an anchored chain or cycle, any
+required occurrence makes the connected exact-base parameters required;
+nullable-only groups retain `Nullable(T)`. Only one outer nullable wrapper is
+removed for this relationship: nested member types, record layouts and enum
+identities remain part of the descriptor. Unanchored groups and incompatible
+types are rejected rather than guessed. Ordered comparisons still require an
+orderable type; type propagation does not substitute or equate binding values.
+
+For example, comparing `p` with nullable UUID ownership, comparing `p` with `q`,
+and comparing `p` with required UUID membership requires bare UUID bindings for
+both names, in every occurrence order and after canonical query revalidation.
+Nullable carriers, including `Nullable(None)`, are rejected for both holes.
+A nullable-only group accepts nullable UUID carriers. Adding `IsNull(p)` to the
+mixed group rejects the query consistently: nullness is checked against the
+final domain, not a provisional nullable type.
+
+Preparation retains operator-specific inference: `in` relates whole values
+with directional compatibility, while `contains` infers a String needle from
+a String haystack or an exact member needle from an Array haystack. A required
+member supplies a required needle constraint even when another comparison uses
+a nullable column; an explicitly nullable member still rejects a separately
+required needle. A typed needle can infer an otherwise unanchored Array haystack
+only after available haystack anchors settle. Constructor members remain
+dependent on their final needle types. Typed literals provide fallback
+inference; checked integer-literal
+normalisation, overflow rejection and the direct-column empty-array exception
+above remain unchanged. An empty `in` eliminates its unused parameter hole.
+Broad compatibility, such as enum/U8 comparisons, is not a transitive type
+relationship. UNION arms still validate independently and merge parameter
+domains only when their complete types are equal. This is bounded anchored
+inference, not generic or polymorphic parameter solving.
 
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
@@ -479,7 +546,7 @@ join sees the accumulated wide left row, and the final terminal input carries
 every source needed for the tuple and its identity. The contribution lowerer
 used for include closure intentionally does something narrower: it projects a
 join to `RIGHT_JOIN_PREFIX` only
-(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+(`crates/jazz/layers/engine/src/query_engine/lowering.rs:5199-5251`). That projection is
 correct for a source-membership fact, but MUST NOT be reused for flat output.
 
 This is achievable with the existing Groove join representation. An inner join
@@ -493,7 +560,7 @@ create an arrangement-key arity obstacle. They do increase arrangement value and
 terminal-payload bytes, which are ordinary descriptor/payload costs, not a
 reason to introduce a second terminal. The source resolver already supplies the
 policy-filtered projected source boundary before query composition
-(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+(`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
 preserves that ordering.
 
 The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
@@ -611,19 +678,19 @@ stable, and a descriptor does not depend on runtime data.
 
 The existing public `JoinSpec { table, alias, on }` advertises aliases and an
 arbitrary equality from the accumulated left result to the newly joined table
-(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+(`crates/jazz/layers/model/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
 not that form: it has no alias or accumulated-left scope, and only represents a
 root- or immediately-nested reference/junction traversal with a target column,
 optional source column/lookup, correlations, filters, and nested joins
-(`crates/jazz/src/query.rs:2045-2071`; validation at
-`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+(`crates/jazz/layers/model/src/query.rs:2045-2071`; validation at
+`crates/jazz/layers/model/src/query.rs:2713-2822`). **Recommendation:** extend the core with
 a separately named flat-join AST and lower the public `JoinSpec` into it; do not
 try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
 leave the public builder advertising a shape that the client rejects. This is a
 small, explicit surface addition rather than a policy-model change.
 
 `result_element_index` is not part of core `Query`
-(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+(`crates/jazz/layers/model/src/query.rs:24-61`), and MUST be removed from the
 public flat-join surface. It is fully expressible as a qualified projection:
 select the desired source's qualified columns (including its explicit row-id
 field where needed), or make that table the query root when its `ObjectId` is the
@@ -657,7 +724,7 @@ materialize root `CurrentRow`s`, and expand-mode occurrence-addressed public
 delivery is not complete. Collect-mode structured output already uses the sole
 Groove terminal and typed terminal operations. The ordinary current
 source resolver already applies source authorization and schema projection
-before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+before lowered query composition (`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
 ### 6.4.2 Uncorrelated policy existence
@@ -842,8 +909,8 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The permanent `JRVK` V1 preimage for that resolved identity is `magic "JRVK" |
-version 1 | tier:u8 | propagate_upstream:u8 | binding_source:u8 | source`. A
+The `JRVK` V2 preimage for that resolved identity is `magic "JRVK" |
+version 2 | tier:u8 | binding_source:u8 | source`. A
 snapshot source encodes `owner:uuid | global_base:u64le | local_base:u64le |
 dot_count:u32le | dots`, where every dot is `tx_time:u64le | node:uuid`. Dots
 are a set: the encoder sorts `TxId` by `(time, node)` and removes duplicates

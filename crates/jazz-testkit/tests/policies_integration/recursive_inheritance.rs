@@ -1,7 +1,7 @@
 use crate::JazzClient;
 use jazz::tools::{DurabilityTier, TransactionId};
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 
 use super::*;
 
@@ -84,7 +84,7 @@ async fn rebac_recursive_inherits_allows_ancestor_access_inner() {
     let (root, root_tx) = insert_folder(&admin, super::ALICE_ID, "Root", None);
     let (child, child_tx) = insert_folder(&admin, super::BOB_ID, "Child", Some(root));
     let (grand, grand_tx) = insert_folder(&admin, super::CAROL_ID, "Grandchild", Some(child));
-    wait_for_edge_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
+    wait_for_global_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
 
     let result_ids = query_folder_ids(&alice).await;
 
@@ -131,7 +131,7 @@ async fn rebac_recursive_inherits_respects_depth_override_inner() {
     let (root, root_tx) = insert_folder(&admin, super::ALICE_ID, "Root", None);
     let (child, child_tx) = insert_folder(&admin, super::BOB_ID, "Child", Some(root));
     let (grand, grand_tx) = insert_folder(&admin, super::CAROL_ID, "Grandchild", Some(child));
-    wait_for_edge_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
+    wait_for_global_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
 
     let result_ids = query_folder_ids(&alice).await;
 
@@ -170,7 +170,7 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let (root, root_tx) = insert_folder(&admin, super::ALICE_ID, "Root", None);
     let (child, child_tx) = insert_folder(&admin, super::BOB_ID, "Child", Some(root));
     let (grand, grand_tx) = insert_folder(&admin, super::BOB_ID, "Grandchild", Some(child));
-    wait_for_edge_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
+    wait_for_global_txs(&admin, &[root_tx, child_tx, grand_tx]).await;
     let _alice_visible = query_folder_ids(&alice).await;
     let _bob_visible = query_folder_ids(&bob).await;
 
@@ -184,7 +184,7 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         Ok(transaction_id) => match alice
             .wait_for_transaction(
                 transaction_id.expect("ordinary mutation has a transaction"),
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
             )
             .await
         {

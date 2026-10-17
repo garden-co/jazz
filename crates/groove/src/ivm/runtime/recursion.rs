@@ -6,6 +6,7 @@
 //! than defining separate operators. Join arrangements live in [`super::join`];
 //! public ticks, subscriptions, and graph retention live in [`super`].
 
+use super::BindingSnapshots;
 use bytes::Bytes;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
@@ -20,11 +21,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
-    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
-    VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
-    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, raw_projection_fields,
-    scan_bounds, touched_join_keys,
+    ArgByDirection, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState, RecordDelta,
+    RecordDeltas, ScopeId, StaticScanBounds, TableDelta, VariantProjection, VariantProjectionKey,
+    arg_by_candidate_replaces, consolidate_deltas, encoded_record_key_part, plan_expr_names,
+    project_binding_source_deltas, raw_projection_fields, scan_bounds, touched_join_keys,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -137,6 +137,7 @@ pub(super) enum RecursiveDeltaProgress {
 
 pub(super) struct HydrationRecomputeContext<'a> {
     pub(super) schema: &'a crate::schema::DatabaseSchema,
+    pub(super) dictionaries: &'a crate::dictionary::SharedDictionaries,
     pub(super) graph: &'a IvmGraph,
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     /// `Some` routes source reads through the session request registry; `None`
@@ -145,7 +146,7 @@ pub(super) struct HydrationRecomputeContext<'a> {
     pub(super) inputs: Option<&'a mut EvaluationInputs>,
     pub(super) table_deltas: Option<&'a [TableDelta]>,
     pub(super) storage: &'a dyn OrderedKvStorage,
-    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    pub(super) binding_snapshots: &'a BindingSnapshots,
     pub(super) scope: ScopeId,
     pub(super) input_generation: u64,
 }
@@ -449,7 +450,12 @@ impl HydrationTraversal {
                         }
                     }
                     HydrationTraversalFrame::Evaluate(node) => {
-                        debug_assert!(self.visiting.remove(&node));
+                        // Keep the removal outside the assertion: release
+                        // builds compile `debug_assert!` away, and a node that
+                        // stays marked as visiting turns every later shared
+                        // (diamond) input into a false dependency cycle.
+                        let was_visiting = self.visiting.remove(&node);
+                        debug_assert!(was_visiting);
                         self.order.push(node);
                     }
                 }
@@ -467,6 +473,7 @@ impl HydrationTraversal {
             remaining -= 1;
             let mut evaluator = HydrationEvaluator {
                 schema: context.schema,
+                dictionaries: context.dictionaries,
                 graph: context.graph,
                 variant_projections: context.variant_projections,
                 table_deltas: context.table_deltas,
@@ -722,6 +729,7 @@ pub(super) async fn recursive_delta(
             recursive_state,
             HydrationRecomputeContext {
                 schema: runtime.schema,
+                dictionaries: runtime.dictionaries,
                 graph: runtime.graph,
                 variant_projections: runtime.variant_projections,
                 inputs: runtime.evaluation_inputs.as_deref_mut(),
@@ -784,13 +792,20 @@ pub(super) async fn recursive_delta(
         let full_table_deltas = match runtime.evaluation_inputs.as_deref_mut() {
             Some(inputs) => snapshot_table_deltas_from_inputs(
                 runtime.schema,
+                runtime.dictionaries,
                 runtime.graph,
                 inputs,
                 nodes.seed,
             )?,
             None => {
-                snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, nodes.seed)
-                    .await?
+                snapshot_table_deltas(
+                    runtime.schema,
+                    runtime.dictionaries,
+                    runtime.graph,
+                    runtime.storage,
+                    nodes.seed,
+                )
+                .await?
             }
         };
         runtime
@@ -1219,7 +1234,14 @@ pub(super) async fn hydrate_recursive_arrangements(
     let full_table_deltas = if runtime.evaluation_inputs.is_some() {
         Vec::new()
     } else {
-        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step).await?
+        snapshot_table_deltas(
+            runtime.schema,
+            runtime.dictionaries,
+            runtime.graph,
+            runtime.storage,
+            step,
+        )
+        .await?
     };
     if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
         let records = full_table_deltas
@@ -1253,6 +1275,7 @@ pub(super) async fn hydrate_recursive_arrangements(
 
 pub(super) async fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
+    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     storage: &dyn OrderedKvStorage,
     root: NodeId,
@@ -1264,7 +1287,7 @@ pub(super) async fn snapshot_table_deltas(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = table_schema.storage_record_schema();
         let store = super::record_store_for_table(storage, table_schema, &storage_descriptor);
         let mut cursor = match &source.scan {
             None => Some(store.scan(ScanBounds::Prefix(Vec::new())).await?),
@@ -1284,39 +1307,18 @@ pub(super) async fn snapshot_table_deltas(
                 stored_records.extend(batch.into_iter().map(|(_, record)| record));
             }
         }
-        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: source.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            by_variant
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        output.extend(
-            by_variant
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: source.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                }),
-        );
+        output.extend(NodeState::group_source_rows(
+            table_schema,
+            dictionaries,
+            stored_records.iter().map(Vec::as_slice),
+        )?);
     }
     Ok(output)
 }
 
 fn snapshot_table_deltas_from_inputs(
     schema: &crate::schema::DatabaseSchema,
+    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     inputs: &mut EvaluationInputs,
     root: NodeId,
@@ -1343,33 +1345,11 @@ fn snapshot_table_deltas_from_inputs(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: source.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            by_variant
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        output.extend(
-            by_variant
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: source.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                }),
-        );
+        output.extend(NodeState::group_source_rows(
+            table_schema,
+            dictionaries,
+            stored_records,
+        )?);
     }
     Ok(output)
 }
@@ -1527,15 +1507,15 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 // Use the maintained operator's shared declared-key/full-record comparator so
 // winner selection cannot diverge by evaluation path.
 
-fn hydrated_arg_by_winners(
-    input: RecordDeltas,
+pub(super) fn hydrated_arg_by_winners(
+    input: &RecordDeltas,
     output_desc: RecordDescriptor,
     group_field_indices: &[usize],
     comparison_field_indices: &[usize],
     direction: ArgByDirection,
 ) -> Result<RecordDeltas, IvmRuntimeError> {
     let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-    for delta in input.deltas {
+    for delta in &input.deltas {
         if delta.weight <= 0 {
             continue;
         }
@@ -1544,7 +1524,7 @@ fn hydrated_arg_by_winners(
             encoded_record_key_part(output_desc, delta.raw(), comparison_field_indices)?;
         match winners.entry(group_key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((comparison_key, delta.record));
+                entry.insert((comparison_key, delta.record.clone()));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let winner = entry.get_mut();
@@ -1556,7 +1536,7 @@ fn hydrated_arg_by_winners(
                     direction,
                 );
                 if replaces {
-                    *winner = (comparison_key, delta.record);
+                    *winner = (comparison_key, delta.record.clone());
                 }
             }
         }
@@ -1573,12 +1553,13 @@ fn hydrated_arg_by_winners(
 /// Full-snapshot evaluator used by recursive recompute fallback.
 struct HydrationEvaluator<'a> {
     schema: &'a crate::schema::DatabaseSchema,
+    dictionaries: &'a crate::dictionary::SharedDictionaries,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: Option<&'a [TableDelta]>,
     evaluation_inputs: Option<&'a mut EvaluationInputs>,
     storage: &'a dyn OrderedKvStorage,
-    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: &'a BindingSnapshots,
     context: EvalContext,
     memo: HashMap<NodeId, RecordDeltas>,
 }
@@ -1602,6 +1583,7 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => NodeState::update_table_source_from_inputs(
                         table,
                         self.schema,
+                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1621,6 +1603,7 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => super::NodeState::update_index_source_from_inputs(
                         index,
                         self.schema,
+                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1663,14 +1646,20 @@ impl HydrationEvaluator<'_> {
                     Ok(deltas)
                 }
                 OpType::BindingSource(binding_source) => {
-                    let deltas = self
-                        .binding_snapshots
-                        .get(&binding_source.key)
-                        .cloned()
-                        .unwrap_or_else(|| RecordDeltas::empty(output_desc));
-                    project_binding_source_deltas(&deltas, &output_desc)
+                    match self.binding_snapshots.get(&binding_source.key) {
+                        Some(deltas) => project_binding_source_deltas(deltas, &output_desc),
+                        None => project_binding_source_deltas(
+                            &RecordDeltas::empty(output_desc),
+                            &output_desc,
+                        ),
+                    }
                 }
                 OpType::Arrange(_) => self.eval_unary_input(graph_node, node).await,
+                // A lookup's storage probes are driven by evaluation
+                // sessions, which this recursive step evaluator is not.
+                OpType::Lookup(_) => Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup cannot run in a recursive step",
+                )),
                 OpType::Filter(filter) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     NodeState::update_filter(filter, output_desc, &input)
@@ -1725,7 +1714,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_max_by.group_field_indices,
                         &arg_max_by.comparison_field_indices,
@@ -1735,7 +1724,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_min_by.group_field_indices,
                         &arg_min_by.comparison_field_indices,
@@ -1825,31 +1814,13 @@ impl HydrationEvaluator<'_> {
                     };
                     let left = self.eval_node(*left).await?;
                     let right = self.eval_node(*right).await?;
-                    let mut join_state = super::join::AntiJoinState::default();
-                    let left_on = plan_expr_names(&join.left_key);
-                    let right_on = plan_expr_names(&join.right_key);
-                    let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let mut right_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let deltas = join_state.apply(
-                        &mut left_arrangement,
-                        &mut right_arrangement,
-                        &join.left_descriptor,
-                        &join.right_descriptor,
-                        &output_desc,
-                        &left_on,
-                        &right_on,
+                    let deltas = super::join::threshold_snapshot(
+                        &left,
+                        &right,
+                        &plan_expr_names(&join.left_key),
+                        &plan_expr_names(&join.right_key),
                         join.comparison,
-                        super::join::JoinInput::deltas(&left.deltas),
-                        super::join::JoinInput::deltas(&right.deltas),
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        ArrangementUpdateMode::Accumulate,
+                        false,
                     )?;
                     #[cfg(feature = "cold-settle-attribution")]
                     crate::cold_settle_attribution::record_join(
@@ -1886,29 +1857,13 @@ impl HydrationEvaluator<'_> {
                     };
                     let left = self.eval_node(*left).await?;
                     let right = self.eval_node(*right).await?;
-                    let mut join_state = super::join::SemiJoinState::default();
-                    let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let mut right_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let deltas = join_state.apply(
-                        &mut left_arrangement,
-                        &mut right_arrangement,
-                        join.left_descriptor,
-                        join.right_descriptor,
-                        &output_desc,
+                    let deltas = super::join::threshold_snapshot(
+                        &left,
+                        &right,
                         &plan_expr_names(&join.left_key),
                         &plan_expr_names(&join.right_key),
                         join.comparison,
-                        super::join::JoinInput::deltas(&left.deltas),
-                        super::join::JoinInput::deltas(&right.deltas),
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        ArrangementUpdateMode::Replace,
+                        true,
                     )?;
                     Ok(RecordDeltas {
                         descriptor: output_desc,
@@ -1929,39 +1884,18 @@ impl HydrationEvaluator<'_> {
             .schema
             .table(&table.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = table_schema.storage_record_schema();
         let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
         let mut scan = store.scan(ScanBounds::Prefix(Vec::new())).await?;
         let mut stored_records = Vec::<Vec<u8>>::new();
         while let Some(batch) = scan.next_batch().await? {
             stored_records.extend(batch.into_iter().map(|(_, record)| record));
         }
-        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for stored in stored_records {
-            let (variant_tag, payload) = crate::records::split_variant_record(&stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: table.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            grouped
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        let table_deltas = grouped
-            .into_iter()
-            .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                table: table.table.clone(),
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-            .collect::<Vec<_>>();
+        let table_deltas = NodeState::group_source_rows(
+            table_schema,
+            self.dictionaries,
+            stored_records.iter().map(Vec::as_slice),
+        )?;
         NodeState::update_table_source(
             table,
             self.schema,

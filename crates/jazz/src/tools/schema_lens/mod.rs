@@ -1,8 +1,5 @@
-//! Lens vocabulary.
-//!
-//! Shared schema lens types used by catalogue publishing, server routes, and
-//! client setup.
+//! Public lens vocabulary and lowering to runtime migration lenses.
+pub use crate::model::schema_lens::*;
 
-pub mod lens;
-
-pub use lens::{Direction, Lens, LensOp, LensTransform};
+#[doc(hidden)]
+pub mod runtime;

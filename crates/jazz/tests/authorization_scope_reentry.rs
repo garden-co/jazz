@@ -4,9 +4,9 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, LocalUpdates, MergeableTxOps, Propagation,
-    ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, UpdateOptions,
-    UpsertOptions, WriteIdentity,
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, MergeableTxOps, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream, UpdateOptions, UpsertOptions,
+    WriteIdentity,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -14,7 +14,6 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
@@ -80,7 +79,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -101,15 +100,13 @@ fn open_db() -> Db<TestStorage> {
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
+        tier: jazz::db::ReadTier::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
     }
 }
 
-fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) {
+fn insert_document(db: &Db, id: RowUuid, team: RowUuid, rank: u64) {
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
@@ -124,7 +121,7 @@ fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) 
     .expect("insert document");
 }
 
-fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorSubject) {
+fn insert_membership(db: &Db, id: RowUuid, team: RowUuid, user: AuthorSubject) {
     block_on(db.insert(
         MEMBERSHIPS,
         BTreeMap::from([
@@ -182,7 +179,7 @@ fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
 }
 
 fn ordered_page(
-    db: &Db<TestStorage>,
+    db: &Db,
     identity: AuthorSubject,
     prepared: &jazz::db::PreparedQuery,
 ) -> Vec<RowUuid> {

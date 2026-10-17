@@ -26,7 +26,7 @@ fn schema() -> JazzSchema {
     )]))
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

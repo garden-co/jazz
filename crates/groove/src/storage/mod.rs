@@ -31,8 +31,9 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use manifest::{
-    AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
-    StorageCodecProfile, StorageEpochManifest, StorageMigration,
+    AdapterFormat, GROOVE_DICTIONARY_V1_CODEC, GROOVE_DURABLE_INDEX_V2_CODEC, ManifestOpenReceipt,
+    MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1, StorageCodecProfile,
+    StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
@@ -446,7 +447,7 @@ pub trait OrderedKvStorage {
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
             Ok(collect_scan(
-                self.scan(ScanRequest::prefix(cf, prefix).reversed())
+                self.scan(ScanRequest::prefix(cf, prefix).reversed().with_max_items(1))
                     .await?,
             )
             .await?
@@ -749,23 +750,27 @@ const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
 const CLASS_LAYOUT_MARKER_KEY: &[u8] = b"groove-storage-layout";
-const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
+const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v3";
 
 /// Logical-to-physical storage layout used by [`LayoutStorage`].
 ///
 /// The identity layout preserves the historical one-logical-table-per-CF
 /// mapping. The class layout maps selected logical tables into shared physical
-/// class CFs while prefixing keys with a length-framed logical table name.
+/// class CFs while prefixing keys with the logical table's u32 class table id
+/// (see [`class_table_id`]); the indices class, which holds only the
+/// `indices` family, is unframed. `V3` (marker `class-cf-v3`) replaced the
+/// retired `class-cf-v2` framing, a u32 length plus the logical table name,
+/// with that id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum StorageLayout {
     #[default]
     Identity,
-    JazzClassV1,
+    JazzClassV3,
 }
 
 impl StorageLayout {
-    pub fn jazz_class_v1() -> Self {
-        Self::JazzClassV1
+    pub fn jazz_class_v3() -> Self {
+        Self::JazzClassV3
     }
 
     pub fn physical_column_families<'a>(
@@ -773,13 +778,13 @@ impl StorageLayout {
         logical_column_families: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
         let mut names = BTreeSet::new();
-        if matches!(self, Self::JazzClassV1) {
+        if matches!(self, Self::JazzClassV3) {
             names.insert(CLASS_META_CF.to_owned());
         }
         for logical in logical_column_families {
             let physical = match self {
                 Self::Identity => logical,
-                Self::JazzClassV1 => jazz_physical_class(logical).unwrap_or(logical),
+                Self::JazzClassV3 => jazz_physical_class(logical).unwrap_or(logical),
             };
             names.insert(physical.to_owned());
         }
@@ -787,25 +792,27 @@ impl StorageLayout {
     }
 
     fn map_cf<'a>(&'a self, logical_cf: &'a str) -> Result<PhysicalCf<'a>, Error> {
-        // A Jazz class key embeds this name. Validate before calculating its
-        // byte length or framing it, so no invalid logical CF can acquire a
-        // durable spelling even through this lower-level storage view.
+        // Validate before mapping, so no invalid logical CF can reach a
+        // physical class even through this lower-level storage view.
         validate_physical_storage_name(logical_cf)?;
         match self {
             Self::Identity => Ok(PhysicalCf {
                 physical_cf: logical_cf,
-                logical_prefix: None,
+                framed_family: None,
             }),
-            Self::JazzClassV1 => {
+            Self::JazzClassV3 => {
                 if let Some(physical_cf) = jazz_physical_class(logical_cf) {
+                    // The indices class holds only the `indices` family,
+                    // whose keys already start with a numeric index id, so it
+                    // is stored unframed.
                     Ok(PhysicalCf {
                         physical_cf,
-                        logical_prefix: Some(logical_cf),
+                        framed_family: (physical_cf != CLASS_INDICES_CF).then_some(logical_cf),
                     })
                 } else {
                     Ok(PhysicalCf {
                         physical_cf: logical_cf,
-                        logical_prefix: None,
+                        framed_family: None,
                     })
                 }
             }
@@ -813,13 +820,13 @@ impl StorageLayout {
     }
 
     fn validates_marker(&self) -> bool {
-        matches!(self, Self::JazzClassV1)
+        matches!(self, Self::JazzClassV3)
     }
 }
 
 struct PhysicalCf<'a> {
     physical_cf: &'a str,
-    logical_prefix: Option<&'a str>,
+    framed_family: Option<&'a str>,
 }
 
 struct MappedStorageCursor<'a> {
@@ -883,14 +890,87 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
     } else if logical_cf == "jazz_global_changes" {
         Some(CLASS_CHANGES_CF)
     } else if logical_cf == "indices" {
-        // The class prefix wraps the existing durable-index key. That key
-        // already starts with table/index identity, so this avoids introducing
-        // a second table prefix while keeping one physical index CF.
+        // The only family in the indices class. Its keys start with a
+        // numeric index id (or 0x00 for index metadata), so the class stores
+        // them without the length-framed family name.
         Some(CLASS_INDICES_CF)
     } else if logical_cf.starts_with("jazz_") {
         Some(CLASS_META_CF)
     } else {
         None
+    }
+}
+
+/// Largest class table id. Every framed key then starts with 0x00, so none can
+/// collide with the unframed layout marker key in the meta class.
+pub const MAX_CLASS_TABLE_ID: u32 = 0x00FF_FFFF;
+
+/// Largest Jazz catalogue physical table id a class key can carry. Jazz
+/// refuses to allocate or accept a larger one at schema ingest; the ids above
+/// it are reserved for [`JAZZ_SYSTEM_CLASS_TABLE_IDS`].
+pub const MAX_JAZZ_PHYSICAL_TABLE_ID: u64 = 0x00FF_FEFF;
+
+/// Durable class table ids of Jazz's fixed system families. They sit above
+/// every catalogue physical table id, so a fixed family never shares an id
+/// with a per-table family in the same class. Never renumber an entry.
+const JAZZ_SYSTEM_CLASS_TABLE_IDS: &[(&str, u32)] = &[
+    ("jazz_nodes", 0x00FF_FF01),
+    ("jazz_schema_versions", 0x00FF_FF02),
+    ("jazz_catalogue", 0x00FF_FF03),
+    ("jazz_transactions", 0x00FF_FF04),
+    ("jazz_pending_transactions", 0x00FF_FF05),
+    ("jazz_tx_provenance", 0x00FF_FF06),
+    ("jazz_tx_touched_rows", 0x00FF_FF07),
+    ("jazz_rejected_transactions", 0x00FF_FF08),
+    ("jazz_history_horizon", 0x00FF_FF09),
+    ("jazz_authority_policy_bindings", 0x00FF_FF0A),
+    ("jazz_subscription_watermarks_v1", 0x00FF_FF0B),
+    ("jazz_local_row_availability_v1", 0x00FF_FF0C),
+    ("jazz_superseded_writes_v1", 0x00FF_FF0D),
+    ("jazz_global_changes", 0x00FF_FF0E),
+];
+
+/// Per-table family suffixes. Each lands in a different class, so one
+/// catalogue table id never names two families of the same class.
+const JAZZ_PHYSICAL_TABLE_SUFFIXES: &[&str] = &[
+    "history",
+    "global_current",
+    "ahead_current",
+    "rejected_versions",
+];
+
+/// Return the class table id that frames `logical_cf`'s keys in the Jazz
+/// class layout. A per-table family (`jazz_physical_{id}_{suffix}`) carries
+/// the catalogue physical table id allocated at schema ingest; a fixed system
+/// family has a static id. Ids are derived from the name alone, so no id
+/// registry is stored. Any other family has no id and is refused.
+pub fn class_table_id(logical_cf: &str) -> Result<u32, Error> {
+    if let Some((_, id)) = JAZZ_SYSTEM_CLASS_TABLE_IDS
+        .iter()
+        .find(|(name, _)| *name == logical_cf)
+    {
+        return Ok(*id);
+    }
+    let per_table = logical_cf
+        .strip_prefix("jazz_physical_")
+        .and_then(|rest| rest.split_once('_'))
+        .filter(|(digits, suffix)| {
+            // Only the exact spelling Jazz's name constructors produce:
+            // unsigned decimal without sign or padding, and a known suffix.
+            !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && (digits.len() == 1 || !digits.starts_with('0'))
+                && JAZZ_PHYSICAL_TABLE_SUFFIXES.contains(suffix)
+        })
+        .and_then(|(digits, _)| digits.parse::<u64>().ok());
+    match per_table {
+        Some(id) if id <= MAX_JAZZ_PHYSICAL_TABLE_ID => Ok(id as u32),
+        Some(_) => Err(Error::InvalidStorageLayout(format!(
+            "physical table id of `{logical_cf}` exceeds the class key range"
+        ))),
+        None => Err(Error::InvalidStorageLayout(format!(
+            "`{logical_cf}` is not a Jazz class family with a table id"
+        ))),
     }
 }
 
@@ -979,10 +1059,10 @@ impl LayoutStorage {
         if self.layout.validates_marker() {
             // An unenumerable adapter cannot distinguish a fresh class layout
             // from a legacy logical-CF store. Creating the marker would make
-            // that ambiguity durable, so V1 deliberately refuses it.
+            // that ambiguity durable, so the class layout deliberately refuses it.
             let names = self.inner.column_family_names().ok_or_else(|| {
                 Error::InvalidStorageLayout(
-                    "class-CF v1 requires enumerable physical column families".to_owned(),
+                    "class-CF v3 requires enumerable physical column families".to_owned(),
                 )
             })?;
             if names.iter().any(|name| jazz_physical_class(name).is_some()) {
@@ -1009,12 +1089,11 @@ impl LayoutStorage {
 
     fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(String, Vec<u8>), Error> {
         let mapping = self.layout.map_cf(cf)?;
-        let Some(logical_prefix) = mapping.logical_prefix else {
+        let Some(framed_family) = mapping.framed_family else {
             return Ok((mapping.physical_cf.to_owned(), key.to_vec()));
         };
-        let mut physical_key = Vec::with_capacity(4 + logical_prefix.len() + key.len());
-        physical_key.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
-        physical_key.extend_from_slice(logical_prefix.as_bytes());
+        let mut physical_key = Vec::with_capacity(4 + key.len());
+        physical_key.extend_from_slice(&class_table_id(framed_family)?.to_be_bytes());
         physical_key.extend_from_slice(key);
         Ok((mapping.physical_cf.to_owned(), physical_key))
     }
@@ -1025,14 +1104,13 @@ impl LayoutStorage {
         prefix: &Key,
     ) -> Result<(String, Vec<u8>, usize), Error> {
         let mapping = self.layout.map_cf(cf)?;
-        let Some(logical_prefix) = mapping.logical_prefix else {
+        let Some(framed_family) = mapping.framed_family else {
             return Ok((mapping.physical_cf.to_owned(), prefix.to_vec(), 0));
         };
-        let mut physical_prefix = Vec::with_capacity(4 + logical_prefix.len() + prefix.len());
-        physical_prefix.extend_from_slice(&(logical_prefix.len() as u32).to_be_bytes());
-        physical_prefix.extend_from_slice(logical_prefix.as_bytes());
+        let mut physical_prefix = Vec::with_capacity(4 + prefix.len());
+        physical_prefix.extend_from_slice(&class_table_id(framed_family)?.to_be_bytes());
         physical_prefix.extend_from_slice(prefix);
-        let strip_len = 4 + logical_prefix.len();
+        let strip_len = 4;
         Ok((mapping.physical_cf.to_owned(), physical_prefix, strip_len))
     }
 
@@ -1059,6 +1137,10 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.inner.permits_eager_read_retry()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1187,7 +1269,11 @@ impl OrderedKvStorage for LayoutStorage {
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             Ok(collect_scan(
                 self.inner
-                    .scan(ScanRequest::prefix(physical_cf, physical_prefix).reversed())
+                    .scan(
+                        ScanRequest::prefix(physical_cf, physical_prefix)
+                            .reversed()
+                            .with_max_items(1),
+                    )
                     .await?,
             )
             .await?
@@ -1334,6 +1420,10 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.inner.permits_eager_read_retry()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -2171,6 +2261,10 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -2252,6 +2346,20 @@ pub enum Error {
     ColumnFamilyNotFound(String),
     #[error("invalid storage layout: {0}")]
     InvalidStorageLayout(String),
+    /// An existing root's manifest is canonical but declares a different
+    /// codec-family inventory than the opening build requires. Codec IDs
+    /// carry their format version (`name.vN`), so the two lists name exactly
+    /// which formats the root was written with and which this build reads.
+    /// Raised by manifest admission before any ordinary key is decoded.
+    #[error(
+        "unsupported storage format: this epoch-{epoch} root lacks codec families {missing:?} \
+         required by this build and declares {unknown:?} that this build does not read"
+    )]
+    UnsupportedStorageCodecs {
+        epoch: u16,
+        missing: Vec<String>,
+        unknown: Vec<String>,
+    },
     #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
     #[error("conditional mutations require a direct storage boundary")]
@@ -2769,9 +2877,26 @@ mod tests {
         }
     }
 
+    #[futures_test::test]
+    async fn wrappers_forward_eager_read_retry() {
+        let memory = || MemoryStorage::new(&["default"]).expect("memory storage opens");
+        assert!(memory().permits_eager_read_retry());
+        assert!(BoxedStorage::new(memory()).permits_eager_read_retry());
+        let layout = LayoutStorage::new(memory(), StorageLayout::Identity)
+            .await
+            .expect("identity layout opens");
+        assert!(layout.permits_eager_read_retry());
+        assert!(layout.begin_txn().permits_eager_read_retry());
+
+        let (backend, _) = MeteredStorage::new();
+        assert!(!BoxedStorage::new(backend).permits_eager_read_retry());
+        let (layout, _) = metered_class_layout().await;
+        assert!(!layout.permits_eager_read_retry());
+    }
+
     async fn metered_class_layout() -> (LayoutStorage, Rc<RefCell<Vec<String>>>) {
         let (backend, calls) = MeteredStorage::new();
-        let storage = LayoutStorage::new(backend, StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(backend, StorageLayout::jazz_class_v3())
             .await
             .expect("class layout opens");
         (storage, calls)
@@ -3120,22 +3245,22 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
-        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([
-            "jazz_albums_history",
-            "jazz_tracks_history",
-            "jazz_albums_register",
+        let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([
+            "jazz_physical_1_history",
+            "jazz_physical_2_history",
+            "jazz_physical_1_rejected_versions",
         ]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
             MemoryStorage::new(&refs).expect("valid memory storage families"),
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
 
         storage
             .set(
-                "jazz_albums_history".into(),
+                "jazz_physical_1_history".into(),
                 b"row:1".to_vec(),
                 b"album-one".to_vec(),
             )
@@ -3143,7 +3268,7 @@ mod tests {
             .unwrap();
         storage
             .set(
-                "jazz_albums_history".into(),
+                "jazz_physical_1_history".into(),
                 b"row:3".to_vec(),
                 b"album-three".to_vec(),
             )
@@ -3151,7 +3276,7 @@ mod tests {
             .unwrap();
         storage
             .set(
-                "jazz_tracks_history".into(),
+                "jazz_physical_2_history".into(),
                 b"row:2".to_vec(),
                 b"track-two".to_vec(),
             )
@@ -3159,7 +3284,7 @@ mod tests {
             .unwrap();
         storage
             .set(
-                "jazz_albums_register".into(),
+                "jazz_physical_1_rejected_versions".into(),
                 b"row:2".to_vec(),
                 b"album-register".to_vec(),
             )
@@ -3168,7 +3293,7 @@ mod tests {
 
         assert_eq!(
             storage
-                .prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .prefix("jazz_physical_1_history".into(), b"row:".to_vec())
                 .await
                 .unwrap(),
             vec![
@@ -3177,7 +3302,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            reverse_prefix_values(&storage, "jazz_albums_history", b"row:")
+            reverse_prefix_values(&storage, "jazz_physical_1_history", b"row:")
                 .await
                 .unwrap(),
             vec![
@@ -3187,7 +3312,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .last_with_prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .last_with_prefix("jazz_physical_1_history".into(), b"row:".to_vec())
                 .await
                 .unwrap(),
             Some((b"row:3".to_vec(), b"album-three".to_vec()))
@@ -3195,7 +3320,7 @@ mod tests {
         assert_eq!(
             storage
                 .range(
-                    "jazz_albums_history".into(),
+                    "jazz_physical_1_history".into(),
                     b"row:1".to_vec(),
                     b"row:4".to_vec()
                 )
@@ -3211,26 +3336,24 @@ mod tests {
     #[futures_test::test]
     async fn class_layout_isolates_every_jazz_physical_class() {
         let logical_cfs = [
-            ("jazz_albums_history", "jazz_tracks_history"),
-            ("jazz_albums_register", "jazz_tracks_register"),
-            ("jazz_albums_global_current", "jazz_tracks_global_current"),
+            ("jazz_physical_1_history", "jazz_physical_2_history"),
             (
-                "jazz_albums_register_global_current",
-                "jazz_tracks_register_global_current",
+                "jazz_physical_1_global_current",
+                "jazz_physical_2_global_current",
             ),
-            ("jazz_albums_ahead_current", "jazz_tracks_ahead_current"),
             (
-                "jazz_albums_register_ahead_current",
-                "jazz_tracks_register_ahead_current",
+                "jazz_physical_1_ahead_current",
+                "jazz_physical_2_ahead_current",
             ),
-            ("jazz_global_changes", "jazz_known_state_facts"),
+            ("jazz_physical_1_rejected_versions", "jazz_catalogue"),
+            ("jazz_global_changes", "jazz_authority_policy_bindings"),
             ("jazz_nodes", "jazz_transactions"),
         ];
         let all_logical = logical_cfs
             .iter()
             .flat_map(|(left, right)| [*left, *right])
             .collect::<Vec<_>>();
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v3();
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
@@ -3276,7 +3399,7 @@ mod tests {
         let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"])
             .expect("valid memory storage families");
         assert!(matches!(
-            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).await,
+            LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).await,
             Err(Error::InvalidStorageLayout(_))
         ));
     }
@@ -3285,7 +3408,7 @@ mod tests {
     async fn class_layout_accepts_truly_empty_store_and_writes_marker() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
             .expect("valid memory storage families");
-        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v3())
             .await
             .unwrap();
         assert_eq!(
@@ -3301,14 +3424,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn class_table_ids_come_from_catalogue_ids_and_fixed_system_ids() {
+        for (name, id) in [
+            ("jazz_physical_0_history", 0),
+            ("jazz_physical_1_history", 1),
+            ("jazz_physical_1_global_current", 1),
+            ("jazz_physical_1_ahead_current", 1),
+            ("jazz_physical_1_rejected_versions", 1),
+            (
+                "jazz_physical_16776959_history",
+                MAX_JAZZ_PHYSICAL_TABLE_ID as u32,
+            ),
+            ("jazz_nodes", 0x00FF_FF01),
+            ("jazz_global_changes", 0x00FF_FF0E),
+        ] {
+            assert_eq!(class_table_id(name).unwrap(), id, "{name}");
+        }
+        for refused in [
+            "jazz_physical_16776960_history",
+            "jazz_physical_18446744073709551616_history",
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical__history",
+            "jazz_physical_history",
+            "jazz_physical_1_register",
+            "jazz_physical_1_register_global_current",
+            "jazz_physical_1_history_extra",
+            "jazz_albums_history",
+            "jazz_unknown_store",
+        ] {
+            assert!(
+                matches!(class_table_id(refused), Err(Error::InvalidStorageLayout(_))),
+                "{refused}"
+            );
+        }
+
+        let mut fixed = BTreeSet::new();
+        for (name, id) in JAZZ_SYSTEM_CLASS_TABLE_IDS {
+            assert!(u64::from(*id) > MAX_JAZZ_PHYSICAL_TABLE_ID, "{name}");
+            assert!(*id <= MAX_CLASS_TABLE_ID, "{name}");
+            assert!(fixed.insert(*id), "{name} reuses a fixed id");
+            assert!(jazz_physical_class(name).is_some_and(|class| class != CLASS_INDICES_CF));
+        }
+    }
+
+    #[futures_test::test]
+    async fn class_layout_refuses_families_without_a_table_id_before_storage() {
+        let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
+            .expect("valid class families");
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v3())
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage
+                .set("jazz_albums_history".into(), b"k".to_vec(), b"v".to_vec())
+                .await,
+            Err(Error::InvalidStorageLayout(_))
+        ));
+        assert!(matches!(
+            storage
+                .get("jazz_albums_history".into(), b"k".to_vec())
+                .await,
+            Err(Error::InvalidStorageLayout(_))
+        ));
+        assert_eq!(
+            raw.prefix("__groove_class_history".into(), Vec::new())
+                .await
+                .unwrap(),
+            Vec::<KeyValue>::new()
+        );
+    }
+
     #[futures_test::test]
     async fn class_layout_marker_and_mapped_key_receipt_is_exact() {
-        let logical_cf = "jazz_albums_history";
+        let logical_cf = "jazz_physical_258_history";
         let physical_cf = "__groove_class_history";
         let raw =
             MemoryStorage::new(&["__groove_class_meta", physical_cf, "__groove_class_indices"])
                 .expect("valid physical class families");
-        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v3())
             .await
             .expect("fresh class layout initializes its one marker");
 
@@ -3324,16 +3519,15 @@ mod tests {
             )
             .await
             .unwrap(),
-            Some(b"class-cf-v1".to_vec()),
+            Some(b"class-cf-v3".to_vec()),
             "the marker has one frozen physical key and value"
         );
-        let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
-        expected_key.extend_from_slice(logical_cf.as_bytes());
+        let mut expected_key = 258_u32.to_be_bytes().to_vec();
         expected_key.extend_from_slice(b"row\0key");
         assert_eq!(
             raw.get(physical_cf.into(), expected_key).await.unwrap(),
             Some(b"value".to_vec()),
-            "mapped keys are exactly u32be(UTF-8 logical-CF length) | logical-CF | key"
+            "mapped keys are exactly u32be(catalogue physical table id) | key"
         );
 
         storage
@@ -3350,16 +3544,17 @@ mod tests {
                 .await
                 .unwrap(),
             vec![(b"existing-index-key".to_vec(), b"index-value".to_vec())],
-            "the public index path must retain its pre-existing logical key"
+            "the public index path must retain its logical key"
         );
-        let mut expected_index_key = ("indices".len() as u32).to_be_bytes().to_vec();
-        expected_index_key.extend_from_slice(b"indicesexisting-index-key");
         assert_eq!(
-            raw.get("__groove_class_indices".into(), expected_index_key)
-                .await
-                .unwrap(),
+            raw.get(
+                "__groove_class_indices".into(),
+                b"existing-index-key".to_vec()
+            )
+            .await
+            .unwrap(),
             Some(b"index-value".to_vec()),
-            "indices use the same one class framing, not a second table prefix"
+            "the indices class holds only `indices`, whose keys are stored unframed"
         );
 
         assert_eq!(
@@ -3392,8 +3587,10 @@ mod tests {
         for invalid_marker in [
             b"".as_slice(),
             b"class-cf-v0".as_slice(),
+            b"class-cf-v1".as_slice(),
             b"class-cf-v2".as_slice(),
-            b"class-cf-v1\0".as_slice(),
+            b"class-cf-v4".as_slice(),
+            b"class-cf-v3\0".as_slice(),
         ] {
             let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
                 .expect("valid class families");
@@ -3413,7 +3610,7 @@ mod tests {
             .unwrap();
 
             assert!(matches!(
-                LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1()).await,
+                LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v3()).await,
                 Err(Error::InvalidStorageLayout(_))
             ));
             assert_eq!(
@@ -3446,7 +3643,7 @@ mod tests {
         assert!(matches!(
             LayoutStorage::new(
                 NonEnumeratingStorage(raw.clone()),
-                StorageLayout::jazz_class_v1()
+                StorageLayout::jazz_class_v3()
             )
             .await,
             Err(Error::InvalidStorageLayout(_))
@@ -3459,7 +3656,7 @@ mod tests {
             .await
             .unwrap(),
             None,
-            "an uninspectable legacy store must not acquire a V1 marker"
+            "an uninspectable legacy store must not acquire a class marker"
         );
     }
 
@@ -3467,7 +3664,7 @@ mod tests {
     async fn class_layout_rejects_invalid_logical_names_before_key_framing() {
         let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
             .expect("valid class families");
-        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v3())
             .await
             .unwrap();
         let overlong = format!(
@@ -3493,8 +3690,8 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_maps_every_classifier_match_and_preserves_unmapped_missing_cf_errors() {
-        let layout = StorageLayout::jazz_class_v1();
-        let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
+        let layout = StorageLayout::jazz_class_v3();
+        let physical_cfs = layout.physical_column_families(["jazz_physical_1_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
             MemoryStorage::new(&refs).expect("valid memory storage families"),
@@ -3505,7 +3702,7 @@ mod tests {
 
         storage
             .set(
-                "jazz_albums_history".into(),
+                "jazz_physical_1_history".into(),
                 b"row:1".to_vec(),
                 b"album-one".to_vec(),
             )
@@ -3516,7 +3713,7 @@ mod tests {
         // as its own legacy logical CF under the same marker.
         storage
             .set(
-                "jazz_tracks_history".into(),
+                "jazz_physical_2_history".into(),
                 b"row:2".to_vec(),
                 b"track-two".to_vec(),
             )
@@ -3524,7 +3721,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             storage
-                .get("jazz_tracks_history".into(), b"row:2".to_vec())
+                .get("jazz_physical_2_history".into(), b"row:2".to_vec())
                 .await
                 .unwrap(),
             Some(b"track-two".to_vec())
@@ -4782,6 +4979,190 @@ mod tests {
             Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
         assert_eq!(storage.scans.get(), 1);
+    }
+
+    /// Internal work-bound receipt: returned values alone cannot distinguish a
+    /// point seek from materializing thousands of discarded candidates. Alice's
+    /// durable keys and Bob's staged replacements/deletions use real storage.
+    /// durable base -> optional layout -> staged overlay -> greatest visible key.
+    #[futures_test::test]
+    async fn last_prefix_lookup_bounds_physical_entries_with_layout_and_staged_deletions() {
+        struct Meter {
+            inner: MemoryStorage,
+            requests: Rc<RefCell<Vec<ScanRequest>>>,
+            entries: Rc<Cell<usize>>,
+        }
+        struct Cursor<'a> {
+            inner: StorageScan<'a>,
+            entries: Rc<Cell<usize>>,
+        }
+        impl StorageCursor for Cursor<'_> {
+            fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+                Box::pin(async move {
+                    let batch = self.inner.next_batch().await?;
+                    self.entries
+                        .set(self.entries.get() + batch.as_ref().map_or(0, Vec::len));
+                    Ok(batch)
+                })
+            }
+        }
+        impl OrderedKvStorage for Meter {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.inner.get(cf, key)
+            }
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.inner.put_if_absent(cf, key, value)
+            }
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.inner.compare_and_delete(cf, key, value)
+            }
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.set(cf, key, value)
+            }
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.delete(cf, key)
+            }
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.write_many(operations)
+            }
+            fn column_family_names(&self) -> Option<Vec<String>> {
+                self.inner.column_family_names()
+            }
+            fn scan(
+                &self,
+                request: ScanRequest,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.requests.borrow_mut().push(request.clone());
+                Box::pin(async move {
+                    Ok(Box::new(Cursor {
+                        inner: self.inner.scan(request).await?,
+                        entries: self.entries.clone(),
+                    }) as StorageScan<'_>)
+                })
+            }
+        }
+        impl ReopenableStorage for Meter {
+            fn reopen(
+                self,
+                column_families: Vec<String>,
+            ) -> StorageFuture<'static, Result<Self, Error>> {
+                Box::pin(async move {
+                    Ok(Self {
+                        inner: self.inner.reopen(column_families).await?,
+                        requests: self.requests,
+                        entries: self.entries,
+                    })
+                })
+            }
+        }
+        fn key(i: usize) -> Vec<u8> {
+            format!("row:{i:05}").into_bytes()
+        }
+        async fn exercise<S: OrderedKvStorage>(
+            storage: &S,
+            requests: &RefCell<Vec<ScanRequest>>,
+            entries: &Cell<usize>,
+        ) {
+            let cf = "jazz_physical_1_history";
+            storage
+                .write_many(
+                    (0..2048)
+                        .map(|i| OwnedWriteOperation::Set {
+                            cf: cf.into(),
+                            key: key(i),
+                            value: key(i),
+                        })
+                        .collect(),
+                )
+                .await
+                .unwrap();
+            for removals in [0, 3] {
+                let staged = RefCell::new(StagedWriteState::from(
+                    (0..removals)
+                        .map(|i| OwnedWriteOperation::Delete {
+                            cf: cf.into(),
+                            key: key(2047 - i),
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+                let overlay = StagedWriteOverlay::new(storage, &staged);
+                requests.borrow_mut().clear();
+                entries.set(0);
+                assert_eq!(
+                    overlay
+                        .last_with_prefix(cf.into(), b"row:".to_vec())
+                        .await
+                        .unwrap(),
+                    Some((key(2047 - removals), key(2047 - removals)))
+                );
+                assert_eq!(entries.get(), 1 + removals);
+                assert_eq!(requests.borrow().len(), 1);
+                assert_eq!(requests.borrow()[0].direction, ScanDirection::Reverse);
+                assert_eq!(requests.borrow()[0].max_items, Some(1 + removals));
+            }
+            requests.borrow_mut().clear();
+            entries.set(0);
+            assert_eq!(
+                storage
+                    .last_with_prefix(cf.into(), b"row:".to_vec())
+                    .await
+                    .unwrap(),
+                Some((key(2047), key(2047)))
+            );
+            assert_eq!(entries.get(), 1);
+            assert_eq!(requests.borrow()[0].max_items, Some(1));
+            assert_eq!(
+                storage
+                    .last_with_prefix(cf.into(), b"missing:".to_vec())
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let entries = Rc::new(Cell::new(0));
+        let storage = Meter {
+            inner: MemoryStorage::new(&["jazz_physical_1_history"]).unwrap(),
+            requests: requests.clone(),
+            entries: entries.clone(),
+        };
+        exercise(&storage, &requests, &entries).await;
+        let layout = StorageLayout::jazz_class_v3();
+        let families = layout.physical_column_families(["jazz_physical_1_history"]);
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = LayoutStorage::new(
+            Meter {
+                inner: MemoryStorage::new(&refs).unwrap(),
+                requests: requests.clone(),
+                entries: entries.clone(),
+            },
+            layout,
+        )
+        .await
+        .unwrap();
+        exercise(&storage, &requests, &entries).await;
     }
 
     #[futures_test::test]

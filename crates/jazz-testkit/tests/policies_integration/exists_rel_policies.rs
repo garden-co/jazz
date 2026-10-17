@@ -110,7 +110,7 @@ async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inn
         .2
         .expect("insert should be pending server policy evaluation");
     alice
-        .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+        .wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer)
         .await
         .expect("nested EXISTS_REL policy should authorise the correlated insert");
 
@@ -213,7 +213,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .expect("non-admin update should be accepted optimistically")
         .expect("non-admin update should be pending server policy evaluation");
     assert!(
-        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .is_err(),
         "non-admin update should be denied"
@@ -228,7 +228,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .expect("admin update should be accepted optimistically");
     if let Some(transaction) = alice_transaction {
         alice
-            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .expect("admin update should be allowed");
     }
@@ -415,7 +415,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
         .2
         .expect("non-admin insert should be pending server policy evaluation");
     assert!(
-        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .is_err(),
         "non-admin insert should be denied by the server"
@@ -430,7 +430,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
         .2;
     if let Some(transaction) = alice_transaction {
         alice
-            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .expect("admin insert should be allowed by the server");
     }
@@ -483,7 +483,7 @@ async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let (_, _, grant_tx) = backend
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
         .expect("seed private admin grant");
-    jazz_testkit::wait_for_edge_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
+    jazz_testkit::wait_for_global_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
 
     let alice = connect_ready_user(
         &server,
@@ -508,7 +508,7 @@ async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let rejection = bob
         .wait_for_transaction(
             bob_tx.expect("Bob transaction"),
-            jazz::tools::DurabilityTier::EdgeServer,
+            jazz::tools::DurabilityTier::GlobalServer,
         )
         .await
         .expect_err("server must reject Bob without a matching grant");
@@ -519,7 +519,7 @@ async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     alice
         .wait_for_transaction(
             alice_tx.expect("Alice transaction"),
-            jazz::tools::DurabilityTier::EdgeServer,
+            jazz::tools::DurabilityTier::GlobalServer,
         )
         .await
         .expect("private grant authorizes Alice's insert");
@@ -648,7 +648,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
         .2;
     if let Some(transaction) = alice_transaction {
         alice
-            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .expect("active admin row should satisfy revoked_at = NULL predicate");
     }
@@ -663,7 +663,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
         .expect("revoked admin insert should be pending server policy evaluation");
     assert!(
         carol
-            .wait_for_transaction(carol_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .wait_for_transaction(carol_transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .is_err(),
         "revoked admin row should fail revoked_at = NULL predicate"
@@ -752,7 +752,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .expect("non-admin delete should be accepted optimistically")
         .expect("non-admin delete should be pending server policy evaluation");
     assert!(
-        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .is_err(),
         "non-admin delete should be denied"
@@ -763,7 +763,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .expect("admin delete should be accepted optimistically");
     if let Some(transaction) = alice_transaction {
         alice
-            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer)
             .await
             .expect("admin delete should be allowed");
     }
@@ -801,7 +801,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
     tokio::task::LocalSet::new()
         .run_until(async {
             use jazz_testkit::{
-                connect_ready_user, has_added_id, has_removed, wait_for_edge_txs, wait_for_query,
+                connect_ready_user, has_added_id, has_removed, wait_for_global_txs, wait_for_query,
                 wait_for_subscription_update,
             };
             let schema = SchemaBuilder::new()
@@ -848,7 +848,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             let (row, _, tx) = admin
                 .insert("protected", row_input!("data" => "secret"))
                 .unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             let query = Query::from("protected").select(["data"]);
             let mut stream = alice.subscribe(query.clone()).await.unwrap();
             let mut log = Vec::new();
@@ -867,7 +867,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             let (grant2, _, tx2) = admin
                 .insert("grants", row_input!("user_id" => ALICE_ID))
                 .unwrap();
-            wait_for_edge_txs(&admin, &[tx1.unwrap(), tx2.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx1.unwrap(), tx2.unwrap()]).await;
             wait_for_subscription_update(
                 &mut stream,
                 &mut log,
@@ -895,7 +895,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             )
             .await;
             let tx = admin.delete("grants", grant1).unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query.clone(),
@@ -916,7 +916,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             .await;
             log.clear();
             let tx = admin.delete("grants", grant2).unwrap();
-            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_global_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query,
@@ -984,7 +984,7 @@ async fn exists_rel_disjunction_preserves_following_owner_predicate() {
                     match result {
                         Ok((_, _, transaction)) => {
                             let transaction = transaction.expect("write requires authority settlement");
-                            let settled = alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer).await;
+                            let settled = alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer).await;
                             assert_eq!(settled.is_ok(), allowed, "owner_first={owner_first}, name={name}, owner={owner}: {settled:?}");
                         }
                         Err(error) if !allowed => assert_client_policy_denied(error, "projects", Operation::Insert),

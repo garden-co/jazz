@@ -28,6 +28,7 @@ macro_rules! local_tokio_test {
 }
 
 fn team_graph_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("teams")
@@ -39,6 +40,7 @@ fn team_graph_schema() -> Schema {
                 .fk_column("child_team", "teams")
                 .fk_column("parent_team", "teams"),
         )
+        .allow_all()
         .build()
 }
 

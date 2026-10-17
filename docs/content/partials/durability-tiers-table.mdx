@@ -1,7 +1,6 @@
-Jazz data propagates through tiers, from fast local confirmation to broader reach.
+Write waits distinguish local persistence from Core acceptance. Synchronization continues with either choice.
 
-| Tier       | Where               | When to use                                                  |
-| ---------- | ------------------- | ------------------------------------------------------------ |
-| `"local"`  | On the device       | Default. Instant writes, no network needed.                  |
-| `"edge"`   | Nearest sync server | Confirm data has left the device before continuing.          |
-| `"global"` | Central server      | Ensure all clients can see the data, regardless of location. |
+| Tier       | Where       | What confirmation means                                                                             |
+| ---------- | ----------- | --------------------------------------------------------------------------------------------------- |
+| `"local"`  | This device | Saved by the local persistence driver, without waiting for the network.                             |
+| `"global"` | Core        | Authorized and durably accepted by Core. Other clients receive updates through their subscriptions. |

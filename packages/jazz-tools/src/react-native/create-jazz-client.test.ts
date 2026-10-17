@@ -41,9 +41,7 @@ import {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
-  type ReactNativeSqliteStorageDriver,
   type JazzClientConfig,
   useLocalFirstAuth,
 } from "./index.js";
@@ -113,9 +111,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("exports the exact installed-package persistence boundary messages", () => {
-    expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
-      "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
-    );
     expect(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR).toMatch(/JazzRelay native artifact/);
   });
 
@@ -256,12 +251,14 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       title: "Native note",
     });
     await expect(inserted.txId).resolves.toBe("04".repeat(16));
-    await expect(client.db.all(app.notes, { tier: "edge" })).resolves.toMatchObject([
+    await expect(client.db.all(app.notes, { tier: "remote" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
-    expect(readOptions).toContainEqual({ tier: "edge" });
+    expect(readOptions).toContainEqual(expect.objectContaining({ tier: "remote" }));
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
-    expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
+    // #3273: reads and subscriptions no longer tick (pump) the native relay
+    // before their command; unsubscribe still drives its cleanup turn.
+    expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");
     expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
     expect(nativeForegroundTest.openAttached).toHaveBeenCalledWith(nativeRelayCapability);
@@ -338,41 +335,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect((error as Error).message).toBe(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
   });
 
-  it("rejects an injected SQLite driver before opening it", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-persistent-boundary-test")),
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("rejects rather than ignores sqliteStorage combined with memory mode", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-memory-sqlite-ambiguity-test")),
-      driver: { type: "memory" },
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
-  });
-
   it("keeps the Node-only memory scaffold out of the React Native entrypoint", async () => {
     const config = {
       ...(await accountConfig("react-native-memory-reopen-test")),
@@ -405,7 +367,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedRow[]): void {
       encoded.bytes(row.rowId);
       encoded.bool(false);
       encoded.bytes(
-        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(row.title)])]),
+        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(row.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);

@@ -100,8 +100,9 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
+        self.schema.validate_table_interning(&table)?;
         self.table_storage_descriptors
-            .insert(table.name.clone(), table.record_schema());
+            .insert(table.name.clone(), table.storage_record_schema());
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
@@ -128,6 +129,16 @@ impl IvmRuntime {
         columns: Vec<crate::schema::ColumnSchema>,
         variant_tag: crate::schema::TableVariant,
     ) -> Result<(), IvmRuntimeError> {
+        {
+            let mut candidate = self
+                .schema
+                .table(table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+                .clone();
+            candidate.columns.extend(columns.iter().cloned());
+            candidate.variants.push(variant_tag.clone());
+            self.schema.validate_table_interning(&candidate)?;
+        }
         let table_schema = self
             .schema
             .tables
@@ -161,7 +172,7 @@ impl IvmRuntime {
         }
         table_schema.variants.push(variant_tag);
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
         let descriptor = table_schema
             .record_schema_for_variant(version)
             .expect("the newly registered variant exists");
@@ -243,7 +254,13 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.record_schema());
+            .insert(table.to_owned(), table_schema.storage_record_schema());
+        if !table_schema.has_variants() {
+            // Registry evolution changes column types; the plain-table
+            // descriptor must follow, as registration keeps it.
+            self.table_descriptors
+                .insert(table.to_owned(), table_schema.record_schema());
+        }
         let mut descriptors = HashMap::default();
         for variant in &table_schema.variants {
             let descriptor = table_schema
@@ -293,6 +310,9 @@ impl IvmRuntime {
             .indices
             .push(index.clone());
         let table_schema = self.schema.tables[table_position].clone();
+        // A runtime (re)creation always backfills under a fresh durable id:
+        // entries a dropped incarnation left behind are never read.
+        self.index_ids.borrow_mut().retire(table, &index.name);
         if table_schema.has_variants() {
             let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
             self.define_variant_projection_target(
@@ -320,14 +340,19 @@ impl IvmRuntime {
         let snapshot = self
             .hydration_snapshot(input, storage, HydrationMode::Ordinary)
             .await?;
-        apply_persist_delta(
+        // The new index's id registration becomes durable in the same atomic
+        // write as its backfilled entries, never after them.
+        let registrations = self.index_ids.borrow().pending();
+        persist::apply_persist_delta_with(
             storage,
             &persist_op.storage,
             &persist_op.key_fields,
             persist_op.unique,
             &snapshot,
+            registrations.operations().to_vec(),
         )
         .await?;
+        self.index_ids.borrow_mut().mark_persisted(&registrations);
         Ok(())
     }
 
@@ -537,6 +562,8 @@ impl IvmRuntime {
             project,
             raw_projection,
         };
+        // Neither outcome replaces a case, so no retained result is stale; see
+        // `register_variant_projection_target_case`.
         match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
@@ -550,7 +577,6 @@ impl IvmRuntime {
                 });
             }
         }
-        self.invalidate_table_inputs(table);
         Ok(())
     }
 
@@ -735,10 +761,16 @@ impl IvmRuntime {
         } else {
             VariantProjectionCase::Ignore { source }
         };
-        let changed = match projection.cases.entry(variant_tag) {
+        // Only replacing a case can make a retained result stale. Every reader
+        // of a projection fails on a row whose tag has no case, so no result
+        // that exists was computed from one: adding a case for a new tag (in
+        // particular the first case of a new target) leaves them all valid.
+        // Invalidating the whole table here dropped every hydration memo over
+        // it each time a query registered its own projection target (#3797).
+        let replaced = match projection.cases.entry(variant_tag) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(case);
-                true
+                false
             }
             std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => false,
             std::collections::hash_map::Entry::Occupied(mut entry)
@@ -763,7 +795,7 @@ impl IvmRuntime {
                 });
             }
         };
-        if changed {
+        if replaced {
             self.invalidate_table_inputs(table);
         }
         Ok(())
@@ -822,21 +854,22 @@ impl IvmRuntime {
         )
     }
 
-    fn invalidate_table_inputs(&mut self, table: &str) {
+    pub(super) fn invalidate_table_inputs(&mut self, table: &str) {
         *self.table_frontiers.entry(table.to_owned()).or_default() += 1;
-        self.eval_memo.retain(|key, _| {
-            self.node_meta
-                .get(&key.node)
-                .and_then(|meta| meta.input_signature.as_ref())
-                .is_none_or(|signature| {
-                    !signature.tables.iter().any(|candidate| candidate == table)
-                })
-        });
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        let invalidated_nodes = self
+            .eval_memo_keys_by_node
+            .keys()
+            .filter(|node| {
+                self.node_meta
+                    .get(node)
+                    .and_then(|meta| meta.input_signature.as_ref())
+                    .is_some_and(|signature| {
+                        signature.tables.iter().any(|candidate| candidate == table)
+                    })
+            })
+            .copied()
+            .collect();
+        self.remove_retained_eval_memos_for_nodes(&invalidated_nodes);
     }
 
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {
@@ -861,6 +894,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.query_snapshot_with_root_values(graph, storage, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::query_snapshot`], choosing how the result presents
+    /// indirect root values; see [`RootIndirectValues`].
+    pub async fn query_snapshot_with_root_values<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &S,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
@@ -874,7 +922,12 @@ impl IvmRuntime {
             ..
         } = runtime.add_dedup_graph(&graph)?;
         let records = runtime
-            .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
+            .hydration_snapshot_with_root_values(
+                output_node,
+                storage,
+                HydrationMode::Ordinary,
+                root_indirect_values,
+            )
             .await?;
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);

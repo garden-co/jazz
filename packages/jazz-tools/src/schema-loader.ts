@@ -312,6 +312,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     columns: table.columns.map(wasmColumnToAst),
     ...(table.relations ? { relations: structuredClone(table.relations) } : {}),
     indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
+    compositeIndexes: table.composite_indexes?.map((columns) => [...columns]),
     branchBy: table.branchBy ? [...table.branchBy] : undefined,
     policies: table.policies as TablePolicies | undefined,
   };

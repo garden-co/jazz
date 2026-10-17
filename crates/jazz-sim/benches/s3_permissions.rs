@@ -33,7 +33,7 @@ use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, ingest_commit_unit_settled,
-    register_query_receiver, register_query_receiver_for_subscription, settle_outcome,
+    settle_outcome,
 };
 use jazz_sim::public_schema_fixture::{
     all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
@@ -319,9 +319,8 @@ struct Summary {
     revoke: Vec<RevokeSummary>,
     forbidden_deliveries: u64,
     link_rtt_floor_us: u64,
-    client_edge_one_way_ms: u64,
-    edge_core_one_way_ms: u64,
-    edge_acceptance: EdgeAcceptanceSummary,
+    client_core_one_way_ms: u64,
+    core_acceptance: CoreAcceptanceSummary,
 }
 
 #[derive(Debug)]
@@ -338,18 +337,12 @@ struct DbSurfaceSummary {
     grant_global_latency: Histogram<u64>,
     revoke: Vec<DbRevokeSummary>,
     forbidden_deliveries: u64,
-    client_edge_one_way_ms: u64,
-    edge_core_one_way_ms: u64,
+    client_core_one_way_ms: u64,
 }
 
 #[derive(Debug)]
-struct EdgeAcceptanceSummary {
+struct CoreAcceptanceSummary {
     acceptance_latency: Histogram<u64>,
-    hydration_bytes: u64,
-    hydration_floor_bytes: u64,
-    hydration_rows: usize,
-    scope_subscriptions_before_drain: usize,
-    scope_subscriptions_after_drain: usize,
 }
 
 #[derive(Debug)]
@@ -431,7 +424,7 @@ struct Fixture {
 
 struct Client {
     name: String,
-    node: NodeState<RocksDbStorage>,
+    node: NodeState,
     _dir: tempfile::TempDir,
     peer: PeerState,
     registered_subscriptions: BTreeSet<SubscriptionKey>,
@@ -439,16 +432,8 @@ struct Client {
     visible_rows: BTreeSet<RowUuid>,
 }
 
-struct EdgeRoute {
-    name: String,
-    node: NodeState<RocksDbStorage>,
-    _dir: tempfile::TempDir,
-    core_peer: PeerState,
-    policy_peer: PeerState,
-}
-
 struct DbClient {
-    db: Db<RocksDbStorage>,
+    db: Db,
     _dir: tempfile::TempDir,
     server_to_client_bytes: Rc<Cell<u64>>,
     server_to_client_floor_bytes: Rc<Cell<u64>>,
@@ -486,21 +471,9 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         schema.clone(),
         AuthorSubject::for_test_uuid(fixture.simple_team.0),
     );
-    let mut simple_edge = open_edge(
-        "simple_edge",
-        node(120),
-        schema.clone(),
-        AuthorSubject::for_test_uuid(fixture.simple_team.0),
-    );
     let mut admin = open_client(
         "admin",
         node(21),
-        schema.clone(),
-        AuthorSubject::for_test_uuid(fixture.admin_team.0),
-    );
-    let mut admin_edge = open_edge(
-        "admin_edge",
-        node(121),
         schema.clone(),
         AuthorSubject::for_test_uuid(fixture.admin_team.0),
     );
@@ -510,30 +483,10 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         schema.clone(),
         AuthorSubject::for_test_uuid(row(9_900).0),
     );
-    let mut spy_edge = open_edge(
-        "spy_edge",
-        node(122),
-        schema.clone(),
-        AuthorSubject::for_test_uuid(row(9_900).0),
-    );
 
-    let simple_cold = hydrate(
-        ctx,
-        &mut core,
-        &mut simple_edge,
-        &mut simple,
-        &shape,
-        &binding,
-    );
-    let admin_cold = hydrate(
-        ctx,
-        &mut core,
-        &mut admin_edge,
-        &mut admin,
-        &shape,
-        &binding,
-    );
-    let spy_cold = hydrate(ctx, &mut core, &mut spy_edge, &mut spy, &shape, &binding);
+    let simple_cold = hydrate_direct(ctx, &mut core, &mut simple, &shape, &binding);
+    let admin_cold = hydrate_direct(ctx, &mut core, &mut admin, &shape, &binding);
+    let spy_cold = hydrate_direct(ctx, &mut core, &mut spy, &shape, &binding);
     assert_eq!(spy.visible_rows.len(), 0);
     assert_eq!(spy_cold.output_rows, 0);
 
@@ -553,7 +506,6 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         ctx,
         &mut writer,
         &mut core,
-        &mut simple_edge,
         &mut simple,
         &shape,
         &binding,
@@ -586,7 +538,6 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             ctx,
             &mut writer,
             &mut core,
-            &mut simple_edge,
             &mut simple,
             &shape,
             &binding,
@@ -602,10 +553,9 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         );
     }
 
-    let edge_acceptance = edge_acceptance_phase(
+    let core_acceptance = core_acceptance_phase(
         ctx,
         &mut core,
-        &mut simple_edge,
         &mut simple,
         fixture
             .resources
@@ -619,7 +569,6 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         ctx,
         &mut writer,
         &mut core,
-        &mut spy_edge,
         &mut spy,
         &shape,
         &binding,
@@ -646,12 +595,9 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         grant_global_latency,
         revoke: revoke_summaries,
         forbidden_deliveries,
-        link_rtt_floor_us: 2
-            * (profile_leg_ms(&config.profile).0 + profile_leg_ms(&config.profile).1)
-            * 1_000,
-        client_edge_one_way_ms: profile_leg_ms(&config.profile).0,
-        edge_core_one_way_ms: profile_leg_ms(&config.profile).1,
-        edge_acceptance,
+        link_rtt_floor_us: 2 * (client_core_latency_ms(&config.profile)) * 1_000,
+        client_core_one_way_ms: client_core_latency_ms(&config.profile),
+        core_acceptance,
     }
 }
 
@@ -747,17 +693,15 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         grant_global_latency,
         revoke,
         forbidden_deliveries,
-        client_edge_one_way_ms: profile_leg_ms(&config.profile).0,
-        edge_core_one_way_ms: profile_leg_ms(&config.profile).1,
+        client_core_one_way_ms: client_core_latency_ms(&config.profile),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn grant_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -792,7 +736,7 @@ fn grant_phase(
     oracle
         .access
         .insert(access_edge, (resource, fixture.visible_group, false));
-    deliver_update(ctx, core, edge, client, shape, binding);
+    deliver_update(ctx, core, client, shape, binding);
     samples.push((ctx.now_ms() - start) * 1_000);
 
     let resource2 = row(700_002);
@@ -837,7 +781,7 @@ fn grant_phase(
         membership,
         (fixture.simple_team, fixture.grant_group, false),
     );
-    deliver_update(ctx, core, edge, client, shape, binding);
+    deliver_update(ctx, core, client, shape, binding);
     samples.push((ctx.now_ms() - start) * 1_000);
     samples
 }
@@ -967,9 +911,8 @@ fn revoke_phase_db(
 #[allow(clippy::too_many_arguments)]
 fn revoke_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -997,18 +940,7 @@ fn revoke_phase(
     let cpu_us = cpu.elapsed().as_micros() as u64;
     oracle.memberships.remove(&membership);
     let query_start = Instant::now();
-    hydrate_edge_policy(ctx, core, edge);
-    let core_update = block_on(edge.core_peer.query_update_for_subscription(
-        core,
-        edge_query_subscription(&edge.name, shape, binding),
-        shape,
-        binding,
-    ))
-    .unwrap();
-    ctx.send("core", &edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
-    let update = block_on(client.peer.query_update(&mut edge.node, shape, binding)).unwrap();
+    let update = block_on(client.peer.query_update(core, shape, binding)).unwrap();
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let next_rows = result_rows(&update, &shape.query().table)
         .into_iter()
@@ -1020,7 +952,7 @@ fn revoke_phase(
         "revocation expected at least {hidden} removals, got {removed}: {update:?}"
     );
     let send_start = Instant::now();
-    ctx.send(&edge.name, &client.name, update);
+    ctx.send("core", &client.name, update);
     let delivered = ctx.recv(&client.name);
     let send_recv_us = send_start.elapsed().as_micros() as u64;
     let apply_start = Instant::now();
@@ -1047,9 +979,8 @@ fn revoke_phase(
 #[allow(clippy::too_many_arguments)]
 fn forbidden_write_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     spy: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1066,20 +997,9 @@ fn forbidden_write_phase(
         resource_cells(9_000),
         900_000,
     );
-    let core_update = block_on(edge.core_peer.query_update_for_subscription(
-        core,
-        edge_query_subscription(&edge.name, shape, binding),
-        shape,
-        binding,
-    ))
-    .unwrap();
-    ctx.send("core", &edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
-    hydrate_edge_policy(ctx, core, edge);
-    let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
+    let update = block_on(spy.peer.query_update(core, shape, binding)).unwrap();
     let forbidden = result_rows(&update, &shape.query().table).len() as u64;
-    ctx.send(&edge.name, &spy.name, update);
+    ctx.send("core", &spy.name, update);
     let delivered = ctx.recv(&spy.name);
     ensure_client_subscription_registered(spy, shape, binding);
     apply_client_update(spy, delivered.message, &shape.query().table);
@@ -1094,18 +1014,7 @@ fn forbidden_write_phase(
             resource_cells(config.resources() + tick),
             900_010 + tick as u64,
         );
-        let core_update = block_on(edge.core_peer.query_update_for_subscription(
-            core,
-            edge_query_subscription(&edge.name, shape, binding),
-            shape,
-            binding,
-        ))
-        .unwrap();
-        ctx.send("core", &edge.name, core_update);
-        let delivered_to_edge = ctx.recv(&edge.name);
-        apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
-        hydrate_edge_policy(ctx, core, edge);
-        let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
+        let update = block_on(spy.peer.query_update(core, shape, binding)).unwrap();
         if !result_rows(&update, &shape.query().table).is_empty() {
             return forbidden + result_rows(&update, &shape.query().table).len() as u64;
         }
@@ -1418,8 +1327,8 @@ fn seed_block_tree_fixture(
     pages: usize,
     blocks_per_page: usize,
     visible_rows: usize,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) -> BlockTreeFixture {
     let mut blocks = Vec::with_capacity(pages * blocks_per_page);
     let mut visible = BTreeSet::new();
@@ -1500,7 +1409,7 @@ fn seed_block_tree_fixture_bulk(
     visible_rows: usize,
     chunk_rows: usize,
     schema: &JazzSchema,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
 ) -> BlockTreeFixture {
     let mut blocks = Vec::with_capacity(pages * blocks_per_page);
     let mut visible = BTreeSet::new();
@@ -1530,7 +1439,6 @@ fn seed_block_tree_fixture_bulk(
                 page_table,
                 schema.version_id(),
                 page,
-                Vec::new(),
                 AuthorSubject::SYSTEM,
                 0,
                 AuthorSubject::SYSTEM,
@@ -1581,7 +1489,6 @@ fn seed_block_tree_fixture_bulk(
                     block_table,
                     schema.version_id(),
                     row,
-                    Vec::new(),
                     AuthorSubject::SYSTEM,
                     0,
                     AuthorSubject::SYSTEM,
@@ -1604,7 +1511,7 @@ fn seed_block_tree_fixture_bulk(
 }
 
 fn flush_headline_versions_if_full(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     versions: &mut Vec<VersionRecord>,
     chunk_rows: usize,
     tx_seq: &mut u64,
@@ -1615,7 +1522,7 @@ fn flush_headline_versions_if_full(
 }
 
 fn flush_headline_versions(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     versions: &mut Vec<VersionRecord>,
     tx_seq: &mut u64,
 ) {
@@ -1710,8 +1617,8 @@ fn block_subtree(fixture: &BlockTreeFixture, root: RowUuid) -> Vec<RowUuid> {
 #[allow(clippy::too_many_arguments)]
 fn rewrite_block_visibility(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     fixture: &BlockTreeFixture,
     row_uuid: RowUuid,
     claim_value: &str,
@@ -1907,86 +1814,9 @@ fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: Subs
     }
 }
 
-fn edge_query_subscription(
-    edge_name: &str,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> SubscriptionKey {
-    // The same semantic query is received from core and served downstream.
-    // Those are independent usages: downstream reset/close must not retire
-    // the edge's upstream receipt. Keep fixture IDs deterministic but distinct.
-    SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: jazz::query::BindingId(uuid::Uuid::new_v5(
-            &binding.binding_id().0,
-            format!("s3/core-to-edge/{edge_name}").as_bytes(),
-        )),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    }
-}
-
-fn hydrate(
-    ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
-    client: &mut Client,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> HydrateSummary {
-    let start = ctx.now_ms();
-    install_claims(core, edge.core_peer.identity());
-    install_claims(&mut edge.node, client.peer.identity());
-    core.reset_storage_read_metrics();
-    let subscription = edge_query_subscription(&edge.name, shape, binding);
-    register_query_receiver_for_subscription(
-        &mut edge.node,
-        subscription,
-        shape,
-        binding,
-        RegisterShapeOptions::default(),
-        jazz::protocol::DelegatedSessionBinding {
-            identity: edge.core_peer.identity(),
-            claims: raw_claims(edge.core_peer.identity()),
-        },
-    )
-    .unwrap();
-    let core_update = block_on(edge.core_peer.rehydrate_query_for_subscription_with_opts(
-        core,
-        subscription,
-        shape,
-        binding,
-        RegisterShapeOptions::default(),
-    ))
-    .unwrap()
-    .expect("core query opens");
-    let core_read_metrics = core.take_storage_read_metrics();
-    ctx.send("core", &edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
-    hydrate_edge_policy(ctx, core, edge);
-    edge.node.reset_storage_read_metrics();
-    let update = block_on(client.peer.rehydrate_query(&mut edge.node, shape, binding)).unwrap();
-    let view_read_metrics = edge.node.take_storage_read_metrics();
-    let bytes = view_update_bytes(&update);
-    let floor_bytes = bytes_floor(&update);
-    let output_rows = result_rows(&update, &shape.query().table).len();
-    ctx.send(&edge.name, &client.name, update);
-    let delivered = ctx.recv(&client.name);
-    ensure_client_subscription_registered(client, shape, binding);
-    apply_client_update(client, delivered.message, &shape.query().table);
-    HydrateSummary {
-        latency_us: (ctx.now_ms() - start) * 1_000,
-        bytes,
-        floor_bytes,
-        output_rows,
-        core_read_metrics,
-        view_read_metrics,
-    }
-}
-
 fn hydrate_direct(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -2015,27 +1845,14 @@ fn hydrate_direct(
 
 fn deliver_update(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
-    install_claims(core, edge.core_peer.identity());
-    install_claims(&mut edge.node, client.peer.identity());
-    hydrate_edge_policy(ctx, core, edge);
-    let core_update = block_on(edge.core_peer.query_update_for_subscription(
-        core,
-        edge_query_subscription(&edge.name, shape, binding),
-        shape,
-        binding,
-    ))
-    .unwrap();
-    ctx.send("core", &edge.name, core_update);
-    let delivered_to_edge = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
-    let update = block_on(client.peer.rehydrate_query(&mut edge.node, shape, binding)).unwrap();
-    ctx.send(&edge.name, &client.name, update);
+    install_claims(core, client.peer.identity());
+    let update = block_on(client.peer.rehydrate_query(core, shape, binding)).unwrap();
+    ctx.send("core", &client.name, update);
     let delivered = ctx.recv(&client.name);
     ensure_client_subscription_registered(client, shape, binding);
     apply_client_update(client, delivered.message, &shape.query().table);
@@ -2113,8 +1930,8 @@ fn ensure_client_subscription_registered(
 fn seed_fixture(
     ctx: &mut dyn DriverContext,
     config: &Config,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) -> Fixture {
     let simple_team = row(10);
     let admin_team = row(11);
@@ -2490,8 +2307,8 @@ fn resource_subscription(schema: &JazzSchema) -> (ValidatedQuery, Binding) {
 #[allow(clippy::too_many_arguments)]
 fn commit_global(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     made_by: AuthorSubject,
@@ -2514,8 +2331,8 @@ fn commit_global(
 
 fn delete_global(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     now_ms: u64,
@@ -2534,108 +2351,51 @@ fn delete_global(
     ctx.record_counter("s3_deletes", 1);
 }
 
-fn edge_acceptance_phase(
+fn core_acceptance_phase(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
+    core: &mut NodeState,
     client: &mut Client,
     resource: RowUuid,
     writer: RowUuid,
-) -> EdgeAcceptanceSummary {
+) -> CoreAcceptanceSummary {
     let mut acceptance_latency = Histogram::new(3).unwrap();
     let start = ctx.now_ms();
     let writer_author = AuthorSubject::for_test_uuid(writer.0);
     install_claims(core, writer_author);
-    install_claims(&mut edge.node, writer_author);
     install_claims(&mut client.node, writer_author);
-    let (_tx_id, unit) = commit_mergeable_unit_settled(
+    let (tx_id, unit) = commit_mergeable_unit_settled(
         &mut client.node,
         MergeableCommit::new(RESOURCES, resource, 950_000)
             .made_by(writer_author)
             .cells(resource_cells(950_000)),
     )
     .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
+    ctx.send(&client.name, "core", unit);
+    let SyncMessage::CommitUnit { tx, versions } = ctx.recv("core").message else {
         unreachable!();
     };
-    ctx.send(
-        &client.name,
-        &edge.name,
-        SyncMessage::CommitUnit {
-            tx: tx.clone(),
-            versions: versions.clone(),
-        },
-    );
-    let delivered_to_edge = ctx.recv(&edge.name);
-    let SyncMessage::CommitUnit { tx, versions } = delivered_to_edge.message else {
-        unreachable!();
-    };
-    let policy_claims = raw_claims(client.peer.identity());
-    let outcome = block_on(client.peer.ingest_edge_mergeable_commit_unit(
-        &mut edge.node,
-        tx.clone(),
-        versions,
-        u64::MAX,
-        u64::MAX,
-        policy_claims,
-    ))
-    .unwrap();
-    let first = settle_outcome(&mut edge.node, outcome).unwrap();
+    let fates = ingest_commit_unit_settled(core, tx, versions, u64::MAX).unwrap();
     assert!(
-        first.is_empty(),
-        "edge write should wait for permission scope"
-    );
-
-    let (scope_shape, scope_binding) = resource_subscription(&schema());
-    let mut core_to_edge_scope = PeerState::edge_client(writer_author);
-    let scope_update =
-        block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
-    let hydration_bytes = view_update_bytes(&scope_update);
-    let hydration_floor_bytes = bytes_floor(&scope_update);
-    let hydration_rows = result_rows(&scope_update, &scope_shape.query().table).len();
-    ctx.send("core", &edge.name, scope_update);
-    let delivered_scope = ctx.recv(&edge.name);
-    apply_sync_message_settled(&mut edge.node, delivered_scope.message).unwrap();
-
-    let scope_subscriptions_before_drain = client.peer.edge_scope_subscription_count();
-    let outcome = block_on(
-        client
-            .peer
-            .drain_deferred_edge_fates(&mut edge.node, u64::MAX),
-    )
-    .unwrap();
-    let fates = settle_outcome(&mut edge.node, outcome).unwrap();
-    let scope_subscriptions_after_drain = client.peer.edge_scope_subscription_count();
-    assert_eq!(scope_subscriptions_before_drain, 1);
-    assert_eq!(scope_subscriptions_after_drain, 0);
-    assert!(
-        fates.iter().any(|message| matches!(
-            message,
-            SyncMessage::FateUpdate {
-                tx_id,
-                fate: Fate::Accepted,
-                durability: Some(DurabilityTier::Edge),
-                ..
-            } if *tx_id == tx.tx_id
+        fates.iter().any(|message| matches!(message,
+            SyncMessage::FateUpdate { tx_id: seen, fate: Fate::Accepted,
+                global_time: Some(_), durability: Some(DurabilityTier::Global) }
+            if *seen == tx_id
         )),
-        "edge must accept the permissioned mergeable write"
+        "Core must authorize and accept the permissioned write"
     );
-    assert_eq!(
-        block_on(edge.node.transaction_state(tx.tx_id)).unwrap(),
-        (Fate::Accepted, None, DurabilityTier::Edge)
-    );
+    for fate in fates {
+        ctx.send("core", &client.name, fate);
+        let delivered = ctx.recv(&client.name);
+        apply_sync_message_settled(&mut client.node, delivered.message).unwrap();
+    }
+    let (fate, global_time, durability) = block_on(client.node.transaction_state(tx_id)).unwrap();
+    assert_eq!(fate, Fate::Accepted);
+    assert!(global_time.is_some());
+    assert_eq!(durability, DurabilityTier::Global);
     acceptance_latency
         .record((ctx.now_ms() - start) * 1_000)
         .unwrap();
-
-    EdgeAcceptanceSummary {
-        acceptance_latency,
-        hydration_bytes,
-        hydration_floor_bytes,
-        hydration_rows,
-        scope_subscriptions_before_drain,
-        scope_subscriptions_after_drain,
-    }
+    CoreAcceptanceSummary { acceptance_latency }
 }
 
 fn open_client(
@@ -2650,55 +2410,10 @@ fn open_client(
         name: name.to_owned(),
         node,
         _dir: dir,
-        peer: PeerState::edge_client(author),
+        peer: PeerState::client_link(author),
         registered_subscriptions: BTreeSet::new(),
         covered_inputs: BTreeSet::new(),
         visible_rows: BTreeSet::new(),
-    }
-}
-
-fn open_edge(
-    name: &str,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorSubject,
-) -> EdgeRoute {
-    let (dir, mut node) = open_node(node_uuid, schema);
-    install_claims(&mut node, author);
-    EdgeRoute {
-        name: name.to_owned(),
-        node,
-        _dir: dir,
-        core_peer: PeerState::edge_client(author),
-        // The benchmark drives this policy reader directly. It is not a
-        // multiplexing relay connection and has one SYSTEM policy identity.
-        policy_peer: PeerState::new(),
-    }
-}
-
-fn hydrate_edge_policy(
-    ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
-    edge: &mut EdgeRoute,
-) {
-    for table in [ACCESS, MEMBERSHIPS] {
-        let shape = Query::from(table).validate(&schema()).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
-        register_query_receiver(
-            &mut edge.node,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-            jazz::protocol::DelegatedSessionBinding {
-                identity: AuthorSubject::SYSTEM,
-                claims: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-        let update = block_on(edge.policy_peer.rehydrate_query(core, &shape, &binding)).unwrap();
-        ctx.send("core", &edge.name, update);
-        let delivered = ctx.recv(&edge.name);
-        apply_sync_message_settled(&mut edge.node, delivered.message).unwrap();
     }
 }
 
@@ -2729,7 +2444,7 @@ fn open_db_client(
 }
 
 struct CoreDb {
-    server: Node<RocksDbStorage>,
+    server: Node,
     next_now_ms: Cell<u64>,
 }
 
@@ -2766,7 +2481,7 @@ fn open_db(
     schema: JazzSchema,
     author: AuthorSubject,
     seed: u64,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2786,10 +2501,7 @@ fn open_db(
     (dir, db)
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2846,7 +2558,7 @@ struct OracleState {
 }
 
 impl OracleState {
-    fn from_core(core: &mut NodeState<RocksDbStorage>, config: &Config, fixture: &Fixture) -> Self {
+    fn from_core(core: &mut NodeState, config: &Config, fixture: &Fixture) -> Self {
         let _ = config;
         let resources = fixture.resources.iter().copied().collect::<BTreeSet<_>>();
         let mut memberships = BTreeMap::new();
@@ -2939,11 +2651,11 @@ fn access_oracle_from_fixture(
 }
 
 fn visible_rows(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) -> BTreeSet<RowUuid> {
-    block_on(node.query_rows(shape, binding, DurabilityTier::Edge))
+    block_on(node.query_rows(shape, binding, DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -3062,57 +2774,41 @@ fn access_cells(resource: RowUuid, team: RowUuid, admins_only: bool) -> BTreeMap
     ])
 }
 
-fn topology(config: &Config, profile: PeerProfile) -> Topology {
+fn topology(_config: &Config, profile: PeerProfile) -> Topology {
     let schema = schema();
-    let (client_edge_ms, edge_core_ms) = profile_leg_ms(&profile.name);
-    let client_edge = PeerProfile::new(
-        format!("{}:client-edge", profile.name),
-        client_edge_ms,
+    let latency_ms = client_core_latency_ms(&profile.name);
+    let link = PeerProfile::new(
+        format!("{}:client-core", profile.name),
+        latency_ms,
         profile.jitter_ms,
         profile.per_message_overhead_ms,
     );
-    let edge_core = PeerProfile::new(
-        format!("{}:edge-core", profile.name),
-        edge_core_ms,
-        profile.jitter_ms,
-        profile.per_message_overhead_ms,
-    );
-    let mut topology = Topology::default()
-        .node("writer", schema.clone(), NodeRole::Writer)
-        .node("core", schema.clone(), NodeRole::Core)
-        .node("simple", schema.clone(), NodeRole::Reader)
-        .node("simple_edge", schema.clone(), NodeRole::Edge)
-        .node("admin", schema.clone(), NodeRole::Reader)
-        .node("admin_edge", schema.clone(), NodeRole::Edge)
-        .node("spy", schema.clone(), NodeRole::Reader)
-        .node("spy_edge", schema, NodeRole::Edge);
-    for (client, edge) in [
-        ("simple", "simple_edge"),
-        ("admin", "admin_edge"),
-        ("spy", "spy_edge"),
-    ] {
-        topology = topology.client_edge_core_line(
-            client,
-            edge,
-            "core",
-            client_edge.clone(),
-            edge_core.clone(),
-        );
+    let mut topology = Topology::default().node("core", schema.clone(), NodeRole::Core);
+    for name in ["writer", "simple", "admin", "spy"] {
+        topology = topology
+            .node(
+                name,
+                schema.clone(),
+                if name == "writer" {
+                    NodeRole::Writer
+                } else {
+                    NodeRole::Reader
+                },
+            )
+            .link(name, "core", link.clone())
+            .link("core", name, link.clone());
     }
-    let _ = config;
     topology
-        .link("writer", "core", edge_core.clone())
-        .link("core", "writer", edge_core)
 }
 
-fn profile_leg_ms(profile: &str) -> (u64, u64) {
+fn client_core_latency_ms(profile: &str) -> u64 {
     match profile {
-        "local" => (1, 1),
-        "regional" => (5, 30),
-        "edge" => (20, 80),
+        "local" => 2,
+        "regional" => 35,
+        "edge" => 100,
         _ => {
             let one_way = env_u64("JAZZ_LINK_ONE_WAY_MS", 1);
-            (one_way, one_way)
+            2 * one_way
         }
     }
 }
@@ -3142,12 +2838,8 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
             json!(summary.link_rtt_floor_us),
         ),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line(
@@ -3179,12 +2871,8 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
             json!(summary.link_rtt_floor_us),
         ),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(cold_admin).to_string());
@@ -3212,12 +2900,8 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
             json!(summary.link_rtt_floor_us),
         ),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(grant).to_string());
@@ -3251,12 +2935,8 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
                 json!(summary.link_rtt_floor_us),
             ),
             (
-                "client_edge_one_way_ms".to_owned(),
-                json!(summary.client_edge_one_way_ms),
-            ),
-            (
-                "edge_core_one_way_ms".to_owned(),
-                json!(summary.edge_core_one_way_ms),
+                "client_core_one_way_ms".to_owned(),
+                json!(summary.client_core_one_way_ms),
             ),
         ]);
         emit_json_line("s3_permissions", &JsonValue::Object(fields).to_string());
@@ -3273,28 +2953,24 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
             json!(summary.link_rtt_floor_us),
         ),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(forbidden).to_string());
 
-    let mut edge_acceptance = base_fields(
+    let mut core_acceptance = base_fields(
         "s3_permissions",
         driver,
-        "edge_mergeable_acceptance",
+        "core_mergeable_acceptance",
         config,
     );
-    edge_acceptance.extend([
+    core_acceptance.extend([
         (
             "acceptance_p50_us".to_owned(),
             json!(
                 summary
-                    .edge_acceptance
+                    .core_acceptance
                     .acceptance_latency
                     .value_at_quantile(0.50)
             ),
@@ -3303,73 +2979,20 @@ fn emit_summaries(driver: &str, config: &Config, summary: &Summary) {
             "acceptance_p95_us".to_owned(),
             json!(
                 summary
-                    .edge_acceptance
+                    .core_acceptance
                     .acceptance_latency
                     .value_at_quantile(0.95)
             ),
         ),
-        ("durability_tier".to_owned(), json!("Edge")),
+        ("durability_tier".to_owned(), json!("Global")),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line(
         "s3_permissions",
-        &JsonValue::Object(edge_acceptance).to_string(),
-    );
-
-    let mut edge_hydration = base_fields(
-        "s3_permissions",
-        driver,
-        "edge_permission_scope_hydration",
-        config,
-    );
-    edge_hydration.extend([
-        (
-            "scope".to_owned(),
-            json!("narrow(policy_shape, writer_claim)"),
-        ),
-        (
-            "hydration_bytes".to_owned(),
-            json!(summary.edge_acceptance.hydration_bytes),
-        ),
-        (
-            "hydration_floor_bytes".to_owned(),
-            json!(summary.edge_acceptance.hydration_floor_bytes),
-        ),
-        (
-            "hydration_rows".to_owned(),
-            json!(summary.edge_acceptance.hydration_rows),
-        ),
-        (
-            "edge_scope_subscription_count_before_drain".to_owned(),
-            json!(summary.edge_acceptance.scope_subscriptions_before_drain),
-        ),
-        (
-            "edge_scope_subscription_count_after_drain".to_owned(),
-            json!(summary.edge_acceptance.scope_subscriptions_after_drain),
-        ),
-        (
-            "whole_table_scope".to_owned(),
-            json!("not hydrated; bench reports the narrow B2 scope only"),
-        ),
-        (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
-        ),
-    ]);
-    emit_json_line(
-        "s3_permissions",
-        &JsonValue::Object(edge_hydration).to_string(),
+        &JsonValue::Object(core_acceptance).to_string(),
     );
 }
 
@@ -3382,12 +3005,8 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
         ("visible_rows".to_owned(), json!(summary.simple_visible)),
         ("fixture_rows".to_owned(), json!(summary.fixture_rows)),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line(
@@ -3403,12 +3022,8 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
         ("visible_rows".to_owned(), json!(summary.admin_visible)),
         ("fixture_rows".to_owned(), json!(summary.fixture_rows)),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(cold_admin).to_string());
@@ -3420,12 +3035,8 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
         ("visible_rows".to_owned(), json!(0)),
         ("fixture_rows".to_owned(), json!(summary.fixture_rows)),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(cold_spy).to_string());
@@ -3449,12 +3060,8 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
             json!(summary.grant_global_latency.value_at_quantile(0.95)),
         ),
         (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
+            "client_core_one_way_ms".to_owned(),
+            json!(summary.client_core_one_way_ms),
         ),
     ]);
     emit_json_line("s3_permissions", &JsonValue::Object(grant).to_string());
@@ -3474,12 +3081,8 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
             ("tick_us".to_owned(), json!(revoke.tick_us)),
             ("update_rows".to_owned(), json!(revoke.update_rows)),
             (
-                "client_edge_one_way_ms".to_owned(),
-                json!(summary.client_edge_one_way_ms),
-            ),
-            (
-                "edge_core_one_way_ms".to_owned(),
-                json!(summary.edge_core_one_way_ms),
+                "client_core_one_way_ms".to_owned(),
+                json!(summary.client_core_one_way_ms),
             ),
         ]);
         emit_json_line("s3_permissions", &JsonValue::Object(fields).to_string());
@@ -3490,16 +3093,10 @@ fn emit_db_surface_summary(config: &Config, summary: &DbSurfaceSummary) {
         "forbidden_deliveries".to_owned(),
         json!(summary.forbidden_deliveries),
     )]);
-    forbidden.extend([
-        (
-            "client_edge_one_way_ms".to_owned(),
-            json!(summary.client_edge_one_way_ms),
-        ),
-        (
-            "edge_core_one_way_ms".to_owned(),
-            json!(summary.edge_core_one_way_ms),
-        ),
-    ]);
+    forbidden.extend([(
+        "client_core_one_way_ms".to_owned(),
+        json!(summary.client_core_one_way_ms),
+    )]);
     emit_json_line("s3_permissions", &JsonValue::Object(forbidden).to_string());
 }
 
@@ -3792,7 +3389,7 @@ fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     ])
 }
 
-fn install_claims(node: &mut NodeState<RocksDbStorage>, author: AuthorSubject) {
+fn install_claims(node: &mut NodeState, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(author, raw_claims(author));
     }
@@ -3806,7 +3403,7 @@ fn install_core_db_claims(core: &CoreDb, author: AuthorSubject) {
     }
 }
 
-fn install_db_claims(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+fn install_db_claims(db: &Db, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         db.set_identity_claims(author, raw_claims(author));
     }

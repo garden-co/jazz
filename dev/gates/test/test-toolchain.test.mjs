@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -21,6 +29,7 @@ for (const [path, task] of [
       const home = join(directory, "home");
       const receipt = join(directory, "receipt");
       for (const path of [selected, login, home]) mkdirSync(path);
+      symlinkSync(process.execPath, join(selected, "node"));
       for (const [path, label] of [
         [selected, "selected"],
         [login, "login"],
@@ -39,7 +48,7 @@ for (const [path, task] of [
       const boundary = script.indexOf(" -- ");
       assert.notEqual(boundary, -1, "task must retain correctness-artifact admission");
       const child = spawnSync("/bin/bash", ["-c", script.slice(boundary + 4)], {
-        cwd: root,
+        cwd: join(root, dirname(path)),
         env: {
           ...process.env,
           HOME: home,

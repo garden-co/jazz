@@ -46,6 +46,7 @@ export const auth = betterAuth({
       jwt: {
         expirationTime: "1h",
         issuer: APP_ORIGIN,
+        audience: APP_ORIGIN,
         getSubject: ({ user }: { user: { id: string } }) => user.id,
         definePayload: jwtPayload,
       },

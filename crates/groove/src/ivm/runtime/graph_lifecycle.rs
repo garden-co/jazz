@@ -42,6 +42,12 @@ impl Drop for EphemeralGraphInstall<'_> {
 }
 
 impl IvmRuntime {
+    /// Cache diagnostics count attempted work, not installed semantic state.
+    pub fn execution_layout_stats(&self) -> ExecutionLayoutStats {
+        let (builds, hits) = self.graph.execution_layout_counters();
+        ExecutionLayoutStats { builds, hits }
+    }
+
     pub fn retained_node_ids(&self) -> HashSet<NodeId> {
         let mut retained = HashSet::new();
         let roots = self
@@ -79,8 +85,16 @@ impl IvmRuntime {
         for arrangement in self.arrangement_states.values() {
             stats.arrangement_rows += arrangement.value().row_count();
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
+            stats.stored_arrangement_count += usize::from(arrangement.value().is_stored());
+            stats.stored_arrangement_resident_bytes += arrangement.value().resident_bytes();
         }
         for state in self.operator_states.values() {
+            if let Some(footprint) = state.grouped_footprint() {
+                stats.grouped_operator_state_count += 1;
+                stats.grouped_operator_state_groups += footprint.groups;
+                stats.grouped_operator_state_rows += footprint.rows;
+                stats.grouped_operator_state_encoded_bytes += footprint.encoded_bytes;
+            }
             let OperatorState::Recursive(recursive) = state else {
                 continue;
             };
@@ -103,6 +117,11 @@ impl IvmRuntime {
             .sum()
     }
 
+    /// Live subscriptions, without the walk `stats()` makes.
+    pub fn active_subscription_count(&self) -> usize {
+        self.multisink_subscriptions.len()
+    }
+
     pub(super) fn cheap_stats(&self) -> RuntimeStats {
         RuntimeStats {
             graph_nodes: self.graph.nodes().len(),
@@ -115,16 +134,8 @@ impl IvmRuntime {
                 .sum(),
             arrangement_count: self.arrangement_states.len(),
             eval_memo_entries: self.eval_memo.len(),
-            hydration_memo_entries: self
-                .eval_memo
-                .keys()
-                .filter(|key| key.tick_epoch.is_none())
-                .count(),
-            eval_memo_bytes: self
-                .eval_memo
-                .values()
-                .map(|entry| entry.payload_bytes)
-                .sum(),
+            hydration_memo_entries: self.eval_memo.len() - self.eval_memo.tick_entries(),
+            eval_memo_bytes: self.tracked_eval_memo_bytes(),
             hydration_memo_hits: self.hydration_memo_hits,
             hydration_memo_computes: self.hydration_memo_computes,
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
@@ -132,6 +143,19 @@ impl IvmRuntime {
             deduped_graph_nodes: self.graph.nodes().len(),
             ..RuntimeStats::default()
         }
+    }
+
+    /// `eval_memo_bytes` is maintained at every memo mutation; debug builds
+    /// check it against a full recount.
+    fn tracked_eval_memo_bytes(&self) -> usize {
+        debug_assert_eq!(
+            self.eval_memo_bytes,
+            self.eval_memo
+                .values()
+                .map(|entry| entry.payload_bytes)
+                .sum::<usize>()
+        );
+        self.eval_memo_bytes
     }
 
     pub(super) fn record_hydration_memo_metrics(&mut self, metrics: &TickMetrics) {
@@ -150,17 +174,6 @@ impl IvmRuntime {
         meta.retainers.insert(retainer)
     }
 
-    pub(super) fn retain_as_subscription(
-        &mut self,
-        subscription_id: SubscriptionId,
-        output_node: NodeId,
-    ) -> bool {
-        self.add_retainer(
-            output_node,
-            Retainer::Subscription(subscription_id.retainer_key()),
-        )
-    }
-
     pub(super) fn remove_multisink_retainers(
         &mut self,
         subscription_id: SubscriptionId,
@@ -172,41 +185,146 @@ impl IvmRuntime {
                 output.node,
                 &Retainer::Subscription(subscription_id.retainer_key()),
             );
+            removed |= self.remove_retainer(
+                output.node,
+                &Retainer::Hydration(subscription_id.retainer_key()),
+            );
         }
         self.collect_unretained_ephemeral_nodes();
         removed
     }
 
     pub(super) fn remove_retainer(&mut self, id: NodeId, retainer: &Retainer) -> bool {
+        // Conservatively a GC candidate even when nothing was removed: the
+        // sweep re-checks reachability, and a spare candidate costs only its
+        // ancestor closure.
+        self.gc_candidates.insert(id);
         self.node_meta
             .get_mut(&id)
             .map(|meta| meta.retainers.remove(retainer))
             .unwrap_or(false)
     }
 
-    pub(super) fn gc_ephemeral_nodes(&mut self, ttl_ticks: u64) -> Vec<NodeId> {
-        let retained = self.retained_node_ids();
-        let remove_before_tick = self.current_tick.saturating_sub(ttl_ticks);
-        let removable = self
-            .graph
-            .nodes()
-            .values()
-            .filter(|node| {
-                !node.is_durable()
-                    && !retained.contains(&node.id)
-                    && self
-                        .node_meta
-                        .get(&node.id)
-                        .is_none_or(|meta| meta.last_used_tick <= remove_before_tick)
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+    fn is_retained_gc_root(&self, node: &crate::ivm::GraphNode) -> bool {
+        node.is_durable()
+            || self
+                .node_meta
+                .get(&node.id)
+                .is_some_and(|meta| !meta.retainers.is_empty())
+    }
 
+    /// Remove every node that no durable node, retained node or queued
+    /// evaluation node reaches through its inputs.
+    ///
+    /// Only candidates and their ancestors can have become unreachable since
+    /// the previous sweep: new nodes, and roots that lost retainers or queued
+    /// work. A node in that ancestor closure stays when it is a root itself or
+    /// any consumer stays; consumers outside the closure are still reachable
+    /// from their unchanged roots. Returns the removed nodes and whether some
+    /// candidate was only kept alive by queued evaluation work.
+    fn gc_ephemeral_nodes(&mut self) -> (Vec<NodeId>, bool) {
+        let mut candidates = std::mem::take(&mut self.gc_candidates);
+        candidates.extend(self.graph.take_added_nodes());
+        let mut closure = HashSet::new();
+        for &candidate in &candidates {
+            self.graph.mark_ancestors(candidate, &mut closure);
+        }
+        closure.retain(|id| self.graph.node(*id).is_some());
+        if closure.is_empty() {
+            return (Vec::new(), false);
+        }
+        let queued = if self.pending_incremental.is_pending() {
+            self.pending_incremental.registered_nodes()
+        } else {
+            HashSet::new()
+        };
+
+        // Decide consumers before their inputs: an iterative post-order over
+        // `children`, restricted to the closure (the graph is acyclic).
+        // Queue membership is only a temporary root when no durable or
+        // retained consumer already keeps the node alive. Otherwise every
+        // cold-read wake would resweep the same live subscription graph.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Retention {
+            None,
+            Queued,
+            Retained,
+        }
+        let mut kept = HashMap::<NodeId, Retention>::default();
+        let mut blocked_by_queue = false;
+        for &start in &closure {
+            if kept.contains_key(&start) {
+                continue;
+            }
+            let mut stack = vec![(start, false)];
+            while let Some((id, children_done)) = stack.pop() {
+                if kept.contains_key(&id) {
+                    continue;
+                }
+                let node = self.graph.node(id).expect("closure holds live nodes");
+                if !children_done {
+                    stack.push((id, true));
+                    for child in &node.children {
+                        if closure.contains(child) && !kept.contains_key(child) {
+                            stack.push((*child, false));
+                        }
+                    }
+                    continue;
+                }
+                let retention = if self.is_retained_gc_root(node)
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| !closure.contains(child) || kept[child] == Retention::Retained)
+                {
+                    Retention::Retained
+                } else if queued.contains(&id)
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| kept[child] == Retention::Queued)
+                {
+                    Retention::Queued
+                } else {
+                    Retention::None
+                };
+                blocked_by_queue |= retention == Retention::Queued;
+                kept.insert(id, retention);
+            }
+        }
+
+        let removable = kept
+            .into_iter()
+            .filter_map(|(id, retention)| (retention == Retention::None).then_some(id))
+            .collect::<Vec<_>>();
         for id in &removable {
             self.graph.remove_node(*id);
         }
+        if blocked_by_queue {
+            // Queued work releases its nodes without a lifecycle event, so
+            // revisit these candidates on the next sweep.
+            candidates.retain(|id| self.graph.node(*id).is_some());
+            self.gc_candidates.extend(candidates);
+        }
+        (removable, blocked_by_queue)
+    }
 
-        removable
+    /// Debug builds check the incremental sweep against a full reachability
+    /// pass: no unreachable node may survive a sweep that nothing blocked.
+    #[cfg(debug_assertions)]
+    fn debug_assert_no_unreachable_nodes(&self) {
+        let retained = self.retained_node_ids();
+        let leaked = self
+            .graph
+            .nodes()
+            .values()
+            .filter(|node| !node.is_durable() && !retained.contains(&node.id))
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        debug_assert!(
+            leaked.is_empty(),
+            "incremental graph GC left unreachable nodes: {leaked:?}"
+        );
     }
 
     /// Reclaim unretained nodes only while all pending evaluator queues are
@@ -218,7 +336,7 @@ impl IvmRuntime {
         if self.pending_incremental_polling {
             return;
         }
-        let removed = self.gc_ephemeral_nodes(0);
+        let (removed, blocked_by_queue) = self.gc_ephemeral_nodes();
         if !removed.is_empty() {
             let removed: HashSet<_> = removed.into_iter().collect();
             // Reclaim a batch with one pass per state map, not one full scan
@@ -228,13 +346,15 @@ impl IvmRuntime {
                 .retain(|key, _| !removed.contains(&key.node));
             self.arrangement_states
                 .retain(|key, _| !removed.contains(&key.input));
-            self.eval_memo.retain(|key, _| !removed.contains(&key.node));
+            self.remove_retained_eval_memos_for_nodes(&removed);
             for node in removed {
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);
             }
         }
-        if !self.pending_incremental.is_pending() {
+        if !blocked_by_queue {
+            #[cfg(debug_assertions)]
+            self.debug_assert_no_unreachable_nodes();
             self.ephemeral_graph_gc_pending = false;
         }
     }
@@ -262,7 +382,16 @@ impl IvmRuntime {
     }
 
     pub(super) fn initialize_node_runtime(&mut self, node: NodeId) {
-        self.node_meta.entry(node).or_default();
+        let meta = self.node_meta.entry(node).or_default();
+        if self.stored_arrangements_enabled && meta.stored_arrangement.is_none() {
+            meta.stored_arrangement = stored_arrangement::plan_stored_arrangement(
+                &self.graph,
+                &self.schema,
+                node,
+                Arc::clone(&self.arrangement_use_tracking),
+            )
+            .map(Arc::new);
+        }
         let Some(graph_node) = self.graph.node(node) else {
             return;
         };

@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Align runtime and TypeScript relation names using a compact bounded naming convention, removing pluralize-esm without introducing code generation. Explicit Ids/\_ids references support common irregular, invariant, and suffix-based plurals; unsuffixed names remain unchanged. This changes API aliases for names outside the convention: review includes, reverse relations, and permission hops when upgrading. Stored columns, references, schema hashes, and data are unchanged.
+Remove the pluralize-esm dependency. The intermediate bounded automatic naming convention is superseded in this release by explicit table-local relationships: declare forward navigation with `s.rel` and reverse navigation with `s.reverse`; no automatic reverse names or pluralization remain. When changing navigation names, update includes, reverse declarations, relation filters, and permission hops together. Preserve stored column definitions and every column-to-target mapping when converting existing references; an equivalent conversion preserves schema identity and stored data. See the explicit-relationships migration guide in this changelog.

@@ -78,7 +78,7 @@ type RichTodo = RowOf<typeof richApp.todos>;
 
 const ctx = new TestCleanup();
 
-// These flows can perform two independent edge/local convergence stages, each
+// These flows can perform two independent global/local convergence stages, each
 // with its own 45-second diagnostic timeout. The enclosing test leaves room
 // for both bounded observations plus setup and durability/reopen work.
 const MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS = 120_000;
@@ -200,7 +200,9 @@ describe("alpha public package flow", () => {
         driver: { type: "persistent", dbName: persistentDbName },
       }),
     );
-    expect(await db.one(app.todos.where({ id: created.id }), { tier: "local" })).toEqual(created);
+    expect(await db.one(app.todos.where({ id: created.id }), { tier: "local-first" })).toEqual(
+      created,
+    );
   });
 
   it("moves rows into and out of a filtered public subscription after local updates", async () => {
@@ -236,15 +238,15 @@ describe("alpha public package flow", () => {
       })
       .wait({ tier: "local" });
 
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local-first");
     await waitForSnapshotSummaries(snapshots, ["Starts open:open"], "initial open predicate");
 
     await db.update(app.todos, startsOpen.id, { done: true }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, [], "local");
+    await expectTodoSummariesForQuery(db, openTodos, [], "local-first");
     await waitForSnapshotSummaries(snapshots, [], "row leaves open predicate after update");
 
     await db.update(app.todos, startsDone.id, { done: false }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local-first");
     await waitForSnapshotSummaries(
       snapshots,
       ["Starts done:open"],
@@ -252,11 +254,11 @@ describe("alpha public package flow", () => {
     );
 
     unsubscribe();
-    expect(await db.one(app.todos.where({ id: startsOpen.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.todos.where({ id: startsOpen.id }), { tier: "local-first" })).toEqual({
       ...startsOpen,
       done: true,
     });
-    expect(await db.one(app.todos.where({ id: startsDone.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.todos.where({ id: startsDone.id }), { tier: "local-first" })).toEqual({
       ...startsDone,
       done: false,
     });
@@ -307,7 +309,7 @@ describe("alpha public package flow", () => {
       })
       .wait({ tier: "local" });
 
-    expect(await db.one(richQuery, { tier: "local" })).toEqual(created);
+    expect(await db.one(richQuery, { tier: "local-first" })).toEqual(created);
     await waitForCondition(
       async () =>
         snapshots.some(
@@ -323,7 +325,7 @@ describe("alpha public package flow", () => {
     );
 
     await db.update(richApp.todos, created.id, { payload: null }).wait({ tier: "local" });
-    expect(await db.one(richQuery, { tier: "local" })).toEqual({ ...created, payload: null });
+    expect(await db.one(richQuery, { tier: "local-first" })).toEqual({ ...created, payload: null });
     unsubscribe();
   });
 
@@ -349,7 +351,7 @@ describe("alpha public package flow", () => {
           done: false,
           list: "launch",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "writer insert was not accepted at the server",
     );
@@ -358,11 +360,11 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([created]);
 
     await withTimeout(
-      dbA.update(app.todos, created.id, { done: true }).wait({ tier: "edge" }),
+      dbA.update(app.todos, created.id, { done: true }).wait({ tier: "global" }),
       10_000,
       "writer update was not accepted at the server",
     );
-    await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local");
+    await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local-first");
 
     const remoteBrowserDbId = uniqueDbName("alpha-public-remote-browser-reader");
     await createRemoteBrowserDb({
@@ -379,7 +381,7 @@ describe("alpha public package flow", () => {
         id: remoteBrowserDbId,
         title: "Adopt alpha websocket flow",
         timeoutMs: 45_000,
-        tier: "local",
+        tier: "local-first",
       });
       expect(remoteRows).toContainEqual({
         ...created,
@@ -418,7 +420,7 @@ describe("alpha public package flow", () => {
     );
 
     const owner = await withTimeout(
-      dbA.insert(richApp.users, { name: "Alpha Owner" }).wait({ tier: "edge" }),
+      dbA.insert(richApp.users, { name: "Alpha Owner" }).wait({ tier: "global" }),
       10_000,
       "rich owner insert was not accepted at the server",
     );
@@ -433,7 +435,7 @@ describe("alpha public package flow", () => {
           payload: null,
           ownerId: null,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "low-priority rich row insert was not accepted at the server",
     );
@@ -448,7 +450,7 @@ describe("alpha public package flow", () => {
           payload: new Uint8Array([4, 5, 6, 7]),
           ownerId: owner.id,
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "rich row insert was not accepted at the server",
     );
@@ -471,7 +473,7 @@ describe("alpha public package flow", () => {
     await withTimeout(
       dbA
         .update(richApp.todos, created.id, { payload: null, ownerId: null })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "rich row nullable update was not accepted at the server",
     );
@@ -507,7 +509,7 @@ describe("alpha public package flow", () => {
       // handshake is diagnosed separately from row convergence.
       expect(
         await withTimeout(
-          reader.all(richQuery, { tier: "edge" }),
+          reader.all(richQuery, { tier: "remote" }),
           10_000,
           "mixed persistent reader did not establish its upstream server link",
         ),
@@ -531,7 +533,7 @@ describe("alpha public package flow", () => {
             payload: new Uint8Array([9, 8, 7, 6, 5]),
             ownerId: null,
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "mixed memory writer insert was not accepted at the server",
       );
@@ -565,7 +567,7 @@ describe("alpha public package flow", () => {
         (todos) => todos.length === 1 && todos[0]?.id === created.id,
         "mixed persistent reader local reopen",
         45_000,
-        "local",
+        "local-first",
       );
       expect(reopenedRow).toMatchObject({
         id: created.id,
@@ -600,7 +602,7 @@ describe("alpha public package flow", () => {
             done: false,
             list: "reconnect",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "online insert before reconnect was not accepted at the server",
       );
@@ -618,7 +620,7 @@ describe("alpha public package flow", () => {
             done: true,
             list: "reconnect",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "offline-window insert was not accepted at the server",
       );
@@ -642,12 +644,12 @@ describe("alpha public package flow", () => {
         (todos) => summariesEqual(todos, summaries),
         "reopened public websocket client catches up via all",
         45_000,
-        "local",
+        "local-first",
       );
       expect(allRows).toEqual([initial, offlineWrite]);
-      expect(await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local" })).toEqual(
-        offlineWrite,
-      );
+      expect(
+        await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local-first" }),
+      ).toEqual(offlineWrite);
     },
     MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS,
   );
@@ -675,7 +677,7 @@ describe("alpha public package flow", () => {
       list: "launch",
     });
     const createdRow = await withTimeout(
-      created.wait({ tier: "edge" }),
+      created.wait({ tier: "global" }),
       10_000,
       "initial insert was not accepted at the server",
     );
@@ -687,18 +689,18 @@ describe("alpha public package flow", () => {
       list: "launch",
     });
     const secondRow = await withTimeout(
-      second.wait({ tier: "edge" }),
+      second.wait({ tier: "global" }),
       10_000,
       "second insert was not accepted at the server",
     );
     await withTimeout(
-      db.update(app.todos, createdRow.id, { done: true }).wait({ tier: "edge" }),
+      db.update(app.todos, createdRow.id, { done: true }).wait({ tier: "global" }),
       10_000,
       "update was not accepted at the server",
     );
     expect(
       await db.one(app.todos.where({ id: createdRow.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toEqual({
       id: createdRow.id,
@@ -714,7 +716,7 @@ describe("alpha public package flow", () => {
     );
 
     await withTimeout(
-      db.delete(app.todos, secondRow.id).wait({ tier: "edge" }),
+      db.delete(app.todos, secondRow.id).wait({ tier: "global" }),
       10_000,
       "delete was not accepted at the server",
     );
@@ -722,11 +724,11 @@ describe("alpha public package flow", () => {
 
     expect(
       await db.one(app.todos.where({ id: secondRow.id }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).toBeNull();
 
-    // Edge settlement proves the committed read frontier, not that the
+    // Global settlement proves the committed read frontier, not that the
     // independently scheduled application subscription callback has already
     // consumed that frontier. Before releasing the subscription, wait for its
     // required delivery of the post-delete view.
@@ -750,7 +752,7 @@ describe("alpha public package flow", () => {
     });
     expect(
       await db.one(app.todos.where({ id: createdRow.id }), {
-        tier: "local",
+        tier: "local-first",
       }),
     ).toEqual({
       id: createdRow.id,
@@ -785,13 +787,13 @@ describe("alpha public package flow", () => {
           done: false,
           list: "tombstones",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "insert before delete was not accepted at the server",
     );
 
     await withTimeout(
-      db.delete(app.todos, todo.id).wait({ tier: "edge" }),
+      db.delete(app.todos, todo.id).wait({ tier: "global" }),
       10_000,
       "delete was not accepted at the server",
     );
@@ -802,7 +804,7 @@ describe("alpha public package flow", () => {
       (todos) => todos.length === 0,
       "deleted todo is hidden from default reads",
       45_000,
-      "edge",
+      "remote",
     );
     const restored = await withTimeout(
       db
@@ -811,7 +813,7 @@ describe("alpha public package flow", () => {
           done: true,
           list: "tombstones",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
       10_000,
       "restore was not accepted at the server",
     );
@@ -833,7 +835,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it("exposes edge-confirmed browser deletes through includeDeleted over websocket", async () => {
+  it("exposes globally confirmed browser deletes through includeDeleted over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
@@ -851,8 +853,8 @@ describe("alpha public package flow", () => {
         done: false,
         list: "tombstones",
       })
-      .wait({ tier: "edge" });
-    await db.delete(app.todos, todo.id).wait({ tier: "edge" });
+      .wait({ tier: "global" });
+    await db.delete(app.todos, todo.id).wait({ tier: "global" });
 
     const [deletedTodo] = await waitForQuery(
       db,
@@ -860,7 +862,7 @@ describe("alpha public package flow", () => {
       (todos) => todos.length === 1,
       "deleted todo is visible with includeDeleted",
       45_000,
-      "edge",
+      "remote",
     );
     expect(deletedTodo).toEqual(todo);
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
@@ -939,7 +941,7 @@ async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): 
 async function expectTodoSummaries(
   db: Db,
   summaries: string[],
-  tier?: "local" | "edge",
+  tier?: "local-first" | "remote",
 ): Promise<void> {
   await expectTodoSummariesForQuery(db, app.todos.orderBy("title"), summaries, tier);
 }
@@ -948,7 +950,7 @@ async function expectTodoSummariesForQuery(
   db: Db,
   query: Query<"todos">,
   summaries: string[],
-  tier?: "local" | "edge",
+  tier?: "local-first" | "remote",
 ): Promise<void> {
   const rows = await waitForQuery(
     db,
@@ -1009,7 +1011,7 @@ async function waitForRichTodos(
   predicate: (todos: RichTodo[]) => boolean,
   label: string,
 ): Promise<RichTodo[]> {
-  return await waitForQuery(db, query, predicate, label, 45_000, "edge");
+  return await waitForQuery(db, query, predicate, label, 45_000, "remote");
 }
 
 function titlesEqual(rows: Todo[], titles: string[]): boolean {

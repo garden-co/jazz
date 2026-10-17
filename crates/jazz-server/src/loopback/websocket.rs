@@ -417,6 +417,7 @@ async fn accept_loop(
                 let Ok((stream, _)) = accepted else {
                     break;
                 };
+                crate::tcp::disable_nagle(&stream);
                 tokio::task::spawn_local(handle_connection(
                     stream,
                     Arc::clone(&shell),
@@ -658,20 +659,8 @@ async fn service_connection(
                                 Err(_) => break,
                             }
                         };
-                        if !frames.is_empty() {
-                            let Ok(batches) = encode_frame_batches(&frames) else {
-                                break;
-                            };
-                            let mut send_failed = false;
-                            for batch in batches {
-                                if socket.send(Message::Binary(batch.into())).await.is_err() {
-                                    send_failed = true;
-                                    break;
-                                }
-                            }
-                            if send_failed {
-                                break;
-                            }
+                        if !frames.is_empty() && !send_frame_batches(&mut socket, &frames).await {
+                            break;
                         }
                     }
                     Ok(Message::Close(_)) => break,
@@ -696,20 +685,8 @@ async fn service_connection(
                         Err(_) => break,
                     }
                 };
-                if !frames.is_empty() {
-                    let Ok(batches) = encode_frame_batches(&frames) else {
-                        break;
-                    };
-                    let mut send_failed = false;
-                    for batch in batches {
-                        if socket.send(Message::Binary(batch.into())).await.is_err() {
-                            send_failed = true;
-                            break;
-                        }
-                    }
-                    if send_failed {
-                        break;
-                    }
+                if !frames.is_empty() && !send_frame_batches(&mut socket, &frames).await {
+                    break;
                 }
             }
         }
@@ -719,29 +696,18 @@ async fn service_connection(
     let _ = socket.close(None).await;
 }
 
-fn encode_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    for frame in frames {
-        let mut candidate = current.clone();
-        candidate.push(frame.clone());
-        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
-        if !candidate_fits && !current.is_empty() {
-            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-            current.clear();
-            // A singleton has its own count and length prefixes. Validate the
-            // actual carrier after the flush instead of assuming a raw frame
-            // at the frame limit can fit by itself.
-            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
-        } else if !candidate_fits {
-            return Err(postcard::Error::SerializeBufferFull);
+/// Send `frames` as bounded binary batches. Returns `false` when encoding or a
+/// send fails and the connection must close.
+async fn send_frame_batches(socket: &mut WebSocketStream<TcpStream>, frames: &[Vec<u8>]) -> bool {
+    let Ok(batches) = crate::server::routes::encode_ws_frame_batches(frames) else {
+        return false;
+    };
+    for batch in batches {
+        if socket.send(Message::Binary(batch.into())).await.is_err() {
+            return false;
         }
-        current.push(frame.clone());
     }
-    if !current.is_empty() {
-        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-    }
-    Ok(batches)
+    true
 }
 
 fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
@@ -751,6 +717,7 @@ fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::routes::encode_ws_frame_batches;
     use jazz::groove::records::Value;
     use std::collections::BTreeMap;
 
@@ -886,7 +853,7 @@ mod tests {
     #[test]
     fn frame_batches_split_at_protocol_frame_count_cap() {
         let frames = vec![vec![0x42]; MAX_WIRE_BATCH_FRAMES + 1];
-        let batches = encode_frame_batches(&frames).expect("split bounded frame count");
+        let batches = encode_ws_frame_batches(&frames).expect("split bounded frame count");
 
         assert_eq!(batches.len(), 2);
         assert_eq!(
@@ -906,7 +873,7 @@ mod tests {
     #[test]
     fn frame_batches_never_emit_a_carrier_over_the_physical_cap() {
         let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
-        let batches = encode_frame_batches(std::slice::from_ref(&largest_singleton))
+        let batches = encode_ws_frame_batches(std::slice::from_ref(&largest_singleton))
             .expect("largest singleton carrier fits exactly");
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), MAX_WIRE_FRAME_BYTES);
@@ -917,11 +884,11 @@ mod tests {
 
         let raw_limit = vec![0x42; MAX_WIRE_FRAME_BYTES];
         assert!(
-            encode_frame_batches(std::slice::from_ref(&raw_limit)).is_err(),
+            encode_ws_frame_batches(std::slice::from_ref(&raw_limit)).is_err(),
             "raw limit frame alone cannot fit its carrier prefixes"
         );
         assert!(
-            encode_frame_batches(&[vec![0x11], raw_limit]).is_err(),
+            encode_ws_frame_batches(&[vec![0x11], raw_limit]).is_err(),
             "flushing an earlier frame must still validate the oversized singleton"
         );
     }

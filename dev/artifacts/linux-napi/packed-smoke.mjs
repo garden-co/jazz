@@ -21,7 +21,7 @@ assert.equal(direct.nativeArtifactFingerprint(), cjs.nativeArtifactFingerprint()
 const { createJazzContext } = await import(
   pathToFileURL(join(require.resolve("jazz-tools/backend"), "..", "create-jazz-context.js"))
 );
-const app = s.defineApp({ entries: s.table({ text: s.string() }) });
+const app = s.defineApp({ entries: s.table({ text: s.string() }, {}) });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.entries.allowInsert.always();
@@ -40,9 +40,7 @@ try {
         driver,
         // The memory backend requires a configured URL. db() does not enable
         // authenticated transport; all operations explicitly use the local tier.
-        ...(type === "memory"
-          ? { serverUrl: "http://127.0.0.1:9", defaultDurabilityTier: "local" }
-          : {}),
+        ...(type === "memory" ? { serverUrl: "http://127.0.0.1:9" } : {}),
       });
     context = open();
     const row = await context
@@ -50,7 +48,9 @@ try {
       .insert(app.entries, { text: `${type} receipt` })
       .wait({ tier: "local" });
     const check = async () => {
-      const stored = await context.db().one(app.entries.where({ id: row.id }), { tier: "local" });
+      const stored = await context
+        .db()
+        .one(app.entries.where({ id: row.id }), { tier: "local-first" });
       assert.equal(stored?.text, `${type} receipt`);
     };
     await check();

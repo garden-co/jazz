@@ -10,7 +10,9 @@ import {
   type JWTAuth,
 } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
+import { JAZZ_ENV } from "@/lib/jazz-env";
 import { JazzLifecycle } from "@/lib/jazz-lifecycle";
+import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
@@ -56,6 +58,47 @@ async function getJazzToken() {
   return data.token;
 }
 
+const profileRequests = new Map<string, Promise<void>>();
+const profileKey = (accountId: string) => `wequencer-profile:${accountId}`;
+
+/**
+ * Asks the server to create (or rename) the account's profile, at most once
+ * per account and display name: the name is remembered in localStorage, and
+ * concurrent callers (StrictMode, remounts) share one request. Failures are
+ * logged and retried on the next load.
+ */
+function ensureProfileOnce(accountId: string, displayName: string) {
+  try {
+    if (localStorage.getItem(profileKey(accountId)) === displayName) return;
+  } catch {
+    // Storage unavailable: ask the server, which is idempotent.
+  }
+  const requestKey = `${accountId}:${displayName}`;
+  if (profileRequests.has(requestKey)) return;
+  const request = (async () => {
+    const token = await getJazzToken();
+    const response = await fetch("/api/bootstrap", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`Profile bootstrap failed (${response.status})`);
+    try {
+      localStorage.setItem(profileKey(accountId), displayName);
+    } catch {}
+  })();
+  profileRequests.set(requestKey, request);
+  request.catch((cause) => {
+    profileRequests.delete(requestKey);
+    // Console only, on purpose. The profile is just the display name bandmates
+    // see beside the presence avatars; without it they see "Bandmate" and
+    // everything else (the account, the grid, sync) works as before. The
+    // server call is idempotent and nothing was remembered, so the next load
+    // asks again. An error screen or banner would interrupt a working session
+    // over a cosmetic, self-healing failure.
+    console.error("Wequencer profile setup failed", cause);
+  });
+}
+
 function toError(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
@@ -96,19 +139,18 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   // Pair the manager with the external session before rendering any account
   // client. A new session can therefore never observe the prior session's Db.
   if (slot?.sessionId !== sessionId || slot.identityId !== identityId)
-    return <p className="loading-state">Opening your Jazz account…</p>;
+    return <LoadingScreen label="Opening your Jazz account…" />;
   if (slot.error)
     return (
-      <p className="loading-state" role="alert">
-        {slot.error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </p>
+      <ErrorScreen message={slot.error.message} onRetry={() => setRetry((value) => value + 1)} />
     );
-  if (!slot.manager) return <p className="loading-state">Opening your Jazz account…</p>;
+  if (!slot.manager) return <LoadingScreen label="Opening your Jazz account…" />;
   return (
     <EnrolledProvider
       key={sessionId}
       accounts={slot.manager}
       email={session.user.email}
+      displayName={session.user.name}
       identityId={identityId}
     >
       {children}
@@ -119,16 +161,17 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
 function EnrolledProvider({
   accounts,
   email,
+  displayName,
   identityId,
   children,
 }: {
   accounts: AccountManager<JWTAuth>;
   email: string;
+  displayName: string;
   identityId: string;
   children: React.ReactNode;
 }) {
   const [client, setClient] = useState<JazzClient>();
-  const [ready, setReady] = useState(false);
   const [error, setError] = useState<Error>();
   const [retry, setRetry] = useState(0);
   const active = useRef(true);
@@ -136,44 +179,65 @@ function EnrolledProvider({
   if (!lifecycleRef.current)
     lifecycleRef.current = new JazzLifecycle(
       accounts,
-      (account) => createJazzClient({ appId: APP_ID, serverUrl: SERVER_URL, account }),
+      (account) =>
+        createJazzClient({ appId: APP_ID, serverUrl: SERVER_URL, env: JAZZ_ENV, account }),
       setClient,
     );
   const lifecycle = lifecycleRef.current;
 
-  const enrollAndBootstrap = useCallback(async () => {
-    const registering = claimsSignupIntent(email, identityId);
-    setError(undefined);
-    setReady(false);
-    await lifecycle.transition(
-      (manager) =>
-        registering
-          ? manager.registerJWT({ getToken: getJazzToken })
-          : manager.loginJWT({ getToken: getJazzToken }),
-      () => active.current,
-    );
-    if (registering) clearSignupIntent();
-    const token = await getJazzToken();
-    const response = await fetch("/api/bootstrap", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) throw new Error(`Profile bootstrap failed (${response.status})`);
-    if (active.current) setReady(true);
-  }, [email, identityId, lifecycle]);
+  const enroll = useCallback(
+    async (isCurrent: () => boolean) => {
+      const registering = claimsSignupIntent(email, identityId);
+      setError(undefined);
+      const retained = accounts.getLoggedIn();
+      if (!registering && retained?.identity.subject === identityId) {
+        // This browser kept the signed-in user's Jazz account from an earlier
+        // sign-in: open its local data straight away. It has no credential
+        // until it logs in again, so it cannot sync yet. The login keeps the
+        // open client: logging in as the same identity hands the credential
+        // to the account already open.
+        await lifecycle.attach(isCurrent);
+        await lifecycle.revalidate(
+          (manager) => manager.loginJWT({ getToken: getJazzToken }),
+          isCurrent,
+        );
+      } else {
+        await lifecycle.transition(
+          (manager) =>
+            registering
+              ? manager.registerJWT({ getToken: getJazzToken })
+              : manager.loginJWT({ getToken: getJazzToken }),
+          isCurrent,
+        );
+      }
+      if (!isCurrent()) return;
+      if (registering) clearSignupIntent();
+      // The profile only labels presence avatars, which appear once it syncs:
+      // create it in the background, once per account and display name.
+      const account = accounts.getLoggedIn();
+      if (account) ensureProfileOnce(account.id, displayName);
+    },
+    [accounts, displayName, email, identityId, lifecycle],
+  );
 
   useEffect(() => {
+    // Each run gets its own token. React may start this effect, clean it up and
+    // start it again before the first run's queued transition executes; the
+    // abandoned run must then skip registration rather than register twice.
+    let current = true;
+    const isCurrent = () => current;
     active.current = true;
-    void enrollAndBootstrap().catch((cause) => {
-      if (active.current) setError(toError(cause));
+    void enroll(isCurrent).catch((cause) => {
+      if (isCurrent()) setError(toError(cause));
     });
     return () => {
+      current = false;
       active.current = false;
-      // A late open sees active=false and retires itself instead of publishing
+      // A late open sees a stale token and retires itself instead of publishing
       // into a replacement session. The cleanup rejection is observed here.
       void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
     };
-  }, [enrollAndBootstrap, lifecycle, retry]);
+  }, [enroll, lifecycle, retry]);
 
   const signOut = useCallback(async () => {
     try {
@@ -191,12 +255,8 @@ function EnrolledProvider({
   }, [lifecycle]);
 
   if (error)
-    return (
-      <p className="loading-state" role="alert">
-        {error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </p>
-    );
-  if (!client || !ready) return <p className="loading-state">Opening your Jazz account…</p>;
+    return <ErrorScreen message={error.message} onRetry={() => setRetry((value) => value + 1)} />;
+  if (!client) return <LoadingScreen label="Opening your Jazz account…" />;
   return (
     <JazzClientProvider client={client}>
       <SignOutContext.Provider value={signOut}>{children}</SignOutContext.Provider>

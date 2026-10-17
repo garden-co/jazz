@@ -1,5 +1,5 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import { applyDelta } from "../shared/index.js";
+import { applyDeltaToRows } from "../reconcile-array.js";
 import type {
   CacheEntryHandle,
   QueryBuilder,
@@ -9,6 +9,7 @@ import type {
 } from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 /**
  * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
@@ -32,10 +33,6 @@ export interface UseAllSuspenseResult<T extends { id: string }> {
   error: Ref<Error | null>;
 }
 
-function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
-}
-
 function applyEntryState<T extends { id: string }>(
   state: UseAllState<T>,
   data: Ref<T[] | undefined>,
@@ -43,7 +40,9 @@ function applyEntryState<T extends { id: string }>(
   isLoading: Ref<boolean>,
 ): void {
   if (state.status === "fulfilled") {
-    data.value = state.data;
+    // Own a copy: deltas are applied to this array in place, and the cache
+    // entry's array is shared with every other listener on the same query.
+    data.value = [...state.data];
     error.value = null;
     isLoading.value = false;
   } else if (state.status === "rejected") {
@@ -65,19 +64,12 @@ function subscribeToEntry<T extends { id: string }>(
 
   return entry.subscribe({
     onfulfilled: (nextData) => {
-      data.value = nextData;
+      data.value = [...nextData];
       error.value = null;
       isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      if (data.value) {
-        applyDelta(data.value, delta);
-      } else if (delta.reset) {
-        data.value = delta.all;
-      } else {
-        data.value = [];
-        applyDelta(data.value, delta);
-      }
+      data.value = applyDeltaToRows(data.value, delta);
       isLoading.value = false;
     },
     onError: (err) => {

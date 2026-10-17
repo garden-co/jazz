@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAccountManager, createDb, generateAuthSecret, type Db } from "jazz-tools";
 import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
-import { fileListQuery } from "../../src/file-list-query.js";
+import { fileTableQuery } from "../../src/file-list-query.js";
 import { APP_ID, TEST_PORT } from "./test-constants.js";
 
 const dbs: Db[] = [];
@@ -64,8 +64,8 @@ describe("EpicDrop streamed upload foundation", () => {
       })(),
     });
 
-    const listed = await db.all(fileListQuery(folder.value.id)!);
-    expect(listed).toEqual([
+    const listed = await db.all(fileTableQuery(folder.value.id)!);
+    expect(listed).toMatchObject([
       {
         id: uploaded.value.id,
         name: "set-list.wav",
@@ -73,9 +73,10 @@ describe("EpicDrop streamed upload foundation", () => {
         size_bytes: 9,
       },
     ]);
-    // This is intentionally a projection boundary, not a promise of a typed
-    // range preview. #1833 owns that public API.
+    // The table's query is a projection boundary: listing a folder never
+    // selects the large `contents` value.
     expect("contents" in listed[0]!).toBe(false);
+    expect(listed[0]!.$updatedAt).toBeInstanceOf(Date);
   });
 
   it("does not publish a cancelled stream and permits a clean retry", async () => {
@@ -108,7 +109,7 @@ describe("EpicDrop streamed upload foundation", () => {
         yield new Uint8Array(32 * 1024).fill(5);
       })(),
     });
-    await expect(db.all(fileListQuery(folder.value.id)!)).resolves.toEqual([
+    await expect(db.all(fileTableQuery(folder.value.id)!)).resolves.toMatchObject([
       {
         id: retried.value.id,
         name: "retry.wav",
@@ -124,9 +125,9 @@ describe("EpicDrop streamed upload foundation", () => {
     const aliceId = sessionUser(alice);
     const bobId = sessionUser(bob);
     const aliceFolder = alice.insert(app.folders, { name: "Alice", owner_id: aliceId });
-    await aliceFolder.wait({ tier: "edge" });
+    await aliceFolder.wait({ tier: "global" });
     const bobFolder = bob.insert(app.folders, { name: "Bob", owner_id: bobId });
-    await bobFolder.wait({ tier: "edge" });
+    await bobFolder.wait({ tier: "global" });
 
     const aliceFile = await alice.insertStreaming(app.files, {
       folder_id: aliceFolder.value.id,
@@ -138,7 +139,7 @@ describe("EpicDrop streamed upload foundation", () => {
         yield new Uint8Array([1, 2, 3]);
       })(),
     });
-    await aliceFile.wait({ tier: "edge" });
+    await aliceFile.wait({ tier: "global" });
 
     await expect(
       alice
@@ -152,16 +153,16 @@ describe("EpicDrop streamed upload foundation", () => {
             yield new Uint8Array([9]);
           })(),
         })
-        .then((write) => write.wait({ tier: "edge" })),
+        .then((write) => write.wait({ tier: "global" })),
     ).rejects.toThrow();
     await expect(
       alice
         .update(app.files, aliceFile.value.id, { folder_id: bobFolder.value.id })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(
-      alice.all(fileListQuery(aliceFolder.value.id)!, { tier: "edge" }),
-    ).resolves.toEqual([
+      alice.all(fileTableQuery(aliceFolder.value.id)!, { tier: "remote" }),
+    ).resolves.toMatchObject([
       {
         id: aliceFile.value.id,
         name: "owned.wav",

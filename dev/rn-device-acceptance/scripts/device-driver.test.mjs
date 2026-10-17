@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertDeviceReceipt, collectResults } from "./device-driver.mjs";
+import { assertDeviceReceipt, collectResults, deviceMetricsLines } from "./device-driver.mjs";
 
 const now = Date.parse("2026-08-28T12:00:00.000Z");
 const expected = {
@@ -75,3 +75,37 @@ for (const [name, output] of [
   ],
 ])
   test(`rejects ${name}`, () => assert.throws(() => assertDeviceReceipt(output, expected)));
+
+test("prints run-bound metrics lines only for measured scenarios", () => {
+  const metrics = {
+    keystrokes: 2,
+    burst: 1,
+    blockedP50Ms: 0.5,
+    blockedP95Ms: 1,
+    blockedMaxMs: 1,
+    echoP50Ms: 8,
+    echoP95Ms: 9,
+    echoMaxMs: 9,
+    burstEchoMs: 10,
+    dropped: 0,
+    reordered: 0,
+    reappeared: 0,
+  };
+  const measured = `JAZZ_DEVICE_RESULT ${JSON.stringify({ protocol: 1, scenario: "typing-composer", state: "passed", detail: "observed", metrics, receipt: { platform: "android", deviceIdentifier: "emulator-5554", buildFingerprint: "a".repeat(64), runNonce: "run-123", sequence: 2, observedAt: "2026-08-28T12:00:00.000Z" } })}`;
+  const results = assertDeviceReceipt(
+    [receipt("local-write-subscription", 1), measured].join("\n"),
+    {
+      ...expected,
+      scenarios: ["local-write-subscription", "typing-composer"],
+    },
+  );
+  const lines = deviceMetricsLines(results);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0].slice("JAZZ_DEVICE_METRICS ".length)), {
+    scenario: "typing-composer",
+    platform: "android",
+    deviceIdentifier: "emulator-5554",
+    runNonce: "run-123",
+    metrics,
+  });
+});

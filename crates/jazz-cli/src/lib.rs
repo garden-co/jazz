@@ -4,4 +4,5 @@
 //! crate owns command dispatch, process signals, allocator selection, and the
 //! executable entry points that assemble those library APIs.
 
-pub mod commands;
+#[cfg(heap_profiling)]
+pub mod heap_profiling;

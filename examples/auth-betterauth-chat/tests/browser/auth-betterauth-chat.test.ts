@@ -59,20 +59,20 @@ async function send(client: JazzClient, chat_id: string, text: string): Promise<
     text,
     sent_at: new Date(),
   });
-  const message = await handle.wait({ tier: "edge" });
+  const message = await handle.wait({ tier: "global" });
   return message.id;
 }
 
 async function update(client: JazzClient, messageId: string, text: string): Promise<void> {
-  await client.db.update(app.messages, messageId, { text }).wait({ tier: "edge" });
+  await client.db.update(app.messages, messageId, { text }).wait({ tier: "global" });
 }
 
 async function move(client: JazzClient, messageId: string, chat_id: string): Promise<void> {
-  await client.db.update(app.messages, messageId, { chat_id }).wait({ tier: "edge" });
+  await client.db.update(app.messages, messageId, { chat_id }).wait({ tier: "global" });
 }
 
 async function remove(client: JazzClient, messageId: string): Promise<void> {
-  await client.db.delete(app.messages, messageId).wait({ tier: "edge" });
+  await client.db.delete(app.messages, messageId).wait({ tier: "global" });
 }
 
 describe("auth-betterauth-chat permissions", () => {

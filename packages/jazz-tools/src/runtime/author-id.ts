@@ -3,7 +3,7 @@ import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new Utf8Decoder({ fatal: true });
-const STORED_SCALAR_INLINE_TAG = 2;
+const STORED_SCALAR_INLINE_TAG = 0;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
 // Verified-handler presentation metadata only. Internal sessions carry only
@@ -68,6 +68,12 @@ export function isUsableSubject(subject: string): boolean {
 
 /** Portable logical author identity. Rust interns this canonical string only internally. */
 export function canonicalAuthorSubject(issuer: string, subject: string, account?: string): string {
+  if (typeof issuer !== "string") {
+    throw new Error("Author identity is missing an issuer");
+  }
+  if (typeof subject !== "string") {
+    throw new Error("Author identity is missing a subject");
+  }
   if (!isPortableAuthorComponent(issuer) || !isPortableAuthorComponent(subject)) {
     throw new Error("Author issuer and subject must be portable and nonempty");
   }

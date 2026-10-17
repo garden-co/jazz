@@ -31,11 +31,11 @@ use crate::ivm::{
     CollectByMode, CollectByOp, CollectByProjection, CollectBySlot, CollectBySlotBuilder,
     DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
     IndexSourceOp, InlineRecordsOp, InputSourceId, IvmGraph, JoinOp, JoinOpKind, LiteralValue,
-    MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput,
-    OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
-    RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp,
-    TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
-    ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    LookupOp, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId,
+    NodeOutput, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec,
+    StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
+    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
@@ -47,18 +47,33 @@ use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, S
 use thiserror::Error;
 
 mod aggregate;
+mod compilation_cache;
+mod counted_map;
+mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
 mod persist;
+pub(crate) mod pipeline;
+mod rank_index;
 mod recursion;
+mod residency;
 mod state;
+mod stored_arrangement;
+pub use residency::{
+    process_cache_budget, process_cache_evicted_buckets, process_cache_resident_bytes,
+    process_stored_arrangements, set_process_cache_budget, set_process_stored_arrangements,
+};
 mod terminal;
+mod typed_template;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use counted_map::CountedMap;
+use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
 };
-use persist::apply_persist_delta;
+use persist::{apply_persist_delta, index_record_from_storage};
+use rank_index::RankIndex;
 use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
     recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
@@ -67,11 +82,13 @@ use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
     HydrationMode, NodeInputSignature, OperatorStateKey, ScopeId, SubTick, Tick,
 };
-pub use state::{RuntimeStats, TickMetrics};
+pub use state::{ExecutionLayoutStats, RuntimeStats, TickMetrics};
 pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };
-use terminal::{order_terminal_snapshot, terminal_deltas_from_record_deltas};
+use terminal::{
+    order_terminal_snapshot, terminal_deltas_from_record_deltas, terminal_deltas_keyed_by_identity,
+};
 
 const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;
@@ -169,23 +186,40 @@ pub struct IvmRuntime {
     /// sources. Cases are runtime input metadata rather than graph identity.
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
+    /// Pure typed fragments, independent of source identity and live state.
+    projection_plans: RefCell<typed_projection::ProjectionPlans>,
+    compilation_cache: compilation_cache::CompilationCache,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
     /// `poll_incremental` temporarily owns its queue outside the shared slot.
     /// Lifecycle reclamation must wait until that queue is visible again.
     pending_incremental_polling: bool,
+    /// The most recent durable wake bridge a runtime owner supplied, and the
+    /// cached fan-out waker for the latest non-owner poller (see
+    /// `poll_incremental`). A suspended cold evaluation keeps only its latest
+    /// poller's waker, so every poll must still reach this owner.
+    owner_progress_waker: Option<std::task::Waker>,
+    owner_fanout_waker: Option<(std::task::Waker, std::task::Waker)>,
     /// A lifecycle operation released retainers while queued work may still
     /// reference the released graph slice.
     ephemeral_graph_gc_pending: bool,
+    /// Nodes whose reachability may have changed since the last graph GC:
+    /// released retainer roots and roots blocked by queued evaluations. New
+    /// nodes are drained from the graph. Every unretained node is an ancestor
+    /// of one of these, so GC never scans the whole graph.
+    gc_candidates: HashSet<NodeId>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
-    binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
+    shared_prepared_shapes: HashMap<subscriptions::SharedShapeKey, PreparedShapeId>,
+    binding_sources: subscriptions::BindingSources,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    /// Bindings admitted onto a live prepared shape without full hydration.
+    live_attaches: u64,
     deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
     durable_notification_publications: HashSet<PublicationId>,
     completed_deferred_publications: HashSet<PublicationId>,
@@ -193,6 +227,11 @@ pub struct IvmRuntime {
     /// acknowledgement that may have followed commit. This runtime must not
     /// evaluate against its pre-flush state again.
     persistence_indeterminate: Rc<Cell<bool>>,
+    /// Durable numeric ids of schema indexes, shared by runtime clones.
+    index_ids: SharedIndexIds,
+    /// Groove dictionaries of interned columns, shared with the database and
+    /// runtime clones. Table sources decode stored rows through it.
+    dictionaries: crate::dictionary::SharedDictionaries,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -201,10 +240,13 @@ pub struct IvmRuntime {
     /// expensive context-independent arrangements.
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
+    /// Keys of retained hydration entries grouped by producer node. Staged
+    /// tick frames are deliberately not represented here.
+    eval_memo_keys_by_node: HashMap<NodeId, HashSet<EvalMemoKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
-    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo: EvaluationMemo,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     memo_use_clock: u64,
@@ -220,15 +262,89 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether new arrangements over stored tables, keyed on their primary
+    /// key, are read from storage instead of held (`stored_arrangement`).
+    stored_arrangements_enabled: bool,
+    /// Bytes the resident buckets of this runtime's stored arrangements may
+    /// hold after an install; `None` follows the process budget
+    /// (`residency`).
+    cache_budget: Option<usize>,
+    /// Shared with every stored arrangement plan: whether reads record the
+    /// buckets they use, which only a finite budget needs.
+    arrangement_use_tracking: Arc<std::sync::atomic::AtomicBool>,
+    /// This runtime's part of the process's resident bytes.
+    resident_share: residency::ResidentShare,
+    /// Whether plain ordered outputs receive generic root positions (insert
+    /// indices and moves). A consumer that never reads them turns this off,
+    /// so an unbounded TopBy keeps its delta-only path.
+    plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
 }
 
 impl IvmRuntime {
+    /// Insert one retained hydration memo while keeping its node index and
+    /// byte budget synchronized. Tick-keyed deltas remain in staged frames.
+    fn insert_retained_eval_memo(&mut self, key: EvalMemoKey, entry: EvalMemoEntry) {
+        debug_assert!(key.tick_epoch.is_none());
+        let payload_bytes = entry.payload_bytes;
+        self.eval_memo_keys_by_node
+            .entry(key.node)
+            .or_default()
+            .insert(key.clone());
+        if let Some(previous) = self.eval_memo.insert(key, entry) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+        }
+        self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
+    }
+
+    fn remove_retained_eval_memo(&mut self, key: &EvalMemoKey) {
+        debug_assert!(key.tick_epoch.is_none());
+        if let Some(entry) = self.eval_memo.remove(key) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+        }
+        if let Some(keys) = self.eval_memo_keys_by_node.get_mut(&key.node) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.eval_memo_keys_by_node.remove(&key.node);
+            }
+        }
+    }
+
+    fn remove_retained_eval_memos_for_nodes(&mut self, nodes: &HashSet<NodeId>) {
+        for node in nodes {
+            if let Some(keys) = self.eval_memo_keys_by_node.remove(node) {
+                for key in keys {
+                    debug_assert!(key.tick_epoch.is_none());
+                    if let Some(entry) = self.eval_memo.remove(&key) {
+                        self.eval_memo_bytes =
+                            self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
+        let dictionaries = Rc::new(RefCell::new(
+            crate::dictionary::DictionaryRegistry::declared(&schema.dictionaries),
+        ));
+        Self::new_with_shared_state(schema, SharedIndexIds::default(), dictionaries)
+    }
+
+    /// Build a runtime whose schema indexes take their durable numeric ids
+    /// from `index_ids` and whose interned columns use `dictionaries` (both
+    /// loaded from storage by the database facade).
+    pub(crate) fn new_with_shared_state(
+        schema: DatabaseSchema,
+        index_ids: SharedIndexIds,
+        dictionaries: crate::dictionary::SharedDictionaries,
+    ) -> Result<Self, IvmRuntimeError> {
+        schema.validate_interned_columns()?;
+        dictionaries.borrow().check_declares(&schema.dictionaries)?;
         let table_storage_descriptors = schema
             .tables
             .iter()
-            .map(|table| (table.name.clone(), table.record_schema()))
+            .map(|table| (table.name.clone(), table.storage_record_schema()))
             .collect();
         let table_descriptors = schema
             .tables
@@ -261,15 +377,21 @@ impl IvmRuntime {
             variant_descriptors,
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
+            projection_plans: RefCell::default(),
+            compilation_cache: compilation_cache::CompilationCache::default(),
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
+            owner_progress_waker: None,
+            owner_fanout_waker: None,
             ephemeral_graph_gc_pending: false,
+            gc_candidates: HashSet::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
-            eval_memo: HashMap::default(),
+            eval_memo: EvaluationMemo::default(),
+            eval_memo_keys_by_node: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,
@@ -283,18 +405,29 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            stored_arrangements_enabled: residency::process_stored_arrangements(),
+            cache_budget: None,
+            arrangement_use_tracking: Arc::new(std::sync::atomic::AtomicBool::new(
+                residency::process_cache_budget().is_some(),
+            )),
+            resident_share: residency::ResidentShare::default(),
+            plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
-            binding_sources: HashMap::default(),
+            shared_prepared_shapes: HashMap::default(),
+            binding_sources: subscriptions::BindingSources::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
             pending_binding_retractions: Vec::new(),
+            live_attaches: 0,
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),
             completed_deferred_publications: HashSet::default(),
             persistence_indeterminate: Rc::new(Cell::new(false)),
+            index_ids,
+            dictionaries,
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
@@ -368,6 +501,27 @@ impl IvmRuntime {
         self.auto_direct_family_enabled = enabled;
     }
 
+    /// Read arrangements compiled from now on from storage when they arrange
+    /// a stored table by its primary key. Existing arrangements keep their
+    /// representation.
+    pub fn stored_arrangements_enabled(&self) -> bool {
+        self.stored_arrangements_enabled
+    }
+
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.stored_arrangements_enabled = enabled;
+    }
+
+    /// Enable or disable generic root positions for plain ordered outputs.
+    /// Structured collectors are unaffected: they own their positional edits.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.plain_output_root_positions = enabled;
+    }
+
+    pub fn plain_output_root_positions_enabled(&self) -> bool {
+        self.plain_output_root_positions
+    }
+
     pub fn schema(&self) -> &DatabaseSchema {
         &self.schema
     }
@@ -378,6 +532,20 @@ impl IvmRuntime {
 
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
+    }
+
+    pub(crate) fn index_ids(&self) -> &SharedIndexIds {
+        &self.index_ids
+    }
+
+    pub(crate) fn dictionaries(&self) -> &crate::dictionary::SharedDictionaries {
+        &self.dictionaries
+    }
+
+    /// The durable id of a declared schema index (allocated in memory when
+    /// first seen; see [`index_ids`]).
+    pub(crate) fn index_storage_id(&self, table: &str, index: &IndexSchema) -> u32 {
+        self.index_ids.borrow_mut().resolve(table, index)
     }
 
     pub(crate) fn table_storage_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
@@ -400,23 +568,54 @@ impl IvmRuntime {
     }
 }
 
+/// Freezes a batch output buffer whose rows are handed out as slices. Each retained slice pins
+/// the whole allocation, so a buffer left mostly unused by an overestimate or by doubling growth
+/// is copied down to its length first.
+fn freeze_batch_buffer(buffer: BytesMut) -> Bytes {
+    if buffer.capacity() - buffer.len() > buffer.len() / 2 {
+        Bytes::copy_from_slice(&buffer)
+    } else {
+        buffer.freeze()
+    }
+}
+
 mod compilation;
 mod graph_lifecycle;
 mod runtime_tick;
 mod schema;
 mod subscriptions;
+mod typed_projection;
 pub use subscriptions::*;
 mod operator_updates;
 use operator_updates::*;
 mod evaluator;
+#[cfg(test)]
+pub(crate) use evaluator::take_async_node_frame_count;
 use evaluator::*;
 mod record_projection;
 use record_projection::*;
 mod key_encoding;
+pub(crate) use key_encoding::encode_key_part;
 use key_encoding::*;
-pub(crate) use key_encoding::{durable_index_key_prefix, encode_key_part};
+pub(crate) mod index_ids;
+pub(crate) use index_ids::{
+    IndexIdRegistry, SharedIndexIds, durable_index_key_prefix, split_durable_index_key,
+};
 mod windows;
 use windows::*;
+
+impl From<crate::dictionary::DictionaryTranscodeError> for IvmRuntimeError {
+    fn from(error: crate::dictionary::DictionaryTranscodeError) -> Self {
+        match error {
+            crate::dictionary::DictionaryTranscodeError::Record(error) => {
+                Self::RecordEncoding(error)
+            }
+            crate::dictionary::DictionaryTranscodeError::Dictionary(error) => {
+                Self::Dictionary(error)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
@@ -454,6 +653,11 @@ pub enum IvmRuntimeError {
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]
     UnsupportedIndexIntersectionScan,
+    #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
+    UnsupportedIndexCandidateFilter,
+    /// A keyed lookup whose shape the runtime cannot probe by key.
+    #[error("unsupported keyed lookup: {0}")]
+    UnsupportedLookup(&'static str),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
@@ -494,6 +698,10 @@ pub enum IvmRuntimeError {
     DuplicateTableVariant { table: String, version: u64 },
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
+    #[error(transparent)]
+    Dictionary(#[from] crate::dictionary::DictionaryError),
+    #[error(transparent)]
+    InvalidInternedColumn(#[from] crate::schema::InternedColumnError),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
     RecursiveIterationLimit { node: NodeId, max_iters: usize },
     #[error(transparent)]
@@ -506,6 +714,8 @@ pub enum IvmRuntimeError {
     StorageUnavailable,
     #[error("evaluation blocked on a non-resident storage input")]
     EvaluationBlocked,
+    #[error("a stored arrangement was read for a key nobody probed")]
+    StoredArrangementUnprobed,
     #[error("streaming checksum window and work budgets must be non-zero")]
     InvalidStreamingChecksumBudget,
     #[error("streaming checksum requires a String or Bytes field")]
@@ -607,5 +817,13 @@ pub enum IvmRuntimeError {
     UnsupportedOperator,
 }
 
+/// Arrangement folds on this thread that had to copy a shared join index.
+#[cfg(test)]
+pub(crate) fn shared_arrangement_index_folds() -> usize {
+    join::shared_index_folds()
+}
+
+#[cfg(test)]
+mod retained_gc_tests;
 #[cfg(test)]
 mod tests;

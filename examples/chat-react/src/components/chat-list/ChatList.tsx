@@ -13,7 +13,7 @@ export const ChatList = () => {
   const session = useSession();
   const userId = session?.user.account ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
+    tier: db.getConfig().serverUrl ? "global" : "local",
   };
 
   const myProfile = useMyProfile();

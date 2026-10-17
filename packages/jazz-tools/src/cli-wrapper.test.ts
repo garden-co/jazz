@@ -76,6 +76,17 @@ describe("jazz-tools wrapper", () => {
     expect(help).toContain("validate");
     expect(help).not.toMatch(/\bmcp\b/i);
   });
+
+  it.each([["login"], ["apps"], ["teams"]])(
+    "routes Jazz Cloud command %s to the TypeScript CLI",
+    async (command) => {
+      const result = await runWrapper([command, "--help"]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Jazz Cloud commands");
+      expect(result.stdout).not.toContain("Jazz distributed database CLI");
+    },
+  );
   it.each([
     ["before command", ["--env-file", ".env.staging", "deploy", "explicit-wrapper-app"]],
     ["after command", ["deploy", "--env-file", ".env.staging", "explicit-wrapper-app"]],
@@ -107,6 +118,18 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `,
       );
       await writeFile(
+        join(root, "permissions.ts"),
+        `
+import { schema as s } from ${JSON.stringify(schemaImportPath)};
+import { app } from "./schema.js";
+
+export default s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+});
+`,
+      );
+      await writeFile(
         join(root, ".env.staging"),
         [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
       );
@@ -118,7 +141,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
       expect(result.status).toBe(1);
       expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
-      expect(result.stderr).toContain("request=/apps/explicit-wrapper-app/schemas");
+      expect(result.stderr).toContain("request=/apps/explicit-wrapper-app/admin/migrations/graph");
       expect(result.stderr).toContain("secret=real-secret");
       expect(result.stderr).not.toContain("Missing app ID");
       expect(result.stdout).not.toContain("Jazz distributed database CLI");

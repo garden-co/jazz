@@ -10,6 +10,9 @@ const BUCKETS: usize = 2;
 
 static MAP_BUFFER_CAPACITY: AtomicU64 = AtomicU64::new(0);
 static MAP_BUFFER_USED: AtomicU64 = AtomicU64::new(0);
+static PIPELINE_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+static PIPELINE_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+static PIPELINE_STAGE_VISITS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 
 static MAP_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -21,6 +24,9 @@ static JOIN_OUTPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) };
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Snapshot {
+    pub pipeline_calls: [u64; BUCKETS],
+    pub pipeline_input_records: [u64; BUCKETS],
+    pub pipeline_stage_visits: [u64; BUCKETS],
     pub map_buffer_capacity: u64,
     pub map_buffer_used: u64,
     pub map_calls: [u64; BUCKETS],
@@ -41,6 +47,9 @@ pub fn reset() {
     MAP_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
     MAP_BUFFER_USED.store(0, Ordering::Relaxed);
     for counters in [
+        &PIPELINE_CALLS,
+        &PIPELINE_INPUT_RECORDS,
+        &PIPELINE_STAGE_VISITS,
         &MAP_CALLS,
         &MAP_INPUT_RECORDS,
         &MAP_OUTPUT_RECORDS,
@@ -60,6 +69,9 @@ pub fn snapshot() -> Snapshot {
         std::array::from_fn(|index| counters[index].load(Ordering::Relaxed))
     }
     Snapshot {
+        pipeline_calls: load(&PIPELINE_CALLS),
+        pipeline_input_records: load(&PIPELINE_INPUT_RECORDS),
+        pipeline_stage_visits: load(&PIPELINE_STAGE_VISITS),
         map_buffer_capacity: MAP_BUFFER_CAPACITY.load(Ordering::Relaxed),
         map_buffer_used: MAP_BUFFER_USED.load(Ordering::Relaxed),
         map_calls: load(&MAP_CALLS),
@@ -70,6 +82,14 @@ pub fn snapshot() -> Snapshot {
         join_right_records: load(&JOIN_RIGHT_RECORDS),
         join_output_records: load(&JOIN_OUTPUT_RECORDS),
     }
+}
+
+/// Disjoint from standalone map kernels: visits include fused filters and maps.
+pub fn record_pipeline(hydrate: bool, input_records: usize, stage_visits: u64) {
+    let index = bucket(hydrate);
+    PIPELINE_CALLS[index].fetch_add(1, Ordering::Relaxed);
+    PIPELINE_INPUT_RECORDS[index].fetch_add(input_records as u64, Ordering::Relaxed);
+    PIPELINE_STAGE_VISITS[index].fetch_add(stage_visits, Ordering::Relaxed);
 }
 
 pub fn record_map(hydrate: bool, input_records: usize, output_records: usize) {
@@ -136,4 +156,104 @@ pub fn record_map_node(
 
 pub fn map_node_work() -> Vec<MapNodeWork> {
     MAP_NODES.lock().unwrap().values().cloned().collect()
+}
+
+/// Row representation conversions on the cold path, keyed by site. `calls`
+/// counts conversions; `distinct` counts the distinct physical versions they
+/// converted, so `calls - distinct` is repeated work for the same version.
+/// The benchmark driver sets the role around each node tick.
+pub mod conversions {
+    use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, HashSet};
+
+    #[derive(Clone, Debug, Default)]
+    pub struct SiteWork {
+        pub calls: u64,
+        pub distinct: u64,
+        pub bytes: u64,
+    }
+
+    /// `(role, column family)`.
+    pub type TableWriteKey = (&'static str, String);
+    /// `(writes, bytes)`.
+    pub type TableWrite = (u64, u64);
+
+    #[derive(Default)]
+    struct Site {
+        calls: u64,
+        bytes: u64,
+        seen: HashSet<u64>,
+    }
+
+    thread_local! {
+        static ROLE: Cell<&'static str> = const { Cell::new("outside_node_ticks") };
+        static SITES: RefCell<BTreeMap<(&'static str, &'static str), Site>> =
+            const { RefCell::new(BTreeMap::new()) };
+        static TABLE_WRITES: RefCell<BTreeMap<TableWriteKey, TableWrite>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Physical record writes per column family: `(writes, bytes)`.
+    pub fn record_table_write(table: &str, bytes: usize) {
+        let role = ROLE.with(Cell::get);
+        TABLE_WRITES.with(|tables| {
+            let mut tables = tables.borrow_mut();
+            let entry = tables.entry((role, table.to_owned())).or_default();
+            entry.0 += 1;
+            entry.1 += bytes as u64;
+        });
+    }
+
+    pub fn table_writes() -> Vec<(TableWriteKey, TableWrite)> {
+        TABLE_WRITES.with(|tables| {
+            tables
+                .borrow()
+                .iter()
+                .map(|(key, value)| (key.clone(), *value))
+                .collect()
+        })
+    }
+
+    pub fn set_role(role: &'static str) {
+        ROLE.with(|current| current.set(role));
+    }
+
+    pub fn reset() {
+        SITES.with(|sites| sites.borrow_mut().clear());
+        TABLE_WRITES.with(|tables| tables.borrow_mut().clear());
+    }
+
+    /// `identity` is a hash of the physical version (table, row, branch,
+    /// transaction, layer); `bytes` is the size of the produced representation
+    /// when it has one.
+    pub fn record(site: &'static str, identity: u64, bytes: usize) {
+        let role = ROLE.with(Cell::get);
+        SITES.with(|sites| {
+            let mut sites = sites.borrow_mut();
+            let entry = sites.entry((role, site)).or_default();
+            entry.calls += 1;
+            entry.bytes += bytes as u64;
+            entry.seen.insert(identity);
+        });
+    }
+
+    /// `(role, site) -> work`, sorted.
+    pub fn snapshot() -> Vec<((&'static str, &'static str), SiteWork)> {
+        SITES.with(|sites| {
+            sites
+                .borrow()
+                .iter()
+                .map(|(key, site)| {
+                    (
+                        *key,
+                        SiteWork {
+                            calls: site.calls,
+                            distinct: site.seen.len() as u64,
+                            bytes: site.bytes,
+                        },
+                    )
+                })
+                .collect()
+        })
+    }
 }

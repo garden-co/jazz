@@ -206,7 +206,7 @@ async fn create_team_edge(
         QUERY_TIMEOUT,
         client.wait_for_transaction(
             transaction_id.expect("team edge insert must commit immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         ),
     )
     .await
@@ -782,7 +782,7 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         .delete("team_edges", first_path_edge)
         .expect("remove first recursive path")
         .expect("edge deletion transaction");
-    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&admin, &[tx]).await;
     let remaining_rows = bob
         .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
@@ -803,7 +803,7 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         .delete("team_edges", second_path_edge)
         .expect("remove last recursive path")
         .expect("edge deletion transaction");
-    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&admin, &[tx]).await;
     wait_for_query(
         &bob,
         query,

@@ -12,9 +12,10 @@ import type {
   PolicyExpr,
   PolicyLiteralValue,
   PolicyValue,
-  Schema,
   TablePolicies,
 } from "./schema.js";
+import { isRecord } from "./runtime/util.js";
+import { mapPolicyExpr } from "./policy-expr-map.js";
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
@@ -27,10 +28,6 @@ export interface MissingExplicitPolicyDiagnostic {
 }
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isWasmValueLike(value: unknown): value is WasmValue {
   if (!isRecord(value) || typeof value.type !== "string") {
@@ -367,89 +364,11 @@ function normalizeRelationExprForWasm(expr: RelExpr): RelExpr {
 }
 
 function normalizePolicyExprForWasm(expr: PolicyExpr): WasmPolicyExpr {
-  switch (expr.type) {
-    case "Cmp":
-      return {
-        type: "Cmp",
-        column: expr.column,
-        op: expr.op,
-        value: normalizePolicyValueForWasm(expr.value),
-      };
-    case "SessionCmp":
-      return {
-        type: "SessionCmp",
-        path: expr.path,
-        op: expr.op,
-        value: normalizePolicyLiteralValueForWasm(expr.value),
-      };
-    case "IsNull":
-    case "IsNotNull":
-      return expr;
-    case "SessionIsNull":
-    case "SessionIsNotNull":
-      return expr;
-    case "Contains":
-      return {
-        type: "Contains",
-        column: expr.column,
-        value: normalizePolicyValueForWasm(expr.value),
-      };
-    case "SessionContains":
-      return {
-        type: "SessionContains",
-        path: expr.path,
-        value: normalizePolicyLiteralValueForWasm(expr.value),
-      };
-    case "In":
-      return expr;
-    case "InList":
-      return {
-        type: "InList",
-        column: expr.column,
-        values: expr.values.map((value) => normalizePolicyValueForWasm(value)),
-      };
-    case "SessionInList":
-      return {
-        type: "SessionInList",
-        path: expr.path,
-        values: expr.values.map((value) => normalizePolicyLiteralValueForWasm(value)),
-      };
-    case "Exists":
-      return {
-        type: "Exists",
-        table: expr.table,
-        condition: normalizePolicyExprForWasm(expr.condition),
-      };
-    case "ExistsRel":
-      return {
-        type: "ExistsRel",
-        rel: normalizeRelationExprForWasm(expr.rel),
-      };
-    case "Inherits":
-    case "InheritsReferencing":
-    case "True":
-    case "False":
-      return expr as unknown as WasmPolicyExpr;
-    case "And":
-      return {
-        type: "And",
-        exprs: expr.exprs.map((child) => normalizePolicyExprForWasm(child)),
-      };
-    case "Or":
-      return {
-        type: "Or",
-        exprs: expr.exprs.map((child) => normalizePolicyExprForWasm(child)),
-      };
-    case "Not":
-      return {
-        type: "Not",
-        expr: normalizePolicyExprForWasm(expr.expr),
-      };
-    default: {
-      const _never: never = expr;
-      return _never;
-    }
-  }
+  return mapPolicyExpr(expr, {
+    value: normalizePolicyValueForWasm,
+    literal: normalizePolicyLiteralValueForWasm,
+    rel: normalizeRelationExprForWasm,
+  });
 }
 
 function normalizeOperationPolicyForWasm(
@@ -518,8 +437,8 @@ function missingExplicitPolicyMessage(
   return `Warning: table "${tableName}" has a policy set but no explicit ${operation} policy in permissions.ts; ${operation}s will be denied.`;
 }
 
-function fullyOpenTablePolicyMessage(tableName: string): string {
-  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.`;
+function missingTablePolicyMessage(tableName: string): string {
+  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.`;
 }
 
 export function validatePermissionsAgainstSchema(
@@ -542,7 +461,7 @@ export function collectMissingExplicitPolicyDiagnostics(
         {
           tableName,
           operation: "table",
-          message: fullyOpenTablePolicyMessage(tableName),
+          message: missingTablePolicyMessage(tableName),
         },
       ];
     }
@@ -575,30 +494,7 @@ export function normalizePermissionsForWasm(
   return normalized;
 }
 
-export function mergePermissionsIntoSchema(
-  schema: Schema,
-  compiledPermissions: CompiledPermissionsMap,
-): Schema {
-  validatePermissionTables(
-    schema.tables.map((table) => table.name),
-    compiledPermissions,
-  );
-
-  return {
-    tables: schema.tables.map((table) => {
-      const external = compiledPermissions[table.name];
-      if (!external) {
-        return table;
-      }
-
-      return {
-        ...table,
-        policies: external,
-      };
-    }),
-  };
-}
-
+/** Internal native representation. The explicit bundle replaces all embedded policies. */
 export function mergePermissionsIntoWasmSchema(
   schema: WasmSchema,
   compiledPermissions: CompiledPermissionsMap,
@@ -610,7 +506,7 @@ export function mergePermissionsIntoWasmSchema(
   for (const [tableName, table] of Object.entries(schema)) {
     merged[tableName] = {
       ...table,
-      policies: normalizedPermissions[tableName] ?? table.policies,
+      policies: normalizedPermissions[tableName],
     };
   }
   return merged;

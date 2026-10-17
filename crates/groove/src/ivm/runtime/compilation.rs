@@ -261,15 +261,65 @@ impl IvmRuntime {
         &mut self,
         graph: &GraphBuilder,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, false)
+    }
+
+    // Only the isolated template compiler accepts unbound scalar arguments.
+    // No runtime/global mode survives the call; normal installation is strict.
+    pub(super) fn add_dedup_template_graph(
+        &mut self,
+        graph: &GraphBuilder,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_inner(graph, true)
+    }
+
+    fn add_dedup_graph_inner(
+        &mut self,
+        graph: &GraphBuilder,
+        template: bool,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
-        // Precompute descriptors once for the complete graph. The postorder
-        // compiler below can then reuse those descriptors without repeatedly
-        // traversing a long policy graph from each parent.
-        self.infer_builder_output_cached(graph, &mut output_memo)?;
         let mut compiled_memo = HashMap::default();
-        for builder in graph.postorder() {
-            self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+        for (builder, owner) in compilation_cache::compilation_order(graph) {
+            if !template
+                && match builder {
+                    GraphBuilder::Filter { predicate, .. } => predicate.has_template_arguments(),
+                    GraphBuilder::Project { fields, .. } => fields.iter().any(|field| {
+                        matches!(field.expression, ProjectExpr::TemplateArgument { .. })
+                    }),
+                    _ => false,
+                }
+            {
+                return Err(IvmRuntimeError::UnsupportedOperator);
+            }
+            let key = graph_builder_key(builder);
+            if let Some((compiled, inferred, logical_nodes)) = owner.and_then(|owner| {
+                self.compilation_cache
+                    .get(owner, &compiled_memo, &output_memo, &self.graph)
+            }) {
+                self.logical_nodes_requested += logical_nodes;
+                output_memo.insert(key, inferred);
+                compiled_memo.insert(key, compiled);
+                continue;
+            }
+            // Inputs have already been inferred and compiled. Source ownership
+            // and schema checks therefore run before a parent's reuse decision.
+            let inferred = self.infer_builder_output_uncached(builder, &mut output_memo)?;
+            output_memo.insert(key, inferred);
+            let before = self.logical_nodes_requested;
+            let compiled =
+                self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+            if let Some(owner) = owner {
+                self.compilation_cache.insert(
+                    owner,
+                    &compiled_memo,
+                    &output_memo,
+                    compiled,
+                    inferred,
+                    self.logical_nodes_requested - before,
+                );
+            }
         }
         compiled_memo
             .remove(&graph_builder_key(graph))
@@ -288,6 +338,31 @@ impl IvmRuntime {
         }
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
+            GraphBuilder::TypedTemplate {
+                program,
+                inputs,
+                predicates,
+                scalars,
+            } => {
+                let compiled = inputs
+                    .iter()
+                    .map(|input| {
+                        compiled_memo
+                            .get(&graph_builder_key(input))
+                            .cloned()
+                            .ok_or(IvmRuntimeError::UnsupportedOperator)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.install_typed_template(program, &compiled, inputs, predicates, scalars)
+            }
+            GraphBuilder::TemplateInput { input, output, .. } => {
+                let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                let compiled = self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
+                if compiled.output != *output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(compiled)
+            }
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
             | GraphBuilder::InputSource { .. }
@@ -319,9 +394,99 @@ impl IvmRuntime {
             | GraphBuilder::AntiJoin { .. } => {
                 self.add_dedup_join_graph(graph, inferred_output, output_memo, compiled_memo)
             }
+            GraphBuilder::Lookup { .. } => {
+                self.add_dedup_lookup_graph(graph, inferred_output, output_memo, compiled_memo)
+            }
         }?;
         compiled_memo.insert(key, compiled.clone());
         Ok(compiled)
+    }
+
+    /// Compile a keyed lookup: one node over its key relation that probes
+    /// the table by each live key ([`GraphBuilder::lookup`]).
+    #[inline(never)]
+    fn add_dedup_lookup_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+        compiled_memo: &mut HashMap<usize, CompiledNode>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        let GraphBuilder::Lookup {
+            keys,
+            keys_on,
+            table,
+            scan,
+            variant_projection,
+        } = graph
+        else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        let prefix_len = match scan {
+            None => 0,
+            Some(StaticScanSpec::Prefix(values) | StaticScanSpec::Point(values)) => values.len(),
+            Some(_) => {
+                return Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup's static scan must be a point or prefix",
+                ));
+            }
+        };
+        if keys_on.is_empty() {
+            return Err(IvmRuntimeError::UnsupportedLookup(
+                "a lookup needs at least one key field",
+            ));
+        }
+        let compiled_keys = self.add_dedup_graph_cached(keys, output_memo, compiled_memo)?;
+        let key_descriptor = compiled_keys.output;
+        let key_fields = keys_on
+            .iter()
+            .map(|field| resolve_field_ref(&key_descriptor, field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let table_schema = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+        let primary_key = primary_key_field_indices(table_schema, &inferred_output)?;
+        if primary_key.len() < prefix_len + key_fields.len() {
+            return Err(IvmRuntimeError::UnsupportedLookup(
+                "a lookup's prefix and keys exceed the table's primary key",
+            ));
+        }
+        // The probe is the storage key encoding of the key values, so each
+        // key field must have the type of the primary-key column it names.
+        for (key, column) in key_fields.iter().zip(&primary_key[prefix_len..]) {
+            if key_descriptor.fields()[*key].value_type
+                != inferred_output.fields()[*column].value_type
+            {
+                return Err(IvmRuntimeError::UnsupportedLookup(
+                    "a lookup key field must have its primary-key column's type",
+                ));
+            }
+        }
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Lookup(LookupOp {
+                    source: TableSourceOp {
+                        table: table.clone(),
+                        scan: scan.clone(),
+                        variant_projection: variant_projection
+                            .clone()
+                            .map(VariantProjectionTarget::Named),
+                    },
+                    key_descriptor,
+                    key_fields,
+                }),
+                [compiled_keys.node],
+                inferred_output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(CompiledNode {
+            output: inferred_output,
+            node,
+            root_ordering_node: None,
+        })
     }
 
     #[inline(never)]
@@ -420,24 +585,24 @@ impl IvmRuntime {
                 index,
                 scan,
                 intersections,
+                candidate_filter,
                 row_projection,
             } => {
                 let table = self
                     .schema
                     .table(table)
-                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?
-                    .clone();
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
                 let index = table
                     .indices
                     .iter()
                     .find(|candidate| candidate.name == *index)
-                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?
-                    .clone();
+                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?;
                 let source = self.index_source_op(
-                    &table,
-                    &index,
+                    table,
+                    index,
                     scan.clone(),
                     intersections.clone(),
+                    candidate_filter.clone(),
                     row_projection.clone(),
                 )?;
                 let output = inferred_output;
@@ -981,16 +1146,8 @@ impl IvmRuntime {
                 let mut input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let mut expressions = fields
-                    .iter()
-                    .map(|field| {
-                        project_field_expr(&input_output, field).map(|expression| ProjectionExpr {
-                            expression,
-                            output_name: Some(field.output_name.clone()),
-                            output_identity: field.output_identity.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let plan = self.projection_plan(input_output, fields)?;
+                let mut expressions = plan.expressions()?.to_vec();
                 // Compose only total field selections. Dropping an unselected
                 // enum conversion or constant expression could change whether
                 // a row is omitted or an error is raised. Never cross those,
@@ -1689,9 +1846,11 @@ impl IvmRuntime {
             ..
         } = self.add_dedup_index_by_from_input(table, index, input, table_descriptor, None)?;
 
+        let index_id = self.index_storage_id(&table.name, index);
         let storage = DurableStorage {
             column_family: "indices".to_owned(),
-            key_prefix: durable_index_key_prefix(&table.name, &index.name),
+            key_prefix: durable_index_key_prefix(index_id),
+            name: format!("{}.{}", table.name, index.name),
         };
         let persist = self.graph.dedup_node(
             NodeDescriptor::new(
@@ -1721,6 +1880,7 @@ impl IvmRuntime {
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
         intersections: Vec<(String, StaticScanSpec)>,
+        candidate_filter: Option<crate::ivm::IndexCandidateFilter>,
         row_projection: Option<String>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
         for (intersection, _) in &intersections {
@@ -1730,6 +1890,41 @@ impl IvmRuntime {
                 .any(|index| index.name == *intersection)
             {
                 return Err(IvmRuntimeError::IndexNotFound(intersection.clone()));
+            }
+        }
+        if let Some(filter) = &candidate_filter {
+            if row_projection.is_none()
+                || !intersections.is_empty()
+                || !matches!(scan.as_ref(), Some(StaticScanSpec::Prefix(_)))
+                || !matches!(&filter.scan, StaticScanSpec::Prefix(_))
+            {
+                return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+            }
+            let candidate_table = self
+                .schema
+                .table(&filter.table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(filter.table.clone()))?;
+            let candidate_index = candidate_table
+                .indices
+                .iter()
+                .find(|index| index.name == filter.index)
+                .ok_or_else(|| IvmRuntimeError::IndexNotFound(filter.index.clone()))?;
+            let covered = |table: &TableSchema, index: &IndexSchema, column: &str| {
+                index.columns.iter().any(|name| name == column)
+                    || table
+                        .primary_key
+                        .as_ref()
+                        .is_some_and(|key| key.columns.iter().any(|part| part.column == column))
+            };
+            if !covered(table, index, &filter.source_column) {
+                return Err(IvmRuntimeError::GraphFieldNotFound(
+                    filter.source_column.clone(),
+                ));
+            }
+            if !covered(candidate_table, candidate_index, &filter.candidate_column) {
+                return Err(IvmRuntimeError::GraphFieldNotFound(
+                    filter.candidate_column.clone(),
+                ));
             }
         }
         let (table_descriptor, variant_projection) = if table.has_variants() {
@@ -1752,23 +1947,57 @@ impl IvmRuntime {
             .primary_key
             .as_ref()
             .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
+        // Primary-key columns already in the index key are not repeated in
+        // the durable entry's primary-key suffix (or unique value).
         let value_fields = primary_key
             .columns
             .iter()
+            .filter(|column| !index.columns.contains(&column.column))
             .map(|column| {
                 super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let index_key_covers_primary_key = primary_key
-            .columns
+        let index_key_covers_primary_key = value_fields.is_empty();
+        let index_id = self.index_storage_id(&table.name, index);
+        let intersection_index_ids = intersections
             .iter()
-            .all(|primary_key_column| index.columns.contains(&primary_key_column.column));
+            .map(|(name, _)| {
+                let intersection = table
+                    .indices
+                    .iter()
+                    .find(|candidate| candidate.name == *name)
+                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(name.clone()))?;
+                Ok(self.index_storage_id(&table.name, intersection))
+            })
+            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        let candidate_index_id = candidate_filter
+            .as_ref()
+            .map(|filter| {
+                let candidate = self
+                    .schema
+                    .table(&filter.table)
+                    .and_then(|candidate| {
+                        candidate
+                            .indices
+                            .iter()
+                            .find(|index| index.name == filter.index)
+                    })
+                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(filter.index.clone()))?;
+                Ok::<_, IvmRuntimeError>(self.index_storage_id(&filter.table, candidate))
+            })
+            .transpose()?;
 
         Ok(IndexSourceOp {
             table: table.name.clone(),
             index: index.name.clone(),
+            durable_ids: Box::new(crate::ivm::IndexSourceDurableIds {
+                index: index_id,
+                intersections: intersection_index_ids,
+                candidate: candidate_index_id,
+            }),
             intersections,
+            candidate_filter,
             input_descriptor: table_descriptor,
             variant_projection,
             row_projection: row_projection.map(VariantProjectionTarget::Named),
@@ -1802,18 +2031,21 @@ impl IvmRuntime {
             .primary_key
             .as_ref()
             .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
-        let primary_key_fields = primary_key
+        // Only primary-key columns the index key does not already carry form
+        // the suffix (or unique value); readers rebuild the full key.
+        let suffix_columns = primary_key
             .columns
+            .iter()
+            .filter(|column| !index.columns.contains(&column.column))
+            .collect::<Vec<_>>();
+        let primary_key_fields = suffix_columns
             .iter()
             .map(|column| {
                 super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let index_key_covers_primary_key = primary_key
-            .columns
-            .iter()
-            .all(|primary_key_column| index.columns.contains(&primary_key_column.column));
+        let index_key_covers_primary_key = suffix_columns.is_empty();
 
         let node = self.graph.dedup_node(
             NodeDescriptor::new(
@@ -1823,8 +2055,7 @@ impl IvmRuntime {
                         .iter()
                         .map(|column| PlanExpr::field(column.clone()))
                         .collect(),
-                    value_expressions: primary_key
-                        .columns
+                    value_expressions: suffix_columns
                         .iter()
                         .map(|column| PlanExpr::field(column.column.clone()))
                         .collect(),
@@ -1874,7 +2105,10 @@ fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }
 fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldRef> {
@@ -1886,6 +2120,9 @@ fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldR
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
         | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
-        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+        ProjectExpr::Literal(_)
+        | ProjectExpr::TypedLiteral { .. }
+        | ProjectExpr::Null(_)
+        | ProjectExpr::TemplateArgument { .. } => None,
     }
 }

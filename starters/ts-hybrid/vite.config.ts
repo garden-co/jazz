@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { jazzPlugin } from "jazz-tools/dev/vite";
 
 // `/api` must reach the Hono server in both `vite` (dev) and `vite preview`
@@ -10,9 +10,22 @@ const apiProxy = {
   },
 };
 
-export default defineConfig({
-  plugins: [jazzPlugin({ server: { jwksUrl: "http://localhost:3001/api/auth/jwks" } })],
-  worker: { format: "es" },
-  server: { proxy: apiProxy },
-  preview: { proxy: apiProxy },
+export default defineConfig(({ mode }) => {
+  const appOrigin =
+    loadEnv(mode, process.cwd(), "APP_ORIGIN").APP_ORIGIN ?? "http://localhost:3001";
+
+  return {
+    plugins: [
+      jazzPlugin({
+        server: {
+          jwksUrl: `${appOrigin}/api/auth/jwks`,
+          jwtIssuer: appOrigin,
+          jwtAudience: appOrigin,
+        },
+      }),
+    ],
+    worker: { format: "es" },
+    server: { proxy: apiProxy },
+    preview: { proxy: apiProxy },
+  };
 });

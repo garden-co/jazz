@@ -162,6 +162,108 @@ fn descriptor_fields_remain_in_declaration_order() {
     assert_eq!(names, ["name", "age", "payload", "active"]);
 }
 
+/// Alice's persisted schemas retain every type and enum identity while omitting
+/// execution bindings. This codec-level test covers malformed bytes that the
+/// database API cannot construct.
+#[test]
+fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees() {
+    let child = RecordDescriptor::new([("value", ValueType::U48)]);
+    let types = vec![
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::U48,
+        ValueType::I32,
+        ValueType::I64,
+        ValueType::F64,
+        ValueType::Bool,
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::raw_string(),
+        ValueType::raw_bytes(),
+        ValueType::Uuid,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ValueType::EnumTag(
+            ScalarEnumSchema::new("state", ["open", "closed"])
+                .unwrap()
+                .with_system_registry(SystemVariantRegistry::deletion_state()),
+        ),
+        ValueType::Tuple(vec![ValueType::U8, ValueType::U64]),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(
+            EnumSchema::new(
+                "event",
+                [
+                    EnumCase::new("empty", RecordDescriptor::default()),
+                    EnumCase::new("value", child),
+                ],
+            )
+            .unwrap()
+            .with_registry_id(42),
+        )),
+    ];
+    for original in [RecordDescriptor::default(), descriptor(types)] {
+        let encoded = encode_persisted_record_descriptor(&original).unwrap();
+        let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(
+            encode_persisted_record_descriptor(&decoded).unwrap(),
+            encoded
+        );
+        for length in 0..encoded.len() {
+            assert!(decode_persisted_record_descriptor(&encoded[..length]).is_err());
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_persisted_record_descriptor(&trailing).is_err());
+    }
+    let bound_child = RecordDescriptor::new_with_fields([
+        DescriptorField::new("stored_name", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "runtime_name".into(),
+                slot: 7,
+            },
+        ),
+        DescriptorField {
+            name: None,
+            identity: Some(FieldIdentity::Slot(8)),
+            value_type: ValueType::Bool,
+        },
+    ]);
+    let expected_child =
+        RecordDescriptor::new_with_fields(bound_child.fields().iter().cloned().map(|mut field| {
+            field.identity = None;
+            field
+        }));
+    let bound = RecordDescriptor::new([("child", ValueType::Record(Box::new(bound_child)))]);
+    let expected = RecordDescriptor::new([("child", ValueType::Record(Box::new(expected_child)))]);
+    let encoded = encode_persisted_record_descriptor(&bound).unwrap();
+    assert_eq!(
+        decode_persisted_record_descriptor(&encoded).unwrap(),
+        expected
+    );
+    assert_eq!(
+        encode_persisted_record_descriptor(&expected).unwrap(),
+        encoded
+    );
+    let child_bytes = bound_child
+        .create(&[Value::U64(42), Value::Bool(true)])
+        .unwrap();
+    let row = bound
+        .create(&[Value::Record(OwnedRecord::new(child_bytes, bound_child))])
+        .unwrap();
+    assert_eq!(
+        expected
+            .create(&expected.bind(&row).to_values().unwrap())
+            .unwrap(),
+        row
+    );
+}
+
 #[test]
 fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     // A descriptor can cross a durable engine boundary (for example, inside a
@@ -222,7 +324,7 @@ fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
-        "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
+        "54151d5d6d5d06f759624b321a0c42472afdbab061bf5e899d7c98dfcc47617c"
     );
     let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
     assert_eq!(
@@ -989,7 +1091,7 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
 
     let mut expected = Vec::new();
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([1, 2]);
+    expected.extend([1, 0]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1087,6 +1189,300 @@ fn nullable_tuple_round_trips() {
             Value::U64(4)
         ]))))
     );
+}
+
+/// Pinned tuple-member bytes (#2759, `INV-STORAGE-9`): nullable integer
+/// members keep the big-endian / order-preserving member encoding of their
+/// payload and decode back through it, `F64` members use the ordered-index
+/// transform big-endian, and nulls zero-fill the payload width. Each value
+/// round-trips through decode, structural validation and typed reads.
+#[test]
+fn tuple_member_fixtures_pin_bytes_and_round_trip() {
+    let nullable = |value_type: ValueType| ValueType::Nullable(Box::new(value_type));
+    let some = |value: Value| Value::Nullable(Some(Box::new(value)));
+    let cases: Vec<(ValueType, Value, Vec<u8>)> = vec![
+        (
+            nullable(ValueType::U16),
+            some(Value::U16(0x0102)),
+            vec![1, 0x01, 0x02],
+        ),
+        (
+            nullable(ValueType::U16),
+            Value::Nullable(None),
+            vec![0, 0, 0],
+        ),
+        (
+            nullable(ValueType::U32),
+            some(Value::U32(0x0102_0304)),
+            vec![1, 0x01, 0x02, 0x03, 0x04],
+        ),
+        (
+            nullable(ValueType::U48),
+            some(Value::U48(0x0102_0304_0506)),
+            vec![1, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06],
+        ),
+        (
+            nullable(ValueType::U64),
+            some(Value::U64(0x0102_0304_0506_0708)),
+            vec![1, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+        ),
+        (
+            nullable(ValueType::I32),
+            some(Value::I32(-1)),
+            vec![1, 0x7f, 0xff, 0xff, 0xff],
+        ),
+        (
+            nullable(ValueType::I64),
+            some(Value::I64(1)),
+            vec![1, 0x80, 0, 0, 0, 0, 0, 0, 0x01],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            some(some(Value::U16(0x0102))),
+            vec![1, 1, 0x01, 0x02],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            some(Value::Nullable(None)),
+            vec![1, 0, 0, 0],
+        ),
+        (
+            nullable(nullable(ValueType::U16)),
+            Value::Nullable(None),
+            vec![0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(1.0),
+            vec![0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(-1.0),
+            vec![0x40, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(0.0),
+            vec![0x80, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(-0.0),
+            vec![0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(f64::INFINITY),
+            vec![0xff, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::F64,
+            Value::F64(f64::NEG_INFINITY),
+            vec![0x00, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (
+            nullable(ValueType::F64),
+            some(Value::F64(1.0)),
+            vec![1, 0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            nullable(ValueType::F64),
+            Value::Nullable(None),
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            ValueType::Tuple(vec![nullable(ValueType::U16), ValueType::F64]),
+            Value::Tuple(vec![some(Value::U16(0x0102)), Value::F64(1.0)]),
+            vec![1, 0x01, 0x02, 0xbf, 0xf0, 0, 0, 0, 0, 0, 0],
+        ),
+    ];
+    for (member_type, member, member_bytes) in cases {
+        let tuple_type = ValueType::Tuple(vec![member_type.clone()]);
+        let tuple = Value::Tuple(vec![member.clone()]);
+        let record_descriptor = descriptor([tuple_type.clone()]);
+        let raw = record_descriptor
+            .create(std::slice::from_ref(&tuple))
+            .unwrap();
+        assert_eq!(raw, member_bytes, "{member_type:?} {member:?}");
+        assert_eq!(
+            record_descriptor.get_idx(&raw, 0).unwrap(),
+            tuple,
+            "{member_type:?} {member:?}"
+        );
+        record_descriptor.bind(&raw).validate_canonical().unwrap();
+        assert_eq!(
+            <Value as RecordField>::read_raw(&raw, &tuple_type).unwrap(),
+            tuple
+        );
+        assert_eq!(
+            <Value as RecordField>::read_tuple_raw(&raw, &member_type).unwrap(),
+            member
+        );
+
+        // The same tuple nested under every containing type.
+        let child = OwnedRecord::new(raw.clone(), record_descriptor);
+        let schema =
+            EnumSchema::new("wrapper", [EnumCase::new("value", record_descriptor)]).unwrap();
+        for (wrapper_type, wrapper) in [
+            (
+                ValueType::Record(Box::new(record_descriptor)),
+                Value::Record(child.clone()),
+            ),
+            (
+                ValueType::Array(Box::new(tuple_type.clone())),
+                Value::Array(vec![tuple.clone(), tuple.clone()]),
+            ),
+            (nullable(tuple_type.clone()), some(tuple.clone())),
+            (
+                ValueType::Enum(Box::new(schema)),
+                Value::Enum(EnumValue::new(0, child.clone())),
+            ),
+        ] {
+            let outer = descriptor([wrapper_type.clone()]);
+            let outer_raw = outer.create(std::slice::from_ref(&wrapper)).unwrap();
+            assert_eq!(outer.get_idx(&outer_raw, 0).unwrap(), wrapper);
+            outer.bind(&outer_raw).validate_canonical().unwrap();
+            assert_eq!(
+                outer
+                    .create(&outer.bind(&outer_raw).to_values().unwrap())
+                    .unwrap(),
+                outer_raw
+            );
+        }
+    }
+}
+
+/// Typed tuple reads decode nullable and `F64` members with the member
+/// encoding, matching the dynamic decoder (#2759).
+#[test]
+fn typed_tuple_reads_use_member_encoding() {
+    let tuple_type = ValueType::Tuple(vec![
+        ValueType::Nullable(Box::new(ValueType::U32)),
+        ValueType::F64,
+    ]);
+    let record_descriptor = descriptor([tuple_type.clone()]);
+    let raw = record_descriptor
+        .create(&[Value::Tuple(vec![
+            Value::Nullable(Some(Box::new(Value::U32(0x0102_0304)))),
+            Value::F64(-2.5),
+        ])])
+        .unwrap();
+    assert_eq!(
+        <(Option<u32>, f64) as RecordField>::read_raw(&raw, &tuple_type).unwrap(),
+        (Some(0x0102_0304), -2.5)
+    );
+}
+
+/// `F64` tuple members sort bytewise in numeric order, like integer members.
+#[test]
+fn tuple_f64_member_bytes_sort_numerically() {
+    let record_descriptor = descriptor([ValueType::Tuple(vec![ValueType::F64])]);
+    let values = [
+        f64::NEG_INFINITY,
+        -1e300,
+        -2.5,
+        -1.0,
+        -f64::MIN_POSITIVE,
+        -0.0,
+        0.0,
+        f64::MIN_POSITIVE,
+        1.0,
+        2.5,
+        1e300,
+        f64::INFINITY,
+    ];
+    let encoded = values
+        .iter()
+        .map(|value| {
+            record_descriptor
+                .create(&[Value::Tuple(vec![Value::F64(*value)])])
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(encoded.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        record_descriptor
+            .create(&[Value::Tuple(vec![Value::F64(f64::NAN)])])
+            .unwrap_err(),
+        Error::InvalidF64NaN
+    );
+}
+
+// Byte-level admission is internal: no public API constructs arbitrary raw
+// tuple bytes, and the contract under test is that structural validation and
+// decode/re-encode agree on every byte string.
+/// Structural validation of tuple members admits exactly the byte strings that
+/// decode and re-encode to themselves (#2759): exhaustively for two-byte
+/// tuples, and over seeded byte strings for wider members.
+#[test]
+fn tuple_member_validation_admits_exactly_canonical_decodes() {
+    fn roundtrips(record_descriptor: RecordDescriptor, raw: &[u8]) -> bool {
+        record_descriptor
+            .bind(raw)
+            .to_values()
+            .and_then(|values| record_descriptor.create(&values))
+            .is_ok_and(|encoded| encoded == raw)
+    }
+    fn check(record_descriptor: RecordDescriptor, raw: &[u8]) {
+        let structural = record_descriptor.bind(raw).validate_canonical().is_ok();
+        assert_eq!(
+            structural,
+            roundtrips(record_descriptor, raw),
+            "{record_descriptor:?}: {raw:02x?}"
+        );
+        assert_eq!(
+            record_descriptor.bind(raw).validate().is_ok(),
+            structural,
+            "{record_descriptor:?}: {raw:02x?}"
+        );
+    }
+    let nullable = |value_type: ValueType| ValueType::Nullable(Box::new(value_type));
+    let status = ValueType::EnumTag(ScalarEnumSchema::new("status", ["a", "b", "c"]).unwrap());
+    for members in [
+        vec![nullable(ValueType::U8)],
+        vec![nullable(ValueType::Bool)],
+        vec![status.clone(), ValueType::Bool],
+        vec![nullable(status.clone())],
+        vec![ValueType::Tuple(vec![ValueType::Bool]), ValueType::U8],
+    ] {
+        let record_descriptor = descriptor([ValueType::Tuple(members)]);
+        for raw in 0..=u16::MAX {
+            check(record_descriptor, &raw.to_be_bytes());
+        }
+    }
+
+    let wide = [
+        vec![ValueType::F64],
+        vec![nullable(ValueType::F64)],
+        vec![nullable(ValueType::U16), nullable(ValueType::I32)],
+        vec![nullable(nullable(ValueType::U16))],
+        vec![nullable(ValueType::Tuple(vec![
+            ValueType::Bool,
+            ValueType::F64,
+        ]))],
+    ];
+    let mut seed = 0x2759_5eed_u64;
+    for members in wide {
+        let tuple_type = ValueType::Tuple(members);
+        let width = tuple_type.fixed_size().unwrap();
+        let record_descriptor = descriptor([tuple_type]);
+        for _ in 0..20_000 {
+            let raw = (0..width)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    // Bias toward the flag and boundary bytes that matter.
+                    match (seed >> 33) % 4 {
+                        0 => 0,
+                        1 => 1,
+                        2 => 0xff,
+                        _ => (seed >> 41) as u8,
+                    }
+                })
+                .collect::<Vec<_>>();
+            check(record_descriptor, &raw);
+        }
+    }
 }
 
 #[test]
@@ -1285,9 +1681,9 @@ fn encodes_record_offsets_relative_to_record_start() {
 
     let mut expected = vec![9];
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"abc");
-    expected.extend([2, 4, 5]);
+    expected.extend([0, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1314,10 +1710,10 @@ const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
     0x00, 0x00, // fixed nullable U8: null flag + canonical zero payload
     0xab, 0xcd, 0x01, // tuple U16 (big-endian) + Bool
     0x0e, 0x00, 0x00, 0x00, // first variable field ends at record byte 14
-    0x02, b'h', b'i', // String primitive StoredScalar arm tag + payload
+    0x00, b'h', b'i', // String primitive StoredScalar arm tag + payload
     0x02, 0x00, 0x00, 0x00, // variable array count
     0x0a, 0x00, 0x00, 0x00, // first array item ends at array-relative byte 10
-    0x02, b'a', 0x02, b'b', b'c',
+    0x00, b'a', 0x00, b'b', b'c',
 ];
 
 // Scalar and envelope goldens deliberately keep both sides of the codec
@@ -1426,11 +1822,11 @@ fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_clo
         ]),
         Value::Enum(EnumValue::create(1, case, &[Value::U8(0x7e)]).unwrap()),
     ];
-    // Four record offsets, then StoredScalar primitive arms (02), array offsets,
+    // Four record offsets, then StoredScalar primitive arms (00), array offsets,
     // and the canonical payload-enum tag 1 as a one-byte u32 varint.
     let frozen: &[u8] = &[
-        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x02, b'h', b'i', 0x02, 0x00,
-        0xff, 0x01, 0x02, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x02, b'a', 0x02, b'b', b'c',
+        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x00, b'h', b'i', 0x00, 0x00,
+        0xff, 0x01, 0x00, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x00, b'a', 0x00, b'b', b'c',
         0x01, 0x7e,
     ];
     assert_eq!(descriptor.create(&values).unwrap(), frozen);
@@ -1586,9 +1982,9 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
     expected.extend(11_u32.to_le_bytes());
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"hi");
-    expected.extend([2]);
+    expected.extend([0]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);
@@ -1796,6 +2192,82 @@ fn record_projector_copies_encoded_spans_equivalent_to_decode_reencode() {
             );
         }
     }
+}
+
+/// Byte-level coverage is intentionally internal: equal decoded query rows
+/// cannot pin the durable record framing or rejection of malformed offsets.
+#[test]
+fn prepared_multi_input_copy_preserves_record_bytes_and_rejects_bad_spans() {
+    let left = RecordDescriptor::new([("id", ValueType::U64), ("name", ValueType::String)]);
+    let right = RecordDescriptor::new([("name", ValueType::String), ("id", ValueType::U64)]);
+    let target = RecordDescriptor::new([
+        ("right_name", ValueType::String),
+        ("left_id", ValueType::U64),
+        ("left_name", ValueType::String),
+        ("right_id", ValueType::U64),
+    ]);
+    let mapping = [(1, 0), (0, 0), (0, 1), (1, 1)];
+    let plan = PreparedRecordCopy::new(&[left, right], target, &mapping).unwrap();
+    let l = left
+        .create(&[Value::U64(7), Value::String("a".into())])
+        .unwrap();
+    let r = right
+        .create(&[Value::String("bc".into()), Value::U64(9)])
+        .unwrap();
+    let expected = [
+        7, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 23, 0, 0, 0, 0, b'b', b'c', 0, b'a',
+    ];
+    let mut bytes = BytesMut::from(&b"prefix"[..]);
+    let range = plan.project_into(&[&l, &r], &mut bytes).unwrap();
+    assert_eq!(&bytes[range], &expected);
+    assert_eq!(&bytes[..6], b"prefix");
+    for name in ["", "a", "multibyte \u{1f3b7}", "a longer variable payload"] {
+        let l = left
+            .create(&[Value::U64(u64::MAX), Value::String(name.into())])
+            .unwrap();
+        for n in 0..=l.len() {
+            let old = target.project_record_raw(&[left, right], &[&l[..n], &r], &mapping);
+            let mut actual = BytesMut::new();
+            let new = plan.project_into(&[&l[..n], &r], &mut actual);
+            assert_eq!(old.is_ok(), new.is_ok(), "prefix {n}");
+            if let Ok(expected) = old {
+                assert_eq!(&actual[..], &expected);
+            }
+        }
+    }
+    let nested = RecordDescriptor::new([
+        ("a", ValueType::String),
+        ("b", ValueType::Nullable(Box::new(ValueType::String))),
+    ]);
+    let identity = PreparedRecordCopy::new(&[nested], nested, &[(0, 0), (0, 1)]).unwrap();
+    for nullable in [
+        Value::Nullable(None),
+        Value::Nullable(Some(Box::new(Value::String("tail".into())))),
+    ] {
+        let valid = nested
+            .create(&[Value::String("lead".into()), nullable])
+            .unwrap();
+        let mut output = BytesMut::new();
+        identity.project_into(&[&valid], &mut output).unwrap();
+        assert_eq!(&output[..], &valid);
+        for offset in [0, 3, 4, 6, 8, valid.len() as u32, u32::MAX] {
+            let mut raw = valid.clone();
+            raw[..4].copy_from_slice(&offset.to_le_bytes());
+            let old = nested.project_record_raw(&[nested], &[&raw], &[(0, 0), (0, 1)]);
+            let mut output = BytesMut::from(&b"prefix"[..]);
+            let new = identity.project_into(&[&raw], &mut output);
+            assert_eq!(old.is_ok(), new.is_ok(), "offset {offset}");
+            match old {
+                Ok(expected) => assert_eq!(&output[6..], &expected),
+                Err(_) => assert_eq!(&output[..], b"prefix"),
+            }
+        }
+    }
+    assert!(PreparedRecordCopy::new(&[left], target, &mapping).is_err());
+    assert!(
+        PreparedRecordCopy::new(&[left, right], target, &[(0, 0), (0, 0), (0, 1), (1, 1)]).is_err()
+    );
+    assert!(plan.project_into(&[&l], &mut BytesMut::new()).is_err());
 }
 
 #[test]
@@ -2189,7 +2661,7 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[2, 1, 0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[0, 1, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
     );
 }
@@ -2750,7 +3222,7 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
         (
             nullable_string,
             Value::Nullable(Some(Box::new(Value::String("abc".into())))),
-            vec![1, 2, b'a', b'b', b'c'],
+            vec![1, 0, b'a', b'b', b'c'],
         ),
         (
             ValueType::Array(Box::new(ValueType::String)),
@@ -2760,7 +3232,7 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
                 Value::String(String::new()),
             ]),
             vec![
-                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 2, b'a', 2, b'b', b'c', 2,
+                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 0, b'a', 0, b'b', b'c', 0,
             ],
         ),
         (
@@ -2773,13 +3245,13 @@ fn variable_fields_append_exact_bytes_into_existing_output() {
                 Value::Array(vec![]),
             ]),
             vec![
-                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 2, b'a', 0, 0, 0, 0, 0,
+                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 0, b'a', 0, 0, 0, 0, 0,
             ],
         ),
         (
             ValueType::Bytes,
             Value::Bytes(vec![0, 255]),
-            vec![2, 0, 255],
+            vec![0, 0, 255],
         ),
         (
             ValueType::Array(Box::new(ValueType::String)),
@@ -2855,4 +3327,145 @@ fn compact_large_value_preserves_native_and_serde_encodings() {
         serde_json::to_value(&value).unwrap(),
         serde_json::json!({"Large": reference})
     );
+}
+
+// U48 is a constant-width scalar: 6 bytes little-endian in the record's fixed
+// region (`INV-STORAGE-9`), 6 bytes big-endian as a fixed tuple member, and a
+// fixed-width nullable reserves its 6-byte payload (`INV-STORAGE-10`). The
+// literal bytes are the durable receipt; they are not derived from `create`.
+const U48_RECORD_FIXTURE: &[u8] = &[
+    0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // stamp: U48 little-endian
+    0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // maybe: Some(U48_MAX)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // none: null + 6 zero bytes
+    0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, // pair: Tuple(U48) big-endian
+    0x00, b'h', b'i', // name: String primitive StoredScalar arm tag + payload
+];
+
+fn u48_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("stamp", ValueType::U48),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::U48))),
+        ("none", ValueType::Nullable(Box::new(ValueType::U48))),
+        ("pair", ValueType::Tuple(vec![ValueType::U48])),
+    ])
+}
+
+#[test]
+fn u48_record_fixture_is_exact_constant_width_and_range_checked() {
+    let descriptor = u48_record_descriptor();
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::U48(0x0102_0304_0506),
+        Value::Nullable(Some(Box::new(Value::U48(U48_MAX)))),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U48(0x0a0b_0c0d_0e0f)]),
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), U48_RECORD_FIXTURE);
+    let bound = descriptor.bind(U48_RECORD_FIXTURE);
+    assert_eq!(bound.to_values().unwrap(), values);
+    assert_eq!(bound.get_u48(1).unwrap(), 0x0102_0304_0506);
+    assert_eq!(bound.get_nullable_u48(2).unwrap(), Some(U48_MAX));
+    assert_eq!(bound.get_nullable_u48(3).unwrap(), None);
+    bound.validate().unwrap();
+
+    // Width is constant: the extreme values occupy the same six bytes.
+    let only = RecordDescriptor::new([("stamp", ValueType::U48)]);
+    assert_eq!(only.create(&[Value::U48(0)]).unwrap(), [0u8; 6]);
+    assert_eq!(only.create(&[Value::U48(U48_MAX)]).unwrap(), [0xffu8; 6]);
+    assert!(only.bind(&[0u8; 5]).to_values().is_err());
+    assert!(only.bind(&[0u8; 7]).to_values().is_err());
+
+    // Values outside 0..=2^48-1 are rejected on encode, in every position.
+    let out_of_range = U48_MAX + 1;
+    assert!(matches!(
+        only.create(&[Value::U48(out_of_range)]),
+        Err(Error::U48OutOfRange(value)) if value == out_of_range
+    ));
+    assert!(matches!(
+        RecordDescriptor::new([("pair", ValueType::Tuple(vec![ValueType::U48]))])
+            .create(&[Value::Tuple(vec![Value::U48(u64::MAX)])]),
+        Err(Error::U48OutOfRange(_))
+    ));
+    assert!(matches!(
+        RecordDescriptor::new([("maybe", ValueType::Nullable(Box::new(ValueType::U48)))])
+            .create(&[Value::Nullable(Some(Box::new(Value::U48(out_of_range))))]),
+        Err(Error::U48OutOfRange(_))
+    ));
+    // A U48 is not interchangeable with the other unsigned widths.
+    assert!(only.create(&[Value::U64(1)]).is_err());
+
+    let mut noncanonical_null = U48_RECORD_FIXTURE.to_vec();
+    noncanonical_null[14] = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+}
+
+#[test]
+fn u48_typed_fields_and_descriptor_codec_round_trip() {
+    #[derive(Debug, PartialEq)]
+    struct Stamp(u64);
+    crate::impl_record_field_u48!(Stamp);
+
+    assert_eq!(U48::MAX, (1 << 48) - 1);
+    assert!(U48::new(U48::MAX).is_ok());
+    assert!(matches!(
+        U48::new(U48::MAX + 1),
+        Err(Error::U48OutOfRange(_))
+    ));
+
+    let descriptor = RecordDescriptor::new([("stamp", ValueType::U48)]);
+    assert_record_field_layout(&descriptor, 0, "stamp", <Stamp as RecordField>::COLUMN_KIND);
+    let raw = descriptor
+        .create(&[Stamp(0x0102_0304_0506).to_value()])
+        .unwrap();
+    let bound = descriptor.bind(&raw);
+    assert_eq!(Stamp::read(&bound, 0).unwrap(), Stamp(0x0102_0304_0506));
+    assert_eq!(U48::read(&bound, 0).unwrap().get(), 0x0102_0304_0506);
+    assert_eq!(
+        <U48 as RecordField>::read_raw(&[1, 0, 0, 0, 0, 0], &ValueType::U48)
+            .unwrap()
+            .get(),
+        1
+    );
+    assert_eq!(
+        <U48 as RecordField>::read_tuple_raw(&[0, 0, 0, 0, 0, 1], &ValueType::U48)
+            .unwrap()
+            .get(),
+        1
+    );
+    assert!(<U48 as RecordField>::read_raw(&[0; 6], &ValueType::U64).is_err());
+
+    // The persisted descriptor codec names U48 with its own permanent tag 25.
+    for (encode, decode) in [
+        (
+            encode_record_descriptor as fn(&RecordDescriptor) -> Result<Vec<u8>, Error>,
+            decode_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+        (
+            encode_persisted_record_descriptor,
+            decode_persisted_record_descriptor,
+        ),
+    ] {
+        let nested = RecordDescriptor::new([
+            ("stamp", ValueType::U48),
+            ("maybe", ValueType::Nullable(Box::new(ValueType::U48))),
+        ]);
+        let encoded = encode(&nested).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded, nested);
+        assert_eq!(decoded.fields()[0].value_type, ValueType::U48);
+    }
+    let u64_descriptor =
+        encode_persisted_record_descriptor(&RecordDescriptor::new([("stamp", ValueType::U64)]))
+            .unwrap();
+    let u48_descriptor =
+        encode_persisted_record_descriptor(&RecordDescriptor::new([("stamp", ValueType::U48)]))
+            .unwrap();
+    let differing = u64_descriptor
+        .iter()
+        .zip(&u48_descriptor)
+        .filter(|(left, right)| left != right)
+        .collect::<Vec<_>>();
+    assert_eq!(u64_descriptor.len(), u48_descriptor.len());
+    assert_eq!(differing, [(&5u8, &25u8)]);
 }

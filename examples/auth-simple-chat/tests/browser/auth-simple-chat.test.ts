@@ -55,7 +55,7 @@ async function send(client: JazzClient, chat_id: string, text: string): Promise<
     text,
     sent_at: new Date(),
   });
-  await handle.wait({ tier: "edge" });
+  await handle.wait({ tier: "global" });
 }
 
 describe("auth-simple-chat permissions", () => {

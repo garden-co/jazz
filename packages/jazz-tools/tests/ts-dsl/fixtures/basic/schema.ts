@@ -1,8 +1,6 @@
 import { TypedTableQueryBuilder, schema as s } from "../../../../src/index.js";
-import { schemaToWasm } from "../../../../src/codegen/schema-reader.js";
-import { schemaDefinitionToAst } from "../../../../src/migrations.js";
 import type { CompiledPermissions } from "../../../../src/permissions/index.js";
-import { mergePermissionsIntoSchema } from "../../../../src/schema-permissions.js";
+import { mergePermissionsIntoWasmSchema } from "../../../../src/schema-permissions.js";
 import { z } from "zod";
 
 const jsonSchema = z.object({
@@ -100,9 +98,7 @@ export const permissions = s.definePermissions(baseApp, ({ policy }) => {
 });
 
 function applyPermissions(permissions: CompiledPermissions): s.App<AppSchema> {
-  const wasmSchema = schemaToWasm(
-    mergePermissionsIntoSchema(schemaDefinitionToAst(schema), permissions),
-  );
+  const wasmSchema = mergePermissionsIntoWasmSchema(baseApp.wasmSchema, permissions);
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of Object.keys(schema)) {

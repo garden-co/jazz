@@ -2,12 +2,14 @@ import { copyAccountConfigAdmission } from "../../accounts/config-capability.js"
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { AuthUpdate, DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
+import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
+import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
+import type { RemoteLinkState } from "../remote-link-state.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -35,6 +37,12 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
   policyStrippedSchemaCache.set(schema, strippedSchema);
   return strippedSchema;
 }
+
+/** Readiness required by an operation, independent of read or write tiers.
+ * `runtime` admits local work, including browser worker initialization.
+ * `server` also waits for the configured server transport to be available.
+ */
+export type ConnectionRequirement = "runtime" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
@@ -69,6 +77,7 @@ export abstract class ConnectionManager {
   private client: JazzClient | null = null;
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
+  private remoteLinkHintBinding: AbortController | null = null;
 
   /** Browser managers set this during their asynchronous bootstrap. */
   protected foregroundNodeLease: ForegroundNodeLease | undefined;
@@ -112,6 +121,7 @@ export abstract class ConnectionManager {
 
     this.client = client;
     this.clientSchema = runtimeSchema;
+    this.bindRemoteLinkHint(client);
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
     return client;
   }
@@ -135,9 +145,9 @@ export abstract class ConnectionManager {
 
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
-  abstract ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void>;
+  abstract ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void>;
 
-  abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
+  abstract shouldDeferSubscriptionStart(requirement: ConnectionRequirement): boolean;
 
   /** True only after the application explicitly called Db.disconnect(). */
   abstract isExplicitlyOffline(): boolean;
@@ -161,6 +171,65 @@ export abstract class ConnectionManager {
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 
   /**
+   * Live reachability of the configured server. Only `ReadTier.LocalFirst`
+   * reads with a `firstLoadRemoteWaitMs` consult it, to decide whether their
+   * first load may wait (bounded by that timeout) for a remote answer.
+   */
+  remoteLinkState(): RemoteLinkState {
+    const { config, runtimeSource } = this.host;
+    if (!config.serverUrl && runtimeSource?.nativeConnection?.configured() !== true) return "none";
+    if (this.isExplicitlyOffline()) return "unavailable";
+    return this.transportLinkState();
+  }
+
+  /** The runtime transport's own view, once a server is configured and not explicitly offline. */
+  protected transportLinkState(): RemoteLinkState {
+    const state = this.getCurrentClient()?.getRuntime().remoteLinkState?.() ?? "connecting";
+    // A configured server whose transport has not been requested yet is about
+    // to be connected by this manager, not absent.
+    return state === "none" ? "connecting" : state;
+  }
+
+  /** Observe {@link remoteLinkState} changes, including explicit disconnects. */
+  onRemoteLinkStateChange(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    let published = this.remoteLinkState();
+    const check = () => {
+      if (signal.aborted) return;
+      const state = this.remoteLinkState();
+      if (state === published) return;
+      published = state;
+      listener(state);
+    };
+    this.onExplicitOfflineChange(check, signal);
+    this.onTransportLinkStateChange(check, signal);
+  }
+
+  /**
+   * Keep the runtime's core read gate informed of {@link remoteLinkState}. The
+   * core decides whether a local-first read's first load may wait;
+   * this host only reports whether the server is being reached, reachable, or
+   * not.
+   */
+  private bindRemoteLinkHint(client: JazzClient): void {
+    this.remoteLinkHintBinding?.abort();
+    // Test doubles and runtimes without a core read gate expose no setter.
+    const runtime = client.getRuntime?.();
+    if (!runtime?.setRemoteLinkHint) return;
+    const binding = new AbortController();
+    this.remoteLinkHintBinding = binding;
+    const report = (state: RemoteLinkState) => {
+      if (!binding.signal.aborted) runtime.setRemoteLinkHint?.(state);
+    };
+    this.onRemoteLinkStateChange(report, binding.signal);
+    report(this.remoteLinkState());
+  }
+
+  protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
+    this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+  }
+
+  /**
    * Browser worker followers learn the namespace-wide explicit-offline state
    * during their initial handshake. Other runtimes already have a synchronous
    * state snapshot, so they deliberately return `null`: tier choice must not
@@ -176,6 +245,19 @@ export abstract class ConnectionManager {
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
+
+  /** Renew account credentials and synchronize the client before Db publishes them. */
+  refreshAccountAuth(jwtToken: string, trustedReservedSession?: Session): void {
+    const auth: AuthUpdate = { mode: "bearer", jwtToken, trustedReservedSession };
+    if (this.host.runtimeSource.refreshAccountToken(jwtToken)) {
+      // The account capability owns transport auth; only the JS snapshot remains.
+      this.client?.acceptAuthUpdate(auth);
+    } else {
+      this.host.runtimeSource.assertAuthUpdateAllowed();
+      this.updateAuth(auth);
+    }
+  }
+
   updateAuth(auth: AuthUpdate): void {
     if (auth.mode === "bearer") {
       if (auth.jwtToken && auth.trustedReservedSession) {
@@ -199,6 +281,8 @@ export abstract class ConnectionManager {
   }
 
   protected clearClient(): void {
+    this.remoteLinkHintBinding?.abort();
+    this.remoteLinkHintBinding = null;
     this.client = null;
     this.clientSchema = null;
   }

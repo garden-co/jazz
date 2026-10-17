@@ -1,7 +1,6 @@
+import { bytesToHex } from "../hex.js";
 import { PostcardWriter, type NativeRowBatch } from "./native-codec.js";
 import { writeNativeRowDescriptor, writeValueType, type ValueType } from "./native-row-codec.js";
-
-const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 
 /**
  * A wire-exact key for a native ValueType.
@@ -26,8 +25,4 @@ export function nativeRowFieldPlanCacheKey(
   writer.string(batch.table);
   writeNativeRowDescriptor(writer, [...batch.descriptor]);
   return bytesToHex(writer.finish());
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byteHex[byte]).join("");
 }

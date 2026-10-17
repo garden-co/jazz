@@ -1,3 +1,4 @@
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAccountManager, createDb } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
@@ -30,7 +31,7 @@ describe("React Native account preparation", () => {
     vi.stubGlobal("crypto", undefined);
     const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.signature`;
     const native = {
-      abiVersion: 1,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
       mintLocalFirstToken: vi.fn(() => jwt),
       openAttached: vi.fn(),
@@ -81,7 +82,7 @@ describe("React Native account preparation", () => {
   });
 
   it("rejects a native build without account crypto during preparation", async () => {
-    mocks.install.mockReturnValue({ abiVersion: 1, openAttached: vi.fn() });
+    mocks.install.mockReturnValue({ abiVersion: NATIVE_RELAY_ABI_V1, openAttached: vi.fn() });
     await expect(
       createAccountManager({
         appId: "native-accounts",
@@ -97,7 +98,7 @@ describe("React Native account preparation", () => {
     const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: subject }))}.signature`;
     const capability = new Uint8Array(32).fill(9);
     const native = {
-      abiVersion: 1,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
       mintLocalFirstToken: vi.fn(() => jwt),
       beginAccountSession: vi.fn((_request: string) => capability),
@@ -132,5 +133,35 @@ describe("React Native account preparation", () => {
     await db.shutdown();
     expect(native.releaseAccountSession).toHaveBeenCalledExactlyOnceWith(capability);
     expect(manager.getLoggedIn()).toBe(account);
+  });
+
+  it("neither retains an external assignment nor revalidates it in place", async () => {
+    const identity = { issuer: "https://issuer.example", subject: "alice" };
+    const account = "00000000-0000-4000-8000-00000000000a";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ account, identity }))),
+    );
+    mocks.install.mockReturnValue({
+      abiVersion: NATIVE_RELAY_ABI_V1,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => "unused"),
+      openAttached: vi.fn(),
+    });
+    const accountStore = store();
+    const config = {
+      appId: "native-retention",
+      serverUrl: "https://core.example",
+      store: accountStore,
+    };
+    const manager = await createAccountManager(config);
+    expect(manager.revalidatesInPlace).toBe(false);
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    await manager.loginJWT(
+      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
+    );
+    await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
+    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
+    expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
   });
 });

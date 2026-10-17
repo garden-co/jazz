@@ -129,7 +129,7 @@ paths are not compiled module paths. Exact public wrapper examples:
 dev/t node::tests::harness::maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_without_authority
 dev/t node::tests::harness::retired_result_codec_profiles_reject_historical_native_roots
 dev/t node::tests::harness::corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix
-dev/t --test persistent_codec_family_registry authoritative_persistent_codec_family_registry_is_complete_and_current
+dev/t --test integration persistent_codec_family_registry::authoritative_persistent_codec_family_registry_is_complete_and_current
 ```
 
 The intermediate browser producer receipt passed 1/1 in real Chromium after an

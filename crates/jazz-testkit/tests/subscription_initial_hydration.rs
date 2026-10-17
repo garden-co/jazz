@@ -41,7 +41,7 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
             let (second_id, _, second_tx) = writer
                 .insert("items", row_input!("label" => "second"))
                 .expect("insert second initial item");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[
                     first_tx.expect("ordinary mutation commits immediately"),
@@ -56,11 +56,11 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
                 .map(jazz::tools::test_support::ordinary_rows)
-                .expect("subscriber reaches the initial edge view");
+                .expect("subscriber reaches the initial remote view");
             assert_eq!(
                 rows.into_iter().map(|(id, _)| id).collect::<BTreeSet<_>>(),
                 expected_ids,
-                "subscriber must see the complete initial edge view before attaching"
+                "subscriber must see the complete initial remote view before attaching"
             );
             let mut stream = client
                 .subscribe(query)
@@ -89,7 +89,7 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
             );
             assert!(
                 !delta.pending,
-                "the authoritative initial edge view must already be settled: {delta:?}"
+                "the authoritative initial remote view must already be settled: {delta:?}"
             );
             let mut reduced = BTreeMap::new();
             for added in delta.added {
@@ -125,7 +125,7 @@ async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view()
             let mut stream = client
                 .subscribe(query)
                 .await
-                .expect("subscribe to an empty edge view");
+                .expect("subscribe to an empty remote view");
             let item = tokio::time::timeout(Duration::from_secs(5), stream.next())
                 .await
                 .expect("settled empty subscription delivery arrives")

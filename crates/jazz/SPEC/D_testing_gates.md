@@ -21,9 +21,9 @@ Invariant digest:
 
 ### D.1 Canonical gate source
 
-`.claude/CLAUDE.md` is the operational source of truth for the repository's
+`dev/gates/run-canonical.sh` is the operational source of truth for the repository's
 canonical gates. This appendix mirrors that source for SPEC readers; if the two
-diverge, update this appendix from `.claude/CLAUDE.md` rather than treating the
+diverge, update this appendix from `dev/gates/run-canonical.sh` rather than treating the
 appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
@@ -31,7 +31,7 @@ For ordinary Rust/core work, the full gate set is:
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
 3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
-4. `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
+4. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
 5. `dev/gates/ts-wire-codec.sh`
 6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
@@ -44,13 +44,16 @@ compile check. The standalone `dev/gates/benchmark-smoke.sh --ci` executes the
 deterministic core and jazz-sim scenario assertions for callers that need it.
 The ordinary PR workspace partition runs those same named cases in its broad
 Nextest selection with CI's feature set, first failing closed if the selected
-inventory omits either smoke binary or any named scenario case. The realistic
-benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
-all maintained benchmark APIs on same-repository benchmark-labeled PRs,
-non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
-example benchmark crates on benchmark-labeled PRs and nightly; native `jazz`
-and `jazz-sim` timing remains in the realistic benchmark workflow until it is
-ported. No local omnibus benchmark script is a push gate. A change to a public
+inventory omits either smoke binary or any named scenario case. The nightly
+`benchmark-api` job (`.github/workflows/nightly-tests.yml`) runs
+`dev/gates/benchmark-smoke.sh --compile-ci` to check all maintained benchmark
+APIs on the default branch each night and on manual runs. CodSpeed evaluates the
+example benchmark crates on benchmark-labeled PRs and on every default-branch
+push, coalescing bursts to the running and latest commit, so each PR compares
+against its exact main baseline or one at most a burst older (#3488). Native
+`jazz` and `jazz-sim` timing has no CI home since the realistic benchmark
+workflow was retired on 2026-10-15; its CodSpeed port is tracked separately.
+No local omnibus benchmark script is a push gate. A change to a public
 `jazz` type additionally gates the full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
@@ -59,10 +62,10 @@ replacing the former fixed `-j 2` guidance.
 ### D.2 The tiers
 
 - **Crate tests** — integration and crate tests for `jazz` and `groove`.
-- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs on the
-  realistic benchmark workflow (same-repository benchmark-labeled PRs,
-  non-bot default-branch pushes, manual runs, and nightly), where it catches
-  benchmark API rot without extending every ordinary PR's critical path.
+- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs in the
+  nightly `benchmark-api` job (default branch, nightly and manual runs), where
+  it catches benchmark API rot without extending every ordinary PR's critical
+  path.
 - **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
@@ -77,7 +80,7 @@ replacing the former fixed `-j 2` guidance.
   the `--lib` test binary before separately bounding its semantic execution,
   then executes the bounded, real seed-11 smoke
   `JAZZ_SEED=11 JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3
-cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
+cargo test -p jazz-node --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
   That smoke preserves the oracle assertions but is not a substitute for the
   quarantined multi-seed gate.
 - **Incremental delivery canary** —
@@ -87,10 +90,10 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
   customer-specific fixture names, domains, and ids out of the public
   repository.
 - **Benchmark API and scenario smoke** — Ordinary CI runs deterministic
-  scenario assertions. The realistic benchmark workflow compiles all
+  scenario assertions. The nightly `benchmark-api` job compiles all
   maintained benchmark targets; CodSpeed compares example benchmark crates;
-  native `jazz` and `jazz-sim` timing stays in the realistic workflow until
-  migrated.
+  native `jazz` and `jazz-sim` timing awaits its CodSpeed port (the realistic
+  workflow was retired on 2026-10-15).
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package
@@ -139,7 +142,7 @@ lower-level tests that best pin an invariant.
 
 **Current coverage limit (verified 2026-08-04).**
 `m3_maintained_one_shot_differential_oracle` compares only
-`BTreeSet<(table, RowUuid)>` (`crates/jazz/src/node/tests/m3_differential.rs:896-936`).
+`BTreeSet<(table, RowUuid)>` (`crates/jazz/layers/node/src/node/tests/m3_differential.rs:896-936`).
 It discards cells, content versions, relation edges, position/order, and
 duplicates. It therefore proves root-membership convergence only; it does not
 prove output content, ordering, nested association, or delivery shape. The
@@ -168,17 +171,17 @@ The target test ladder for ch. 8 §8.4.1 is intentionally staged. Each rung must
 prove local derivation from canonical input closure; asserting that a receiver
 was handed the expected projected row is not evidence for this design.
 
-| Rung                                         | Required black-box proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Current quarantine / migration mapping                                                                                                                                                                                    |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Authored fact codec and manifest identity | A `v1` version is rejected if its bytes are decoded as `v2`, accepted when decoded as `v1`, and produces the same canonical identity after receive/restart. A changed class inventory, digest, epoch, or residual-program id parks the closure.                                                                                                                                                                                                                                                                                                                                                      | New focused protocol/codec and manifest test; no existing quarantine isolates raw-byte relabeling.                                                                                                                        |
-| 2. Full/reset install crash ladder           | Fault each point after staging every class member, after IVM precomputation, after durable manifest/fact/terminal/fast-receipt swap, after local-publication enqueue, and before local consumer observation. Recovery exposes only the old or new complete closure and never a partial terminal, settlement, fast receipt, or publication.                                                                                                                                                                                                                                                           | New focused durable-install/recovery tests.                                                                                                                                                                               |
-| 3. Incremental manifest transition           | A successor names an exact active predecessor and per-class authenticated sparse-Merkle old/new roots/counts plus canonical add/remove proofs. Invalid membership/non-membership proof, predecessor, count, root, duplicate, or removal never changes the active closure and requests repair/reset. A valid transition changes only affected IVM inputs.                                                                                                                                                                                                                                             | New focused transition tests, including a planted full-rebuild detector for `INV-INC-1` and an independently recomputed proof/root oracle.                                                                                |
-| 4. Simple root lineage                       | `v1.users { id, name, email }` received by a `v2.people { id, name, email_address }` subscriber selects the `v1` winner before projection and reaches the same selected root result as one-shot after ordered lens projection and restart, without a projected-row carrier or local-history supplement.                                                                                                                                                                                                                                                                                              | `multi_hop_column_additions_new_client_can_read_old_rows` and `multi_hop_column_renames_new_client_can_read_old_rows` are active regression coverage; `column_addition_new_client_can_read_old_rows` remains quarantined. |
-| 5. Source identity, joins, and branch views  | Replacements/deletions retain authored branch-key identity through table rename and projected join lowering; the selected head and live/frozen base are isolated from unrelated branch keys and post-cut base rows; local IVM retracts/replaces the same output as the authority.                                                                                                                                                                                                                                                                                                                    | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                   |
-| 6. Opaque admission isolation                | Nested array/join updates and policy revocation converge from safe facts; unreadable evidence is never serialized. An opaque admission fact is rejected when replayed under any different authority lineage, authority epoch, shape/binding/read view, reader/policy revision, branch sources/SnapshotRef, residual-program identity, protected output/source occurrence, or concrete content/deletion/witness version/layer. In particular, a test swaps an allowed admission onto a denied row/output and applies a stale admission after its protected winner is replaced; both must fail closed. | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                   |
-| 7. Reconnect, repair, and reset              | After durable restart, eviction, a known-state declaration, and exact repair of each closure class, no terminal cache is needed to regain a settled local result; a missing catalogue/version/branch-source/correlation/admission/replacement/settlement fact blocks settlement, and an epoch mismatch resets.                                                                                                                                                                                                                                                                                       | `persisted_stale_edge_reconnect_replays_catalogue_before_client_work` is the catalogue-replay prerequisite; `edge_write_reaches_client_on_peer_edge` is the multi-edge delivery prerequisite.                             |
-| 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                           |
-| 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `m3_maintained_one_shot_differential_oracle`; its present shared-source-only comparison is insufficient under §D.4.1.                                                                                             |
+| Rung                                         | Required black-box proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Current quarantine / migration mapping                                                                                                                                                                                                          |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Authored fact codec and manifest identity | A `v1` version is rejected if its bytes are decoded as `v2`, accepted when decoded as `v1`, and produces the same canonical identity after receive/restart. A changed class inventory, digest, epoch, or residual-program id parks the closure.                                                                                                                                                                                                                                                                                                                                                      | New focused protocol/codec and manifest test; no existing quarantine isolates raw-byte relabeling.                                                                                                                                              |
+| 2. Full/reset install crash ladder           | Fault each point after staging every class member, after IVM precomputation, after durable manifest/fact/terminal/fast-receipt swap, after local-publication enqueue, and before local consumer observation. Recovery exposes only the old or new complete closure and never a partial terminal, settlement, fast receipt, or publication.                                                                                                                                                                                                                                                           | New focused durable-install/recovery tests.                                                                                                                                                                                                     |
+| 3. Incremental manifest transition           | A successor names an exact active predecessor and per-class authenticated sparse-Merkle old/new roots/counts plus canonical add/remove proofs. Invalid membership/non-membership proof, predecessor, count, root, duplicate, or removal never changes the active closure and requests repair/reset. A valid transition changes only affected IVM inputs.                                                                                                                                                                                                                                             | New focused transition tests, including a planted full-rebuild detector for `INV-INC-1` and an independently recomputed proof/root oracle.                                                                                                      |
+| 4. Simple root lineage                       | `v1.users { id, name, email }` received by a `v2.people { id, name, email_address }` subscriber selects the `v1` winner before projection and reaches the same selected root result as one-shot after ordered lens projection and restart, without a projected-row carrier or local-history supplement.                                                                                                                                                                                                                                                                                              | `multi_hop_column_additions_new_client_can_read_old_rows` and `multi_hop_column_renames_new_client_can_read_old_rows` are active regression coverage; `column_addition_new_client_can_read_old_rows` remains quarantined.                       |
+| 5. Source identity, joins, and branch views  | Replacements/deletions retain authored branch-key identity through table rename and projected join lowering; the selected head and live/frozen base are isolated from unrelated branch keys and post-cut base rows; local IVM retracts/replaces the same output as the authority.                                                                                                                                                                                                                                                                                                                    | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                         |
+| 6. Opaque admission isolation                | Nested array/join updates and policy revocation converge from safe facts; unreadable evidence is never serialized. An opaque admission fact is rejected when replayed under any different authority lineage, authority epoch, shape/binding/read view, reader/policy revision, branch sources/SnapshotRef, residual-program identity, protected output/source occurrence, or concrete content/deletion/witness version/layer. In particular, a test swaps an allowed admission onto a denied row/output and applies a stale admission after its protected winner is replaced; both must fail closed. | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                         |
+| 7. Reconnect, repair, and reset              | After durable restart, eviction, a known-state declaration, and exact repair of each closure class, no terminal cache is needed to regain a settled local result; a missing catalogue/version/branch-source/correlation/admission/replacement/settlement fact blocks settlement, and an epoch mismatch resets.                                                                                                                                                                                                                                                                                       | The former edge-topology prerequisites were removed with the server edge; a Core-only catalogue-replay-before-client-work test is tracked in #3298. `core_permission_retightening_reaches_all_subscribed_clients` covers multi-client delivery. |
+| 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                                                 |
+| 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `m3_maintained_one_shot_differential_oracle`; its present shared-source-only comparison is insufficient under §D.4.1.                                                                                                                   |
 
 The named source ignore annotations above remain failures to be burned down, not
 coverage claims. Rungs 1–8 should become focused deterministic tests first;
@@ -189,7 +192,7 @@ name the missing closure component.
 
 The required local gates and the GitHub Actions workflow are not equivalent yet.
 The canonical set above is the pre-push discipline mirrored from
-`.claude/CLAUDE.md`; this distinction remains explicit as required by
+`dev/gates/run-canonical.sh`; this distinction remains explicit as required by
 `INV-TEST-4`.
 
 ## Open Questions

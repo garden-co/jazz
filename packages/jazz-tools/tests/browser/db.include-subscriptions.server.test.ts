@@ -96,16 +96,16 @@ afterEach(async () => {
 
 describe("websocket include subscriptions", () => {
   /**
-   * A client may attach several independently bound strict-edge reads after an
+   * A client may attach several independently bound strict-global reads after an
    * authority has accepted an exclusive transaction. Each attachment
    * needs its own current authority receipt; one must not strand the others.
    *
    * owner ──exclusive todo──► server
-   * observer ──three Edge attachments──► server ──current receipts──► observer
+   * observer ──three Global attachments──► server ──current receipts──► observer
    */
-  it("covers concurrent edge queries attached after an exclusive commit", async () => {
+  it("covers concurrent global queries attached after an exclusive commit", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("exclusive-then-edge-coverage"),
+      uniqueDbName("exclusive-then-global-coverage"),
     );
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
@@ -114,21 +114,21 @@ describe("websocket include subscriptions", () => {
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-edge-owner",
+      "exclusive-then-global-owner",
       sharedSecret,
     );
     const observer = await openDb(
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-edge-observer",
+      "exclusive-then-global-observer",
       sharedSecret,
     );
     await ensureNativeRuntimeAdapterReady(owner);
     await ensureNativeRuntimeAdapterReady(observer);
 
-    const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "edge" });
-    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "edge" })).toMatchObject([
+    const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "global" });
+    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "remote" })).toMatchObject([
       { id: org.id },
     ]);
     const write = await owner.exclusiveTransaction((transaction) => {
@@ -154,7 +154,7 @@ describe("websocket include subscriptions", () => {
         (rows) => {
           subscribedTodoIds = rows.map((row) => row.id);
         },
-        { tier: "edge" },
+        { tier: "remote" },
       ),
     );
     let cancelledUpdates = 0;
@@ -163,18 +163,18 @@ describe("websocket include subscriptions", () => {
       () => {
         cancelledUpdates += 1;
       },
-      { tier: "edge" },
+      { tier: "remote" },
     );
     cancelBeforeOpening();
 
     const [todos, checks, notes] = await withTimeout(
       Promise.all([
-        observer.all(app.todos.where({ org_id: org.id }), { tier: "edge" }),
-        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "edge" }),
-        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "edge" }),
+        observer.all(app.todos.where({ org_id: org.id }), { tier: "remote" }),
+        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "remote" }),
+        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "remote" }),
       ]),
       20_000,
-      "concurrent strict-edge query coverage did not settle",
+      "concurrent strict-global query coverage did not settle",
     );
     await waitForCondition(
       async () => subscribedTodoIds.includes(todo.id),
@@ -229,7 +229,7 @@ describe("websocket include subscriptions", () => {
         (rows) => {
           snapshots.push(rows as OrgWithDeepIncludes[]);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(
@@ -359,14 +359,14 @@ describe("websocket include subscriptions", () => {
           .include({ org: true, user_check: true })
           .requireIncludes(),
         (rows) => includingSnapshots.push(rows as (typeof includingSnapshots)[number]),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     const refFiltered = ctx.trackSubscription(
       browser.subscribe(
         app.check_notes.where({ user_check_id: userCheck.id }),
         (rows) => refFilteredSnapshots.push(rows as (typeof refFilteredSnapshots)[number]),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(

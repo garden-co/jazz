@@ -79,7 +79,7 @@ export function ChatPanel({
           text: messageText.trim(),
           sent_at: new Date(),
         })
-      ).wait({ tier: "edge" });
+      ).wait({ tier: "global" });
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
@@ -93,7 +93,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await (await db.delete(app.messages, messageId)).wait({ tier: "edge" });
+      await (await db.delete(app.messages, messageId)).wait({ tier: "global" });
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {

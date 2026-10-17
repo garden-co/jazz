@@ -1,4 +1,4 @@
-import { schema as s } from "./index.js";
+import { schema as s, migration as m } from "./index.js";
 
 // @ts-expect-error Required explicit relationship map, even for empty tables.
 s.table({ name: s.string() });
@@ -75,11 +75,24 @@ const migrationTo = {
   posts: s.table({ owner: s.uuid() }, { author: s.rel("teams", "owner") }),
 };
 // @ts-expect-error Changing the effective stored reference target requires a supported migration, not an empty lens.
-s.defineMigration({ from: migrationFrom, to: migrationTo });
-s.defineMigration({
+m.defineMigration({ from: migrationFrom, to: migrationTo });
+m.defineMigration({
   from: migrationFrom,
   to: {
     ...migrationFrom,
     posts: s.table({ owner: s.uuid() }, { writer: s.rel("users", "owner") }),
   },
+});
+
+// Permission helpers use the same declared names in either direction.
+s.definePermissions(app, ({ policy, allowedTo }) => {
+  policy.posts.allowRead.where(allowedTo.read("author"));
+  policy.users.allowRead.where(allowedTo.read("authored"));
+  policy.users.allowDelete.where(allowedTo.deleteReferencing(policy.posts, "author"));
+  // @ts-expect-error Stored UUID column is not a relationship name.
+  allowedTo.update("authorId");
+  // @ts-expect-error No convention-derived reverse name.
+  allowedTo.read("postsViaAuthor");
+  // @ts-expect-error Names must be declared somewhere in the app.
+  allowedTo.insert("missing");
 });

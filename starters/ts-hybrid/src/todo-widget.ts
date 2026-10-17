@@ -5,7 +5,7 @@ type Todo = { id: string; title: string; done: boolean };
 type MaybePromise<T> = T | Promise<T>;
 type MutationResult<T> = {
   value: T;
-  wait(options: { tier: "local" | "edge" | "global" }): Promise<T>;
+  wait(options: { tier: "local" | "global" | "global" }): Promise<T>;
 };
 
 export interface TodoDb {
@@ -94,7 +94,7 @@ export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {
       if (generation === latestSaveGeneration) latestLocalSaveState = "saved";
       pendingLocalSaveCount -= 1;
       renderLocalSaveState();
-      await write.wait({ tier: "edge" });
+      await write.wait({ tier: "global" });
       if (generation === latestSaveGeneration) form.reset();
     } catch {
       if (generation === latestSaveGeneration) {
@@ -116,7 +116,9 @@ export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {
     if (!li) return;
     const id = li.dataset.id!;
     if (target.dataset.action === "delete") {
-      void Promise.resolve(db.delete(app.todos, id)).then((write) => write.wait({ tier: "edge" }));
+      void Promise.resolve(db.delete(app.todos, id)).then((write) =>
+        write.wait({ tier: "global" }),
+      );
     }
   });
 
@@ -126,7 +128,7 @@ export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {
     const li = target.closest<HTMLLIElement>("li[data-id]");
     if (!li) return;
     void Promise.resolve(db.update(app.todos, li.dataset.id!, { done: target.checked })).then(
-      (write) => write.wait({ tier: "edge" }),
+      (write) => write.wait({ tier: "global" }),
     );
   });
 

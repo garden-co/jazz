@@ -79,7 +79,9 @@ fn run_rung(source_rows: usize) {
     let maintained_result = maintained
         .subscription_result_sets(subscription)
         .expect("maintained result set");
-    let maintained_footprint = maintained.maintained_subscription_view_metrics().footprint;
+    let maintained_footprint = maintained
+        .inspect_maintained_subscription_view_footprint(subscription)
+        .expect("maintained view footprint");
 
     rehydrated_fixture.core.reset_storage_read_metrics();
     let mut rehydrated = PeerState::new();
@@ -95,7 +97,9 @@ fn run_rung(source_rows: usize) {
     let rehydrated_result = rehydrated
         .subscription_result_sets(subscription)
         .expect("rehydrated result set");
-    let rehydrated_footprint = rehydrated.maintained_subscription_view_metrics().footprint;
+    let rehydrated_footprint = rehydrated
+        .inspect_maintained_subscription_view_footprint(subscription)
+        .expect("rehydrated view footprint");
 
     assert_eq!(maintained_result, rehydrated_result);
     assert_eq!(maintained_footprint, rehydrated_footprint);
@@ -182,8 +186,8 @@ fn result_digest(result: &BTreeSet<TxId>) -> String {
 }
 
 struct Fixture {
-    writer: NodeState<RocksDbStorage>,
-    core: NodeState<RocksDbStorage>,
+    writer: NodeState,
+    core: NodeState,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -220,11 +224,7 @@ impl Fixture {
     }
 
     fn update_to_active(&mut self, (row_uuid, parent): (RowUuid, TxId)) {
-        self.commit(
-            MergeableCommit::new(TABLE, row_uuid, 1_000_000)
-                .parents(vec![parent])
-                .cells(cells(1, ACTIVE)),
-        );
+        self.commit(MergeableCommit::new(TABLE, row_uuid, 1_000_000).cells(cells(1, ACTIVE)));
     }
 
     fn commit(&mut self, commit: MergeableCommit) -> TxId {
@@ -245,11 +245,7 @@ impl Fixture {
     }
 }
 
-fn core_ingest(
-    core: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now_ms: u64,
-) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -272,10 +268,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let column_families = schema.column_families();
     let refs = column_families

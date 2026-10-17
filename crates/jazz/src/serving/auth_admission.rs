@@ -4,7 +4,6 @@
 //! gate, and a deliberately small static JWT verifier.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use crate::account_registry::AccountId;
 use crate::groove::records::Value;
@@ -47,23 +46,15 @@ impl AuthAdmissionConfig {
     pub fn static_bearer(token: impl Into<String>) -> Self {
         Self {
             static_bearer_token: Some(token.into()),
-            jwt_verifier: None,
-            expected_issuer: None,
-            allow_local_first_auth: false,
-            expected_audience: None,
-            anonymous_subject: "anonymous".to_owned(),
+            ..Self::default()
         }
     }
 
     /// Require a signed JWT.
     pub fn jwt(verifier: JwtVerifierConfig) -> Self {
         Self {
-            static_bearer_token: None,
             jwt_verifier: Some(verifier),
-            expected_issuer: None,
-            allow_local_first_auth: false,
-            expected_audience: None,
-            anonymous_subject: "anonymous".to_owned(),
+            ..Self::default()
         }
     }
 
@@ -103,27 +94,11 @@ impl JwtVerifierConfig {
         }
     }
 
-    /// Verify RSA-signed tokens with a PEM-encoded public key.
-    pub fn rsa_public_key_pem(algorithm: Algorithm, public_key_pem: impl Into<Vec<u8>>) -> Self {
-        Self {
-            algorithm,
-            key: JwtVerificationKey::RsaPublicKeyPem(public_key_pem.into()),
-        }
-    }
-
     /// Verify EdDSA/Ed25519-signed tokens with a PEM-encoded public key.
     pub fn ed_public_key_pem(public_key_pem: impl Into<Vec<u8>>) -> Self {
         Self {
             algorithm: Algorithm::EdDSA,
             key: JwtVerificationKey::EdPublicKeyPem(public_key_pem.into()),
-        }
-    }
-
-    /// Verify EdDSA/Ed25519-signed tokens with a DER-encoded public key.
-    pub fn ed_public_key_der(public_key_der: impl Into<Vec<u8>>) -> Self {
-        Self {
-            algorithm: Algorithm::EdDSA,
-            key: JwtVerificationKey::EdPublicKeyDer(public_key_der.into()),
         }
     }
 }
@@ -133,12 +108,8 @@ impl JwtVerifierConfig {
 pub enum JwtVerificationKey {
     /// HMAC shared secret.
     HmacSecret(Vec<u8>),
-    /// PEM-encoded RSA public key.
-    RsaPublicKeyPem(Vec<u8>),
     /// PEM-encoded Ed25519 public key.
     EdPublicKeyPem(Vec<u8>),
-    /// DER-encoded Ed25519 public key.
-    EdPublicKeyDer(Vec<u8>),
 }
 
 /// First-frame auth handshake shape.
@@ -212,49 +183,30 @@ pub enum AdmissionSource {
 }
 
 /// Auth/session admission errors.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthAdmissionError {
     /// Static bearer auth is configured but no bearer was supplied.
+    #[error("missing bearer auth")]
     MissingBearer,
     /// A bearer was supplied but does not match the configured static token.
+    #[error("invalid bearer auth")]
     InvalidBearer,
     /// A bearer JWT was supplied but failed signature, expiry, or claim validation.
+    #[error("invalid bearer JWT: {0}")]
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
+    #[error("invalid auth handshake: {0}")]
     InvalidHandshake(String),
     /// A host account binding was attempted for an accountless anonymous session.
+    #[error("trusted account binding requires an authenticated credential")]
     AccountBindingRequiresCredential,
     /// A host account binding selected the reserved system account.
+    #[error("trusted account binding must not select the system account")]
     TrustedAccountIsSystem,
     /// The credential attempted to claim an invalid or Jazz-reserved author identity.
+    #[error("invalid author subject: {0}")]
     InvalidAuthorSubject(AuthorSubjectError),
 }
-
-impl fmt::Display for AuthAdmissionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingBearer => write!(f, "missing bearer auth"),
-            Self::InvalidBearer => write!(f, "invalid bearer auth"),
-            Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
-            Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
-            Self::AccountBindingRequiresCredential => {
-                write!(
-                    f,
-                    "trusted account binding requires an authenticated credential"
-                )
-            }
-            Self::TrustedAccountIsSystem => {
-                write!(
-                    f,
-                    "trusted account binding must not select the system account"
-                )
-            }
-            Self::InvalidAuthorSubject(error) => write!(f, "invalid author subject: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for AuthAdmissionError {}
 
 impl From<AuthorSubjectError> for AuthAdmissionError {
     fn from(error: AuthorSubjectError) -> Self {
@@ -287,7 +239,7 @@ pub fn admit_static_bearer_with_claims(
         }
     }
     let subject = subject.into();
-    if !crate::tools::identity::principal_is_nonempty(&subject) {
+    if !crate::identity::principal_is_nonempty(&subject) {
         return Err(AuthAdmissionError::InvalidHandshake(
             "sub must be non-empty".to_owned(),
         ));
@@ -338,7 +290,7 @@ pub fn admit_bearer_jwt(
     validation.set_issuer(&[expected_issuer]);
     validation.set_audience(&[expected_audience]);
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
+    if !crate::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     let issuer = decoded.claims.iss;
@@ -392,8 +344,8 @@ pub fn admit_local_first_jwt(
     } else {
         validation.validate_aud = false;
     }
-    let decoded = decode::<LocalFirstJwtClaims>(token, &key, &validation).map_err(jwt_error)?;
-    if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
+    let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
+    if !crate::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
     if let Some(expected_audience) = config.expected_audience.as_deref() {
@@ -445,36 +397,21 @@ pub fn admitted_session_claims(
         (author_issuer, author_subject),
         (issuer.to_owned(), subject.to_owned())
     );
-    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
+    crate::model::policy_claims::canonical_policy_binding_claims(&author, claims)
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
     match &verifier.key {
         JwtVerificationKey::HmacSecret(secret) => Ok(DecodingKey::from_secret(secret)),
-        JwtVerificationKey::RsaPublicKeyPem(public_key) => {
-            DecodingKey::from_rsa_pem(public_key).map_err(jwt_error)
-        }
         JwtVerificationKey::EdPublicKeyPem(public_key) => {
             DecodingKey::from_ed_pem(public_key).map_err(jwt_error)
         }
-        JwtVerificationKey::EdPublicKeyDer(public_key) => Ok(DecodingKey::from_ed_der(public_key)),
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct JwtClaims {
     iss: String,
-    sub: String,
-    #[serde(rename = "exp")]
-    _exp: u64,
-    #[serde(flatten)]
-    extra: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LocalFirstJwtClaims {
-    #[serde(rename = "iss")]
-    _iss: String,
     sub: String,
     #[serde(rename = "exp")]
     _exp: u64,
@@ -501,9 +438,9 @@ pub fn jwt_json_claims_to_policy_claims(
         ) {
             continue;
         }
-        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+        if let Some(value) = crate::model::policy_claims::json_value_to_policy_claim(
             value,
-            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
         )
         .map_err(AuthAdmissionError::InvalidJwt)?
         {

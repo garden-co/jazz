@@ -22,7 +22,7 @@ Use `allowedTo` to inherit access from the parent row. If you can read a project
   ../examples/docs/todo-client-localfirst-react/src/nested-data-snippets.tsx#nested-permissions
 </include>
 
-The `allowedTo.read("projectId")` argument is the FK column name. See [Permissions](/docs/auth/permissions) for `maxDepth` and recursive inheritance.
+The `allowedTo.read("project")` argument is the relationship name explicitly declared on the tasks table, such as `project: s.rel("projects", "projectId")`. Stored column names and inferred aliases are not accepted. See [Permissions](/docs/auth/permissions) for `maxDepth` and recursive inheritance.
 
 <Callout type="info">
   Projects use `$createdBy` instead of an explicit `owner_id` column. Jazz tracks who created each

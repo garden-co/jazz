@@ -5,16 +5,15 @@
 //! [`WireTransport`](crate::wire::WireTransport): an adapter owns DNS, TLS,
 //! WebSocket framing and its async pump, while `jazz` owns wire negotiation
 //! and peer state. Do not add an adapter dependency back to `jazz` merely to
-//! construct a client or an edge upstream connection.
+//! construct a client connection.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::app_id::AppId;
 use crate::db::ConnectionSessionContext;
 use crate::ids::AuthorSubject;
-use crate::protocol::CatalogueSnapshot;
-use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 use crate::wire::WireTransport;
 
@@ -28,7 +27,7 @@ pub enum NativeTransportLink {
     ScopeIsolatedClientRelay,
 }
 
-/// Inputs shared by the public client and an edge server when opening a native
+/// Inputs supplied by a client or its local persistence relay when opening a native
 /// peer link. The wake callback is only for newly staged inbound work: waking
 /// for outbound sends creates an empty-tick feedback loop in the synchronous
 /// database owner.
@@ -85,8 +84,6 @@ pub type NativeTransportFuture = Pin<
             + 'static,
     >,
 >;
-pub type NativeCatalogueBootstrapFuture =
-    Pin<Box<dyn Future<Output = Result<CatalogueSnapshot, NativeTransportError>> + Send + 'static>>;
 
 /// Future that resolves exactly once when an established adapter pump stops.
 pub type NativeTransportTerminalFuture =
@@ -104,11 +101,13 @@ pub enum NativeTransportTerminal {
 }
 
 /// Error at the target/socket boundary, before a core peer has been attached.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NativeTransportError {
     /// The peer is unavailable; local work may continue while connection retries.
+    #[error("{0}")]
     Retryable(String),
     /// Admission, protocol, or an unclassified adapter failure must fail closed.
+    #[error("{0}")]
     Terminal(String),
 }
 
@@ -118,39 +117,13 @@ impl NativeTransportError {
     }
 }
 
-impl std::fmt::Display for NativeTransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Retryable(message) | Self::Terminal(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for NativeTransportError {}
-
 /// Factory implemented by `jazz-native-transport` (or another native shell).
 ///
 /// The factory is passed at consumer composition points rather than registered
 /// globally. CLI/server/NAPI therefore choose an adapter explicitly, and tests
 /// can use an in-memory transport without compiling Tokio or TLS into core.
 pub trait NativeTransportConnector: Send + Sync {
-    /// Validate an edge bootstrap URL using adapter-specific transport rules.
-    fn validate_catalogue_bootstrap_url(
-        &self,
-        _server_url: &str,
-        _app_id: AppId,
-    ) -> Result<(), NativeTransportError> {
-        Ok(())
-    }
-
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture;
-
-    /// Fetch the authenticated, snapshot-only catalogue exchange used before
-    /// an edge attaches its ordinary upstream peer.
-    fn bootstrap_catalogue(
-        &self,
-        request: NativeTransportRequest,
-    ) -> NativeCatalogueBootstrapFuture;
 }
 
 #[cfg(test)]
@@ -184,17 +157,6 @@ mod tests {
                     permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::pending()),
                 })
-            })
-        }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(NativeTransportError::Terminal(
-                    "not used in this contract test".to_owned(),
-                ))
             })
         }
     }

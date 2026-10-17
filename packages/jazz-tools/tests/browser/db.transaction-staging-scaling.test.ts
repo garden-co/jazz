@@ -9,7 +9,7 @@ const app = schema.defineApp({
 });
 
 describe("exact local transaction write merging", () => {
-  it("preserves large content after commit rejection and a caught native staging failure", async () => {
+  it("keeps large content through a transactional update and a caught staging failure", async () => {
     const db = await createBrowserTestDb({
       appId: "transaction-staging-large-rejection",
       driver: { type: "memory" },
@@ -25,11 +25,16 @@ describe("exact local transaction write merging", () => {
       await large.wait({ tier: "local" });
       const small = db.insert(app.todos, { title: "small", done: false });
       await small.wait({ tier: "local" });
-      const unsupported = db.beginTransaction();
-      unsupported.update(app.todos, large.value.id, { done: true });
-      await expect(unsupported.commit().wait({ tier: "local" })).rejects.toThrow(
-        "callers must author logical scalar values, not physical large descriptors",
-      );
+      // Updating a small column of a row that holds a large value commits and
+      // keeps the large value unchanged (#3507).
+      const update = db.beginTransaction();
+      update.update(app.todos, large.value.id, { done: true });
+      await update.commit().wait({ tier: "local" });
+      expect(await db.one(app.todos.where({ id: large.value.id }))).toEqual({
+        id: large.value.id,
+        title,
+        done: true,
+      });
       const tx = db.beginTransaction();
       const { WasmDb } = await loadWasmModule();
       const exact = vi.spyOn(WasmDb.prototype, "updateInTransaction");
@@ -37,7 +42,7 @@ describe("exact local transaction write merging", () => {
         throw new Error("synthetic staging failure");
       });
       try {
-        expect(() => tx.update(app.todos, large.value.id, { done: true })).toThrow(
+        expect(() => tx.update(app.todos, large.value.id, { done: false })).toThrow(
           "synthetic staging failure",
         );
       } finally {
@@ -47,7 +52,7 @@ describe("exact local transaction write merging", () => {
       await tx.commit().wait({ tier: "local" });
       expect(await db.all(app.todos)).toEqual(
         expect.arrayContaining([
-          { id: large.value.id, title, done: false },
+          { id: large.value.id, title, done: true },
           { id: small.value.id, title: "small", done: true },
         ]),
       );

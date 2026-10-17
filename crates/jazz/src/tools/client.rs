@@ -16,11 +16,11 @@ use futures::task::{ArcWake, waker};
 
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
-    PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
-    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
-    WriteIdentity as CoreWriteIdentity,
+    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, FirstLoad as CoreFirstLoad,
+    PeerConnection as CorePeerConnection, ReadOpts as CoreReadOpts,
+    RemoteLinkHint as CoreRemoteLinkHint, SubscriptionEvent as CoreSubscriptionEvent,
+    SubscriptionOutputRow as CoreSubscriptionOutputRow, TickScheduler, TickUrgency,
+    Transport as CoreTransport, WireTransportAdapter, WriteIdentity as CoreWriteIdentity,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -29,25 +29,24 @@ use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreM
 use crate::ids::{
     AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
 };
-use crate::protocol::ReadViewSpec as CoreReadViewSpec;
+use crate::model::public_api::types::{
+    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
+};
+use crate::model::public_schema::TableName;
+use crate::model::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
+use crate::model::public_schema::{OrderedRowDelta, QueryResult, Row};
+use crate::model::public_schema::{Schema, validate_json_value};
+use crate::model::transaction::OpenTransactionId;
+use crate::model::transaction::TransactionId;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
-use crate::tools::OpenTransactionId;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
 };
-use crate::tools::public_api::types::{
-    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
-};
-use crate::tools::public_schema::TableName;
-use crate::tools::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
-use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
-use crate::tools::public_schema::{Schema, validate_json_value};
 #[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::{DurabilityTier, ReadTier};
-use crate::tools::transaction::TransactionId;
 use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use crate::tx::{
     DurabilityTier as CoreDurabilityTier, Fate as CoreFate, RejectionReason as CoreRejectionReason,
@@ -59,14 +58,211 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::object::OutputOccurrenceId;
 use crate::tools::{
-    AppContext, ClientStorage, JazzError, ObjectId, OutputOccurrenceId, Result, ResultKey,
-    SubscriptionHandle, SubscriptionRejectReason, SubscriptionServerFailureCode,
-    SubscriptionStream, SubscriptionStreamItem,
+    AppContext, ClientStorage, JazzError, ObjectId, Result, ResultKey, SubscriptionHandle,
+    SubscriptionRejectReason, SubscriptionServerFailureCode, SubscriptionStream,
+    SubscriptionStreamItem,
 };
 
-type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
+type CoreClientDb = CoreDb;
+type BackendConnection = Rc<LocalMutex<CorePeerConnection>>;
+
+// Credit windows bound protocol ingress; charge tiny frames as one physical slot
+// too, so a peer cannot turn the byte limit into an unbounded allocation count.
+const CLIENT_WIRE_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+fn client_wire_frame_charge(frame: &[u8]) -> usize {
+    crate::wire::channel_credit::channel_frame_credit_cost(frame.len())
+}
+
+#[derive(Default)]
+struct ClientWireQueues {
+    inbound: VecDeque<Vec<u8>>,
+    outbound: VecDeque<Vec<u8>>,
+    inbound_bytes: usize,
+    outbound_bytes: usize,
+    closed: bool,
+}
+
+#[derive(Clone)]
+struct ClientQueuedWire {
+    queues: Rc<RefCell<ClientWireQueues>>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl crate::wire::WireTransport for ClientQueuedWire {
+    fn send_frame(
+        &mut self,
+        frame: Vec<u8>,
+    ) -> std::result::Result<(), crate::wire::TransportError> {
+        let mut queues = self.queues.borrow_mut();
+        if queues.closed {
+            return Err(crate::wire::TransportError::Failed(
+                "native client wire retired".to_owned(),
+            ));
+        }
+        let charge = client_wire_frame_charge(&frame);
+        if queues.outbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+            return Err(crate::wire::TransportError::Backpressure);
+        }
+        queues.outbound_bytes += charge;
+        queues.outbound.push_back(frame);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        let mut queues = self.queues.borrow_mut();
+        let frame = queues.inbound.pop_front()?;
+        queues.inbound_bytes -= client_wire_frame_charge(&frame);
+        Some(frame)
+    }
+}
+
+struct ClientNativeIo {
+    pump: crate::db::PeerIoPump,
+    transport: ClientQueuedWire,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ClientNativeIo {
+    fn drop(&mut self) {
+        self.pump.disconnect();
+        self.transport.queues.borrow_mut().closed = true;
+        self.task.abort();
+    }
+}
+
+// This owns physical I/O independently of Db::tick: evaluating a received row
+// may await chunks while holding the semantic node. Only canonical frames enter
+// its adapter; auxiliary replies and credit grants never need that node lock.
+async fn drive_native_client_wire(
+    mut wire: Box<dyn crate::wire::WireTransport + Send>,
+    mut terminal: NativeTransportTerminalFuture,
+    transport: ClientQueuedWire,
+    pump: crate::db::PeerIoPump,
+    scheduler: Rc<TickSchedulerImpl>,
+) -> NativeTransportTerminal {
+    use crate::tools::native_transport_connector::NativeTransportError;
+    use crate::wire::TransportError;
+    let failed =
+        |error: String| NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
+    let result = async {
+        loop {
+            if let Err(error) = pump.expire_incomplete_receive() {
+                return failed(error);
+            }
+            let mut received = false;
+            // Bounded turns keep cancellation and other connections runnable.
+            for _ in 0..64 {
+                let Some(frame) = wire.try_recv_frame() else {
+                    break;
+                };
+                let routed = tokio::select! {
+                    biased;
+                    _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                    stopped = &mut terminal => return stopped,
+                    routed = pump.route_incoming_wire_frame(frame) => routed,
+                };
+                match routed {
+                    Ok(Some(frame)) => {
+                        let mut queues = transport.queues.borrow_mut();
+                        let charge = client_wire_frame_charge(&frame);
+                        if queues.inbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+                            return failed(
+                                "native client canonical ingress exceeded its credit budget"
+                                    .to_owned(),
+                            );
+                        }
+                        queues.inbound_bytes += charge;
+                        queues.inbound.push_back(frame);
+                        scheduler.wake(TickUrgency::Immediate);
+                    }
+                    Ok(None) => {
+                        if pump.take_canonical_credit_progress() {
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                    }
+                    Err(error) => return failed(error.to_string()),
+                }
+                received = true;
+            }
+            let mut backpressured = false;
+            for _ in 0..16 {
+                let frame = transport.queues.borrow().outbound.front().cloned();
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame) {
+                        Ok(()) => {
+                            let mut queues = transport.queues.borrow_mut();
+                            let frame = queues
+                                .outbound
+                                .pop_front()
+                                .expect("retained canonical frame");
+                            queues.outbound_bytes -= client_wire_frame_charge(&frame);
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                let reservation = match pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return failed(error.to_string()),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !backpressured
+                && (received
+                    || !transport.queues.borrow().outbound.is_empty()
+                    || pump.outbound_is_ready())
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            tokio::select! {
+                biased;
+                _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                stopped = &mut terminal => return stopped,
+                _ = transport.wake.notified() => {},
+                _ = async {
+                    match pump.incomplete_receive_timeout_ms() {
+                        Some(delay) => tokio::time::sleep(Duration::from_millis(delay)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if let Err(error) = pump.expire_incomplete_receive() { return failed(error); }
+                },
+                _ = async {
+                    if backpressured { std::future::pending::<()>().await; }
+                    pump.outbound_ready().await;
+                } => {
+                    if pump.is_disconnected() { return NativeTransportTerminal::OwnerDropped; }
+                }
+            }
+        }
+    }
+    .await;
+    pump.disconnect();
+    transport.queues.borrow_mut().closed = true;
+    result
+}
 
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
@@ -146,6 +342,7 @@ struct ClientDbInner {
     scheduler: Rc<TickSchedulerImpl>,
     tick_driver: Option<tokio::task::JoinHandle<()>>,
     upstream: Option<BackendConnection>,
+    upstream_io: Option<ClientNativeIo>,
     upstream_generation: u64,
     native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
     upstream_recovery_generation: Option<u64>,
@@ -361,7 +558,7 @@ async fn recover_tick_driver_error(
 #[derive(Clone)]
 struct ConnectConfig {
     server_url: String,
-    app_id: crate::tools::AppId,
+    app_id: crate::app_id::AppId,
     auth: WsAuthConfig,
     connector: Arc<dyn NativeTransportConnector>,
 }
@@ -418,9 +615,12 @@ impl Backend {
         } else {
             StackSafeFuture::new(CoreDb::open(config)).await
         };
-        Ok(Self(Rc::new(db.map_err(|error| {
-            JazzError::Connection(error.to_string())
-        })?)))
+        let db = db.map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Application writes carry wall-clock physical milliseconds, exactly
+        // as the TypeScript runtime passes `Date.now()`: linear history
+        // resolves plain columns last-writer-wins by that time.
+        db.use_wall_clock_for_writes();
+        Ok(Self(Rc::new(db)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -444,6 +644,10 @@ impl Backend {
         self.0.detach_connection(connection)
     }
 
+    fn set_remote_link_hint(&self, hint: CoreRemoteLinkHint) {
+        self.0.set_remote_link_hint(hint);
+    }
+
     fn set_identity_claims(&self, identity: CoreAuthorSubject, claims: HashMap<String, CoreValue>) {
         self.0
             .set_identity_claims(identity, claims.into_iter().collect());
@@ -453,101 +657,41 @@ impl Backend {
         StackSafeFuture::new(self.0.tick()).await
     }
 
+    /// Insert one row. `None` writes as the database identity; a row id of
+    /// `None` lets the core generate one.
     fn insert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
+        row_id: Option<CoreRowUuid>,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(table, cells, Default::default()))?;
-        Ok((write.row_uuid(), write.mergeable_tx_id()))
-    }
-
-    fn insert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(
+        let write = crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
-                identity,
+                row_id,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
-    fn insert_with_id(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn insert_with_id_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert(
-            table,
-            cells,
-            crate::db::InsertOptions {
-                row_id: Some(row_id),
-                identity,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
     fn upsert(
         &self,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
         updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(
+        Ok(crate::local_executor::block_on(self.0.upsert(
             table,
             row_id,
             cells,
             crate::db::UpsertOptions {
-                updated_at_ms,
-                ..Default::default()
-            },
-        ))?
-        .mergeable_tx_id())
-    }
-
-    fn upsert_for_identity(
-        &self,
-        identity: CoreWriteIdentity,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(
-            table,
-            row_id,
-            cells,
-            crate::db::UpsertOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 updated_at_ms,
                 ..Default::default()
             },
@@ -562,7 +706,7 @@ impl Backend {
         cells: crate::db::RowCells,
         updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.update(
+        Ok(crate::local_executor::block_on(self.0.update(
             table,
             row_id,
             cells,
@@ -574,39 +718,28 @@ impl Backend {
         .mergeable_tx_id())
     }
 
-    fn delete_for_identity(
+    fn delete(
         &self,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.delete(
+        Ok(crate::local_executor::block_on(self.0.delete(
             table,
             row_id,
             crate::db::DeleteOptions {
-                identity,
+                identity: identity.unwrap_or_default(),
                 ..Default::default()
             },
         ))?
         .mergeable_tx_id())
     }
 
-    fn delete(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.delete(table, row_id, Default::default()))?
-                .mergeable_tx_id(),
-        )
-    }
-
-    fn prepare_query(
+    async fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema(query)
+        StackSafeFuture::new(self.0.prepare_query_for_open_schema_async(query)).await
     }
 
     async fn row_provenance_for_subscription(
@@ -667,16 +800,15 @@ impl Backend {
         StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive(id))
-    }
-
-    fn begin_exclusive_for_identity(
+    fn begin_exclusive(
         &self,
         id: OpenTransactionId,
-        identity: CoreWriteIdentity,
+        identity: Option<CoreWriteIdentity>,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive_with_identity(id, identity))
+        crate::local_executor::block_on(
+            self.0
+                .begin_exclusive_with_identity(id, identity.unwrap_or_default()),
+        )
     }
 
     fn exclusive_write(
@@ -686,7 +818,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).insert(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -697,6 +829,21 @@ impl Backend {
         .map(|_| ())
     }
 
+    fn exclusive_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_id: CoreRowUuid,
+        cells: crate::db::RowCells,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
+            table,
+            row_id,
+            cells,
+            Default::default(),
+        ))
+    }
+
     fn exclusive_update(
         &self,
         tx_id: OpenTransactionId,
@@ -704,7 +851,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).update(
             table,
             row_id,
             cells,
@@ -718,7 +865,7 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).delete(
             table,
             row_id,
             Default::default(),
@@ -729,7 +876,7 @@ impl Backend {
         &self,
         tx_id: OpenTransactionId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::db::block_on(self.0.commit_exclusive_handle(tx_id))
+        crate::local_executor::block_on(self.0.commit_exclusive_handle(tx_id))
     }
 
     fn commit_exclusive_handle_for_identity(
@@ -737,7 +884,7 @@ impl Backend {
         tx_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::db::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
+        crate::local_executor::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
     }
 }
 
@@ -756,7 +903,7 @@ struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     after_current_turn: AtomicBool,
-    delayed: AtomicBool,
+    delayed: std::sync::Mutex<Option<(tokio::time::Instant, tokio::task::AbortHandle)>>,
     cancelled: AtomicBool,
     cancel_notify: tokio::sync::Notify,
     notify: tokio::sync::Notify,
@@ -774,6 +921,9 @@ impl TickState {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        if let Some((_, task)) = self.delayed.lock().unwrap().take() {
+            task.abort();
+        }
         self.cancel_notify.notify_waiters();
     }
 }
@@ -837,23 +987,32 @@ impl TickSchedulerImpl {
     }
 
     fn wake_after(&self, delay_ms: u64) {
-        // One delayed wake is enough to service all currently rate-limited
-        // uploads. The protocol has no receiver-supplied retry-after, so every
-        // caller uses the same bounded default admission window.
-        if self.state.delayed.swap(true, Ordering::AcqRel) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
             return;
         }
+        if let Some((_, task)) = pending.take() {
+            task.abort();
+        }
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_local(async move {
+        let task = tokio::task::spawn_local(async move {
             tokio::select! {
                 _ = state.cancelled() => {}
-                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
-                    state.delayed.store(false, Ordering::Release);
+                _ = tokio::time::sleep_until(deadline) => {
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending.as_ref().is_none_or(|(current, _)| *current != deadline) { return; }
+                    pending.take();
+                    drop(pending);
                     state.deferred.store(true, Ordering::Release);
                     state.notify.notify_one();
                 }
             }
         });
+        *pending = Some((deadline, task.abort_handle()));
     }
 }
 
@@ -874,13 +1033,17 @@ impl TickScheduler for TickSchedulerImpl {
 }
 
 impl ClientDb {
+    fn backend(&self) -> Result<Backend> {
+        self.inner.borrow().backend_clone()
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         public_schema: Schema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::tools::AppId,
+        app_id: crate::app_id::AppId,
         auth: Option<WsAuthConfig>,
         connector: Option<Arc<dyn NativeTransportConnector>>,
     ) -> Result<Rc<Self>> {
@@ -1010,13 +1173,11 @@ impl ClientDb {
         transaction_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let prepared = {
-            let inner = self.inner.borrow();
-            inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?
-        };
+        let prepared = self
+            .backend()?
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
@@ -1058,32 +1219,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
-        let (row_uuid, tx_id) = match row_id {
-            Some(uuid) => {
-                let row_uuid = CoreRowUuid(uuid);
-                let tx_id = match identity {
-                    Some(identity) => inner
-                        .backend()?
-                        .insert_with_id_for_identity(identity, &table, row_uuid, cells),
-                    None => inner.backend()?.insert_with_id(&table, row_uuid, cells),
-                }
-                .map_err(|error| JazzError::Write(error.to_string()))?;
-                (row_uuid, tx_id)
-            }
-            None => {
-                if let Some(identity) = identity {
-                    inner
-                        .backend()?
-                        .insert_for_identity(identity, &table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                } else {
-                    inner
-                        .backend()?
-                        .insert(&table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                }
-            }
-        };
+        let (row_uuid, tx_id) = inner
+            .backend()?
+            .insert(identity, &table, row_id.map(CoreRowUuid), cells)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
         inner.remember_write(tx_id);
@@ -1122,19 +1261,10 @@ impl ClientDb {
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
-                &table,
-                CoreRowUuid(row_id),
-                cells,
-                updated_at_ms,
-            ),
-            None => inner
-                .backend()?
-                .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .upsert(identity, &table, CoreRowUuid(row_id), cells, updated_at_ms)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1153,7 +1283,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .exclusive_upsert(tx_id, &table, CoreRowUuid(row_id), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -1173,8 +1303,9 @@ impl ClientDb {
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => inner.backend()?.upsert_for_identity(
-                identity,
+            // An identity-bound update is applied as an upsert for that identity.
+            Some(identity) => inner.backend()?.upsert(
+                Some(identity),
                 table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
@@ -1222,15 +1353,10 @@ impl ClientDb {
         identity: Option<CoreWriteIdentity>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => {
-                inner
-                    .backend()?
-                    .delete_for_identity(identity, table, CoreRowUuid(*row_id.uuid()))
-            }
-            None => inner.backend()?.delete(table, CoreRowUuid(*row_id.uuid())),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let write = inner
+            .backend()?
+            .delete(identity, table, CoreRowUuid(*row_id.uuid()))
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(write);
         let tx_id = write;
@@ -1266,13 +1392,10 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        match identity {
-            Some(identity) => inner
-                .backend()?
-                .begin_exclusive_for_identity(transaction_id, identity),
-            None => inner.backend()?.begin_exclusive(transaction_id),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
+        inner
+            .backend()?
+            .begin_exclusive(transaction_id, identity)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         // Explicit sessions bind commit identity; attributed transactions use
         // the core's bound commit path to retain their separate provenance.
         let author = identity.and_then(|identity| match identity {
@@ -1367,8 +1490,8 @@ impl ClientDb {
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
         generation: u64,
-        terminal: NativeTransportTerminalFuture,
-    ) {
+        terminal: impl Future<Output = NativeTransportTerminal> + 'static,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let terminal = terminal.await;
             let Some(inner) = inner.upgrade() else {
@@ -1379,7 +1502,7 @@ impl ClientDb {
                 .native_terminal_events
                 .push_back((generation, terminal));
             scheduler.wake(TickUrgency::Immediate);
-        });
+        })
     }
 
     async fn handle_native_terminal(
@@ -1467,7 +1590,15 @@ impl ClientDb {
                     match tick_result {
                         Ok(()) => backpressure_attempts = 0,
                         Err(error) => {
-                            let class = classify_tick_driver_error(&error);
+                            let class = match classify_tick_driver_error(&error) {
+                                TickDriverErrorClass::Fatal
+                                    if ClientDbInner::upstream_asks_reconnect_later(&inner)
+                                        .await =>
+                                {
+                                    TickDriverErrorClass::Reconnect
+                                }
+                                class => class,
+                            };
                             let should_exit = match class {
                                 TickDriverErrorClass::Fatal => {
                                     inner
@@ -1522,9 +1653,16 @@ impl ClientDbInner {
     }
 
     fn disconnect_upstream(&mut self) -> bool {
+        self.upstream_io.take();
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
+        if let Some(db) = self.db.as_ref() {
+            // Explicit disconnects and recovery starts are not live, and
+            // recovery retries keep reporting `Failed`: nothing waits on a
+            // backoff. Only a fresh connect reports an attempt.
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         let Some(connection) = self.upstream.take() else {
             return false;
         };
@@ -1573,6 +1711,9 @@ impl ClientDbInner {
     }
 
     fn record_tick_driver_failure(&mut self, error: String) {
+        if let Some(db) = self.db.as_ref() {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
         self.tick_driver_error = Some(error);
@@ -1584,7 +1725,7 @@ impl ClientDbInner {
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::tools::AppId,
+        app_id: crate::app_id::AppId,
         auth: Option<WsAuthConfig>,
         connector: Option<Arc<dyn NativeTransportConnector>>,
         scheduler: Rc<TickSchedulerImpl>,
@@ -1615,6 +1756,7 @@ impl ClientDbInner {
             scheduler,
             tick_driver: None,
             upstream: None,
+            upstream_io: None,
             upstream_generation: 0,
             native_terminal_events: VecDeque::new(),
             upstream_recovery_generation: None,
@@ -1659,6 +1801,19 @@ impl ClientDbInner {
             && inner_state.upstream_generation == generation
             && inner_state.upstream.is_none()
             && inner_state.upstream_recovery_generation == Some(generation)
+    }
+
+    /// Whether the server ended the current upstream with an error that asks
+    /// this client to come back later, such as ingress backpressure. That link
+    /// is gone, but the client and its pending writes are not.
+    async fn upstream_asks_reconnect_later(inner: &Rc<RefCell<Self>>) -> bool {
+        let Some(upstream) = inner.borrow().upstream.clone() else {
+            return false;
+        };
+        let connection = upstream.lock().await;
+        connection
+            .remote_wire_error()
+            .is_some_and(|error| error.asks_reconnect_later())
     }
 
     fn start_upstream_recovery(inner: &Rc<RefCell<Self>>, initial_error: String) {
@@ -1759,7 +1914,7 @@ impl ClientDbInner {
         inner: &Weak<RefCell<Self>>,
         expected_generation: u64,
     ) -> Result<bool> {
-        let (db, identity, scheduler, config, state_notify) = {
+        let (db, identity, scheduler, config, state_notify, recovering) = {
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -1780,9 +1935,18 @@ impl ClientDbInner {
                 Rc::clone(&inner_state.scheduler),
                 config,
                 Arc::clone(&inner_state.upstream_state_notify),
+                inner_state.upstream_recovery_generation == Some(expected_generation),
             )
         };
 
+        // The core empty-opening gate waits on an attempt, bounded from its
+        // start; a failed attempt or a backoff between retries never waits.
+        // A recovery retry after a lost link keeps the `Failed` reported at
+        // the loss, as the TS and RN hosts do.
+        if !recovering {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Attempting);
+        }
+        let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,
             expected_generation,
@@ -1790,8 +1954,14 @@ impl ClientDbInner {
             Rc::clone(&scheduler),
             config,
             state_notify,
+            Arc::clone(&wire_wake),
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            if Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+                db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+            }
+        })?;
         let Some(connected) = connected else {
             return Ok(false);
         };
@@ -1807,10 +1977,14 @@ impl ClientDbInner {
             permits_delegated_sessions,
             terminal,
         } = connected;
+        let queued_wire = ClientQueuedWire {
+            queues: Rc::new(RefCell::new(ClientWireQueues::default())),
+            wake: wire_wake,
+        };
         let connection = db
             .connect_upstream(Box::new(
                 WireTransportAdapter::new_with_session_context_and_delegated_sessions(
-                    transport,
+                    queued_wire.clone(),
                     protocol_version,
                     features,
                     None,
@@ -1820,7 +1994,9 @@ impl ClientDbInner {
             ))
             .await;
 
+        let pump = connection.lock().await.io_pump();
         let Some(inner) = inner.upgrade() else {
+            pump.disconnect();
             db.detach_connection(&connection);
             return Ok(false);
         };
@@ -1837,18 +2013,30 @@ impl ClientDbInner {
             }
             inner_state.upstream_generation = inner_state.upstream_generation.wrapping_add(1);
             inner_state.upstream = Some(connection);
+            db.set_remote_link_hint(CoreRemoteLinkHint::Live);
             if inner_state.upstream_recovery_generation == Some(expected_generation) {
                 inner_state.upstream_recovery_generation = None;
             }
             inner_state.upstream_state_notify.notify_waiters();
             inner_state.upstream_generation
         };
-        ClientDb::spawn_native_terminal_watcher(
+        let task = ClientDb::spawn_native_terminal_watcher(
             Rc::downgrade(&inner),
-            scheduler,
+            Rc::clone(&scheduler),
             generation,
-            terminal,
+            drive_native_client_wire(
+                transport,
+                terminal,
+                queued_wire.clone(),
+                pump.clone(),
+                scheduler,
+            ),
         );
+        inner.borrow_mut().upstream_io = Some(ClientNativeIo {
+            pump,
+            transport: queued_wire,
+            task,
+        });
         Ok(true)
     }
 
@@ -1859,6 +2047,7 @@ impl ClientDbInner {
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
         state_notify: Arc<tokio::sync::Notify>,
+        wire_wake: Arc<tokio::sync::Notify>,
     ) -> Result<Option<ConnectedNativeTransport>> {
         let wake = scheduler.wake_handle();
         let admission = config.connector.connect(NativeTransportRequest {
@@ -1869,6 +2058,7 @@ impl ClientDbInner {
             peer_identity: identity.author,
             auth: config.auth,
             wake: Arc::new(move || {
+                wire_wake.notify_one();
                 wake.immediate.store(true, Ordering::Release);
                 wake.notify.notify_one();
             }),
@@ -1931,16 +2121,11 @@ impl ClientDbInner {
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            (
-                inner.backend_clone()?,
-                inner
-                    .backend()?
-                    .prepare_query(&query)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            )
-        };
+        let db = inner.borrow().backend_clone()?;
+        let prepared = db
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -1969,10 +2154,10 @@ impl ClientDbInner {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let mut stream = db
-            .subscribe(prepared, opts)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let mut stream =
+            db.0.subscribe_remote_answer(prepared, opts)
+                .await
+                .map_err(|error| JazzError::Query(error.to_string()))?;
         let outcome = async {
             loop {
                 let event = stream.next_event().await.ok_or_else(|| {
@@ -1980,7 +2165,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if jazz_types::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2008,14 +2193,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if jazz_types::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        if jazz_types::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -2068,13 +2253,13 @@ impl ClientDbInner {
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
         let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            let prepared = inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?;
-            (inner.backend_clone()?, prepared)
+        let db = inner.borrow().backend_clone()?;
+        let prepared = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            prepared = db.prepare_query(&query) => {
+                prepared.map_err(|error| JazzError::Query(error.to_string()))?
+            }
         };
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
@@ -2136,9 +2321,11 @@ impl ClientDbInner {
                                 let previous = current_rows
                                     .iter()
                                     .find(|row| row.occurrence_id == occurrence)
-                                    .ok_or_else(|| crate::db::Error {
-                                        code: crate::db::ErrorCode::Protocol,
-                                        message: "terminal edit addressed a missing tools subscription root".into(),
+                                    .ok_or_else(|| {
+                                        crate::db::Error::new(
+                                            crate::db::ErrorCode::Protocol,
+                                            "terminal edit addressed a missing tools subscription root",
+                                        )
                                     })?;
                                 if !changed.contains_key(&occurrence) {
                                     let (descriptor, raw) = previous.row.encoded_record();
@@ -2516,18 +2703,18 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         .ok()?;
     let claims: UnverifiedJwtClaims = serde_json::from_slice(&payload).ok()?;
     let user_id = claims.sub.as_str();
-    if !crate::tools::identity::principal_is_nonempty(user_id) {
+    if !crate::identity::principal_is_nonempty(user_id) {
         return None;
     }
 
     let auth_mode = match claims.iss.as_str() {
         CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
-            crate::tools::public_api::session::AuthMode::LocalFirst
+            crate::model::public_api::session::AuthMode::LocalFirst
         }
         CoreAuthorSubject::ANONYMOUS_ISSUER => {
-            crate::tools::public_api::session::AuthMode::Anonymous
+            crate::model::public_api::session::AuthMode::Anonymous
         }
-        _ => crate::tools::public_api::session::AuthMode::External,
+        _ => crate::model::public_api::session::AuthMode::External,
     };
     Some(Session {
         account_id: None,
@@ -2615,12 +2802,30 @@ async fn core_storage(
                 .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
-                    epoch_1_storage_codec_profile()
+                    node_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
                 )
                 .await
-                .map_err(|error| JazzError::Connection(error.to_string()))
+                .map_err(persistent_storage_open_error)
         }
+    }
+}
+
+/// A store in a format this build does not read is a typed refusal the
+/// application acts on (wipe and resync); any other open failure stays a
+/// connection error.
+fn persistent_storage_open_error(error: crate::groove::storage::Error) -> JazzError {
+    match error {
+        crate::groove::storage::Error::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        } => JazzError::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        },
+        other => JazzError::Connection(other.to_string()),
     }
 }
 
@@ -2653,9 +2858,9 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+        if let Some(value) = crate::model::policy_claims::json_value_to_policy_claim(
             value,
-            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
         )
         .map_err(JazzError::Connection)?
         {
@@ -2674,7 +2879,7 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
-    core_claims.extend(crate::tools::policy_claims::author_policy_claims(
+    core_claims.extend(crate::model::policy_claims::author_policy_claims(
         session.author_subject()?,
     ));
     Ok(core_claims)
@@ -2758,7 +2963,7 @@ fn public_to_core_value_for_column_type(
 
 fn public_to_core_value_for_column(
     value: Value,
-    column: &crate::tools::public_schema::ColumnDescriptor,
+    column: &crate::model::public_schema::ColumnDescriptor,
 ) -> Result<CoreValue> {
     validate_json_value(&value, &column.column_type, column.name_str())
         .map_err(JazzError::Write)?;
@@ -2795,18 +3000,18 @@ fn core_to_public_value_for_column_type(
     }
 }
 
-fn auth_mode_claim_value(auth_mode: crate::tools::public_api::session::AuthMode) -> &'static str {
+fn auth_mode_claim_value(auth_mode: crate::model::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
-        crate::tools::public_api::session::AuthMode::External => "external",
-        crate::tools::public_api::session::AuthMode::LocalFirst => "local-first",
-        crate::tools::public_api::session::AuthMode::Anonymous => "anonymous",
+        crate::model::public_api::session::AuthMode::External => "external",
+        crate::model::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::model::public_api::session::AuthMode::Anonymous => "anonymous",
     }
 }
 
 fn core_row_provenance_to_public(
     provenance: crate::node::RowProvenance,
-) -> crate::tools::metadata::RowProvenance {
-    crate::tools::metadata::RowProvenance {
+) -> crate::model::metadata::RowProvenance {
+    crate::model::metadata::RowProvenance {
         created_by: provenance.created_by.canonical().to_owned(),
         created_at: provenance.created_at,
         updated_by: provenance.updated_by.canonical().to_owned(),
@@ -2819,8 +3024,10 @@ fn core_row_provenance_to_public(
 /// Current rows already expose public provenance in Unix milliseconds. Packed
 /// HLC values remain internal version and transaction-ordering state.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
-    let (descriptor, raw) = row.encoded_record();
-    let mut values = BorrowedRecord::new(raw, descriptor)
+    let published = crate::binding_codec::published_record(row)
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    let descriptor = &published.descriptor;
+    let mut values = BorrowedRecord::new(&published.raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
     normalize_public_subscription_record_values(descriptor, &mut values)?;
@@ -2968,7 +3175,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if jazz_types::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3001,15 +3208,7 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
 fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer => CoreDurabilityTier::Edge,
         DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
-    }
-}
-
-fn core_legacy_read_tier(tier: DurabilityTier) -> CoreDurabilityTier {
-    match tier {
-        DurabilityTier::Local => CoreDurabilityTier::Local,
-        DurabilityTier::EdgeServer | DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
     }
 }
 
@@ -3142,23 +3341,14 @@ impl JazzClient {
         }
         Ok(())
     }
-    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
-        CoreReadOpts {
-            tier: durability_tier
-                .map(core_legacy_read_tier)
-                .unwrap_or(CoreDurabilityTier::Local),
-            local_updates: CoreLocalUpdates::Immediate,
-            propagation: CorePropagation::Full,
-            include_deleted: false,
-            read_view: CoreReadViewSpec::default(),
-        }
+    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
+        CoreReadOpts::for_read_tier(tier)
     }
 
-    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
-        let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
-        opts.local_updates = match tier {
-            ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+    fn core_read_opts_local_first(first_load_remote_wait: Duration) -> CoreReadOpts {
+        let mut opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        opts.first_load = CoreFirstLoad::WaitForRemote {
+            timeout_ms: u64::try_from(first_load_remote_wait.as_millis()).unwrap_or(u64::MAX),
         };
         opts
     }
@@ -3396,7 +3586,7 @@ impl PublicQueryDecoder {
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
             .unwrap_or_else(|| {
-                crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
+                crate::model::metadata::RowProvenance::for_insert("jazz:unknown", 0)
             });
         let public = Row::new(
             ResultKey::from_occurrence(row.occurrence_id.clone()),
@@ -3412,7 +3602,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if jazz_types::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
@@ -3653,11 +3843,79 @@ impl JazzClient {
         self.subscribe_with_read_tier(query, ReadTier::Remote).await
     }
 
-    /// Subscribe using a product-level read tier.
+    /// Subscribe local first, waiting up to `first_load_remote_wait` for the
+    /// server's answer before the first delivery.
     ///
-    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
-    /// facade because it has no public explicit-disconnect state; host bindings
-    /// can lower it to local only after their caller explicitly disconnects.
+    /// While the server could answer (a link is live, or its first connection
+    /// attempt is still young), the core stream withholds its opening, empty
+    /// or not, until the server has answered, the link is lost, or
+    /// `first_load_remote_wait` elapses, whichever comes first. Offline, without a
+    /// server, or with a zero wait it opens on local data at once. Afterwards
+    /// it behaves exactly like [`ReadTier::LocalFirst`]: local writes show
+    /// immediately and remote changes as they arrive. An offset window is
+    /// read as the server's page while it waits.
+    pub async fn subscribe_local_first(
+        &self,
+        query: Query,
+        first_load_remote_wait: Duration,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opts(
+            query,
+            Self::core_read_opts_local_first(first_load_remote_wait),
+        )
+        .await
+    }
+
+    /// One-shot local-first query that waits up to `first_load_remote_wait` for the
+    /// server's answer.
+    ///
+    /// While the server could answer, returns the server's result (with this
+    /// client's pending writes) if it arrives in time, and otherwise the
+    /// local result, dropping the pending remote read. Offline, without a
+    /// server, with a zero wait, or inside a transaction it is a plain
+    /// [`ReadTier::LocalFirst`] query.
+    pub async fn query_local_first(
+        &self,
+        query: Query,
+        first_load_remote_wait: Duration,
+    ) -> Result<Vec<QueryResult>> {
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if first_load_remote_wait.is_zero() || in_transaction {
+            return self
+                .query_with_opts(
+                    query,
+                    Self::core_read_opts_for_read_tier(ReadTier::LocalFirst),
+                )
+                .await;
+        }
+        let backend = self.db.backend()?;
+        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        let remote_opts = local_opts.clone();
+        let remote_query = query.clone();
+        backend
+            .0
+            .read_local_first_within(
+                first_load_remote_wait,
+                || self.query_with_opts(query, local_opts),
+                || async {
+                    let rows = self
+                        .db
+                        .query_rows(remote_query.clone(), remote_opts, true, self.read_scope()?)
+                        .await?;
+                    self.db
+                        .query_decoder
+                        .core_rows_to_query_results(&remote_query, rows)
+                },
+            )
+            .await
+    }
+
+    /// Subscribe using a product-level read tier. For a local-first read
+    /// whose first load waits for the server, use
+    /// [`JazzClient::subscribe_local_first`].
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3681,7 +3939,8 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query with read tier.
+    /// One-shot query with read tier. For a local-first read that waits for
+    /// the server, use [`JazzClient::query_local_first`].
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
         self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
             .await
@@ -3705,11 +3964,11 @@ impl JazzClient {
                 .query_transaction_rows(query.clone(), opts, transaction_id, author)
                 .await?
         } else {
-            // A product `Remote` read lowers to the legacy Edge tier. Both
-            // Edge and Global are strict remote one-shots: they must own a
+            // A product `Remote` read lowers to Global. Strict remote
+            // one-shots must own a
             // fresh coverage lifetime and return only after the receiver's
             // local maintained graph has settled that exact coverage.
-            let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
+            let wait_for_coverage = opts.tier == ReadTier::Remote;
             self.db
                 .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
@@ -3717,6 +3976,109 @@ impl JazzClient {
         self.db
             .query_decoder
             .core_rows_to_query_results(&query, rows)
+    }
+
+    /// Read a byte range from a locally observed bytes or string cell.
+    ///
+    /// The connected database identity and ordinary read policy apply. Only
+    /// intersecting large-value chunks are read; this does not materialise the
+    /// whole value or qualify typed-query projection of large cells. Storage
+    /// and missing chunk retrieval may suspend, so hydrate audio outside a
+    /// device's playback callback.
+    ///
+    /// Explicit backend sessions (`for_session`) and transaction-scoped reads
+    /// are unsupported and return a query error rather than ignoring scope.
+    pub async fn read_value_range(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads in a transaction are not supported".into(),
+                ));
+            }
+            // ponytail: core range reads use the database identity; add a
+            // scoped core operation when backend audio sessions are needed.
+            if context.session().is_some() {
+                return Err(JazzError::Query(
+                    "byte-range reads with an explicit session are not supported".into(),
+                ));
+            }
+        }
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let bytes = StackSafeFuture::new(backend.0.read_value_range(
+            table,
+            CoreRowUuid(*object_id.uuid()),
+            column,
+            range,
+        ))
+        .await
+        .map_err(|error| JazzError::Query(error.to_string()))?;
+        self.db.inner.borrow().backend()?;
+        Ok(bytes)
+    }
+
+    /// Stream one bytes, text or JSON cell into a new row using a native reader.
+    ///
+    /// `values` supplies the other columns and must omit `column`. The core
+    /// import uses bounded buffering and publishes the row only after EOF and
+    /// scalar validation. The reader runs on a separate thread. Errors publish
+    /// no row; abandoned staged data follows ordinary staging cleanup.
+    ///
+    /// The database's enrolled identity, permission checks and write settlement
+    /// apply. Await the returned transaction with [`Self::wait_for_transaction`]
+    /// for the required durability tier. No complete imported value is returned.
+    /// Transaction, explicit session and attribution contexts are unsupported
+    /// and rejected before consuming the reader. Native-reader imports are not
+    /// available on WebAssembly.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+        reader: R,
+    ) -> Result<(ObjectId, TransactionId)>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        self.reject_updated_at_override("streaming inserts")?;
+        if let Some(context) = &self.write_context {
+            if context.transaction_id.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts in a transaction are not supported".into(),
+                ));
+            }
+            if context.session().is_some() || context.attribution.is_some() {
+                return Err(JazzError::Write(
+                    "streaming inserts with an explicit session or attribution are not supported"
+                        .into(),
+                ));
+            }
+        }
+        let cells = self.core_cells(table, values)?;
+        self.db.ensure_tick_driver_running()?;
+        let backend = self.db.backend()?;
+        let write = StackSafeFuture::new(
+            backend
+                .0
+                .insert_streaming_value(table, cells, column, reader),
+        )
+        .await
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = write.mergeable_tx_id();
+        let mut inner = self.db.inner.borrow_mut();
+        Self::check_core_write_not_rejected(inner.backend()?, tx_id)?;
+        inner.remember_write(tx_id);
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            core_batch_id(tx_id),
+        ))
     }
 
     /// Create a new row in a table.
@@ -3981,14 +4343,14 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_id::AppId;
     use crate::groove::storage::{Error as StorageError, StorageFactory, StorageFuture};
     use crate::ids::NodeUuid;
-    use crate::tools::AppId;
+    use crate::model::public_schema::Schema;
     use crate::tools::native_transport_connector::{
-        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportError,
-        NativeTransportFuture, NativeTransportTerminal, NativeTransportTerminalFuture,
+        ConnectedNativeTransport, NativeTransportError, NativeTransportFuture,
+        NativeTransportTerminal, NativeTransportTerminalFuture,
     };
-    use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use crate::wire::{TransportError, WireTransport};
     use serde_json::json;
@@ -4119,17 +4481,6 @@ mod tests {
                 }
             })
         }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(NativeTransportError::Terminal(
-                    "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                ))
-            })
-        }
     }
 
     fn controlled_terminal() -> (
@@ -4196,10 +4547,7 @@ mod tests {
     }
 
     fn tick_reconnect_error() -> CoreDbError {
-        CoreDbError {
-            code: CoreDbErrorCode::Protocol,
-            message: "websocket pump is closed".to_owned(),
-        }
+        CoreDbError::new(CoreDbErrorCode::Protocol, "websocket pump is closed")
     }
 
     fn make_native_context(name: &str) -> AppContext {
@@ -4244,6 +4592,8 @@ mod tests {
     struct DriverConnectorState {
         behavior: DriverTransportBehavior,
         block_reconnect: bool,
+        /// A server error frame the first connection receives once.
+        remote_error_frame: Mutex<Option<Vec<u8>>>,
         connect_calls: std::sync::atomic::AtomicUsize,
         send_attempted: tokio::sync::Notify,
         reconnect_started: tokio::sync::Notify,
@@ -4280,6 +4630,7 @@ mod tests {
                 state: Arc::new(DriverConnectorState {
                     behavior,
                     block_reconnect,
+                    remote_error_frame: Mutex::new(None),
                     connect_calls: std::sync::atomic::AtomicUsize::new(0),
                     send_attempted: tokio::sync::Notify::new(),
                     reconnect_started: tokio::sync::Notify::new(),
@@ -4294,6 +4645,24 @@ mod tests {
 
         fn closed_pump(block_reconnect: bool) -> Self {
             Self::new(DriverTransportBehavior::ClosedPump, block_reconnect)
+        }
+
+        /// An idle server whose first connection ends with `error`. The error
+        /// frame arrives without a peer-close terminal, so only the tick
+        /// driver's classification can decide whether the client reconnects.
+        fn remote_error_once(error: crate::wire::WireError) -> Self {
+            let connector = Self::idle();
+            *connector.state.remote_error_frame.lock().unwrap() = Some(
+                crate::wire::encode_frame(&crate::wire::WireFrame::Error(error))
+                    .expect("encode server error frame"),
+            );
+            connector
+        }
+
+        fn connect_count(&self) -> usize {
+            self.state
+                .connect_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -4312,7 +4681,7 @@ mod tests {
         }
 
         fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            None
+            self.state.remote_error_frame.lock().unwrap().take()
         }
     }
 
@@ -4355,19 +4724,6 @@ mod tests {
                 )
             })
         }
-
-        fn bootstrap_catalogue(
-            &self,
-            _request: NativeTransportRequest,
-        ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
-            Box::pin(async {
-                Err(
-                    crate::tools::native_transport_connector::NativeTransportError::Terminal(
-                        "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
-                    ),
-                )
-            })
-        }
     }
 
     fn make_online_context(
@@ -4385,6 +4741,32 @@ mod tests {
     // These internal lifecycle tests are necessary because a detached
     // spawn_local task and a late connection installation have no direct
     // public observation once the client has consumed its core facade.
+
+    // Scheduler deadlines belong to different peers and upload retries. An
+    // already armed long receive timeout must not suppress an earlier wake.
+    #[tokio::test(flavor = "current_thread")]
+    async fn earlier_client_deadline_replaces_pending_later_wake() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let scheduler = TickSchedulerImpl::default();
+                scheduler.wake_after(30_000);
+                scheduler.wake_after(5);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                // A host tick services every peer and rearms remaining deadlines.
+                scheduler.wake_after(10);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                scheduler.wake_after(30_000);
+                scheduler.cancel();
+                assert!(scheduler.state.delayed.lock().unwrap().is_none());
+            })
+            .await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_shutdown_aborts_owned_tick_driver() {
@@ -4423,6 +4805,110 @@ mod tests {
             })
             .await;
     }
+    async fn drive_remote_error_to_tick_driver(
+        error: crate::wire::WireError,
+        name: &str,
+    ) -> (JazzClient, DriverConnector) {
+        let connector = DriverConnector::remote_error_once(error);
+        let client = JazzClient::connect_with_native_transport(
+            make_online_context(
+                AppId::from_name(name),
+                TempDir::new().expect("tempdir").keep(),
+                declared_todo_schema(),
+            ),
+            Arc::new(connector.clone()),
+        )
+        .await
+        .expect("connect online client");
+        client
+            .insert(
+                "todos",
+                crate::row_input!("title" => "pending", "completed" => false),
+            )
+            .expect("stage a write before the server ends the link");
+        client
+            .db
+            .inner
+            .borrow()
+            .scheduler
+            .schedule_tick(TickUrgency::Immediate);
+        (client, connector)
+    }
+
+    async fn wait_until(mut predicate: impl FnMut() -> bool, failure: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !predicate() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{failure}"));
+    }
+
+    /// Given the server ends alice's link with a retry-later backpressure
+    /// error, when the tick driver sees it before any peer-close terminal,
+    /// then the client reconnects and stays usable instead of stopping.
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_later_server_error_reconnects_instead_of_stopping() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, connector) = drive_remote_error_to_tick_driver(
+                    crate::wire::WireError::new(
+                        crate::wire::WireErrorCode::Backpressure,
+                        crate::wire::WireRetry::Later,
+                        "wire frame queue backpressure",
+                    ),
+                    "retry-later-reconnects",
+                )
+                .await;
+
+                wait_until(
+                    || connector.connect_count() >= 2,
+                    "a retry-later server error must reconnect the upstream",
+                )
+                .await;
+                assert_eq!(client.db.inner.borrow().tick_driver_error, None);
+                client
+                    .insert(
+                        "todos",
+                        crate::row_input!("title" => "after", "completed" => false),
+                    )
+                    .expect("the client keeps accepting writes after reconnecting");
+
+                client.shutdown().await.expect("shutdown online client");
+            })
+            .await;
+    }
+
+    /// Given the server ends alice's link with an error that retrying cannot
+    /// fix, when the tick driver sees it, then the client stops instead of
+    /// reconnecting in a loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_retryable_server_error_stops_the_tick_driver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, connector) = drive_remote_error_to_tick_driver(
+                    crate::wire::WireError::new(
+                        crate::wire::WireErrorCode::AuthFailed,
+                        crate::wire::WireRetry::Later,
+                        "credential revoked",
+                    ),
+                    "non-retryable-stops",
+                )
+                .await;
+
+                wait_until(
+                    || client.db.inner.borrow().tick_driver_error.is_some(),
+                    "a non-retryable server error must stop the tick driver",
+                )
+                .await;
+                assert_eq!(connector.connect_count(), 1);
+
+                let _ = client.shutdown().await;
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_joins_an_idle_tick_driver() {
         tokio::task::LocalSet::new()
@@ -4584,46 +5070,16 @@ mod tests {
     #[test]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
-            ReadTier::LocalFirst.legacy_durability_tier(),
-            DurabilityTier::Local
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).tier,
+            ReadTier::LocalFirst
         );
         assert_eq!(
-            ReadTier::Remote.legacy_durability_tier(),
-            DurabilityTier::EdgeServer
-        );
-        assert_eq!(
-            ReadTier::RemoteIfPossible.legacy_durability_tier(),
-            DurabilityTier::EdgeServer,
-            "the native facade has no explicit offline boundary"
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
-            CoreLocalUpdates::Immediate
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
-            CoreLocalUpdates::Deferred
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
-            CoreLocalUpdates::Immediate
-        );
-        assert_eq!(
-            core_legacy_read_tier(DurabilityTier::Local),
-            CoreDurabilityTier::Local
-        );
-        assert_eq!(
-            core_legacy_read_tier(DurabilityTier::EdgeServer),
-            CoreDurabilityTier::Global,
-            "legacy EdgeServer reads retain the ordinary settled remote view"
+            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).tier,
+            ReadTier::Remote
         );
         assert_eq!(
             core_write_tier(DurabilityTier::Local),
             CoreDurabilityTier::Local
-        );
-        assert_eq!(
-            core_write_tier(DurabilityTier::EdgeServer),
-            CoreDurabilityTier::Edge
         );
         assert_eq!(
             core_write_tier(DurabilityTier::GlobalServer),
@@ -4743,33 +5199,33 @@ mod tests {
     #[test]
     fn client_session_claim_projection_matches_admission_and_preserves_nested_values() {
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(7),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::U64(7))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(-7),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::I64(-7))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(9_007_199_254_740_992_u64),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::U64(9_007_199_254_740_992))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!({ "role": "admin" }),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::Tuple(vec![CoreValue::Tuple(vec![
@@ -4782,7 +5238,7 @@ mod tests {
     #[test]
     fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
         let mut session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
-            .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
+            .with_auth_mode(crate::model::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
                 "user_id": "spoofed-user",
@@ -5188,6 +5644,52 @@ mod tests {
         );
     }
 
+    // This is an internal test because the suspended node operation it needs
+    // (the client's sync turn awaiting large-value chunks or cold storage) is
+    // timing-dependent through the public API; #3514 hit it only under load.
+    // Holding the owner makes that suspension deterministic. The assertion is
+    // public: `JazzClient::query` waits for the owner instead of panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_waits_for_a_suspended_node_operation() {
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
+            AppId::from_name("query-waits-for-suspended-owner"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        )))
+        .await
+        .expect("connect offline client");
+        client
+            .upsert(
+                "todos",
+                Uuid::from_u128(0x3514),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("held".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write local row");
+        let backend = client
+            .db
+            .inner
+            .borrow()
+            .backend_clone()
+            .expect("client is open");
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut owner = Box::pin(backend.0.hold_node_owner_for_test());
+        assert!(owner.as_mut().poll(&mut context).is_pending());
+
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::LocalFirst));
+        assert!(
+            query.as_mut().poll(&mut context).is_pending(),
+            "a query must wait while another operation owns the node"
+        );
+
+        drop(owner);
+        let rows = query.await.expect("query after the owner is released");
+        assert_eq!(rows.len(), 1);
+    }
+
     // This is an internal fault-injection test because a real fatal tick error
     // means corrupt local state; creating that through the public API would
     // require deliberately corrupting a storage backend. The assertion itself
@@ -5201,10 +5703,10 @@ mod tests {
         ))
         .await
         .expect("connect offline client");
-        let error = CoreDbError {
-            code: CoreDbErrorCode::Storage,
-            message: "simulated local storage corruption".to_string(),
-        };
+        let error = CoreDbError::new(
+            CoreDbErrorCode::Storage,
+            "simulated local storage corruption",
+        );
 
         assert_eq!(
             classify_tick_driver_error(&error),
@@ -6072,7 +6574,7 @@ mod tests {
         let unknown_error = client
             .wait_for_transaction_with_timeout_for_test(
                 unknown,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
@@ -6092,21 +6594,21 @@ mod tests {
         let timeout_error = client
             .wait_for_transaction_with_timeout_for_test(
                 transaction_id,
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 Duration::ZERO,
             )
             .await
-            .expect_err("offline transaction cannot reach edge");
+            .expect_err("offline transaction cannot reach the global server");
         assert!(
-            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach EdgeServer"),
+            matches!(timeout_error, JazzError::Sync(ref message) if message == "timed out waiting for transaction to reach GlobalServer"),
             "unexpected transaction timeout error: {timeout_error}"
         );
         assert_eq!(
             transaction_rejected_before_tier_message(
-                DurabilityTier::EdgeServer,
+                DurabilityTier::GlobalServer,
                 &CoreRejectionReason::AuthorizationDenied,
             ),
-            "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+            "transaction was rejected before reaching GlobalServer durability: authorization_denied",
         );
     }
 

@@ -3,6 +3,9 @@ import { app } from "./schema.js";
 
 // #region permissions-basic-react
 export default s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+
   // Everyone can read todos.
   policy.todos.allowRead.where({}),
   // New todos start as incomplete.

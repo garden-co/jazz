@@ -420,7 +420,6 @@ export function LensDiagram() {
 
   return (
     <Graph
-      eyebrow="Interactive Demo"
       description={
         <>
           Choose data from the left, then pick a schema version on the client device. The row is

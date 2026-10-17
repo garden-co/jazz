@@ -14,7 +14,7 @@ describe("shared example topology harness", () => {
     const delivered: Array<{ value: string; attempt: number; tick: number }> = [];
     const send = (value: string) =>
       scheduler.intercept(
-        { from: "browser", to: "edge", label: value },
+        { from: "browser", to: "core", label: value },
         value,
         (received, context) => void delivered.push({ value: received, ...context }),
       );
@@ -45,10 +45,10 @@ describe("shared example topology harness", () => {
     ]);
     await scheduler.advance();
     expect(delivered.some(({ value }) => value === "retry")).toBe(true);
-    scheduler.partition("browser", "edge");
+    scheduler.partition("browser", "core");
     await send("partitioned");
     expect(delivered.some(({ value }) => value === "partitioned")).toBe(false);
-    await scheduler.heal("browser", "edge");
+    await scheduler.heal("browser", "core");
     expect(delivered.map(({ value }) => value)).toContain("partitioned");
 
     const receipt = scheduler.receipt();
@@ -349,7 +349,7 @@ describe("shared example topology harness", () => {
     };
     const receipt = await runTopologyScenario({
       id: "harness.fixture.cross-topology-faults",
-      topology: ["core", "edge", "browser", "native", "fixture"],
+      topology: ["core", "browser", "native", "fixture"],
       seed,
       phaseTimeoutMs: 500,
       faultTimeoutMs: 500,

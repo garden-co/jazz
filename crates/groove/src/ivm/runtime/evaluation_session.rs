@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::ivm::graph::NodeId;
+use crate::records::Value;
 use crate::schema::DatabaseSchema;
 use crate::storage::{KeyValue, OwnedStorage, ScanRequest, StorageFuture};
 use crate::{chunks::ChunkLease, chunks::ChunkRequest, chunks::OwnedChunkProvider};
@@ -30,6 +31,7 @@ pub(super) enum StorageRequestKey {
         family: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsPrefix {
         table: String,
@@ -41,12 +43,23 @@ pub(super) enum StorageRequestKey {
         index: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsIntersection {
         table: String,
         index: String,
         prefix: Vec<u8>,
         intersections: Vec<(String, Vec<u8>)>,
+    },
+    IndexedRowsCandidateFilter {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        candidate_table: String,
+        candidate_index: String,
+        candidate_prefix: Vec<u8>,
+        source_column: String,
+        candidate_column: String,
     },
     IndexedRowsRange {
         table: String,
@@ -77,6 +90,19 @@ pub(super) enum EvaluationRequestOutput {
 #[derive(Debug)]
 pub(crate) struct LoadedChunk {
     bytes: LoadedChunkBytes,
+}
+
+impl LoadedChunk {
+    pub(crate) fn bytes(&self) -> &bytes::Bytes {
+        self.bytes.bytes()
+    }
+
+    pub(crate) fn verifies_object_hash(&self, expected: &[u8; 32]) -> bool {
+        match &self.bytes {
+            LoadedChunkBytes::Direct(_) => false,
+            LoadedChunkBytes::Leased(lease) => lease.verifies_object_hash(expected),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -162,6 +188,13 @@ impl EvaluationInputs {
         &mut self,
         request: ChunkRequest,
     ) -> Result<&bytes::Bytes, super::IvmRuntimeError> {
+        self.loaded_chunk(request).map(LoadedChunk::bytes)
+    }
+
+    pub(crate) fn loaded_chunk(
+        &mut self,
+        request: ChunkRequest,
+    ) -> Result<&LoadedChunk, super::IvmRuntimeError> {
         let key = EvaluationRequestKey::Chunk(request);
         if let Some(scope) = self.chunk_scope {
             self.chunk_owners
@@ -174,7 +207,7 @@ impl EvaluationInputs {
             return Err(super::IvmRuntimeError::EvaluationBlocked);
         }
         match self.loaded.get(&key).expect("loaded key checked") {
-            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk.bytes.bytes()),
+            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk),
             EvaluationRequestOutput::Storage(_) => Err(super::IvmRuntimeError::UnsupportedOperator),
         }
     }
@@ -206,6 +239,19 @@ impl EvaluationInputs {
 
     pub(super) fn take_missing(&mut self) -> BTreeSet<EvaluationRequestKey> {
         std::mem::take(&mut self.missing)
+    }
+
+    /// Move every loaded large-value chunk into `successor`, a session that
+    /// replaces this one (#3901). Chunks are immutable, so they stay valid
+    /// for any snapshot.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, output) in std::mem::take(&mut self.loaded) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.loaded.entry(key).or_insert(output);
+            } else {
+                self.loaded.insert(key, output);
+            }
+        }
     }
 }
 
@@ -272,233 +318,32 @@ impl<'a> EvaluationRequests<'a> {
                 chunks.is_some_and(OwnedChunkProvider::permits_eager_read_retry)
             }
         };
-        let future = match &key {
-            EvaluationRequestKey::Storage(StorageRequestKey::Get { family, key }) => {
-                let future = storage.get(family.clone(), key.clone());
-                Box::pin(async move {
-                    future
-                        .await
-                        .map(StorageRequestOutput::Value)
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                }) as PendingRequestFuture<'a>
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::ScanRange { family, start, end }) => {
-                let future = storage.scan(ScanRequest::range(
-                    family.clone(),
-                    start.clone(),
-                    end.clone(),
-                ));
-                Box::pin(async move {
-                    future
-                        .await
-                        .map(StorageRequestOutput::Rows)
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                }) as PendingRequestFuture<'a>
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::ScanPrefix { family, prefix }) => {
-                let future = storage.scan(ScanRequest::prefix(family.clone(), prefix.clone()));
-                Box::pin(async move {
-                    future
-                        .await
-                        .map(StorageRequestOutput::Rows)
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                }) as PendingRequestFuture<'a>
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::ScanPrefixLimit {
-                family,
-                prefix,
-                max_items,
-            }) => {
-                let future = storage.scan(
-                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items),
-                );
-                Box::pin(async move {
-                    future
-                        .await
-                        .map(StorageRequestOutput::Rows)
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                }) as PendingRequestFuture<'a>
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsPrefix {
-                table,
-                index,
-                prefix,
-            }) => {
-                let table_schema = schema
-                    .table(table)
-                    .expect("compiled indexed-row source table exists")
-                    .clone();
-                let index_schema = table_schema
-                    .indices
-                    .iter()
-                    .find(|candidate| candidate.name == *index)
-                    .expect("compiled indexed-row source index exists")
-                    .clone();
-                let index = index.clone();
-                let scan = storage.scan(ScanRequest::prefix("indices".to_owned(), prefix.clone()));
-                let storage = storage.clone();
-                Box::pin(async move {
-                    let entries = scan.await?;
-                    load_indexed_rows(storage, table_schema, index_schema, index, entries)
-                        .await
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                })
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsPrefixLimit {
-                table,
-                index,
-                prefix,
-                max_items,
-            }) => {
-                let table_schema = schema
-                    .table(table)
-                    .expect("compiled indexed-row source table exists")
-                    .clone();
-                let index_schema = table_schema
-                    .indices
-                    .iter()
-                    .find(|candidate| candidate.name == *index)
-                    .expect("compiled indexed-row source index exists")
-                    .clone();
-                let index = index.clone();
-                let scan = storage.scan(
-                    ScanRequest::prefix("indices".to_owned(), prefix.clone())
-                        .with_max_items(*max_items),
-                );
-                let storage = storage.clone();
-                Box::pin(async move {
-                    let entries = scan.await?;
-                    load_indexed_rows(storage, table_schema, index_schema, index, entries)
-                        .await
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                })
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsIntersection {
-                table,
-                index,
-                prefix,
-                intersections,
-            }) => {
-                let table_schema = schema
-                    .table(table)
-                    .expect("compiled intersected index source table exists")
-                    .clone();
-                let primary_index_schema = table_schema
-                    .indices
-                    .iter()
-                    .find(|candidate| candidate.name == *index)
-                    .expect("compiled intersected index source exists")
-                    .clone();
-                let index = index.clone();
-                let prefix = prefix.clone();
-                let intersections = intersections.clone();
-                let storage = storage.clone();
-                Box::pin(async move {
-                    let mut entries = storage
-                        .scan(ScanRequest::prefix("indices".to_owned(), prefix))
-                        .await?;
-                    let primary_keys = indexed_primary_keys(
-                        &table_schema,
-                        &index,
-                        &primary_index_schema,
-                        &entries,
-                    )?;
-                    let mut retained = primary_keys.iter().cloned().collect::<HashSet<_>>();
-                    for (other_index, other_prefix) in intersections {
-                        let other_schema = table_schema
-                            .indices
-                            .iter()
-                            .find(|candidate| candidate.name == other_index)
-                            .expect("compiled intersected index exists");
-                        let other_entries = storage
-                            .scan(ScanRequest::prefix("indices".to_owned(), other_prefix))
-                            .await?;
-                        let other_keys = indexed_primary_keys(
-                            &table_schema,
-                            &other_index,
-                            other_schema,
-                            &other_entries,
-                        )?
-                        .into_iter()
-                        .collect::<HashSet<_>>();
-                        retained.retain(|key| other_keys.contains(key));
-                    }
-                    entries = entries
-                        .into_iter()
-                        .zip(primary_keys)
-                        .filter_map(|(entry, key)| retained.contains(&key).then_some(entry))
-                        .collect();
-                    load_indexed_rows(storage, table_schema, primary_index_schema, index, entries)
-                        .await
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                })
-            }
-            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsRange {
-                table,
-                index,
-                start,
-                end,
-            }) => {
-                let table_schema = schema
-                    .table(table)
-                    .expect("compiled indexed-row source table exists")
-                    .clone();
-                let index_schema = table_schema
-                    .indices
-                    .iter()
-                    .find(|candidate| candidate.name == *index)
-                    .expect("compiled indexed-row source index exists")
-                    .clone();
-                let index = index.clone();
-                let scan = storage.scan(ScanRequest::range(
-                    "indices".to_owned(),
-                    start.clone(),
-                    end.clone(),
-                ));
-                let storage = storage.clone();
-                Box::pin(async move {
-                    let entries = scan.await?;
-                    load_indexed_rows(storage, table_schema, index_schema, index, entries)
-                        .await
-                        .map(EvaluationRequestOutput::Storage)
-                        .map_err(Into::into)
-                })
-            }
-            EvaluationRequestKey::Chunk(request) => {
-                let request = request.clone();
-                match chunks {
-                    Some(chunks) => {
-                        let future = chunks.get_tracked(request.clone());
-                        Box::pin(async move {
-                            match future.await {
-                                Ok(bytes) => Ok(EvaluationRequestOutput::Chunk(LoadedChunk {
-                                    bytes: LoadedChunkBytes::Leased(bytes),
-                                })),
-                                Err(error) => {
-                                    let (error, publication_metadata_durability) =
-                                        error.into_parts();
-                                    Err(EvaluationRequestFailure {
-                                        error: super::IvmRuntimeError::Chunk(error),
-                                        publication_metadata_durability,
-                                    })
-                                }
+        let future: PendingRequestFuture<'a> = match &key {
+            EvaluationRequestKey::Storage(request) => storage_request(request, storage, schema),
+            EvaluationRequestKey::Chunk(request) => match chunks {
+                Some(chunks) => {
+                    let future = chunks.get_tracked(request.clone());
+                    Box::pin(async move {
+                        match future.await {
+                            Ok(bytes) => Ok(EvaluationRequestOutput::Chunk(LoadedChunk {
+                                bytes: LoadedChunkBytes::Leased(bytes),
+                            })),
+                            Err(error) => {
+                                let (error, publication_metadata_durability) = error.into_parts();
+                                Err(EvaluationRequestFailure {
+                                    error: super::IvmRuntimeError::Chunk(error),
+                                    publication_metadata_durability,
+                                })
                             }
-                        }) as PendingRequestFuture<'a>
-                    }
-                    None => Box::pin(async {
-                        Err(EvaluationRequestFailure::from(
-                            super::IvmRuntimeError::Chunk(crate::chunks::ChunkError::Unavailable),
-                        ))
-                    }) as PendingRequestFuture<'a>,
+                        }
+                    })
                 }
-            }
+                None => Box::pin(async {
+                    Err(EvaluationRequestFailure::from(
+                        super::IvmRuntimeError::Chunk(crate::chunks::ChunkError::Unavailable),
+                    ))
+                }),
+            },
         };
         self.pending.insert(
             key,
@@ -513,18 +358,7 @@ impl<'a> EvaluationRequests<'a> {
     /// Advance every in-flight request once so one blocked source cannot hide
     /// a different request that is already resident.
     pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> usize {
-        let mut completed = Vec::new();
-        for (key, request) in &mut self.pending {
-            if let Poll::Ready(result) = Pin::new(&mut request.future).poll(cx) {
-                completed.push((key.clone(), result));
-            }
-        }
-        let count = completed.len();
-        for (key, result) in completed {
-            self.pending.remove(&key);
-            self.ready.insert(key, result);
-        }
-        count
+        self.poll_where(cx, false)
     }
 
     /// Re-poll only requests whose storage backend explicitly guarantees that
@@ -532,13 +366,17 @@ impl<'a> EvaluationRequests<'a> {
     /// remains pending for its owner rather than being mistaken for resident
     /// work.
     pub(super) fn poll_eager_retry(&mut self, cx: &mut Context<'_>) -> usize {
+        self.poll_where(cx, true)
+    }
+
+    fn poll_where(&mut self, cx: &mut Context<'_>, only_eager_retry_safe: bool) -> usize {
         let mut completed = Vec::new();
         for (key, request) in &mut self.pending {
-            if request.eager_retry_safe {
-                let result = Pin::new(&mut request.future).poll(cx);
-                if let Poll::Ready(result) = result {
-                    completed.push((key.clone(), result));
-                }
+            if only_eager_retry_safe && !request.eager_retry_safe {
+                continue;
+            }
+            if let Poll::Ready(result) = Pin::new(&mut request.future).poll(cx) {
+                completed.push((key.clone(), result));
             }
         }
         let count = completed.len();
@@ -559,6 +397,35 @@ impl<'a> EvaluationRequests<'a> {
 
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Move every large-value chunk fetch, in flight or finished, into
+    /// `successor`, a session that replaces this one (#3901). The in-flight
+    /// future keeps its demand with the chunk provider, so the replacement
+    /// neither loses nor repeats the fetch: when it reaches the same chunk,
+    /// [`Self::request`] finds the future already registered.
+    pub(super) fn hand_off_chunks(&mut self, successor: &mut Self) {
+        for (key, request) in std::mem::take(&mut self.pending) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.pending.entry(key).or_insert(request);
+            } else {
+                self.pending.insert(key, request);
+            }
+        }
+        for (key, result) in std::mem::take(&mut self.ready) {
+            if matches!(key, EvaluationRequestKey::Chunk(_)) {
+                successor.ready.entry(key).or_insert(result);
+            } else {
+                self.ready.insert(key, result);
+            }
+        }
+    }
+
+    /// Whether any in-flight request is a large-value chunk fetch.
+    pub(super) fn has_pending_chunk(&self) -> bool {
+        self.pending
+            .keys()
+            .any(|key| matches!(key, EvaluationRequestKey::Chunk(_)))
     }
 
     pub(super) fn drain_ready(
@@ -582,6 +449,248 @@ impl<'a> EvaluationRequests<'a> {
         self.pending.len()
     }
 }
+
+/// Every storage request resolves to a `StorageRequestOutput`; only the work
+/// that produces it differs per request kind.
+fn storage_future<'a>(
+    output: impl Future<Output = Result<StorageRequestOutput, super::IvmRuntimeError>> + 'a,
+) -> PendingRequestFuture<'a> {
+    Box::pin(async move {
+        output
+            .await
+            .map(EvaluationRequestOutput::Storage)
+            .map_err(Into::into)
+    })
+}
+
+fn indexed_source(
+    schema: &DatabaseSchema,
+    table: &str,
+    index: &str,
+) -> (crate::schema::TableSchema, crate::schema::IndexSchema) {
+    let table_schema = schema
+        .table(table)
+        .expect("compiled indexed-row source table exists")
+        .clone();
+    let index_schema = table_schema
+        .indices
+        .iter()
+        .find(|candidate| candidate.name == index)
+        .expect("compiled indexed-row source index exists")
+        .clone();
+    (table_schema, index_schema)
+}
+
+fn index_prefix(prefix: &[u8]) -> ScanRequest {
+    ScanRequest::prefix("indices".to_owned(), prefix.to_vec())
+}
+
+fn limited(request: ScanRequest, max_items: usize, reversed: bool) -> ScanRequest {
+    let request = request.with_max_items(max_items);
+    if reversed {
+        request.reversed()
+    } else {
+        request
+    }
+}
+
+/// Hydrate the rows behind one ordered index scan.
+fn indexed_rows<'a>(
+    storage: &OwnedStorage<'a>,
+    schema: &DatabaseSchema,
+    table: &str,
+    index: &str,
+    request: ScanRequest,
+) -> PendingRequestFuture<'a> {
+    let (table_schema, index_schema) = indexed_source(schema, table, index);
+    let index = index.to_owned();
+    let scan = storage.scan(request);
+    let storage = storage.clone();
+    storage_future(async move {
+        let entries = scan.await?;
+        load_indexed_rows(storage, table_schema, index_schema, index, entries).await
+    })
+}
+
+fn storage_request<'a>(
+    key: &StorageRequestKey,
+    storage: &OwnedStorage<'a>,
+    schema: &DatabaseSchema,
+) -> PendingRequestFuture<'a> {
+    let rows = |request| {
+        let scan = storage.scan(request);
+        storage_future(async move { Ok(StorageRequestOutput::Rows(scan.await?)) })
+    };
+    match key {
+        StorageRequestKey::Get { family, key } => {
+            let get = storage.get(family.clone(), key.clone());
+            storage_future(async move { Ok(StorageRequestOutput::Value(get.await?)) })
+        }
+        StorageRequestKey::ScanRange { family, start, end } => rows(ScanRequest::range(
+            family.clone(),
+            start.clone(),
+            end.clone(),
+        )),
+        StorageRequestKey::ScanPrefix { family, prefix } => {
+            rows(ScanRequest::prefix(family.clone(), prefix.clone()))
+        }
+        StorageRequestKey::ScanPrefixLimit {
+            family,
+            prefix,
+            max_items,
+            reversed,
+        } => rows(limited(
+            ScanRequest::prefix(family.clone(), prefix.clone()),
+            *max_items,
+            *reversed,
+        )),
+        StorageRequestKey::IndexedRowsPrefix {
+            table,
+            index,
+            prefix,
+        } => indexed_rows(storage, schema, table, index, index_prefix(prefix)),
+        StorageRequestKey::IndexedRowsPrefixLimit {
+            table,
+            index,
+            prefix,
+            max_items,
+            reversed,
+        } => indexed_rows(
+            storage,
+            schema,
+            table,
+            index,
+            limited(index_prefix(prefix), *max_items, *reversed),
+        ),
+        StorageRequestKey::IndexedRowsRange {
+            table,
+            index,
+            start,
+            end,
+        } => indexed_rows(
+            storage,
+            schema,
+            table,
+            index,
+            ScanRequest::range("indices".to_owned(), start.clone(), end.clone()),
+        ),
+        StorageRequestKey::IndexedRowsIntersection {
+            table,
+            index,
+            prefix,
+            intersections,
+        } => {
+            let (table_schema, primary_index_schema) = indexed_source(schema, table, index);
+            let index = index.clone();
+            let prefix = prefix.clone();
+            let intersections = intersections.clone();
+            let storage = storage.clone();
+            storage_future(async move {
+                let mut entries = storage.scan(index_prefix(&prefix)).await?;
+                let primary_keys =
+                    indexed_primary_keys(&table_schema, &index, &primary_index_schema, &entries)?;
+                let mut retained = primary_keys.iter().cloned().collect::<HashSet<_>>();
+                for (other_index, other_prefix) in intersections {
+                    let other_schema = table_schema
+                        .indices
+                        .iter()
+                        .find(|candidate| candidate.name == other_index)
+                        .expect("compiled intersected index exists");
+                    let other_entries = storage.scan(index_prefix(&other_prefix)).await?;
+                    let other_keys = indexed_primary_keys(
+                        &table_schema,
+                        &other_index,
+                        other_schema,
+                        &other_entries,
+                    )?
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                    retained.retain(|key| other_keys.contains(key));
+                }
+                entries = entries
+                    .into_iter()
+                    .zip(primary_keys)
+                    .filter_map(|(entry, key)| retained.contains(&key).then_some(entry))
+                    .collect();
+                load_indexed_rows(storage, table_schema, primary_index_schema, index, entries).await
+            })
+        }
+        StorageRequestKey::IndexedRowsCandidateFilter {
+            table,
+            index,
+            prefix,
+            candidate_table,
+            candidate_index,
+            candidate_prefix,
+            source_column,
+            candidate_column,
+        } => {
+            let (table_schema, index_schema) = indexed_source(schema, table, index);
+            let (candidate_schema, candidate_index_schema) =
+                indexed_source(schema, candidate_table, candidate_index);
+            let index = index.clone();
+            let prefix = prefix.clone();
+            let candidate_index = candidate_index.clone();
+            let candidate_prefix = candidate_prefix.clone();
+            let source_column = source_column.clone();
+            let candidate_column = candidate_column.clone();
+            let storage = storage.clone();
+            storage_future(async move {
+                let entries = storage.scan(index_prefix(&prefix)).await?;
+                // An already-small source is cheaper to hydrate directly.
+                // Cap the candidate probe so a broad candidate prefix
+                // cannot scan thousands of keys to filter a small source.
+                // Both fallbacks hydrate the complete, unfiltered source.
+                if entries.len() < CANDIDATE_FILTER_MIN_SOURCE_ENTRIES {
+                    return load_indexed_rows(storage, table_schema, index_schema, index, entries)
+                        .await;
+                }
+                let candidate_scan_limit = entries.len().div_ceil(2);
+                let candidates = storage
+                    .scan(index_prefix(&candidate_prefix).with_max_items(candidate_scan_limit))
+                    .await?;
+                if candidates.len() == candidate_scan_limit {
+                    return load_indexed_rows(storage, table_schema, index_schema, index, entries)
+                        .await;
+                }
+                let candidate_uuids = indexed_uuid_values(
+                    &candidate_schema,
+                    &candidate_index,
+                    &candidate_index_schema,
+                    &candidates,
+                    &candidate_column,
+                )?
+                .into_iter()
+                .flatten()
+                .collect::<HashSet<_>>();
+                if candidate_uuids.is_empty() {
+                    return Ok(StorageRequestOutput::Rows(Vec::new()));
+                }
+                let source_uuids = indexed_uuid_values(
+                    &table_schema,
+                    &index,
+                    &index_schema,
+                    &entries,
+                    &source_column,
+                )?;
+                let entries = entries
+                    .into_iter()
+                    .zip(source_uuids)
+                    .filter_map(|(entry, row_uuid)| {
+                        row_uuid
+                            .filter(|uuid| candidate_uuids.contains(uuid))
+                            .map(|_| entry)
+                    })
+                    .collect();
+                load_indexed_rows(storage, table_schema, index_schema, index, entries).await
+            })
+        }
+    }
+}
+
+/// Below this many source index entries, a candidate-filtered source hydrates
+/// its rows directly instead of scanning the candidate index first.
+const CANDIDATE_FILTER_MIN_SOURCE_ENTRIES: usize = 512;
 
 async fn load_indexed_rows(
     storage: OwnedStorage<'_>,
@@ -632,25 +741,54 @@ async fn load_indexed_rows(
     Ok(StorageRequestOutput::Rows(rows))
 }
 
+fn indexed_uuid_values(
+    table: &crate::schema::TableSchema,
+    index_name: &str,
+    index_schema: &crate::schema::IndexSchema,
+    entries: &[KeyValue],
+    column: &str,
+) -> Result<Vec<Option<uuid::Uuid>>, super::IvmRuntimeError> {
+    entries
+        .iter()
+        .map(|(storage_key, stored_value)| {
+            let value = crate::db::persisted_index_column_value(
+                table,
+                index_name,
+                index_schema,
+                storage_key,
+                stored_value,
+                column,
+            )
+            .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
+            let mut value = &value;
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            match value {
+                Value::Uuid(uuid) => Ok(Some(*uuid)),
+                Value::Nullable(None) => Ok(None),
+                _ => Err(super::IvmRuntimeError::InvalidPersistedIndex(
+                    index_name.to_owned(),
+                )),
+            }
+        })
+        .collect()
+}
+
 fn indexed_primary_keys(
     table: &crate::schema::TableSchema,
     index_name: &str,
     index_schema: &crate::schema::IndexSchema,
     entries: &[KeyValue],
 ) -> Result<Vec<Vec<u8>>, super::IvmRuntimeError> {
-    let index_descriptor = crate::db::index_record_descriptor();
     let mut primary_keys = Vec::with_capacity(entries.len());
-    for (storage_key, persisted_record) in entries {
-        let index_record = index_descriptor.bind(persisted_record);
-        let stored_value = index_record
-            .get("value")
-            .map_err(super::IvmRuntimeError::RecordEncoding)?;
+    for (storage_key, stored_value) in entries {
         let primary_key = crate::db::persisted_index_primary_key(
             table,
             index_name,
             index_schema,
             storage_key,
-            &stored_value,
+            stored_value,
         )
         .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
         primary_keys.push(primary_key);

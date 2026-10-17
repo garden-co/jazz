@@ -4,8 +4,6 @@ description: Resolve references with include(), pick columns with select(), insp
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 ## Includes
 
 Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references.
@@ -22,10 +20,15 @@ Including a relation adds the resolved object alongside the foreign-key column&h
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
 </include>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -43,10 +46,15 @@ Declare reverse relations explicitly on the target table. For example, if `todos
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-reverse-relation-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-reverse-relation-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -70,10 +78,15 @@ data must be returned.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -140,10 +153,15 @@ readable child row matches.
 Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
 a source row if one of those required targets is unavailable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-require-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-require-includes-effect
     </include>
   </Tab>
   <Tab value="Rust">

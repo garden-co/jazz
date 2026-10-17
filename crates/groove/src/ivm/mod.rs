@@ -7,6 +7,15 @@
 //! row encoding or durable storage APIs; those live in [`crate::records`] and
 //! [`crate::storage`].
 
+mod activation;
+mod execution_layout;
+pub(crate) mod routes;
+mod template;
+pub use template::{
+    TemplateBindingError, TemplateGraphInput, TemplateScalarArgument, TypedGraphTemplate,
+    TypedGraphTemplateCache, bind_template_arguments, bind_template_graphs, bind_template_program,
+    compile_template_graphs, match_template_sources, split_template_sources,
+};
 pub mod graph;
 pub mod op_types;
 pub mod planner;

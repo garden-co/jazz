@@ -105,7 +105,11 @@ fn server_command_report(command: &mut Command) -> String {
 }
 
 fn jazz_tools_command() -> Command {
-    let mut command = Command::new(cargo_binary("jazz-tools"));
+    jazz_tools_command_at(cargo_binary("jazz-tools"))
+}
+
+fn jazz_tools_command_at(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
     command
         .env_remove("JAZZ_SERVER_PORT")
         .env_remove("JAZZ_SERVER_DATA_DIR")
@@ -138,7 +142,26 @@ fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
 
 #[cfg(unix)]
 fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> (Child, u16) {
-    let mut child = jazz_tools_command()
+    start_jazz_tools_server_with_env(data_dir, bound_port_file, &[])
+}
+
+#[cfg(unix)]
+fn start_jazz_tools_server_with_env(
+    data_dir: &Path,
+    bound_port_file: &Path,
+    env: &[(&str, &str)],
+) -> (Child, u16) {
+    let mut command = jazz_tools_command();
+    command.envs(env.iter().copied());
+    start_jazz_tools_server_with(command, data_dir, bound_port_file)
+}
+
+fn start_jazz_tools_server_with(
+    mut command: Command,
+    data_dir: &Path,
+    bound_port_file: &Path,
+) -> (Child, u16) {
+    let mut child = command
         .args([
             "server",
             "00000000-0000-0000-0000-000000000001",
@@ -189,14 +212,15 @@ fn parse_bound_port_record(contents: &str) -> Option<u16> {
 
 #[cfg(unix)]
 fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
-    let body = serde_json::to_string(&json!({
-        "schema": empty_schema().public_schema(),
-    }))
+    let body = serde_json::to_string(&jazz_testkit::schema_deployment(
+        empty_schema().public_schema(),
+        [],
+    ))
     .expect("serialize empty schema");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
     write!(
         stream,
-        "POST /apps/00000000-0000-0000-0000-000000000001/admin/schemas HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /apps/00000000-0000-0000-0000-000000000001/admin/deploy HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
@@ -206,7 +230,7 @@ fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
         .read_to_string(&mut response)
         .expect("read schema publish response");
     assert!(
-        response.starts_with("HTTP/1.1 201"),
+        response.starts_with("HTTP/1.1 200"),
         "schema publication failed: {response}"
     );
     assert!(
@@ -310,15 +334,36 @@ struct QueuedWireTransport {
 struct WireQueues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+    delivery_credits: u64,
+    delivery_frames: u64,
 }
 
 impl QueuedWireTransport {
     fn drain_outbound(&self) -> Vec<Vec<u8>> {
-        self.queues.borrow_mut().outbound.drain(..).collect()
+        let mut queues = self.queues.borrow_mut();
+        let frames = queues.outbound.drain(..).collect::<Vec<_>>();
+        for frame in &frames {
+            if let Ok(jazz::wire::WireFrame::ChannelCredit(grant)) = jazz::wire::decode_frame(frame)
+            {
+                if grant.class == jazz::wire::channels::ChannelClass::Delivery
+                    && grant.kind == jazz::wire::WireCreditKind::Frames
+                {
+                    queues.delivery_credits += grant.consumed_bytes;
+                }
+            }
+        }
+        frames
     }
 
     fn push_inbound(&self, frame: Vec<u8>) {
-        self.queues.borrow_mut().inbound.push_back(frame);
+        let mut queues = self.queues.borrow_mut();
+        if let Ok(jazz::wire::WireFrame::Channel(envelope)) = jazz::wire::decode_frame(&frame) {
+            if envelope.extent.class == jazz::wire::channels::ChannelClass::Delivery {
+                queues.delivery_frames +=
+                    jazz::wire::channel_credit::channel_frame_credit_cost(frame.len()) as u64;
+            }
+        }
+        queues.inbound.push_back(frame);
     }
 }
 
@@ -334,7 +379,7 @@ impl WireTransport for QueuedWireTransport {
 }
 
 struct ConnectedClient {
-    db: Db<MemoryStorage>,
+    db: Db,
     wire: QueuedWireTransport,
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
 }
@@ -364,7 +409,7 @@ fn open_connected_client(
 
 fn pump_websocket(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) -> bool {
     let mut saw_server_frames = false;
@@ -391,7 +436,7 @@ fn pump_websocket(
 
 fn pump_websocket_once(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) -> bool {
     block_on(db.tick()).expect("drive client db");
@@ -416,7 +461,7 @@ fn pump_websocket_once(
 }
 fn pump_websocket_once_allow_close(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    db: &Db<MemoryStorage>,
+    db: &Db,
     wire: &QueuedWireTransport,
 ) {
     block_on(db.tick()).expect("drive client db");
@@ -449,8 +494,9 @@ struct BackpressureGateState {
     large_frame_started: bool,
     large_frame_payload_bytes: Option<u64>,
     large_frame_count: usize,
-    large_frame_total_payload_bytes: u64,
+    response_payload_bytes: u64,
     released: bool,
+    stopped: bool,
 }
 
 impl BackpressureGate {
@@ -466,7 +512,7 @@ impl BackpressureGate {
         state.large_frame_started = false;
         state.large_frame_payload_bytes = None;
         state.large_frame_count = 0;
-        state.large_frame_total_payload_bytes = 0;
+        state.response_payload_bytes = 0;
     }
 
     fn set_receive_window(&self, bytes: usize) {
@@ -502,13 +548,21 @@ impl BackpressureGate {
             .expect("receive window became unavailable")
     }
 
+    fn record_response_payload(&self, payload_bytes: u64) {
+        let mut state = self.lock_state();
+        if state.armed {
+            // Channel extents and their final tails can be below the gate's
+            // large-frame threshold, but all binary bytes consume TCP budget.
+            state.response_payload_bytes += payload_bytes;
+        }
+    }
+
     fn record_large_frame(&self, payload_bytes: u64) -> bool {
         let mut state = self.lock_state();
         if !state.armed {
             return false;
         }
         state.large_frame_count += 1;
-        state.large_frame_total_payload_bytes += payload_bytes;
         let first = !state.large_frame_started;
         if first {
             state.large_frame_started = true;
@@ -560,10 +614,7 @@ impl BackpressureGate {
                 "server response did not produce enough large WebSocket batches"
             );
         }
-        (
-            state.large_frame_count,
-            state.large_frame_total_payload_bytes,
-        )
+        (state.large_frame_count, state.response_payload_bytes)
     }
 
     fn wait_until_released(&self) {
@@ -576,8 +627,15 @@ impl BackpressureGate {
         }
     }
 
-    fn is_released(&self) -> bool {
-        self.lock_state().released
+    fn is_stopped(&self) -> bool {
+        self.lock_state().stopped
+    }
+
+    fn stop(&self) {
+        let mut state = self.lock_state();
+        state.released = true;
+        state.stopped = true;
+        self.changed.notify_all();
     }
 
     fn release(&self) {
@@ -661,7 +719,7 @@ impl BackpressureProxy {
     }
 
     fn shutdown(mut self) {
-        self.release();
+        self.gate.stop();
         self.thread
             .take()
             .expect("backpressure proxy thread")
@@ -765,6 +823,8 @@ fn connect_upstream_with_receive_window(addr: SocketAddr) -> (TcpStream, usize) 
     );
 
     let sockaddr = libc::sockaddr_in {
+        #[cfg(target_vendor = "apple")]
+        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: addr.port().to_be(),
         sin_addr: libc::in_addr {
@@ -870,6 +930,9 @@ fn relay_server_to_client(
                 .expect("forward proxy WebSocket header");
         }
 
+        if header[0] & 0x0f == 2 {
+            gate.record_response_payload(payload_len);
+        }
         if payload_len >= LARGE_FRAME_BYTES && gate.record_large_frame(payload_len) {
             gate.wait_until_released();
         }
@@ -907,7 +970,11 @@ fn read_proxy_byte(upstream: &mut TcpStream, gate: &BackpressureGate) -> Option<
                 if matches!(
                     error.kind(),
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) && !gate.is_released() => {}
+                ) && !gate.is_stopped() =>
+            {
+                // Releasing A permits a real credit-driven stream to resume.
+                // An inter-frame pause is not EOF: only shutdown stops polling.
+            }
             Err(_) => return None,
         }
     }
@@ -1119,7 +1186,8 @@ fn help_lists_dev_server_commands() {
             .iter()
             .any(|line| line.contains("JAZZ_ALLOW_LOCAL_FIRST_AUTH"))
     );
-    assert!(lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_UPSTREAM_URL")));
+    assert!(!lines.iter().any(|line| line.contains("--upstream-url")));
 }
 
 #[test]
@@ -1254,6 +1322,110 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
 #[test]
 fn jazz_tools_server_sigint_exits_cleanly_and_releases_storage() {
     run_signal_lifecycle(libc::SIGINT, "SIGINT");
+}
+
+/// Alice, the operator, scrapes the heap profile of a running Linux
+/// `jazz-tools` server with the admin secret and gets a gzipped pprof that
+/// names the server's own functions, so memory growth can be traced to code.
+/// Mallory, without the secret, is refused.
+///
+/// ```text
+/// mallory ──GET /debug/pprof/heap (no secret)──► 401
+/// alice   ──GET /debug/pprof/heap (admin)──────► gzipped pprof naming jazz_server::*
+/// ```
+#[cfg(heap_profiling)]
+#[test]
+fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let port_file = temp_dir.path().join("port");
+    // Turn sampling on at about every allocation so the profile
+    // deterministically contains the server's startup allocations.
+    // Started as `./jazz-tools`, the way operators often run it: the
+    // profile must still find the executable's symbols.
+    let binary = cargo_binary("jazz-tools");
+    let mut command = jazz_tools_command_at("./jazz-tools");
+    command
+        .current_dir(binary.parent().expect("binary has a directory"))
+        .env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "1");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
+
+    let (status, _) = http_get(port, "/debug/pprof/heap", None);
+    assert_eq!(status, 401);
+
+    let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let mut profile = Vec::new();
+    flate2::read::GzDecoder::new(body.as_slice())
+        .read_to_end(&mut profile)
+        .expect("heap profile is gzipped");
+    let profile = String::from_utf8_lossy(&profile);
+    assert!(
+        profile.contains("jazz_server"),
+        "heap profile should be symbolized with the server's own functions"
+    );
+
+    // SAFETY: `server.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut server, Duration::from_secs(10));
+}
+
+/// With sampling turned off (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES=0`) alice, the
+/// admin, gets an explicit "turned off" answer instead of an empty profile.
+#[cfg(heap_profiling)]
+#[test]
+fn jazz_tools_server_with_heap_sampling_off_says_so() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let port_file = temp_dir.path().join("port");
+    let mut command = jazz_tools_command_at(cargo_binary("jazz-tools"));
+    command.env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "0");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
+
+    let (status, body) = http_get(port, "/debug/pprof/heap", Some("sigterm-test-secret"));
+    assert_eq!(status, 404, "{}", String::from_utf8_lossy(&body));
+    assert!(
+        String::from_utf8_lossy(&body).contains("JAZZ_HEAP_PROFILE_SAMPLE_BYTES"),
+        "the answer says how to turn sampling on"
+    );
+
+    // SAFETY: `server.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(server.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut server, Duration::from_secs(10));
+}
+
+#[cfg(heap_profiling)]
+fn http_get(port: u16, path: &str, admin_secret: Option<&str>) -> (u16, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+    let secret_header = admin_secret
+        .map(|secret| format!("X-Jazz-Admin-Secret: {secret}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{secret_header}Connection: close\r\n\r\n"
+    )
+    .expect("send request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("response has a header terminator");
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    assert!(
+        !head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "expected a sized response: {head}"
+    );
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .expect("response has a status code");
+    (status, response[header_end + 4..].to_vec())
 }
 
 /// Bound-port readiness accepts only one complete newline-terminated numeric record.
@@ -1784,7 +1956,7 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     let mut subscription = block_on(reader.db.subscribe(
         &prepared,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -1981,7 +2153,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         payload
     };
 
-    let schema = structured_schema();
+    use jazz::tools::test_support::AllowAll;
+    let schema = structured_schema().allow_all();
     let server = RunningServer::start_schema(&schema);
     let proxy = BackpressureProxy::start(&server.ws_url);
 
@@ -2080,7 +2253,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let mut stalled_data_subscription = block_on(stalled.db.subscribe(
         &data_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2092,7 +2265,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let _auxiliary_subscription = block_on(stalled.db.subscribe(
         &auxiliary_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2154,6 +2327,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     // is withholding its payload. This is the concrete bounded-backpressure
     // barrier: the pre-connect receive window is known, so no fixed sleep
     // decides when B is introduced.
+    let delivery_credits_before_release = stalled.wire.queues.borrow().delivery_credits;
     let gated_payload_bytes = proxy.wait_for_large_frame(Duration::from_secs(15));
     assert!(
         gated_payload_bytes > receive_window_bytes as u64,
@@ -2175,7 +2349,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let mut independent_subscription = block_on(independent.db.subscribe(
         &control_query,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..Default::default()
         },
     ))
@@ -2194,6 +2368,11 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     );
     drop(_auxiliary_subscription);
 
+    assert_eq!(
+        stalled.wire.queues.borrow().delivery_credits,
+        delivery_credits_before_release,
+        "A must withhold delivery credits while B settles"
+    );
     proxy.release();
     // Release A only after B has completed. The gate then forwards the held
     // frame so the strict FIFO assertion can consume it.
@@ -2244,6 +2423,14 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     assert!(
         response_batch_count >= BACKPRESSURE_MIN_RESPONSE_BATCHES,
         "A's response must span multiple oversized WebSocket batches, got {response_batch_count}"
+    );
+    assert!(
+        stalled.wire.queues.borrow().delivery_credits > delivery_credits_before_release,
+        "A must return real delivery credits to resume the withheld response"
+    );
+    assert!(
+        stalled.wire.queues.borrow().delivery_frames > gated_payload_bytes,
+        "A must consume additional delivery extents after the gated frame"
     );
     assert!(
         response_payload_bytes > tcp_send_buffer_ceiling_bytes,
@@ -2408,7 +2595,7 @@ fn bug_306_rejects_privileged_secret_aliases_with_actionable_replacements() {
 }
 
 #[test]
-fn dry_run_rejects_upstream_url_for_local_server_mode() {
+fn dry_run_rejects_removed_upstream_url() {
     let output = jazz_server_command()
         .args(["dry-run", "--upstream-url", "wss://example.invalid/sync"])
         .output()
@@ -2418,8 +2605,9 @@ fn dry_run_rejects_upstream_url_for_local_server_mode() {
     assert!(output.stdout.is_empty());
 
     let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
-    assert!(stderr.contains("error=unsupported_upstream_url=wss://example.invalid/sync"));
-    assert!(stderr.contains("local-only"));
+    assert!(stderr.contains("error=unsupported_upstream_url:"));
+    assert!(stderr.contains("connect clients directly to Core"));
+    assert!(!stderr.contains("wss://example.invalid/sync"));
 }
 
 #[test]

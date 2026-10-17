@@ -18,6 +18,7 @@
     "recipes/data-patterns",
     "recipes/auth",
     "recipes/testing",
+    "recipes/effect",
     "---Reference---",
     "reference",
     "faq"

@@ -23,7 +23,11 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const userId = session?.user.account ?? null;
   const myProfile = useMyProfile();
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
-    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    () => ({ tier: db.getConfig().serverUrl ? "global" : "local" }),
+    [db],
+  );
+  const sharedReadOptions = useMemo(
+    () => ({ tier: db.getConfig().serverUrl ? ("remote" as const) : ("local-first" as const) }),
     [db],
   );
 
@@ -32,7 +36,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // Wait for the authority-tier snapshot before treating an empty result as an
   // access denial. A local empty snapshot can merely mean the chat has not
   // synced to this client yet.
-  const chatRowsResult = useAll(app.chats.where({ id: chatId }), sharedWriteOptions);
+  const chatRowsResult = useAll(app.chats.where({ id: chatId }), sharedReadOptions);
   const chatRows = chatRowsResult.data ?? [];
   const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
@@ -41,7 +45,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // chatMember row so they appear in the member list and can send messages.
   const myMembershipsResult = useAll(
     userId ? app.chatMembers.where({ chatId, userId }) : undefined,
-    sharedWriteOptions,
+    sharedReadOptions,
   );
   const myMemberships = myMembershipsResult.data ?? [];
   const membershipKnown = myMembershipsResult.data !== undefined;

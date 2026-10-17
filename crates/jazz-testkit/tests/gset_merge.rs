@@ -25,6 +25,7 @@ async fn lock_gset_suite() -> tokio::sync::MutexGuard<'static, ()> {
 
 /// `docs` table with a `tags` array column that merges as a grow-only set.
 fn gset_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     let tags = ColumnDescriptor::new(
         "tags",
         ColumnType::Array {
@@ -36,7 +37,7 @@ fn gset_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         tags,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn doc_values(name: &str, tags: &[&str]) -> HashMap<String, Value> {
@@ -78,7 +79,7 @@ async fn merge_concurrently(
     let first_tx = first
         .update("docs", doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         first,
         &[first_tx.expect("ordinary mutation commits immediately")],
     )
@@ -87,7 +88,7 @@ async fn merge_concurrently(
     let second_tx = second
         .update("docs", doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         second,
         &[second_tx.expect("ordinary mutation commits immediately")],
     )
@@ -501,7 +502,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
     let remove_tx = alice
         .update("docs", doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[remove_tx.expect("ordinary mutation commits immediately")],
     )
@@ -622,6 +623,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
 
 /// `docs` table with a `scores` float-array column merging as a grow-only set.
 fn gset_float_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     let scores = ColumnDescriptor::new(
         "scores",
         ColumnType::Array {
@@ -633,7 +635,7 @@ fn gset_float_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         scores,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn score_doc_values(name: &str, scores: &[f64]) -> HashMap<String, Value> {

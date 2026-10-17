@@ -2,7 +2,6 @@
 
 use super::*;
 
-type SourceRecord = (Vec<u8>, Bytes);
 pub(super) type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -12,6 +11,7 @@ enum TopBySortKey {
     U16(u16),
     U32(u32),
     U64(u64),
+    U48(u64),
     I32(i32),
     I64(i64),
     F64(u64),
@@ -26,6 +26,25 @@ enum TopBySortKey {
 pub(super) struct TopBySortPart {
     key: TopBySortKey,
     pub(super) direction: TopByDirection,
+}
+
+impl TopBySortPart {
+    /// Bytes of the sort value, for state footprints.
+    pub(super) fn encoded_len(&self) -> usize {
+        match &self.key {
+            TopBySortKey::Null => 0,
+            TopBySortKey::U8(_) | TopBySortKey::Bool(_) | TopBySortKey::EnumTag(_) => 1,
+            TopBySortKey::U16(_) => 2,
+            TopBySortKey::U32(_) | TopBySortKey::I32(_) => 4,
+            TopBySortKey::U64(_)
+            | TopBySortKey::U48(_)
+            | TopBySortKey::I64(_)
+            | TopBySortKey::F64(_) => 8,
+            TopBySortKey::String(value) => value.len(),
+            TopBySortKey::Bytes(value) => value.len(),
+            TopBySortKey::Uuid(_) => 16,
+        }
+    }
 }
 
 impl Ord for TopBySortPart {
@@ -65,52 +84,40 @@ pub(super) fn arg_by_candidate_replaces(
 }
 
 pub(super) struct ArgBySpec<'a> {
-    pub(super) group_fields: &'a [String],
     pub(super) group_field_indices: &'a [usize],
     pub(super) comparison_field_indices: &'a [usize],
     pub(super) direction: ArgByDirection,
 }
 
-pub(super) fn arg_by_winner_from_records(
+pub(super) fn arg_by_order_key(
     descriptor: RecordDescriptor,
-    comparison_field_indices: &[usize],
-    records: Vec<(Bytes, i64)>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    // Match TopBy's total-order convention: declared fields decide the rank
-    // under the operator direction, while encoded record bytes break exact
-    // comparison-key ties ascending for both ArgMinBy and ArgMaxBy.
-    let mut winner = None;
-    for (record, weight) in records {
-        if weight <= 0 {
-            continue;
-        }
-        let key = encoded_record_key_part(descriptor, &record, comparison_field_indices)?;
-        let replaces = winner
-            .as_ref()
-            .is_none_or(|(winner_key, winner_record): &SourceRecord| {
-                arg_by_candidate_replaces(&key, &record, winner_key, winner_record, direction)
-            });
-        if replaces {
-            winner = Some((key, record));
-        }
-    }
-    Ok(winner)
+    delta: &RecordDelta,
+    spec: &ArgBySpec<'_>,
+) -> Result<CollectByOrderKey, IvmRuntimeError> {
+    // Reuse the sparse ordered group without changing ArgBy's existing encoded
+    // comparison semantics. Only the declared key reverses for Max; the full
+    // record tie-breaker remains ascending for both directions.
+    Ok((
+        vec![TopBySortPart {
+            key: TopBySortKey::Bytes(encoded_record_key_part(
+                descriptor,
+                delta.raw(),
+                spec.comparison_field_indices,
+            )?),
+            direction: match spec.direction {
+                ArgByDirection::Min => TopByDirection::Asc,
+                ArgByDirection::Max => TopByDirection::Desc,
+            },
+        }],
+        delta.record.clone(),
+    ))
 }
 
-pub(super) fn arg_by_winner_before_from_deltas(
-    descriptor: RecordDescriptor,
-    comparison_field_indices: &[usize],
-    after_records: Vec<(Bytes, i64)>,
-    deltas: Vec<RecordDelta>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    arg_by_winner_from_records(
-        descriptor,
-        comparison_field_indices,
-        records_before_deltas(after_records, &deltas),
-        direction,
-    )
+pub(super) fn arg_by_ordered_winner(group: &CollectByGroup) -> Option<Bytes> {
+    group
+        .iter()
+        .find(|(_, weight)| **weight > 0)
+        .map(|(key, _)| key.1.clone())
 }
 
 #[cfg(test)]
@@ -382,10 +389,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.get_or_default(group_key.clone());
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
-        let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
         group.set(state_key.clone(), after_weight);
         if !emit || (before_weight > 0) == (after_weight > 0) {
+            continue;
+        }
+        // A group that enters the terminal in this batch is rendered whole as
+        // a root insert below, which drops its child edits. Don't build them.
+        if root_groups_before
+            .as_ref()
+            .is_some_and(|before| !before.contains(&group_key))
+        {
             continue;
         }
         let source_input = BorrowedRecord::new(delta.raw(), &input_desc);
@@ -430,7 +444,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 path,
                 edit: TerminalEdit::Remove { key: child_key },
             });
-            debug_assert!(before_index.is_some());
+            debug_assert!(before_weight > 0);
         }
     }
     state
@@ -456,7 +470,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 },
             });
         }
-        for root_key in root_groups_after.difference(&root_groups_before) {
+        let inserted_roots = root_groups_after
+            .difference(&root_groups_before)
+            .collect::<Vec<_>>();
+        // Rank against the complete merged group index: untouched parents
+        // remain in the immutable base and still determine terminal insertion
+        // position. Ascending inserts ranked against the final index apply
+        // correctly in order, and one merged walk ranks them all.
+        let root_ranks = state
+            .groups
+            .count_before_each(inserted_roots.iter().map(|key| key.as_slice()));
+        for (root_key, index) in inserted_roots.into_iter().zip(root_ranks) {
             let group = state
                 .groups
                 .get(root_key)
@@ -472,10 +496,6 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                             "new collect root did not render a terminal row".to_owned(),
                         )
                     })?;
-            // Rank against the complete merged group index: untouched parents
-            // remain in the immutable base and still determine terminal
-            // insertion position.
-            let index = state.groups.count_before(root_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
@@ -525,7 +545,31 @@ fn canonical_collect_by_terminal_deltas(
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(canonicalize_collect_by_terminal_weights(keyed)
+    let mut canonical = canonicalize_collect_by_terminal_weights(keyed);
+    if let Some(presence) = direct_tree_slot.and_then(|slot| slot.presence_field_index) {
+        // A direct-tree group includes a parent anchor with no child. Sorting
+        // that anchor by the child's fields can put it after child insertions
+        // (or before child removals). Consumers apply edits in emitted order:
+        // retire children before their parent, then create the new parent
+        // before its children. Keep the canonical child sort within each phase.
+        let mut ordered = canonical
+            .into_iter()
+            .map(|entry| {
+                let is_child = BorrowedRecord::new(&entry.2, &input_desc).get_bool(presence)?;
+                let phase = if entry.3 > 0 { is_child } else { !is_child };
+                Ok::<_, IvmRuntimeError>((entry, phase))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Stable sorting preserves child order and exact-record tie breaking.
+        ordered.sort_by(|(left, left_phase), (right, right_phase)| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.3.is_positive().cmp(&right.3.is_positive()))
+                .then_with(|| left_phase.cmp(right_phase))
+        });
+        canonical = ordered.into_iter().map(|(entry, _)| entry).collect();
+    }
+    Ok(canonical
         .into_iter()
         .map(|(_, _, record, weight)| RecordDelta { record, weight })
         .collect())
@@ -618,35 +662,6 @@ fn update_collect_by_root_terminal_state(
         return collect_by_root_payload_updates(input_desc, output_desc, collect_by, state, before);
     }
 
-    // Capture the actual public sequence once before replacing changed sort
-    // keys below. Terminal edits are applied sequentially, so final ranks
-    // alone are insufficient for a batch that mixes moves and inserts.
-    let mut public_sequence = state
-        .emitted_root_order
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-
-    // `groups` also retains join-maintenance state that may never be exposed
-    // as a root terminal. Keep the public rank index in sync only for roots
-    // which were actually materialized, so an internal group cannot shift a
-    // subscriber-visible Insert or Move position.
-    for (root_key, before_key) in &before_order {
-        if !state.emitted_root_keys.contains(root_key) {
-            continue;
-        }
-        let after_key = state.groups.get(root_key).and_then(order_key);
-        if *before_key != after_key {
-            let order = Rc::make_mut(&mut state.emitted_root_order);
-            if let Some(before_key) = before_key {
-                order.remove(before_key);
-            }
-            if let Some(after_key) = after_key {
-                order.insert(after_key, root_key.clone());
-            }
-        }
-    }
-
     let mut operations = Vec::new();
     // Remove first so the later positional inserts/moves index the final
     // retained sequence rather than an opaque-key snapshot. A group with no
@@ -655,7 +670,7 @@ fn update_collect_by_root_terminal_state(
     // hydration replaces that state. In particular, do not leave a previously
     // emitted facade occurrence live merely because its internal group is
     // non-empty.
-    for root_key in before_order.keys() {
+    for (root_key, before_key) in &before_order {
         if state.emitted_root_keys.contains(root_key)
             && state.groups.get(root_key).and_then(order_key).is_none()
         {
@@ -667,30 +682,19 @@ fn update_collect_by_root_terminal_state(
                     key: root_key.clone(),
                 },
             });
+            if let Some(before_key) = before_key {
+                Rc::make_mut(&mut state.emitted_root_order).remove(before_key);
+            }
             Rc::make_mut(&mut state.emitted_root_keys).remove(root_key);
-            public_sequence.retain(|key| key != root_key);
         }
     }
 
-    // `emitted_root_order` is already the compiled total order. Snapshot its
-    // retained entries once per batch so changed roots can find their target
-    // positions without re-scanning the whole result for every Move or
-    // Insert.
-    let retained_final_order = state
-        .emitted_root_order
-        .iter()
-        .filter(|(_, root_key)| state.emitted_root_keys.contains(*root_key))
-        .map(|(order_key, root_key)| (order_key.clone(), root_key.clone()))
-        .collect::<Vec<_>>();
-    let retained_final_positions = retained_final_order
-        .iter()
-        .enumerate()
-        .map(|(index, (_, root_key))| (root_key.clone(), index))
-        .collect::<BTreeMap<_, _>>();
-
-    // Reposition retained occurrences before inserting new ones. Their target
-    // index is their rank among retained public roots only; inserting first
-    // would make a final absolute rank address the wrong mutable sequence.
+    // The rank index describes the actual public sequence after each emitted
+    // edit. Unprocessed moves retain their OLD keys; processed moves have NEW
+    // keys. Removing one old key and ranking its replacement therefore gives
+    // the correct intermediate position, not an independently computed final
+    // rank. Every intermediate sequence stays sorted by these transient keys.
+    // Only touched paths detach from the immutable predecessor.
     let mut moves = Vec::new();
     for (root_key, before_key) in &before_order {
         let Some(before_key) = before_key else {
@@ -705,23 +709,19 @@ fn update_collect_by_root_terminal_state(
             continue;
         };
         if *before_key != after_key {
-            moves.push((after_key, root_key.clone()));
+            moves.push((after_key, before_key.clone(), root_key.clone()));
         }
     }
-    moves.sort_by(|(left, _), (right, _)| left.cmp(right));
-    for (_, root_key) in moves {
-        let index = *retained_final_positions
-            .get(&root_key)
-            .expect("moved root has a final retained position");
-        let current_index = public_sequence
-            .iter()
-            .position(|key| key == &root_key)
-            .expect("emitted root is present in the public sequence");
+    moves.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    for (after_key, before_key, root_key) in moves {
+        let order = Rc::make_mut(&mut state.emitted_root_order);
+        let current_index = order.rank(&before_key);
+        order.remove(&before_key);
+        let index = order.rank(&after_key);
+        order.insert(after_key, root_key.clone());
         if current_index == index {
             continue;
         }
-        let root_key = public_sequence.remove(current_index);
-        public_sequence.insert(index, root_key.clone());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
             root_key: root_key.clone(),
@@ -765,16 +765,13 @@ fn update_collect_by_root_terminal_state(
         inserts.push((order_key, root_key.clone(), record));
     }
     inserts.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-    for (new_roots_before, (order_key, root_key, record)) in inserts.into_iter().enumerate() {
-        // Insert lower-ranked new occurrences first. Each insertion joins the
-        // mutable sequence before the next rank is computed. Existing roots
-        // come from the one batch snapshot above; earlier new roots all sort
-        // before this one because `inserts` is ordered by the same total key.
-        let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
-            + new_roots_before;
-        Rc::make_mut(&mut state.emitted_root_order).insert(order_key, root_key.clone());
-        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone());
-        public_sequence.insert(index, root_key.clone());
+    for (order_key, root_key, record) in inserts {
+        // Earlier inserts already belong to the rank index. No complete
+        // retained-sequence snapshot or per-batch position map is needed.
+        let order = Rc::make_mut(&mut state.emitted_root_order);
+        let index = order.rank(&order_key);
+        order.insert(order_key, root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone(), ());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
             root_key: root_key.clone(),
@@ -1281,6 +1278,7 @@ fn top_by_sort_value(
         (ValueType::U16, Value::U16(value)) => TopBySortKey::U16(value),
         (ValueType::U32, Value::U32(value)) => TopBySortKey::U32(value),
         (ValueType::U64, Value::U64(value)) => TopBySortKey::U64(value),
+        (ValueType::U48, Value::U48(value)) => TopBySortKey::U48(value),
         (ValueType::I32, Value::I32(value)) => TopBySortKey::I32(value),
         (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
         (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
@@ -1353,11 +1351,24 @@ pub(super) fn diff_record_windows(
 /// Unbounded, zero-offset membership is the positive part of each weight.
 /// Compare first/final weights for touched records, not complete windows.
 /// This helper does not compute generic root positions or finite boundaries.
+#[cfg(test)]
 pub(super) fn update_unbounded_top_by_group(
     descriptor: RecordDescriptor,
     top_by: &TopByOp,
     group: &mut CollectByGroup,
     input: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    update_unbounded_top_by_group_touching(descriptor, top_by, group, input, None)
+}
+
+/// [`update_unbounded_top_by_group`], also reporting each touched order key
+/// when a positions consumer will rank the changed rows.
+pub(super) fn update_unbounded_top_by_group_touching(
+    descriptor: RecordDescriptor,
+    top_by: &TopByOp,
+    group: &mut CollectByGroup,
+    input: &[RecordDelta],
+    mut touched_keys: Option<&mut Vec<CollectByOrderKey>>,
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let mut touched = BTreeMap::<CollectByOrderKey, (i64, i64)>::new();
     for delta in input {
@@ -1388,6 +1399,9 @@ pub(super) fn update_unbounded_top_by_group(
                 added.push(delta);
             }
         }
+        if let Some(keys) = touched_keys.as_deref_mut() {
+            keys.push(key.clone());
+        }
         group.set(key, after);
     }
     // Match diff_record_windows: removals in old order, then additions in new
@@ -1409,6 +1423,97 @@ pub(super) fn encoded_record_key_part(
     Ok(key)
 }
 
+/// Terminal root identity key of `field_indices` (#3309). Unlike
+/// [`encoded_record_key_part`] this keys every value a record can hold: the
+/// runtime primary-key bytes for every value that encoder supports (so group
+/// prefixes match the TopBy's own group keys), extended with arrays, enum
+/// payloads and indirect large values. It is a process-local opaque key, not a
+/// durable codec: nothing persists it and consumers only compare it.
+pub(super) fn encoded_identity_key_part(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    field_indices: &[usize],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in field_indices {
+        let value = descriptor.get_idx(record, *field_idx)?;
+        encode_identity_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encode_identity_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::Tuple(values) => {
+            key.push(11);
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Nullable(None) => {
+            key.push(12);
+            key.push(0);
+        }
+        Value::Nullable(Some(value)) => {
+            key.push(12);
+            key.push(1);
+            encode_identity_key_part(key, value)?;
+        }
+        Value::Array(values) => {
+            key.push(16);
+            key.extend((values.len() as u64).to_be_bytes());
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Enum(value) => {
+            // The column's schema fixes each case's payload descriptor, so the
+            // tag plus the payload values identify the value.
+            key.push(17);
+            key.extend(value.tag().to_be_bytes());
+            let payload = value.record();
+            let fields = payload.descriptor().fields().len();
+            key.extend((fields as u64).to_be_bytes());
+            for index in 0..fields {
+                encode_identity_key_part(key, &payload.get_idx(index)?)?;
+            }
+        }
+        Value::Large(large) => {
+            // An indirect value is identified by its content, not by where its
+            // chunks live: the structural content hash of its base, its
+            // lengths and its pending edits. The root locator is left out, so
+            // two references to the same content share a key.
+            key.push(18);
+            key.push(match large.kind {
+                crate::large_values::LargeValueKind::String => 0,
+                crate::large_values::LargeValueKind::Bytes => 1,
+                crate::large_values::LargeValueKind::Json => 2,
+            });
+            key.push(large.format_version);
+            key.extend_from_slice(&large.logical_hash.0);
+            key.extend(large.byte_length.to_be_bytes());
+            match large.utf16_length {
+                Some(length) => {
+                    key.push(1);
+                    key.extend(length.to_be_bytes());
+                }
+                None => key.push(0),
+            }
+            key.extend((large.edit_tail.len() as u64).to_be_bytes());
+            for edit in &large.edit_tail {
+                key.extend(edit.offset.to_be_bytes());
+                key.extend(edit.delete_length.to_be_bytes());
+                key.extend(edit.utf16_offset.to_be_bytes());
+                key.extend(edit.delete_utf16_length.to_be_bytes());
+                key.extend(edit.insert_utf16_length.to_be_bytes());
+                encode_ordered_bytes(key, &edit.insert_bytes);
+            }
+        }
+        value => encode_runtime_primary_key_part(key, value)?,
+    }
+    Ok(())
+}
+
 pub(super) fn encoded_arrangement_key_part(
     descriptor: RecordDescriptor,
     record: &[u8],
@@ -1426,54 +1531,6 @@ fn encode_runtime_primary_key_part(
     value: &Value,
 ) -> Result<(), IvmRuntimeError> {
     match value {
-        Value::U8(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::U16(value) => {
-            key.push(1);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            key.push(2);
-            key.extend(value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            key.push(3);
-            key.extend(value.to_be_bytes());
-        }
-        Value::I32(value) => {
-            key.push(14);
-            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
-        }
-        Value::I64(value) => {
-            key.push(13);
-            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
-        }
-        Value::F64(value) => {
-            key.push(4);
-            key.extend(ordered_f64_key(*value).to_be_bytes());
-        }
-        Value::Bool(value) => {
-            key.push(5);
-            key.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            key.push(6);
-            encode_runtime_ordered_bytes(key, value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            key.push(0);
-            key.push(*value);
-        }
-        Value::Bytes(value) => {
-            key.push(7);
-            encode_runtime_ordered_bytes(key, value);
-        }
-        Value::Uuid(value) => {
-            key.push(10);
-            key.extend_from_slice(value.as_bytes());
-        }
         Value::Tuple(values) => {
             key.push(11);
             for value in values {
@@ -1496,35 +1553,12 @@ fn encode_runtime_primary_key_part(
             // This is not the durable arrangement/primary-key codec.
             key.push(15);
             let descriptor = records::encode_record_descriptor(record.descriptor())?;
-            encode_runtime_ordered_bytes(key, &descriptor);
-            encode_runtime_ordered_bytes(key, record.raw());
+            encode_ordered_bytes(key, &descriptor);
+            encode_ordered_bytes(key, record.raw());
         }
-        Value::Array(_) | Value::Enum(_) | Value::Large(_) => {
-            return Err(IvmRuntimeError::UnsupportedJoinKey);
-        }
+        value => encode_scalar_key_part(key, value)?,
     }
     Ok(())
-}
-
-fn ordered_f64_key(value: f64) -> u64 {
-    let bits = value.to_bits();
-    if bits & (1 << 63) == 0 {
-        bits ^ (1 << 63)
-    } else {
-        !bits
-    }
-}
-
-fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
-    for byte in value {
-        if *byte == 0 {
-            key.extend([0, 0xff]);
-        } else {
-            key.push(*byte);
-        }
-    }
-    key.push(0);
-    key.push(0);
 }
 
 #[cfg(test)]
@@ -2041,10 +2075,21 @@ mod root_terminal_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(moves.len(), 2);
-        assert_eq!(moves[0].1, 0);
-        assert_eq!(moves[1].1, 2);
         assert_ne!(moves[0].0, moves[1].0);
         assert!(moves.iter().all(|(key, _)| key.len() > 17));
+        // Positions address the sequence after each preceding edit, not the
+        // final ranks in isolation. Different valid move sequences are allowed.
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &opened);
+        apply_root_operations(&mut roots, &moved);
+        assert_eq!(
+            roots,
+            vec![
+                (root_key(0xa1, 0x11), "yyyy".to_owned()),
+                (root_key(0xb1, 0x22), "maria".to_owned()),
+                (root_key(0xc1, 0x33), "aaaa".to_owned()),
+            ]
+        );
     }
 
     #[test]

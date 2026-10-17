@@ -1,14 +1,17 @@
-import type { DurabilityTier } from "../client.js";
+import type { AuthUpdate } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
+  type ConnectionRequirement,
   type DbForConnection,
 } from "./types.js";
 
 /** Manages a Db whose runtime connects directly to the configured server. */
 export class DirectConnectionManager extends ConnectionManager {
   private isDisconnected = false;
+  /** The server was not dialled because the context has no credential yet. */
+  private awaitingCredential = false;
   private reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
 
@@ -63,19 +66,41 @@ export class DirectConnectionManager extends ConnectionManager {
     this.connectClient(client);
   }
 
-  private connectClient(client: ConnectionManagerClientInput["client"]): void {
+  private connectClient(
+    client: ConnectionManagerClientInput["client"],
+    credentials: {
+      jwtToken?: string;
+      cookieSession?: DbForConnection["config"]["cookieSession"];
+    } = this.host.config,
+  ): void {
     const { config } = this.host;
     if (this.host.runtimeSource?.nativeConnection) return;
     if (!config.serverUrl) return;
-    client.connectTransport(config.serverUrl, {
-      jwt_token: config.jwtToken,
+    const auth = {
+      jwt_token: credentials.jwtToken,
       admin_secret: config.adminSecret,
-      backend_session: config.cookieSession,
-    });
+      backend_session: credentials.cookieSession,
+    };
+    // A retained account opens before its provider credential arrives. The
+    // server rejects a credential-less connection as a terminal failure that
+    // ends every remote subscription, so dial only once a credential exists.
+    this.awaitingCredential = !auth.jwt_token && !auth.admin_secret && !auth.backend_session;
+    if (this.awaitingCredential) return;
+    client.connectTransport(config.serverUrl, auth);
   }
 
-  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    if (tier === "local") return;
+  override updateAuth(auth: AuthUpdate): void {
+    super.updateAuth(auth);
+    const client = this.clientEntry?.client;
+    if (!this.awaitingCredential || !client || this.isExplicitlyOffline()) return;
+    this.connectClient(
+      client,
+      auth.mode === "bearer" ? { jwtToken: auth.jwtToken } : { cookieSession: auth.cookieSession },
+    );
+  }
+
+  async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
+    if (requirement === "runtime") return;
     for (;;) {
       await this.host.runtimeSource?.nativeConnection?.waitForTransportTransition?.();
       while (this.isExplicitlyOffline()) {
@@ -87,7 +112,7 @@ export class DirectConnectionManager extends ConnectionManager {
     }
   }
 
-  shouldDeferSubscriptionStart(_tier?: DurabilityTier): boolean {
+  shouldDeferSubscriptionStart(_requirement: ConnectionRequirement): boolean {
     return false;
   }
   isExplicitlyOffline(): boolean {
@@ -140,7 +165,7 @@ export class DirectConnectionManager extends ConnectionManager {
         await this.clientEntry?.client.disconnectTransport();
       }
       // An in-flight or failed disconnect is not permission for a
-      // RemoteIfPossible read to fall back locally.
+      // read to treat the Db as explicitly offline.
       this.isDisconnected = true;
       this.publishExplicitOfflineState();
     });

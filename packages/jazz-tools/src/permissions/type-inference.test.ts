@@ -221,7 +221,7 @@ describe("permissions type inference", () => {
       expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
       expectTypeOf(isCreator).toEqualTypeOf<PermissionExpressionInput>();
       expectTypeOf(anyOf([])).toEqualTypeOf<PermissionExpressionInput>();
-      expectTypeOf(allowedTo.read("projectId")).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(allowedTo.read("project")).toEqualTypeOf<PermissionExpressionInput>();
 
       const manualExpression: PolicyExpr = { type: "True" };
       expectTypeOf(raw(manualExpression)).toEqualTypeOf<PermissionExpression>();
@@ -258,9 +258,9 @@ describe("permissions type inference", () => {
           ]),
         ),
         policy.todos.allowUpdate
-          .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
-          .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
-        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+          .whereOld(allowedTo.update("project", { maxDepth: 4 }))
+          .whereNew(allowedTo.update("project", { maxDepth: 4 })),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
         policy.teams.allowRead.where({
           "resource_access_edges.grant_role": "viewer",
         }),
@@ -270,7 +270,7 @@ describe("permissions type inference", () => {
 
   it("supports reusable helpers annotated with the public condition input type", () => {
     definePermissions(app, ({ policy, allOf, anyOf, allowedTo, isCreator, raw, session }) => {
-      const policyAtom = (): PermissionExpressionInput => allowedTo.read("projectId");
+      const policyAtom = (): PermissionExpressionInput => allowedTo.read("project");
       const creatorAtom: PermissionExpressionInput = isCreator;
 
       const legacyRawHelper = (): PolicyExpr => ({ type: "True" });
@@ -331,7 +331,7 @@ describe("permissions type inference", () => {
   it("rejects invalid table/column usage at compile time where possible", () => {
     definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where({ done: true }),
-      policy.todos.allowRead.where(allowedTo.read("projectId")),
+      policy.todos.allowRead.where(allowedTo.read("project")),
     ]);
 
     definePermissions(app, ({ policy }) => {

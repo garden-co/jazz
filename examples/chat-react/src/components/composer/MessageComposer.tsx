@@ -22,7 +22,7 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
   const userId = session?.user.account ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
     () => ({
-      tier: db.getConfig().serverUrl ? "edge" : "local",
+      tier: db.getConfig().serverUrl ? "global" : "local",
     }),
     [db],
   );

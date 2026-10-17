@@ -219,8 +219,8 @@ fn normalized_tick_metrics(metrics: Option<&TickMetrics>) -> Option<TickMetrics>
 }
 
 struct ColdSubscriptionBench {
-    writer: NodeState<RocksDbStorage>,
-    core: Option<NodeState<RocksDbStorage>>,
+    writer: NodeState,
+    core: Option<NodeState>,
     schema: JazzSchema,
     _writer_dir: tempfile::TempDir,
     core_dir: tempfile::TempDir,
@@ -240,11 +240,11 @@ impl ColdSubscriptionBench {
         }
     }
 
-    fn core(&self) -> &NodeState<RocksDbStorage> {
+    fn core(&self) -> &NodeState {
         self.core.as_ref().expect("core must be open")
     }
 
-    fn core_mut(&mut self) -> &mut NodeState<RocksDbStorage> {
+    fn core_mut(&mut self) -> &mut NodeState {
         self.core.as_mut().expect("core must be open")
     }
 
@@ -273,13 +273,13 @@ impl ColdSubscriptionBench {
         let mut parent = None;
         // Every measured winner has one parent: `depth` counts ordinary
         // last-seen-style updates after the initial create, rather than making
-        // depth one a structurally different parentless version.
+        // depth one a structurally different parentless version. Each winner's
+        // base names its writer's previous transaction, whose time is a
+        // varint on the wire, so every depth's clock stays within one varint
+        // width.
         for idx in 0..=depth {
             let mut commit =
-                MergeableCommit::new(TABLE, row_uuid, 1_000 + idx as u64).cells(cells(idx));
-            if let Some(parent_tx_id) = parent {
-                commit = commit.parents(vec![parent_tx_id]);
-            }
+                MergeableCommit::new(TABLE, row_uuid, 1_000_000 + idx as u64).cells(cells(idx));
             let (publication, unit) =
                 block_on(self.writer.commit_mergeable_unit(commit)).expect("mergeable commit");
             let tx_id = publication.tx_id();
@@ -335,7 +335,7 @@ impl ColdSubscriptionBench {
                 let _ = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Local))
                     .expect("cold local current rows");
             }
-            DurabilityTier::None | DurabilityTier::Edge => {
+            DurabilityTier::None => {
                 unreachable!("bench only uses local/global")
             }
         }
@@ -352,7 +352,7 @@ impl ColdSubscriptionBench {
         let phase = match tier {
             DurabilityTier::Global => "global_current_rows_update",
             DurabilityTier::Local => "local_current_rows",
-            DurabilityTier::None | DurabilityTier::Edge => {
+            DurabilityTier::None => {
                 unreachable!("bench only uses local/global")
             }
         };
@@ -365,11 +365,7 @@ impl ColdSubscriptionBench {
     }
 }
 
-fn core_ingest(
-    core: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now_ms: u64,
-) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -397,10 +393,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

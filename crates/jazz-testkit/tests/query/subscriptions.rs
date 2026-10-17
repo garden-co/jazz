@@ -967,7 +967,7 @@ local_tokio_test! {
 ///
 /// The writer inserts a todo with a title that does not include "needle". The
 /// subscriber's query result must remain empty and no add delta must appear.
-/// An EdgeServer query on the subscriber is used as the causal barrier before
+/// An GlobalServer query on the subscriber is used as the causal barrier before
 /// draining the stream: once the server confirms the empty result set, any
 /// notification it was going to send has already been sent or withheld.
 ///
@@ -1000,7 +1000,7 @@ async fn subscribe_all_does_not_emit_add_for_non_matching_contains_query() {
     )
     .await;
 
-    // The EdgeServer query returning empty is the causal barrier: by the time
+    // The GlobalServer query returning empty is the causal barrier: by the time
     // the server confirms no matching rows, it has already decided whether to
     // send a subscription notification. The drain then flushes any buffered
     // messages before the negative assertion.

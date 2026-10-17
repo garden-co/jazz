@@ -84,12 +84,45 @@ versioned binary layouts; they are not authoritative JSON. In this epoch,
 public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
 pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
 and the pending write-pointer and active-lineage receipts are likewise fixed
-`v1` UUID/integer tuples. A decoder accepts exactly one known version and
-must consume the entire payload before it returns a value to catalogue
-recovery; it does not fall back to the former JSON bytes. The public-schema
+`v1` UUID/integer tuples. The `schema` envelope has one further version:
+`v2` has the identical layout and is used exactly when some table's public
+schema declares `composite_indexes`; every other schema keeps its frozen `v1`
+bytes. A reader that predates composite indexes therefore rejects such a
+schema by version instead of silently dropping the unknown JSON field, and a
+decoder rejects a `v1` label on a composite schema and a `v2` label on a
+schema without one. Composite indexes serialize in canonical order
+(lexicographic over UTF-8 column-name bytes), the order the schema hash uses,
+so declaration order never changes the payload. A decoder accepts exactly the
+known versions and must consume the entire payload before it returns a value
+to catalogue recovery; it does not fall back to the former JSON bytes. The public-schema
 body is decoded and re-encoded with the canonical public-schema serializer,
 and those bytes must match exactly, so insignificant whitespace, field
 reordering, or alternate JSON spellings are corruption rather than aliases.
+
+Composite indexes and peers that predate them. The `v2` label protects durable
+storage only. On the sync wire a `SchemaVersion` is `(id, public_schema_json)`
+with no envelope version, and a pre-composite peer (alpha.56 and earlier)
+parses that JSON with serde defaults, silently dropping `composite_indexes`.
+It is still rejected loudly, because composite indexes are part of the schema
+id (ch. 2, §2.4): the peer recomputes the id from the schema it parsed, gets
+the plain schema's id, and refuses the payload at catalogue admission as a
+content-id mismatch (the lineage-publication id, which hashes the encoded catalogue schema,
+mismatches likewise). So once any schema that declares a composite index is
+published, a pre-composite peer rejects the catalogue rather than serving a
+schema without the index. The HTTP admin route is different: a
+pre-composite server stores and hashes the plain schema it parsed and returns
+that hash. `deploy` and `pushSchema` therefore compare the structural hash the
+server returns with the locally computed one and stop with
+`SchemaHashMismatchError` before publishing any migration or permissions
+against the wrong hash; the plain schema the server already stored is inert
+until something targets it.
+
+Rollback: an app cannot roll back to a pre-composite release once it has
+published a composite-index schema. Stores then hold `v2` schema records and
+v2-domain schema ids, which older binaries reject on reopen by version and
+on sync by id. Removing a composite index later is an ordinary forward schema
+change (a new plain schema version published through a lens), not a return to
+the older runtime.
 Each pending write-pointer row id is UUIDv5 under its schema UUID over the
 little-endian revision bytes; recovery verifies that join and rejects two rows
 claiming the same revision before building resident pointer state.
@@ -126,6 +159,26 @@ their bodies; unknown versions, unordered/duplicate names, malformed nested
 records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
 reopen before resident state changes. The former naked serde JSON has no
 compatibility decoder in this experimental storage epoch.
+
+A schema publication contains a nonempty set of predecessors, each with its
+incoming lens and source-relative new/dropped table declarations. Sources must
+be distinct, already admitted before activation, and different from the target.
+All preserved target coordinates must agree on their permanent identities. A
+target may inherit a column from any predecessor; only identities preserved by
+an incoming lens may be reused from catalogue history. Activation and snapshots
+install the schema, every incoming lens, and its identity manifest together.
+
+The staged/pending envelopes retain their layout; their length-prefixed
+publication body always uses `v2:u8 | id:uuid[16] | schema_len:u32-le |
+schema | predecessor_count:u32-le | predecessors | physical_identity_manifest`.
+The predecessor count must be nonzero, including for a singleton. Each
+predecessor is `lens_len:u32-le | lens | new_table_count:u32-le |
+new_table_strings | dropped_table_count:u32-le | dropped_table_strings`,
+using length-prefixed UTF-8 strings and the existing lens encoding.
+Predecessors are sorted by source UUID bytes, declarations by name; duplicates
+are rejected. Content identity always uses the
+`jazz-schema-lineage-publication-v2` domain and the counted canonical list.
+`catalogue-predecessors.hex` pins singleton and multiple-predecessor bodies.
 
 The protocol `MigrationLens` is intentionally distinct from the server schema
 editor's `LensTransform`. A protocol lens describes a published source/target
@@ -193,9 +246,9 @@ permissions relation payload, rejects reopen rather than selecting a fallback
 or recovering a partial catalogue.
 
 Schema evolution is coordinated through the catalogue, which serializes
-publication and write-pointer changes under administrative authority. Catalogue
+publication and active schema changes under administrative authority. Catalogue
 mutations travel as admin-gated
-`SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
+`SyncMessage::{PublishSchemaWithLens, PublishLens}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
@@ -208,8 +261,8 @@ identity evolution before admitting any catalogue state. Local numeric aliases
 are compression details and never authorize a replacement UUID manifest.
 
 Exactly one database-wide catalogue sequencer assigns a dense monotone
-`CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
-edges forward authenticated, prevalidated requests to that sequencer. Catalogue
+`CatalogueSeq`. Core owns this sequencer; clients and local relays never assign catalogue
+sequence. Authenticated publication requests are evaluated at Core. Catalogue
 sequence is an administrative ordering domain, not a Jazz data transaction and
 not branch-branch-local row causality. A receiver parks an envelope whose earlier catalogue
 sequence or active source schema is missing. The same sequence with different
@@ -536,6 +589,52 @@ installs the authority UUID manifest, and reconciles ancestors and descendants
 around the local anchor. Pending local rows therefore remain addressable while
 cross-node semantic identity converges.
 
+**Union row cases.** Besides one Groove case per schema version (tag = the
+schema's local alias), every physical history, global current, ahead current
+and ahead shadow table has a **union case** per schema version `G` whose
+lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
+`G`'s own case followed by those columns ("extras"), in physical column id
+order. The extras of `G` are the columns of the same physical table mapped by
+any schema version ranked no later than `G` in the catalogue: a lineage's
+target ranks at its catalogue position and the authority genesis before them
+all. Every node replicates that order from its Core, so every node that knows
+`G` derives the same extras, fixed once `G` is published; old union cases
+never change. Local aliases cannot order them: a client allocates its own
+schema's alias first and learns older schemas later. A schema version only
+the node knows (not yet published) has no union case. Rejected-version tables
+have no union case. A union row reads exactly like a `G` row to code that only
+knows `G`.
+
+Core stores each post-image in the union case of the schema version ranked
+last among those mapping the table (ch. 4 §4.6, "Across schema versions").
+That need not be the write's own schema, nor name the table as the write
+does, so a post-image replaces the write's pending record by its physical
+row (table, branch, row), not by its name or schema. An extra is
+**derived** when the lens path from `G` carries it on from one of `G`'s own
+columns (a rename chain or a bijective transform); it stays null, and readers
+derive it from `G`'s cell as for any `G` row. Every other extra is
+**stored**: a column `G` dropped, a sibling's column, and a copy
+(`CopyColumn`) target, which is a column of its own (ch. 4 §4.6) whose
+writes a lens from `G` would otherwise overwrite with the source's value.
+The lens path is taken through schema versions ranked no later than `G`
+only, so the stored set is fixed with `G`'s union case: a later schema with
+several predecessors cannot open a shorter route that turns a stored extra
+into a derived one (or the reverse) under existing union rows. Reading a
+union row as schema `R`, by any read path: a column of `R` that is a stored
+extra reads that field (null reads as absent); any other column takes the
+`G` → `R` projection.
+
+On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
+travel as `UnionExtraCells`, one entry per schema version defining them, each
+a record of that schema's authored cells (`_app_<column>`, nullable). The
+entries travel inside the row's `JVRR` v3 blob, flagged by its descriptor
+head (ch. 16); a row without entries leaves the flag clear and carries
+nothing extra. A receiver validates each cell against its schema and
+stores the image unchanged, in `G`'s union case: its entries must be exactly
+`G`'s stored extras there, as the shared catalogue order guarantees. The image
+keeps its identity, so what the receiver serves or compares later is Core's
+record. Commit units carry no union cells.
+
 ### 10.4 Writes: authored schema variants
 
 New local writes carry the schema selected by `current_write_schema` as their
@@ -590,7 +689,9 @@ selection is deterministic over the schema-version graph. The chosen path is the
 shortest path by lens count. Ties are broken by a stable ordering of candidate
 endpoints and lens content ids; publication or storage iteration order must not
 affect the chosen path. Schema updates are rare, so this is specified as a
-clarity-first graph walk rather than a hot-path optimization.
+clarity-first graph walk rather than a hot-path optimization. Each step can traverse its
+lens forward or backward: B-to-C translation through `A → B` and `A → C` applies
+the reverse A-to-B transformation followed by the forward A-to-C transformation.
 
 RLS policy evaluation under lenses uses the permission-evaluation schema pinned
 by the node/admin policy bundle. Row data is translated into that schema before
@@ -672,6 +773,34 @@ dry-runs and before sealing. Literal defaults are in scope; dynamic defaults suc
 as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
+
+### Active schema and local schema
+
+The authority's **active schema** selects one structural schema and one explicit
+permission bundle at a single monotone revision. Policy-only updates advance
+that revision without changing structural schema identity or creating migration
+lenses. Admitting structural schemas or lenses does not activate them. Activation
+requires an admitted migration path, traversing each lens in either direction.
+For example, `A → B` and `A → C` permit switching from B to C through A.
+An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
+older clients retain their schema view across authority activations.
+
+The server catalogue retains the existing permissions-bundle/head encodings and
+HTTP endpoints as compatibility boundaries. Internally they describe the active
+schema. Runtime activation persists its selection and authorization source in
+one batch before installing the new authorization view. Structural catalogue
+entries do not need to be rewritten with permissions on policy updates.
+
+Opening a legacy store without an active-schema record recovers its selected
+schema and grants from the old write pointer and schema payload, then persists
+an active-schema record at revision zero. The old independent write counter is
+not an authority revision. Server startup installs the durable administrative
+selection before serving traffic. Reopening the upgraded store preserves its
+active revision; snapshots have no legacy revision exception. Standalone schema
+publications cannot replace grants, and standalone write pointers cannot change
+the active selection. Interoperation with old running nodes is not supported.
+The existing snapshot wire layout is retained: the active authorization source
+is projected into its schema payload at serialization and extracted on receipt.
 
 ## Open Questions
 

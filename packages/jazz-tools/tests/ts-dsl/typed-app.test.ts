@@ -31,9 +31,14 @@ const schema = {
     .table(
       {
         title: s.string(),
+        optionalTitle: s.string().optional(),
         done: s.boolean(),
+        optionalRank: s.int().optional(),
         tags: s.array(s.string()),
+        optionalTags: s.array(s.string()).optional(),
         attachment: s.bytes(),
+        optionalAttachment: s.bytes().optional(),
+        optionalStatus: s.enum("new", "done").optional(),
         project: s.uuid(),
         owner: s.uuid().optional(),
       },
@@ -43,7 +48,6 @@ const schema = {
 };
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
-
 const defaultedSchema = {
   users: s.table(
     {
@@ -88,6 +92,15 @@ const payloadEnumSchema = {
           defaultedText: s.string().default("default"),
         },
       }),
+      optionalEvent: s
+        .enum({
+          message: {
+            requiredText: s.string(),
+            nullableText: s.string().optional(),
+            defaultedText: s.string().default("default"),
+          },
+        })
+        .optional(),
     },
     {},
   ),
@@ -361,6 +374,17 @@ describe("typed app prototype", () => {
     expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();
   });
 
+  it("emits ordered composite indexes through the TypeScript schema", () => {
+    const indexed = s.defineApp({
+      documents: s
+        .table({ ownerId: s.uuid(), updatedAt: s.timestamp() }, {})
+        .indexOnly(["ownerId"])
+        .compositeIndex(["ownerId", "updatedAt"]),
+    });
+    expect(indexed.wasmSchema.documents?.indexed_columns).toEqual(["ownerId"]);
+    expect(indexed.wasmSchema.documents?.composite_indexes).toEqual([["ownerId", "updatedAt"]]);
+  });
+
   it("serializes gather seeded from the current relation", () => {
     const directParents = graphApp.team_edges
       .where({ child_team: "team-a" })
@@ -536,6 +560,18 @@ describe("typed app prototype", () => {
         }
       | undefined
     >();
+
+    app.todos.where({
+      optionalTitle: { isNull: true },
+      optionalRank: { isNull: false },
+      optionalTags: { isNull: true },
+      optionalAttachment: { isNull: false },
+      optionalStatus: { isNull: true },
+    });
+    // @ts-expect-error required scalar columns do not support isNull
+    app.todos.where({ done: { isNull: true } });
+    // @ts-expect-error nullable payload enums keep their dedicated match operator
+    payloadEnumApp.events.where({ optionalEvent: { isNull: true } });
 
     // Membership is deliberately non-nullable. Express null handling with
     // isNull/isNotNull rather than SQL-style null membership semantics.
@@ -743,6 +779,30 @@ describe("typed app prototype", () => {
           },
         },
       );
+      // Transactions take the same applyDiffs option (#2087).
+      void db.transaction((tx) => {
+        tx.update(
+          largeValueUpdateApp.documents,
+          "00000000-0000-0000-0000-000000000001",
+          { done: true },
+          {
+            applyDiffs: {
+              title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+            },
+          },
+        );
+        // @ts-expect-error a column cannot be both replaced and diffed in a transaction either
+        tx.update(
+          largeValueUpdateApp.documents,
+          "00000000-0000-0000-0000-000000000001",
+          { title: "replacement" },
+          {
+            applyDiffs: {
+              title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+            },
+          },
+        );
+      });
       db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
         // @ts-expect-error partial descriptors belong exclusively to update's applyDiffs option
         title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },

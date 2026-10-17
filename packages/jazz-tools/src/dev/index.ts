@@ -6,18 +6,9 @@ export {
 
 export {
   deploy,
-  pushMigration,
-  pushPermissions,
-  pushSchema,
   type DeployOptions,
   type DeployResult,
   type DeploySchemaResult,
-  type PushMigrationOptions,
-  type PushMigrationResult,
-  type PushPermissionsOptions,
-  type PushPermissionsResult,
-  type PushSchemaOptions,
-  type PushSchemaResult,
   type SchemaSourceInput,
 } from "./catalogue.js";
 

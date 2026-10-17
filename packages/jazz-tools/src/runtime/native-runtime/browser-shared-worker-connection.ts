@@ -9,6 +9,7 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
   type BrowserForegroundNodeLeaseAcquireResponse,
   type BrowserForegroundNodeLeasePortEvent,
   type BrowserForegroundNodeLeasePortRequest,
@@ -25,6 +26,31 @@ import type {
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
+import { toError } from "../util.js";
+
+/**
+ * The only place the broker SharedWorker is constructed.
+ *
+ * The foreground lease and the runtime connection must attach to the same
+ * SharedWorker realm, and a realm is keyed by script URL plus name. webpack 5
+ * emits a separate worker chunk (with a distinct URL) for every
+ * `new SharedWorker(new URL(..., import.meta.url))` expression it finds, so
+ * two such expressions put the lease and the runtime in different realms and
+ * the runtime never starts. Keep exactly one statically analyzable
+ * construction here so every bundler emits a single broker worker chunk.
+ */
+function createBrokerSharedWorker(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  name: string,
+): SharedWorker {
+  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion) {
+    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
+  }
+  return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+    type: "module",
+    name,
+  });
+}
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
   BrowserWorkerInitOptions,
@@ -58,6 +84,18 @@ type ForegroundNodeLeaseAttemptOutcome =
  * root so callers retrying a wedged open do not retain unbounded ports.
  */
 const pendingForegroundLeaseCleanups = new Map<string, symbol>();
+
+/**
+ * Ask a newly started worker to fetch, compile and instantiate its WASM while the lease,
+ * IndexedDB admission and the page's own setup run. Only URL-addressed assets
+ * are prefetched: in-memory modules are never cloned twice.
+ */
+function workerWasmPrefetch(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"] {
+  if (runtimeSources?.wasmModule || runtimeSources?.wasmSource) return undefined;
+  return { runtimeSources };
+}
 
 /**
  * The one physical SharedWorker realm that may own a browser persistence root.
@@ -98,6 +136,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     readonly node: Uint8Array,
     readonly confirmedTxTime: bigint,
     private readonly leaseId: string,
+    readonly workerRealmId?: string,
   ) {}
 
   static async acquire(
@@ -111,15 +150,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
         "Shared browser foreground lease cancellation cleanup is still pending for this database; wait for the previous worker admission to finish",
       );
     }
-    const createWorker =
-      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
-        ? (name: string) =>
-            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name })
-        : (name: string) =>
-            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
-              type: "module",
-              name,
-            });
+    const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // A named SharedWorker constructor can still attach to a realm after that
     // realm has acknowledged termination but before the browser has finished
     // destroying it. Probe before sending an allocation request so a realm
@@ -148,6 +179,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           cleanupKey,
           crypto.randomUUID(),
           remainingAdmissionMs,
+          workerWasmPrefetch(runtimeSources),
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -198,6 +230,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
+    wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -299,6 +332,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           message.node.slice(),
           BigInt(message.confirmedTxTime),
           message.leaseId,
+          message.workerRealmId,
         );
         lease.worker = worker;
         lease.port = port;
@@ -317,7 +351,8 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       port.postMessage({
         type: "probe-foreground-node-lease-worker",
         attemptId,
-      });
+        ...(wasmPrefetch ? { wasmPrefetch } : {}),
+      } satisfies BrowserForegroundNodeLeaseProbeRequest);
     });
   }
 
@@ -360,6 +395,12 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     this.failFinish(reason);
   }
 
+  releaseAfterWorkerReplacement(reason: Error): void {
+    // The foreground has quiesced and the fenced successor owns persistence.
+    // Never return this identity as reusable through a dead predecessor port.
+    this.failFinish(reason);
+  }
+
   private failFinish(error: Error): void {
     this.terminalError ??= error;
     this.finishWaiter?.reject(this.terminalError);
@@ -382,7 +423,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     try {
       port.postMessage(message);
     } catch (error) {
-      this.failFinish(error instanceof Error ? error : new Error(String(error)));
+      this.failFinish(toError(error));
     }
     return this.finishPromise;
   }
@@ -439,6 +480,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
@@ -451,18 +493,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     this.workerName = workerName;
-    const createWorker =
-      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
-        ? (name: string) =>
-            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
-              type: "module",
-              name,
-            })
-        : (name: string) =>
-            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
-              type: "module",
-              name,
-            });
+    const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // Retain admission failures as state rather than leaving a process-wide
     // bootstrap promise rejected. The manager converts this state back into
     // the caller's `all()`/`wait()` rejection at its operation boundary; a
@@ -478,7 +509,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     ).then(
       () => undefined,
       (error: unknown) => {
-        this.readyError = error instanceof Error ? error : new Error(String(error));
+        this.readyError = toError(error);
         callbacks.onFailure(this.readyError);
       },
     );
@@ -658,6 +689,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onAuthFailure: this.callbacks.onAuthFailure,
             onAuthRestored: this.callbacks.onAuthRestored,
             onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
+            onRemoteLinkChange: this.callbacks.onRemoteLinkChange,
             onFailure: this.callbacks.onFailure,
             onStorageReset: this.callbacks.onStorageReset,
             onStorageInvalidated: this.callbacks.onStorageInvalidated,
@@ -673,7 +705,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             if (this.worker === worker) this.worker = null;
             settle({
               connected: false,
-              error: error instanceof Error ? error : new Error(String(error)),
+              error: toError(error),
             });
           },
         );
@@ -711,10 +743,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         if (this.worker === worker) this.worker = null;
         settle({
           connected: false,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: toError(error),
         });
       }
     });
+  }
+
+  getWorkerRealmId(): string | undefined {
+    return this.connection?.getWorkerRealmId();
   }
 
   ready(): Promise<void> {

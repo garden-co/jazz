@@ -216,8 +216,66 @@ pub(super) fn primary_key_bytes(
     }
     Ok(bytes)
 }
+pub(super) fn validate_raw_primary_key(
+    table: &TableSchema,
+    variant_tag: u32,
+    record_schema: RecordDescriptor,
+    record: &[u8],
+    key: &[u8],
+) -> Result<(), Error> {
+    let derived_key = primary_key_bytes(table, variant_tag, record_schema, record)?;
+    if derived_key != key {
+        return Err(Error::InvalidDirectRecordStoreKey(format!(
+            "raw record primary key mismatch for table {}",
+            table.name
+        )));
+    }
+    Ok(())
+}
 
 impl Database {
+    /// The logical descriptor and transcoder of one stored table variant,
+    /// cached per database schema generation.
+    pub(super) fn stored_record_codec(
+        &self,
+        table: &TableSchema,
+        variant_tag: u32,
+    ) -> Result<StoredRecordCodec, Error> {
+        if let Some(codec) = self
+            .stored_record_descriptors
+            .borrow()
+            .get(&table.name)
+            .and_then(|variants| variants.get(&variant_tag))
+        {
+            return Ok(codec.clone());
+        }
+        let storage = table
+            .storage_record_schema_for_variant(variant_tag)
+            .ok_or_else(|| Error::UnknownTableVariant {
+                table: table.name.clone(),
+                version: u64::from(variant_tag),
+            })?;
+        let codec = match records::RecordTranscoder::new(storage)? {
+            Some(transcoder) => StoredRecordCodec {
+                logical: transcoder.logical(),
+                transcoder: Some(Rc::new(transcoder)),
+            },
+            None => StoredRecordCodec {
+                logical: storage,
+                transcoder: None,
+            },
+        };
+        self.stored_record_descriptors
+            .borrow_mut()
+            .entry(table.name.clone())
+            .or_default()
+            .insert(variant_tag, codec.clone());
+        Ok(codec)
+    }
+
+    /// Bind one stored row as its logical record. Every point, scan and index
+    /// read of table rows comes through here, so interned columns are
+    /// resolved to their values before any caller sees the record.
     pub(super) fn decode_stored_key_value<'a>(
         &self,
         table: &TableSchema,
@@ -225,174 +283,148 @@ impl Database {
         stored: Vec<u8>,
     ) -> Result<EncodedKeyValue<'a>, Error> {
         let (variant_tag, payload) = split_variant_record(&stored)?;
-        let cached = self
-            .stored_record_descriptors
-            .borrow()
-            .get(&table.name)
-            .and_then(|variants| variants.get(&variant_tag))
-            .copied();
-        let descriptor = if let Some(descriptor) = cached {
-            descriptor
-        } else {
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            self.stored_record_descriptors
-                .borrow_mut()
-                .entry(table.name.clone())
-                .or_default()
-                .insert(variant_tag, descriptor);
-            descriptor
+        let codec = self.stored_record_codec(table, variant_tag)?;
+        let payload = match &codec.transcoder {
+            Some(transcoder) => crate::dictionary::transcode_to_logical(
+                transcoder,
+                &self.ivm_runtime.dictionaries().borrow(),
+                payload,
+            )?,
+            None => payload.to_vec(),
         };
         Ok(EncodedKeyValue::from_variant(
             key,
-            VariantRecord::new(variant_tag, OwnedRecord::new(payload.to_vec(), descriptor)),
+            VariantRecord::new(variant_tag, OwnedRecord::new(payload, codec.logical)),
         ))
     }
 }
 
+/// Rebuild the full encoded primary key of one durable index entry.
+///
+/// Primary-key columns that the index key already carries are taken from the
+/// decoded index columns; the remaining ones come from the entry's suffix: after
+/// the `0xff` separator for a non-unique index, or from the stored value for a
+/// unique one. An index whose columns cover the primary key has no suffix.
 pub(crate) fn persisted_index_primary_key(
     table: &TableSchema,
     index_name: &str,
     index: &IndexSchema,
     storage_key: &[u8],
-    stored_value: &Value,
+    stored_value: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let logical_key = persisted_index_logical_key(table, index_name, storage_key)?;
-    if index_key_covers_primary_key(table, index)? {
-        return primary_key_from_index_columns(table, index_name, index, &logical_key);
-    }
-    if let Some(primary_key) =
-        primary_key_from_appended_index_suffix(table, index_name, index, &logical_key)?
-    {
-        return Ok(primary_key);
-    }
-    let Value::Bytes(primary_key) = stored_value else {
-        return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
-    };
-    validate_primary_key_bytes(table, index_name, primary_key)?;
-    Ok(primary_key.clone())
-}
-
-pub(super) fn persisted_index_logical_key(
-    table: &TableSchema,
-    index_name: &str,
-    storage_key: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let prefix = durable_index_key_prefix(&table.name, index_name);
-    let mut remaining = storage_key
-        .strip_prefix(prefix.as_slice())
-        .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-    expect_persisted_index_key_tag(&mut remaining, index_name, 7)?;
-    let logical_key = decode_persisted_index_ordered_bytes(&mut remaining, index_name)?;
-    if !remaining.is_empty() {
-        return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
-    }
-    Ok(logical_key)
-}
-
-pub(super) fn index_key_covers_primary_key(
-    table: &TableSchema,
-    index: &IndexSchema,
-) -> Result<bool, Error> {
-    let primary_key = table
-        .primary_key
-        .as_ref()
-        .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
-    Ok(primary_key
-        .columns
-        .iter()
-        .all(|primary_key_column| index.columns.contains(&primary_key_column.column)))
-}
-
-pub(super) fn primary_key_from_index_columns(
-    table: &TableSchema,
-    index_name: &str,
-    index: &IndexSchema,
-    logical_key: &[u8],
-) -> Result<Vec<u8>, Error> {
+    let invalid = || Error::InvalidPersistedIndex(index_name.to_owned());
+    let logical_key = persisted_index_logical_key(index_name, storage_key)?;
     let primary_key = table
         .primary_key
         .as_ref()
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
     let mut remaining = logical_key;
-    let mut index_values = Vec::with_capacity(index.columns.len());
-    for column_name in &index.columns {
-        let column = table
-            .columns
-            .iter()
-            .find(|column| column.name == *column_name)
-            .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-        index_values.push(decode_index_key_part(
-            &mut remaining,
-            &column.column_type,
-            index_name,
-        )?);
-    }
-    if !remaining.is_empty() {
-        return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
-    }
-
+    let index_values = decode_index_columns(table, index_name, index, &mut remaining)?;
+    let covers_primary_key = primary_key
+        .columns
+        .iter()
+        .all(|column| index.columns.contains(&column.column));
+    let mut suffix: &[u8] = if covers_primary_key {
+        if !remaining.is_empty() || !stored_value.is_empty() {
+            return Err(invalid());
+        }
+        &[]
+    } else if index.unique {
+        if !remaining.is_empty() {
+            return Err(invalid());
+        }
+        stored_value
+    } else {
+        if remaining.first() != Some(&0xff) || !stored_value.is_empty() {
+            return Err(invalid());
+        }
+        &remaining[1..]
+    };
     let mut bytes = Vec::new();
-    for primary_key_column in &primary_key.columns {
-        let index_position = index
-            .columns
-            .iter()
-            .position(|column| column == &primary_key_column.column)
-            .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-        let value = index_values
-            .get(index_position)
-            .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-        ensure_primary_key_value_type(table, primary_key_column, value)?;
-        encode_primary_key_part(&mut bytes, value)?;
+    for column in &primary_key.columns {
+        if let Some(position) = index.columns.iter().position(|name| *name == column.column) {
+            let value = index_values.get(position).ok_or_else(invalid)?;
+            ensure_primary_key_value_type(table, column, value)?;
+            encode_primary_key_part(&mut bytes, value)?;
+        } else {
+            let before = suffix;
+            decode_primary_key_part(&mut suffix, &column.key_type.column_type())
+                .map_err(|_| invalid())?;
+            bytes.extend_from_slice(&before[..before.len() - suffix.len()]);
+        }
+    }
+    if !suffix.is_empty() {
+        return Err(invalid());
     }
     Ok(bytes)
 }
 
-pub(super) fn primary_key_from_appended_index_suffix(
+fn decode_index_columns(
     table: &TableSchema,
     index_name: &str,
     index: &IndexSchema,
-    logical_key: &[u8],
-) -> Result<Option<Vec<u8>>, Error> {
-    let mut remaining = logical_key;
-    for column_name in &index.columns {
+    remaining: &mut &[u8],
+) -> Result<Vec<Value>, Error> {
+    index
+        .columns
+        .iter()
+        .map(|column_name| {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == *column_name)
+                .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
+            decode_index_key_part(remaining, &column.column_type, index_name)
+        })
+        .collect()
+}
+
+/// Decode one covered index or primary-key column without loading its table row.
+/// Used by snapshot-only key filtering before full-row hydration.
+pub(crate) fn persisted_index_column_value(
+    table: &TableSchema,
+    index_name: &str,
+    index: &IndexSchema,
+    storage_key: &[u8],
+    stored_value: &[u8],
+    column_name: &str,
+) -> Result<Value, Error> {
+    let mut remaining = persisted_index_logical_key(index_name, storage_key)?;
+    for indexed_column in &index.columns {
         let column = table
             .columns
             .iter()
-            .find(|column| column.name == *column_name)
+            .find(|column| column.name == *indexed_column)
             .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-        let _ = decode_index_key_part(&mut remaining, &column.column_type, index_name)?;
+        let value = decode_index_key_part(&mut remaining, &column.column_type, index_name)?;
+        if indexed_column == column_name {
+            return Ok(value);
+        }
     }
-    if remaining.first() != Some(&0xff) {
-        return Ok(None);
-    }
-    let primary_key = remaining[1..].to_vec();
-    validate_primary_key_bytes(table, index_name, &primary_key)?;
-    Ok(Some(primary_key))
-}
-
-pub(super) fn validate_primary_key_bytes(
-    table: &TableSchema,
-    index_name: &str,
-    primary_key: &[u8],
-) -> Result<(), Error> {
-    let table_primary_key = table
+    let primary_key = table
         .primary_key
         .as_ref()
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
-    let mut remaining = primary_key;
-    for column in &table_primary_key.columns {
-        decode_primary_key_part(&mut remaining, &column.key_type.column_type().clone())
-            .map_err(|_| Error::InvalidPersistedIndex(index_name.to_owned()))?;
+    let primary_bytes =
+        persisted_index_primary_key(table, index_name, index, storage_key, stored_value)?;
+    let mut remaining = primary_bytes.as_slice();
+    for column in &primary_key.columns {
+        let value = decode_primary_key_part(&mut remaining, &column.key_type.column_type())?;
+        if column.column == column_name {
+            return Ok(value);
+        }
     }
-    if !remaining.is_empty() {
-        return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
-    }
-    Ok(())
+    Err(Error::InvalidPersistedIndex(index_name.to_owned()))
+}
+
+/// Strip the numeric index-id prefix from a durable index storage key.
+pub(super) fn persisted_index_logical_key<'a>(
+    index_name: &str,
+    storage_key: &'a [u8],
+) -> Result<&'a [u8], Error> {
+    split_durable_index_key(storage_key)
+        .map(|(_, logical_key)| logical_key)
+        .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))
 }
 
 pub(super) fn ensure_primary_key_value_type(
@@ -433,6 +465,10 @@ pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Resul
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::U48(value) => {
+            key.push(16);
+            key.extend(records::u48_be_bytes(*value)?);
         }
         Value::I32(value) => {
             key.push(14);
@@ -539,6 +575,15 @@ pub(super) fn decode_primary_key_part(
             );
             Ok(Value::U64(value))
         }
+        records::ValueType::U48 => {
+            expect_key_tag(bytes, 16)?;
+            let value = records::u48_from_be_bytes(
+                take_key_bytes(bytes, 6)?
+                    .try_into()
+                    .expect("slice has u48 length"),
+            );
+            Ok(Value::U48(value))
+        }
         records::ValueType::I32 => {
             expect_key_tag(bytes, 14)?;
             let value = u32::from_be_bytes(
@@ -643,6 +688,14 @@ pub(super) fn decode_index_key_part(
                 take_persisted_index_key_bytes(bytes, index_name, 8)?
                     .try_into()
                     .expect("slice has u64 length"),
+            )))
+        }
+        ColumnType::U48 => {
+            expect_persisted_index_key_tag(bytes, index_name, 16)?;
+            Ok(Value::U48(records::u48_from_be_bytes(
+                take_persisted_index_key_bytes(bytes, index_name, 6)?
+                    .try_into()
+                    .expect("slice has u48 length"),
             )))
         }
         ColumnType::I32 => {

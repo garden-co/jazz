@@ -149,7 +149,7 @@ async fn query_applies_claims_select_policy() {
                     row_input!("name" => "Party Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -253,7 +253,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("admin creates bigint claims row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     integer_tx.expect("ordinary mutation commits immediately"),
@@ -346,7 +346,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
             let (or_row_id, _, or_tx_id) = admin
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     in_list_tx_id.expect("ordinary mutation commits immediately"),
@@ -477,7 +477,7 @@ async fn subscription_matches_claims_select_query() {
                     row_input!("name" => "Subscription Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -635,7 +635,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                     row_input!("name" => "visible before revocation"),
                 )
                 .expect("writer inserts initially visible room");
-            support::wait_for_edge_txs(&writer, &[initial_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[initial_tx.expect("ordinary mutation commits immediately")]).await;
 
             let mut stream = authorized
                 .subscribe(query.clone())
@@ -676,7 +676,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
             let (future_id, _, future_tx) = writer
                 .insert("admin_rooms", row_input!("name" => "visible to original session"))
                 .expect("writer inserts a later room");
-            support::wait_for_edge_txs(&writer, &[future_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[future_tx.expect("ordinary mutation commits immediately")]).await;
             wait_for_subscription_update(
                 &mut stream,
                 &mut stream_log,
@@ -734,7 +734,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                     row_input!("name" => "Beta Room", "join_code" => "beta"),
                 )
                 .expect("admin creates beta room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     alpha_tx.expect("ordinary mutation commits immediately"),
@@ -890,7 +890,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                     row_input!("access_level" => Value::Integer(-7)),
                 )
                 .expect("I64 claim creates I32 row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bigint_claim_user,
                 &[integer_tx.expect("ordinary mutation commits immediately")],
             )
@@ -911,7 +911,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("U32 claim creates I64 row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &integer_claim_user,
                 &[bigint_tx.expect("ordinary mutation commits immediately")],
             )

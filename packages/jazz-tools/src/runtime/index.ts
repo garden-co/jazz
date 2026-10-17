@@ -18,6 +18,10 @@ export {
   ExclusiveWriteResult,
 } from "./client.js";
 export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
 export { createDb } from "./default-create-db.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
@@ -50,15 +54,11 @@ export {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  publishStoredPermissions,
-  publishStoredSchema,
-  type PublishStoredSchemaOptions,
-  type PublishStoredPermissionsOptions,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
   type StoredSchemaHash,
   type StoredPermissionsResponse,
-} from "./schema-fetch.js";
+} from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,
   type FetchServerSubscriptionsOptions,

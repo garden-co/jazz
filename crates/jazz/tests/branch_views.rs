@@ -9,7 +9,6 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
 };
@@ -92,7 +91,7 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
         .with_delete(read)
 }
 
-fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -122,7 +121,7 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     (db, schema)
 }
 
-fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_history_complete_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -133,12 +132,17 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
             )
             .build(),
     );
+    let db = open_history_complete_db_with_schema(schema.clone());
+    (db, schema)
+}
+
+fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     let families = schema.column_families();
     let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
         .expect("valid memory storage families");
-    let db = block_on(Db::open_history_complete(
+    block_on(Db::open_history_complete(
         DbConfig::new(
-            schema.clone(),
+            schema,
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x90; 16]),
@@ -147,11 +151,10 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
         )
         .with_id_source(SeededRowIdSource::new(9)),
     ))
-    .unwrap();
-    (db, schema)
+    .unwrap()
 }
 
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
     let families = schema.column_families();
     let storage = RocksDbStorage::open(
         path,
@@ -1000,7 +1003,7 @@ fn branch_view_reachability_consumes_effective_sources() {
     );
 }
 
-fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_policy_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -1942,7 +1945,7 @@ fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct
 }
 
 fn assert_branch_view_copy_on_write_receipt(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     schema: &JazzSchema,
     base: &BranchSelector,
     copied: RowUuid,
@@ -2205,46 +2208,419 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     ));
 }
 
+mod common;
+
+/// One write in a scripted branch-view sequence.
+type BranchEdit<'a> = Box<dyn Fn(&Db) + 'a>;
+
+/// Alice subscribes to `title = needle` on her draft over main. Under the
+/// title index each branch's deletion register is read only for the row ids
+/// of the content candidates, and main is masked only by the draft rows
+/// sharing a candidate's id, so every late change on either side must still
+/// reach the view: deletes and restores on the draft and on main, an indexed
+/// value moving into and out of the prefix, a new row, and deletes of rows
+/// outside the prefix. After each write the live result equals the unindexed
+/// read of the same view, filtered to `needle`.
+///
+/// ```text
+/// main:  a=needle  b=needle  c=hay  d=needle  x=hay (deleted)
+/// draft: (empty)
+/// alice ──title = needle, draft over main──► {a, b, d}, then one write at a time
+/// ```
 #[test]
-fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
-    let (db, schema) = open_history_complete_db();
-    let source = selector(0x91);
-    let target = selector(0x92);
-    let row = RowUuid::from_bytes([0x93; 16]);
-    db.insert(
+fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
+    let (db, schema) = open_db();
+    let main = selector(0x81);
+    let draft = selector(0x82);
+    let [a, b, c, d, x, e] =
+        [0x83, 0x84, 0x85, 0x86, 0x87, 0x88].map(|byte| RowUuid::from_bytes([byte; 16]));
+    let title =
+        |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
+    for (row, value) in [
+        (a, "needle"),
+        (b, "needle"),
+        (c, "hay"),
+        (d, "needle"),
+        (x, "hay"),
+    ] {
+        db.insert(
+            "todos",
+            title(value),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let on_main = || jazz::db::WriteTarget::BranchView {
+        head: main.clone(),
+        base: None,
+    };
+    let on_draft = || jazz::db::WriteTarget::BranchView {
+        head: draft.clone(),
+        base: Some(BranchViewBase::Current(main.clone())),
+    };
+    let delete = |db: &Db, row, target| {
+        db.delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let update = |db: &Db, row, value: &str, target| {
+        db.update(
+            "todos",
+            row,
+            title(value),
+            jazz::db::UpdateOptions {
+                target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let restore = |db: &Db, row, value: &str, branch: &BranchSelector| {
+        db.restore(
+            "todos",
+            row,
+            Some(title(value)),
+            jazz::db::RestoreOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    delete(&db, x, on_main());
+
+    let opts =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let needle = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
+        .unwrap();
+    let all = db.prepare_query(&db.table("todos")).unwrap();
+    let table = &schema.tables[0];
+    let expected = |db: &Db| {
+        let mut rows = block_on(db.all(&all, opts.clone()))
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.cell(table, "title") == Some(Value::String("needle".to_owned())))
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+
+    let mut subscription = block_on(db.subscribe(&needle, opts.clone())).unwrap();
+    let mut live = BTreeMap::new();
+    let apply = |subscription: &mut jazz::db::SubscriptionStream,
+                 live: &mut BTreeMap<RowUuid, ()>| {
+        while let Some(event) = subscription.try_next_event() {
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                ..
+            } = event
+            else {
+                panic!("unexpected subscription event: {event:?}");
+            };
+            if reset {
+                live.clear();
+            }
+            for row in removed {
+                assert!(
+                    live.remove(&row.row_uuid).is_some(),
+                    "removed an absent row"
+                );
+            }
+            for row in added {
+                assert!(
+                    live.insert(row.row_uuid(), ()).is_none(),
+                    "added a row twice"
+                );
+            }
+        }
+    };
+    let opening = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset: true, added, ..
+    } = opening
+    else {
+        panic!("unexpected opening event: {opening:?}");
+    };
+    live.extend(added.iter().map(|row| (row.row_uuid(), ())));
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), vec![a, b, d]);
+
+    let edits: Vec<(&str, BranchEdit)> = vec![
+        (
+            "draft deletes an inherited row",
+            Box::new(|db| delete(db, a, on_draft())),
+        ),
+        (
+            "main deletes a row",
+            Box::new(|db| delete(db, b, on_main())),
+        ),
+        (
+            "main restores it",
+            Box::new(|db| restore(db, b, "needle", &main)),
+        ),
+        (
+            "draft restores its delete",
+            Box::new(|db| restore(db, a, "needle", &draft)),
+        ),
+        (
+            "main moves a row into the prefix",
+            Box::new(|db| update(db, c, "needle", on_main())),
+        ),
+        (
+            "main deletes the moved row",
+            Box::new(|db| delete(db, c, on_main())),
+        ),
+        (
+            "draft moves a row out of the prefix",
+            Box::new(|db| update(db, d, "hay", on_draft())),
+        ),
+        (
+            "draft deletes that row",
+            Box::new(|db| delete(db, d, on_draft())),
+        ),
+        (
+            "main deletes the row draft deleted",
+            Box::new(|db| delete(db, d, on_main())),
+        ),
+        (
+            "main restores the outside row",
+            Box::new(|db| restore(db, x, "needle", &main)),
+        ),
+        (
+            "main inserts a row",
+            Box::new(|db| {
+                db.insert(
+                    "todos",
+                    title("needle"),
+                    jazz::db::InsertOptions {
+                        row_id: Some(e),
+                        target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            "draft deletes the new row",
+            Box::new(|db| delete(db, e, on_draft())),
+        ),
+    ];
+    for (step, edit) in edits {
+        edit(&db);
+        apply(&mut subscription, &mut live);
+        assert_eq!(
+            live.keys().copied().collect::<Vec<_>>(),
+            expected(&db),
+            "{step}"
+        );
+    }
+    assert_eq!(live.keys().copied().collect::<Vec<_>>(), {
+        let mut rows = vec![a, b, x];
+        rows.sort();
+        rows
+    });
+}
+
+/// An older reader omits a head row it cannot decode, but that head row still
+/// masks the base row underneath: the reader never sees the base body.
+///
+/// base/open ──v2 head/closed──► v1 reader of head-over-base sees neither
+#[test]
+fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
+    let schema = |variants: &[&str]| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("todos")
+                        .column("branch_id", ColumnType::Uuid)
+                        .column("title", ColumnType::Text)
+                        .column(
+                            "status",
+                            ColumnType::ScalarEnum {
+                                name: "Status".to_owned(),
+                                variants: variants
+                                    .iter()
+                                    .map(|variant| (*variant).to_owned())
+                                    .collect(),
+                            },
+                        )
+                        .branch_by("branch_id"),
+                )
+                .build(),
+        )
+    };
+    let v1 = schema(&["open"]);
+    let db = open_history_complete_db_with_schema(v1.clone());
+    let old = block_on(db.register_schema_view(v1.clone())).unwrap();
+    let base = selector(0x51);
+    let head = selector(0x52);
+    let incompatible = RowUuid::from_bytes([0x53; 16]);
+    let inherited = RowUuid::from_bytes([0x54; 16]);
+    for (row, title) in [
+        (incompatible, "base incompatible"),
+        (inherited, "base inherited"),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("status".to_owned(), Value::EnumTag(0)),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let v2 = schema(&["open", "closed"]);
+    let target = jazz::protocol::SchemaVersion::new(v2.clone());
+    let lens = jazz::protocol::MigrationLens::new(
+        v1.version_id(),
+        target.id,
+        vec![jazz::protocol::TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![jazz::protocol::LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    )
+    .unwrap();
+    let publication = db
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    block_on(db.publish_schema_with_lens(1, publication)).unwrap();
+    block_on(
+        db.activate_catalogue_schema_for_test(jazz::protocol::CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        }),
+    )
+    .unwrap();
+    let new = block_on(db.register_schema_view(v2.clone())).unwrap();
+    new.insert(
         "todos",
-        BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("head incompatible".to_owned()),
+            ),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ]),
         jazz::db::InsertOptions {
-            row_id: Some(row),
-            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
+            row_id: Some(incompatible),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
             ..Default::default()
         },
     )
     .unwrap();
-
-    let selected = || {
-        [ContributionMergeRow {
-            table: "todos".to_owned(),
-            row_uuid: row,
-        }]
+    let table = v1
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+    let whole = old.prepare_query(&old.table("todos")).unwrap();
+    let composed = ReadOpts {
+        tier: jazz::db::ReadTier::LocalOnly,
+        ..ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)))
     };
-    let merged = db
-        .merge_branch_contributions(source.clone(), target.clone(), selected())
-        .unwrap()
-        .expect("the first calculation emits an ordinary transaction");
-    let _ordinary_write_state = db.write_state(merged).unwrap();
-    assert!(
-        db.merge_branch_contributions(source, target.clone(), selected())
-            .unwrap()
-            .is_none(),
-        "observed contribution provenance suppresses a retry"
-    );
-
-    let query = db.prepare_query(&db.table("todos")).unwrap();
-    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("source".to_owned()))
+        block_on(old.all(&whole, composed))
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.row_uuid(), row.cell(table, "title")))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(inherited, Some(Value::String("base inherited".to_owned())))]),
+        "the omitted head row masks the base body"
     );
 }
-mod common;
+
+/// An enum branch column keeps its enum type in branch-view reads, on both
+/// the head and the inherited base rows.
+///
+/// base/open + head/closed ──read head-over-base──► branch cells stay enums
+#[test]
+fn branch_view_reads_keep_enum_branch_columns() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column(
+                        "branch",
+                        ColumnType::ScalarEnum {
+                            name: "Branch".to_owned(),
+                            variants: vec!["base".to_owned(), "head".to_owned()],
+                        },
+                    )
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build(),
+    );
+    let table = &schema.tables()[0];
+    let db = open_history_complete_db_with_schema(schema.clone());
+    let base = BranchSelector::new([("branch", Value::EnumTag(0))]);
+    let head = BranchSelector::new([("branch", Value::EnumTag(1))]);
+    let inherited = RowUuid::from_bytes([0x7a; 16]);
+    let own = RowUuid::from_bytes([0x7b; 16]);
+    for (row, branch, title) in [
+        (inherited, base.clone(), "inherited"),
+        (own, head.clone(), "own"),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let branches = |opts: ReadOpts| {
+        block_on(db.all(&query, opts))
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.row_uuid(), row.cell(table, "branch")))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let exact = ReadOpts {
+        tier: jazz::db::ReadTier::LocalOnly,
+        ..ReadOpts::default().branch_view(head.clone(), None)
+    };
+    assert_eq!(
+        branches(exact.clone()),
+        BTreeMap::from([(own, Some(Value::EnumTag(1)))])
+    );
+    assert_eq!(
+        branches(exact.branch_view(head, Some(BranchViewBase::Current(base)))),
+        BTreeMap::from([
+            (inherited, Some(Value::EnumTag(1))),
+            (own, Some(Value::EnumTag(1))),
+        ])
+    );
+}

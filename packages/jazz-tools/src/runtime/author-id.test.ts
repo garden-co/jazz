@@ -11,7 +11,7 @@ import {
 const encoder = new TextEncoder();
 
 function storedScalar(value: string): Uint8Array {
-  return Uint8Array.from([2, ...encoder.encode(value)]);
+  return Uint8Array.from([0, ...encoder.encode(value)]);
 }
 
 describe("canonical author subjects", () => {
@@ -26,6 +26,16 @@ describe("canonical author subjects", () => {
         }),
       ),
     ).toBe(canonical);
+  });
+
+  it("reports a missing issuer or subject clearly instead of a TypeError", () => {
+    const missing = undefined as unknown as string;
+    expect(() => canonicalAuthorSubject(missing, "alice")).toThrow(
+      new Error("Author identity is missing an issuer"),
+    );
+    expect(() => canonicalAuthorSubject("https://issuer.example", missing)).toThrow(
+      new Error("Author identity is missing a subject"),
+    );
   });
 
   it("distinguishes the same subject issued by different authorities", () => {
@@ -86,7 +96,7 @@ describe("canonical author subjects", () => {
     const canonical = '["urn:jazz:test","author"]';
     expect(decodeCanonicalAuthorSubjectBytes(storedScalar(canonical))).toBe(canonical);
     expect(() =>
-      decodeCanonicalAuthorSubjectBytes(Uint8Array.from([0, ...encoder.encode(canonical)])),
+      decodeCanonicalAuthorSubjectBytes(Uint8Array.from([2, ...encoder.encode(canonical)])),
     ).toThrow(/canonical author subject/);
     expect(() => decodeCanonicalAuthorSubjectBytes(encoder.encode(canonical))).toThrow(
       /canonical author subject/,
@@ -97,7 +107,7 @@ describe("canonical author subjects", () => {
     const canonical = '["urn:jazz:test","author"]';
     for (const bytes of [
       encoder.encode("not-json"),
-      Uint8Array.from([2, ...storedScalar(canonical)]),
+      Uint8Array.from([0, ...storedScalar(canonical)]),
       encoder.encode(`[ "urn:jazz:test", "author" ]`),
       encoder.encode('["urn:jazz:test"," "]'),
       encoder.encode(String.raw`["urn:jazz:test","\ud800"]`),

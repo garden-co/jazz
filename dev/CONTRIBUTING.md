@@ -55,12 +55,27 @@ own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
 probe of that fallback. Direct invocations of
 `node dev/scripts/clippy-staged.mjs` remain available for local debugging.
 
+### CLI integration tests
+
+CLI integration scenarios are partitioned by behavior across focused test files;
+keep every scenario in exactly one suite. Shared helpers live in the private
+`tests/cli/fixtures.ts` factory, which creates isolated temporary roots per file
+and cleans up temporary files and stubbed globals after each test.
+
 ### Running tests
 
 ```sh
 pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
+
+### Better Auth adapter test fixtures
+
+Reuse the generated fixture schema and permissions when testing adapter
+behaviour. Each case still owns a fresh server, client context and rows, and
+publishes its catalogue through the real deployment interface. Keep filesystem
+schema-loading coverage in the CLI and loader suites rather than repeating it
+in adapter setup.
 
 ### Focus one Rust test safely
 
@@ -69,10 +84,13 @@ features it will run. A filter must resolve to exactly one inventory entry; the
 wrapper then invokes that canonical name with Cargo's `--exact`. It refuses an
 empty or ambiguous selection before a test runs, prints the selected binary,
 feature and cache context, and separately reports inventory/compile and test-run
-elapsed time. This is useful for files under `src/node/tests/`: their test names
-are wrapped as `node::tests::harness::…` (rather than retaining their source
-file in the module path), but a distinctive test-name suffix is enough for
-`dev/t` to discover and run the canonical name.
+elapsed time. This is useful for files under the `jazz-node` crate's
+`src/node/tests/`: their test names are wrapped as `node::tests::harness::…`
+(rather than retaining their source file in the module path), but a distinctive
+test-name suffix is enough for `dev/t -p jazz-node` to discover and run the
+canonical name. A filter that already starts with `node::` or `peer::` selects
+`jazz-node` without `-p`, and one starting with `db::`, `binding_codec::`,
+`result_tree::` or `foreground_node_lease::` selects `jazz-db`.
 
 ```sh
 # Default: Jazz library tests, substring matching.
@@ -82,7 +100,7 @@ dev/t subscription::tests::reopens
 dev/t --exact db::tests::round_trips
 
 # A node test: resolve its canonical harness path from the unique suffix.
-dev/t query_rows_at_lowers_filters_against_historical_current_rows
+dev/t -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
 
 # An integration target is explicit, so Cargo cannot search an unintended bin.
 dev/t --test incremental_delivery_canary maintained_relation -- --nocapture

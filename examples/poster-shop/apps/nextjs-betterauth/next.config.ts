@@ -11,7 +11,11 @@ export default withJazz(
   {
     server: {
       backendSecret: process.env.BACKEND_SECRET ?? "poster-shop-development-backend-secret",
+      // The Jazz server requires issuer and audience on external JWTs; both
+      // match the Better Auth jwt plugin in src/lib/auth.ts.
       jwksUrl: `${appOrigin}/api/auth/jwks`,
+      jwtIssuer: appOrigin,
+      jwtAudience: appOrigin,
     },
   },
 );

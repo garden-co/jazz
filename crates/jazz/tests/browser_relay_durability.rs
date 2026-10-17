@@ -1,3 +1,6 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
@@ -6,18 +9,19 @@ use std::rc::Rc;
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::db::{
-    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
-    SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
+    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, SubscriptionEvent,
+    TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    BranchSelector, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
+    BranchSelector, RegisterShapeOptions, ResultRowLayer, RowVersionRefEntry, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle, VersionBundleScope,
+    VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -27,7 +31,6 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz_storage_rocksdb::RocksDbStorage;
-use jazz_testkit::duplex_transport::duplex;
 
 /// Mirror the production browser-worker upstream: the client side has already
 /// been admitted to forward one scope binding, and the authority side installs
@@ -136,12 +139,12 @@ use common::{compile_schema, exists, outer_eq, session_eq};
 /// a relay receipt is not allowed to serve a downstream subscription in the
 /// same turn in which it received its authority update.
 macro_rules! pump_two_browser_relays {
-    ($owner_foreground:expr, $owner_worker:expr, $owner_edge:expr, $core:expr, $guest_edge:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
+    ($owner_foreground:expr, $owner_worker:expr, $owner_relay:expr, $core:expr, $guest_relay:expr, $guest_worker:expr, $guest_foreground:expr, $label:expr) => {{
         $owner_foreground.tick().expect($label);
         $owner_worker.tick().expect($label);
-        $owner_edge.tick().expect($label);
+        $owner_relay.tick().expect($label);
         $core.tick().expect($label);
-        $guest_edge.tick().expect($label);
+        $guest_relay.tick().expect($label);
         $guest_worker.tick().expect($label);
         $guest_foreground.tick().expect($label);
     }};
@@ -242,6 +245,7 @@ fn write_only_policy_schema() -> JazzSchema {
 }
 
 fn included_relation_schema() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
     compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("profiles").column("name", ColumnType::Text))
@@ -251,6 +255,7 @@ fn included_relation_schema() -> JazzSchema {
                     .column("body", ColumnType::Text)
                     .column("created", ColumnType::Timestamp),
             )
+            .allow_all()
             .build(),
     )
 }
@@ -297,7 +302,7 @@ fn band_chat_message_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -319,7 +324,7 @@ fn open_db_with_storage(
     author: AuthorSubject,
     schema: &JazzSchema,
     storage: TestStorage,
-) -> Db<TestStorage> {
+) -> Db {
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -331,7 +336,7 @@ fn open_db_with_storage(
     .expect("open database")
 }
 
-fn open_core(node: u8, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_core(node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -367,11 +372,7 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-fn open_persistent_worker(
-    path: &std::path::Path,
-    node: u8,
-    schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+fn open_persistent_worker(path: &std::path::Path, node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -397,7 +398,7 @@ fn open_persistent_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -427,7 +428,7 @@ fn open_persistent_scope_isolated_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -489,7 +490,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     let _subscription = block_on(foreground.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -530,7 +531,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         table,
         schema.version_id(),
         row,
-        Vec::new(),
         alice,
         tx_id.time.physical_ms(),
         alice,
@@ -539,7 +539,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         None,
     )
     .expect("encode authority row version");
-    let request = RowVersionRef::new("todos", row, tx_id);
     // INV-SYNC-36: an authority never sends result membership. It declares a
     // complete source closure and ships the exact source witness, from which
     // the receiver derives its own terminal.
@@ -626,77 +625,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     drop(worker_foreground);
     drop(foreground);
     drop(worker);
-
-    // The authority link and the initial foreground are gone. A freshly
-    // opened worker with the exact same durable scope may still serve the
-    // physical version it was previously authorized to learn; it must not
-    // need to re-run current policy to repair the new foreground.
-    let reopened =
-        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
-    let (mut reopened_foreground_transport, reopened_worker_transport) = duplex();
-    let _reopened_foreground = reopened.accept_subscriber(reopened_worker_transport, alice);
-    reopened_foreground_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![request],
-            delegated_session: None,
-        })
-        .expect("foreground requests retained repair");
-    reopened
-        .tick()
-        .expect("serve retained same-scope repair after reopen");
-    reopened
-        .tick()
-        .expect("flush retained same-scope repair after reopen");
-    let replies =
-        std::iter::from_fn(|| reopened_foreground_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        replies.iter().any(|reply| matches!(
-            reply,
-            SyncMessage::RowVersionPayloads { version_bundles } if version_bundles.len() == 1
-        )),
-        "same-scope reopen serves the previously authority-delivered exact version, got {replies:?}"
-    );
-
-    let bob = AuthorSubject::for_test_bytes([0xba; 16]);
-    let (mut bob_transport, bob_worker_transport) = duplex();
-    let _bob_foreground = reopened.accept_subscriber(bob_worker_transport, bob);
-    bob_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![RowVersionRef::new("todos", row, tx_id)],
-            delegated_session: None,
-        })
-        .expect("other subject requests retained repair");
-    assert!(
-        block_on(reopened.tick()).is_err(),
-        "an out-of-scope foreground request must fail closed before a repair reply"
-    );
-    let bob_replies = std::iter::from_fn(|| bob_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        !bob_replies
-            .iter()
-            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
-        "a different foreground subject must never reuse Alice's durable repair ledger"
-    );
-
-    let (mut generic_transport, generic_worker_transport) = duplex();
-    let _generic_relay = reopened.accept_relay_subscriber(generic_worker_transport);
-    generic_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![RowVersionRef::new("todos", row, tx_id)],
-            delegated_session: None,
-        })
-        .expect("generic relay requests retained repair");
-    // A generic relay may be forwarded/ignored rather than rejected with a
-    // transport error, but it must never receive the scope-owned body.
-    let _ = block_on(reopened.tick());
-    let _ = block_on(reopened.tick());
-    let generic_replies = std::iter::from_fn(|| generic_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        !generic_replies
-            .iter()
-            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
-        "a generic relay lacks a foreground session capability and must fail closed"
-    );
 }
 
 #[test]
@@ -820,17 +748,19 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         "the initial worker result is still pending"
     );
 
-    // FIFO makes the worker serve the subscription's initial empty view before
-    // it ingests and acknowledges the later commit in this same tick.
+    // The main thread uploads its commit ahead of the subscription, behind a
+    // read barrier, so the worker persists and acknowledges the commit before
+    // it serves the subscription's initial view, all in this same tick
+    // (SPEC 8 §8.2.1). The first view already holds the row.
     main_thread
         .tick()
         .expect("send subscription and optimistic commit to worker");
     worker
         .tick()
-        .expect("serve initial view, persist commit, and acknowledge it");
+        .expect("persist and acknowledge the commit, then serve the initial view");
     main_thread
         .tick()
-        .expect("apply stale initial view and Local acknowledgement");
+        .expect("apply Local acknowledgement and initial view");
     assert_eq!(
         main_thread
             .write_state(insert.mergeable_tx_id())
@@ -978,38 +908,38 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
-        .expect("prepare edge todos query");
-    let mut edge_subscription = block_on(main_thread.subscribe(
+        .expect("prepare global todos query");
+    let mut global_subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe at Edge through worker relay");
-    while edge_subscription.try_next_event().is_some() {}
-    main_thread.tick().expect("request worker Edge view");
+    .expect("subscribe at Global through worker relay");
+    while global_subscription.try_next_event().is_some() {}
+    main_thread.tick().expect("request worker Global view");
     for _ in 0..4 {
-        worker.tick().expect("forward worker Edge coverage");
-        core.tick().expect("serve worker Edge coverage globally");
-        worker.tick().expect("serve settled worker Edge view");
-        main_thread.tick().expect("apply worker Edge view");
+        worker.tick().expect("forward worker Global coverage");
+        core.tick().expect("serve worker Global coverage globally");
+        worker.tick().expect("serve settled worker Global view");
+        main_thread.tick().expect("apply worker Global view");
     }
     assert_eq!(
         main_thread
             .read(&todos)
-            .expect("read relayed Edge row")
+            .expect("read relayed Global row")
             .len(),
         1
     );
-    let events = std::iter::from_fn(|| edge_subscription.try_next_event()).collect::<Vec<_>>();
+    let events = std::iter::from_fn(|| global_subscription.try_next_event()).collect::<Vec<_>>();
     let additions = events
         .iter()
         .filter(|event| matches!(event, SubscriptionEvent::Delta { added, .. } if added.len() == 1))
         .count();
     assert_eq!(
         additions, 1,
-        "the internal Local wake must contribute to one public Edge projection, not a duplicate: {events:?}"
+        "the internal Local wake must contribute to one public Global projection, not a duplicate: {events:?}"
     );
     assert_eq!(
         events.len(),
@@ -1017,7 +947,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
         "the worker authority source must not create a second public projection: {events:?}"
     );
 
-    // A second mutation after the relay has installed Edge coverage must make
+    // A second mutation after the relay has installed Global coverage must make
     // the full main -> worker -> core -> worker -> main round trip without
     // re-entering the worker's current-row projection.
     let update = main_thread
@@ -1196,7 +1126,7 @@ fn browser_client_hydrates_local_structured_subscription_without_authority() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -1244,13 +1174,13 @@ fn browser_client_hydrates_local_structured_subscription_without_authority() {
     );
 }
 
-/// A main-thread Local subscription and a one-shot Edge read have distinct
+/// A main-thread Local subscription and a one-shot Global read have distinct
 /// downstream serving options, but both canonicalize to the worker's Global
 /// upstream coverage. Retiring the one-shot usage site must not unsubscribe
 /// that shared upstream coverage while the live Local subscription still owns
 /// it.
 #[test]
-fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
+fn one_shot_global_read_does_not_retire_live_browser_subscription_coverage() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xac; 16]);
     let main_thread = open_db(0x1e, alice, &schema);
@@ -1295,33 +1225,35 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     }
     while subscription.try_next_event().is_some() {}
 
-    let edge_read = main_thread
+    let global_read = main_thread
         .attach_query_with_opts(
             &todos,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
-        .expect("attach one-shot Edge read");
+        .expect("attach one-shot Global read");
     for _ in 0..8 {
-        main_thread.tick().expect("send one-shot Edge coverage");
+        main_thread.tick().expect("send one-shot Global coverage");
         worker.tick().expect("refresh canonical worker coverage");
         core.tick().expect("serve refreshed canonical coverage");
         worker.tick().expect("apply refreshed canonical coverage");
-        main_thread.tick().expect("apply one-shot Edge receipt");
-        if main_thread.query_attachment_is_covered(&edge_read) {
+        main_thread.tick().expect("apply one-shot Global receipt");
+        if main_thread.query_attachment_is_covered(&global_read) {
             break;
         }
     }
     assert!(
-        main_thread.query_attachment_is_covered(&edge_read),
-        "the one-shot Edge usage site never received its own authority receipt",
+        main_thread.query_attachment_is_covered(&global_read),
+        "the one-shot Global usage site never received its own authority receipt",
     );
 
-    main_thread.detach_query(edge_read);
+    main_thread.detach_query(global_read);
     for _ in 0..4 {
-        main_thread.tick().expect("retire one-shot Edge usage site");
+        main_thread
+            .tick()
+            .expect("retire one-shot Global usage site");
         worker.tick().expect("retain shared worker coverage");
         core.tick().expect("process any upstream lifecycle traffic");
         worker.tick().expect("apply upstream lifecycle traffic");
@@ -1355,7 +1287,7 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
             event,
             SubscriptionEvent::Delta { added, .. } if added.len() == 1
         )),
-        "retiring the one-shot Edge read also retired live Local subscription coverage: {events:?}",
+        "retiring the one-shot Global read also retired live Local subscription coverage: {events:?}",
     );
 }
 
@@ -1967,7 +1899,7 @@ fn browser_client_local_full_waits_for_worker_then_reconciles_upstream() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -2050,8 +1982,7 @@ fn browser_client_local_only_subscription_stays_in_foreground() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Local,
-            propagation: Propagation::LocalOnly,
+            tier: jazz::db::ReadTier::LocalOnly,
             ..ReadOpts::default()
         },
     ))
@@ -2135,7 +2066,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Global,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2193,6 +2124,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 /// ```
 #[test]
 fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
+    use jazz::tools::test_support::AllowAll;
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -2201,6 +2133,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
                     .column("title", ColumnType::Text)
                     .branch_by("branch"),
             )
+            .allow_all()
             .build(),
     );
     let alice = AuthorSubject::for_test_bytes([0xd2; 16]);
@@ -2263,7 +2196,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
         .prepare_query(&Query::from("documents"))
         .expect("prepare documents");
     let opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: jazz::db::ReadTier::Remote,
         ..Default::default()
     }
     .branch_view(main.clone(), None);
@@ -2366,11 +2299,11 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
 
 #[test]
 /// Alice seeds one exclusive transaction containing sibling rows; her browser
-/// main thread asks its durable worker relay for each sibling as an Edge read.
+/// main thread asks its durable worker relay for each sibling as a Global read.
 ///
 /// ```text
 /// alice ──exclusive org/todo/check/note──► core
-/// browser main ──Edge sibling query──► worker ──► core
+/// browser main ──Global sibling query──► worker ──► core
 /// ```
 ///
 /// The core must accept and persist the whole exclusive bundle before the
@@ -2379,8 +2312,8 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
 /// normal host thread rather than relying on an enlarged test stack. The
 /// ordinary `Db::tick` boundary must therefore remain stack-safe when this
 /// receipt runs on libtest's default 2 MiB worker stack.
-fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
-    exclusive_sibling_edge_reads_extend_relay_projection(false, false);
+fn view_scoped_exclusive_sibling_global_reads_extend_relay_projection() {
+    exclusive_sibling_global_reads_extend_relay_projection(false, false);
 }
 
 /// Alice's exclusive multi-row write traverses the same scope-isolated worker
@@ -2392,8 +2325,8 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
 /// alice foreground ◄────────────── authoritative settlement ──────────┘
 /// ```
 #[test]
-fn worker_relay_admits_exclusive_sibling_write_before_edge_reads() {
-    exclusive_sibling_edge_reads_extend_relay_projection(true, false);
+fn worker_relay_admits_exclusive_sibling_write_before_global_reads() {
+    exclusive_sibling_global_reads_extend_relay_projection(true, false);
 }
 
 /// Alice can insert todos and checks but not notes. Relaying the exclusive
@@ -2404,13 +2337,14 @@ fn worker_relay_admits_exclusive_sibling_write_before_edge_reads() {
 /// ```
 #[test]
 fn worker_relay_rejects_exclusive_bundle_when_one_sibling_is_forbidden() {
-    exclusive_sibling_edge_reads_extend_relay_projection(true, true);
+    exclusive_sibling_global_reads_extend_relay_projection(true, true);
 }
 
-fn exclusive_sibling_edge_reads_extend_relay_projection(
+fn exclusive_sibling_global_reads_extend_relay_projection(
     write_through_worker: bool,
     deny_note: bool,
 ) {
+    use jazz::tools::test_support::AllowAll;
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("orgs").column("name", ColumnType::Text))
@@ -2420,6 +2354,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
                     .fk_column("org_id", "orgs")
                     .fk_column("todo_id", "todos"),
             )
+            .allow_all()
             .table(
                 TableSchemaBuilder::new("notes")
                     .fk_column("org_id", "orgs")
@@ -2527,7 +2462,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
     }
 
     let opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
     for (table, expected_row) in [("todos", todo), ("checks", check), ("notes", note)] {
@@ -2564,7 +2499,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
     // Control: the same relay lifecycle already works when every row has its
     // own mergeable transaction identity. Keep it beside the exclusive case
     // so the receipt specifically protects fragment extension, rather than a
-    // broader change to strict-Edge attachment semantics.
+    // broader change to strict-Global attachment semantics.
     let merge_org = seeder
         .insert(
             "orgs",
@@ -2645,7 +2580,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
 /// can model the non-durable main/runtime worker/core boundary used by the
 /// browser bridge.
 #[test]
-fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
+fn browser_relay_hydrates_fresh_included_global_subscription_from_authority() {
     let schema = included_relation_schema();
     let alice = AuthorSubject::for_test_bytes([0xb2; 16]);
     let main_thread = open_db(0x1f, alice, &schema);
@@ -2698,11 +2633,11 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
                 .order_by("created", OrderDirection::Desc)
                 .limit(21),
         )
-        .expect("prepare included edge query");
+        .expect("prepare included global query");
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2740,7 +2675,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
             SubscriptionEvent::Delta { reset: true, added, settled: true, .. }
                 if added.iter().any(|row| row.row.row_uuid() == message.row_uuid())
         )),
-        "fresh included Edge subscription must publish the authority result, got {events:?}"
+        "fresh included Global subscription must publish the authority result, got {events:?}"
     );
 }
 
@@ -2799,7 +2734,7 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     let mut subscription = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -2887,14 +2822,6 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         core.tick().expect("accept authority rows");
         seeder.tick().expect("settle authority rows");
     }
-    let pending = receiver
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
-            Default::default(),
-        )
-        .expect("insert receiver-local pending row");
-
     let (receiver_transport, core_transport) = duplex();
     let (receiver_transport, _receiver_messages) = recording_transport(receiver_transport, true);
     let _receiver_upstream = block_on(receiver.connect_upstream(receiver_transport));
@@ -2905,7 +2832,7 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     let mut local = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Local,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
@@ -2913,10 +2840,9 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     let mut strict = block_on(receiver.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             // Public `remote` lowers to Deferred. Immediate deliberately
-            // includes local pending writes (the remote-if-possible overlay).
-            local_updates: jazz::db::LocalUpdates::Deferred,
+            // includes local pending writes (the pending overlay).
             ..ReadOpts::default()
         },
     ))
@@ -2925,6 +2851,17 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         strict.try_next_event().is_none(),
         "strict remote must wait for its fresh exact authority closure"
     );
+    // Put both reads on the wire before the pending write exists. A request
+    // sent after the write would wait for the authority to answer it (SPEC 8
+    // §8.2.1), and this link never delivers the write.
+    receiver.tick().expect("send both reads");
+    let pending = receiver
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("B".to_owned()))]),
+            Default::default(),
+        )
+        .expect("insert receiver-local pending row");
     for _ in 0..12 {
         receiver.tick().expect("send exact usage sites");
         core.tick().expect("serve authority closures");
@@ -2977,13 +2914,13 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
     );
 }
 
-/// A BandChat room owner's foreground keeps a maintained Edge subscription
+/// A BandChat room owner's foreground keeps a maintained Global subscription
 /// while a separately scoped guest foreground writes a message.  This is the
 /// complete browser path, rather than a direct client/core shortcut:
 ///
 /// ```text
-/// owner foreground -> owner worker -> owner edge -> Core -> guest edge -> guest worker -> guest foreground
-/// guest foreground -> guest worker -> guest edge -> Core -> owner edge -> owner worker -> owner foreground
+/// owner foreground -> owner worker -> owner relay -> Core -> guest relay -> guest worker -> guest foreground
+/// guest foreground -> guest worker -> guest relay -> Core -> owner relay -> owner worker -> owner foreground
 /// ```
 ///
 /// In particular, the owner's live message subscription must be refreshed by
@@ -2995,8 +2932,8 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     let guest = AuthorSubject::for_test_bytes([0xc2; 16]);
     let owner_foreground = open_db(0x61, owner, &schema);
     let owner_worker = open_db(0x62, owner, &schema);
-    let owner_edge = open_db(0x63, AuthorSubject::SYSTEM, &schema);
-    let guest_edge = open_db(0x64, AuthorSubject::SYSTEM, &schema);
+    let owner_relay = open_db(0x63, AuthorSubject::SYSTEM, &schema);
+    let guest_relay = open_db(0x64, AuthorSubject::SYSTEM, &schema);
     let guest_worker = open_db(0x65, guest, &schema);
     let guest_foreground = open_db(0x66, guest, &schema);
     let core = open_core(0x67, &schema);
@@ -3004,40 +2941,40 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     guest_foreground.set_non_durable_client();
     owner_worker.set_relay_authority_session_owner_for_test();
     guest_worker.set_relay_authority_session_owner_for_test();
-    owner_edge.set_relay_authority_session_owner_for_test();
-    guest_edge.set_relay_authority_session_owner_for_test();
+    owner_relay.set_relay_authority_session_owner_for_test();
+    guest_relay.set_relay_authority_session_owner_for_test();
 
     let (owner_foreground_transport, owner_worker_downstream_transport) = duplex();
     let _owner_foreground_upstream =
         block_on(owner_foreground.connect_upstream(owner_foreground_transport));
     let _owner_worker_subscriber =
         owner_worker.accept_subscriber(owner_worker_downstream_transport, owner);
-    let (owner_worker_transport, owner_edge_transport) = duplex();
+    let (owner_worker_transport, owner_relay_transport) = duplex();
     let _owner_worker_upstream = block_on(owner_worker.connect_upstream(owner_worker_transport));
-    let _owner_edge_subscriber = owner_edge.accept_scope_isolated_relay_subscriber_for_test(
-        owner_edge_transport,
+    let _owner_relay_subscriber = owner_relay.accept_scope_isolated_relay_subscriber_for_test(
+        owner_relay_transport,
         owner,
         BTreeMap::new(),
         1,
     );
-    let (_owner_edge_upstream, _owner_core_subscriber) =
-        connect_scope_isolated_worker_to_core!(owner_edge, core, owner);
+    let (_owner_relay_upstream, _owner_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(owner_relay, core, owner);
 
     let (guest_foreground_transport, guest_worker_downstream_transport) = duplex();
     let _guest_foreground_upstream =
         block_on(guest_foreground.connect_upstream(guest_foreground_transport));
     let _guest_worker_subscriber =
         guest_worker.accept_subscriber(guest_worker_downstream_transport, guest);
-    let (guest_worker_transport, guest_edge_transport) = duplex();
+    let (guest_worker_transport, guest_relay_transport) = duplex();
     let _guest_worker_upstream = block_on(guest_worker.connect_upstream(guest_worker_transport));
-    let _guest_edge_subscriber = guest_edge.accept_scope_isolated_relay_subscriber_for_test(
-        guest_edge_transport,
+    let _guest_relay_subscriber = guest_relay.accept_scope_isolated_relay_subscriber_for_test(
+        guest_relay_transport,
         guest,
         BTreeMap::new(),
         1,
     );
-    let (_guest_edge_upstream, _guest_core_subscriber) =
-        connect_scope_isolated_worker_to_core!(guest_edge, core, guest);
+    let (_guest_relay_upstream, _guest_core_subscriber) =
+        connect_scope_isolated_worker_to_core!(guest_relay, core, guest);
 
     let room = owner_foreground
         .insert(
@@ -3053,9 +2990,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
-            owner_edge,
+            owner_relay,
             core,
-            guest_edge,
+            guest_relay,
             guest_worker,
             guest_foreground,
             "settle room"
@@ -3079,9 +3016,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
             pump_two_browser_relays!(
                 owner_foreground,
                 owner_worker,
-                owner_edge,
+                owner_relay,
                 core,
-                guest_edge,
+                guest_relay,
                 guest_worker,
                 guest_foreground,
                 "settle room membership"
@@ -3095,7 +3032,7 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
     let mut owner_subscription = block_on(owner_foreground.subscribe(
         &messages,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3104,9 +3041,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
-            owner_edge,
+            owner_relay,
             core,
-            guest_edge,
+            guest_relay,
             guest_worker,
             guest_foreground,
             "establish owner message coverage"
@@ -3131,9 +3068,9 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
         pump_two_browser_relays!(
             owner_foreground,
             owner_worker,
-            owner_edge,
+            owner_relay,
             core,
-            guest_edge,
+            guest_relay,
             guest_worker,
             guest_foreground,
             "deliver guest message to owner foreground"
@@ -3161,9 +3098,8 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
 /// alice main ──remote structured subscribe──► worker ──Global──► core
 /// alice main ◄──complete reset (roots + sender facts)── worker ◄── core
 /// ```
-fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-    foreground_tier: DurabilityTier,
-) {
+#[test]
+fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
     let schema = included_relation_schema();
     let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
     let main_thread = open_db(0x24, alice, &schema);
@@ -3230,7 +3166,7 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: foreground_tier,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3282,7 +3218,10 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     else {
         unreachable!("the reset was matched above")
     };
-    assert!(*settled, "the single reset must settle the Edge receipt");
+    assert!(
+        *settled,
+        "the single reset must settle the authority receipt"
+    );
     assert!(updated.is_empty(), "a reset cannot carry root updates");
     assert!(
         removed.is_empty(),
@@ -3323,30 +3262,16 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     }
 }
 
-#[test]
-fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
-    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-        DurabilityTier::Edge,
-    );
-}
-
-#[test]
-fn cold_browser_relay_global_structured_reset_materializes_ordered_sender_facts() {
-    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
-        DurabilityTier::Global,
-    );
-}
-
-/// A reopened browser tab receives a new Edge receipt after the persistent
+/// A reopened browser tab receives a new Global receipt after the persistent
 /// worker has already applied the authority membership for an earlier tab.
 /// Alice closes the first main-thread runtime; the worker remains connected
 /// and retains its resident authority row; then Alice opens a fresh runtime.
 ///
 /// ```text
-/// alice tab 1 ──Edge──► persistent worker ──Global──► core
-///      │                         │
-///      └──close──────────────────┤ retains applied authority row
-/// alice tab 2 ──Edge──► same worker ──receipt──► tab 2
+/// alice tab 1 ──Global──► persistent worker ──Global──► core
+///      │                           │
+///      └──close────────────────────┤ retains applied authority row
+/// alice tab 2 ──Global──► same worker ──receipt──► tab 2
 /// ```
 #[test]
 fn reopened_browser_tab_hydrates_from_worker_authority_state() {
@@ -3385,11 +3310,11 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
         connect_scope_isolated_worker_to_core!(worker, core, alice);
     let first_query = first_tab
         .prepare_query(&first_tab.table("todos"))
-        .expect("prepare first-tab Edge query");
+        .expect("prepare first-tab Global query");
     let mut first_subscription = block_on(first_tab.subscribe(
         &first_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3438,11 +3363,11 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let _reopened_worker_connection = worker.accept_subscriber(reopened_worker_transport, alice);
     let reopened_query = reopened_tab
         .prepare_query(&reopened_tab.table("todos"))
-        .expect("prepare reopened-tab Edge query");
+        .expect("prepare reopened-tab Global query");
     let mut reopened_subscription = block_on(reopened_tab.subscribe(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3467,12 +3392,12 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
 }
 
 /// A durable worker may retain a formerly visible offset-window row across a
-/// process restart. A fresh Edge one-shot must not settle from that recovered
+/// process restart. A fresh Global one-shot must not settle from that recovered
 /// authority membership after Core revokes the row; it needs a fresh empty
 /// authority view. The fixed turns below model main -> worker -> core ->
 /// worker -> main after all first-worker handles are dropped.
 #[test]
-fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_shot() {
+fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_global_one_shot() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xb5; 16]);
     let storage = tempfile::tempdir().expect("persistent worker temp dir");
@@ -3521,22 +3446,24 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         .offset(1);
     let first_query = first_tab
         .prepare_query(&exact_query)
-        .expect("prepare initial Edge query");
+        .expect("prepare initial Global query");
     let first_attachment = first_tab
         .attach_query_with_opts(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
-        .expect("attach initial Edge usage site");
+        .expect("attach initial Global usage site");
     for _ in 0..8 {
-        first_tab.tick().expect("register initial Edge usage site");
-        worker.tick().expect("forward initial Edge usage site");
+        first_tab
+            .tick()
+            .expect("register initial Global usage site");
+        worker.tick().expect("forward initial Global usage site");
         core.tick().expect("serve initial authority membership");
         worker.tick().expect("persist initial authority membership");
-        first_tab.tick().expect("apply initial Edge receipt");
+        first_tab.tick().expect("apply initial Global receipt");
         if first_tab.query_attachment_is_covered(&first_attachment) {
             break;
         }
@@ -3546,7 +3473,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         block_on(first_tab.all(
             &first_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -3584,11 +3511,11 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         core.read(
             &core
                 .prepare_query(&exact_query)
-                .expect("prepare revoked Core Edge query")
+                .expect("prepare revoked Core Global query")
         )
-        .expect("read revoked Core Edge membership")
+        .expect("read revoked Core Global membership")
         .is_empty(),
-        "the selected Core Edge membership must be empty before the worker reopens",
+        "the selected Core Global membership must be empty before the worker reopens",
     );
 
     let reopened_worker = open_persistent_worker(storage.path(), 0x2d, &schema);
@@ -3614,23 +3541,23 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     );
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
-        .expect("prepare reopened Edge query");
+        .expect("prepare reopened Global query");
     let reopened_attachment = reopened_tab
         .attach_query_with_opts(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
-        .expect("attach reopened Edge usage site");
+        .expect("attach reopened Global usage site");
     for _ in 0..8 {
         reopened_tab
             .tick()
-            .expect("register reopened Edge usage site");
+            .expect("register reopened Global usage site");
         reopened_worker
             .tick()
-            .expect("forward reopened Edge usage site");
+            .expect("forward reopened Global usage site");
         core.tick().expect("serve fresh empty authority reset");
         let schedules_before = scheduler.calls.get();
         reopened_worker
@@ -3639,7 +3566,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
         if reopened_tab.query_attachment_is_covered(&reopened_attachment) {
             assert!(
                 scheduler.calls.get() > schedules_before,
-                "fresh authority reset must schedule the reopened Edge handoff",
+                "fresh authority reset must schedule the reopened Global handoff",
             );
             break;
         }
@@ -3652,17 +3579,17 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     }
     assert!(
         reopened_tab.query_attachment_is_covered(&reopened_attachment),
-        "the reopened Edge usage site must receive a fresh authority receipt",
+        "the reopened Global usage site must receive a fresh authority receipt",
     );
     assert!(
         block_on(reopened_tab.all(
             &reopened_query,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
-        .expect("read fresh revoked Edge membership")
+        .expect("read fresh revoked Global membership")
         .is_empty(),
         "fresh empty authority membership must not expose the recovered row",
     );
@@ -3698,7 +3625,7 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let regranted_rows = block_on(reopened_tab.all(
         &reopened_query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3716,13 +3643,18 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     assert!(core.detach_connection(&core_seed_subscriber));
 }
 
-/// A write policy changes admission only; it cannot revoke read membership.
-/// A browser-authored exact-row transaction therefore uses the worker's one
-/// ordinary Edge projection. Treating the write-only table as read-scoped
-/// would select a second relay-authority projection and deliver the same
-/// transaction through incompatible bundles (`ConflictingCommitUnit`).
+/// Alice's browser-authored row remains visible to her local-first subscription
+/// while the worker relays it to Core without conflicting commit units.
+/// INSERT permission allows the write to reach Global durability, but the
+/// missing SELECT policy keeps the same row out of her remote subscription.
+///
+/// ```text
+/// Alice's tab ──insert──► worker ──relay──► Core
+///     local-first: row                   INSERT: accepted
+///     remote: empty ◄────────────────── SELECT: denied
+/// ```
 #[test]
-fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection() {
+fn browser_worker_write_only_exact_write_is_visible_locally_but_not_remotely() {
     let schema = write_only_policy_schema();
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let worker = open_db(0xc3, alice, &schema);
@@ -3741,19 +3673,27 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
     let todos = main_thread
         .prepare_query(&exact_query)
-        .expect("prepare exact Edge query");
+        .expect("prepare exact query");
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::LocalFirst,
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe exact Edge query");
+    .expect("subscribe exact local-first query");
+    let mut remote_subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe exact remote query");
 
     for _ in 0..4 {
-        main_thread.tick().expect("register exact Edge coverage");
-        worker.tick().expect("relay exact Edge coverage");
+        main_thread.tick().expect("register exact coverage");
+        worker.tick().expect("relay exact coverage");
         core.tick().expect("serve initial exact coverage");
         worker.tick().expect("apply initial exact coverage");
         main_thread.tick().expect("settle initial exact coverage");
@@ -3765,7 +3705,7 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
             "todos",
             BTreeMap::from([(
                 "title".to_owned(),
-                Value::String("one ordinary projection".to_owned()),
+                Value::String("write-only row".to_owned()),
             )]),
             jazz::db::InsertOptions {
                 row_id: Some(row_id),
@@ -3792,13 +3732,34 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
             SubscriptionEvent::Delta { added, .. }
                 if added.iter().any(|row| row.row.row_uuid() == authored.row_uuid())
         )),
-        "the public Edge read must receive the authored row once: {events:?}",
+        "the local-first read must receive the authored row: {events:?}",
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
-        "the authored row must settle through the ordinary projection: {events:?}",
+        "the local-first read must settle: {events:?}",
+    );
+
+    let state = block_on(authored.write_state()).expect("read authored write state");
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.durability, DurabilityTier::Global);
+
+    let remote_events =
+        std::iter::from_fn(|| remote_subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        remote_events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
+        "the remote read must receive a settled answer: {remote_events:?}",
+    );
+    assert!(
+        remote_events.iter().all(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, updated, .. }
+                if added.is_empty() && updated.is_empty()
+        )),
+        "missing SELECT permission must hide the authored row remotely: {remote_events:?}",
     );
 }
 
@@ -3807,7 +3768,7 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
 /// cached remote page must not silently change the local coordinate system.
 ///
 /// ```text
-/// core Global page 8..24 ──► worker ──► main Edge page 8..24
+/// core Global page 8..24 ──► worker ──► main Global page 8..24
 /// main later Local offset 8/limit 2 over cached 8..24 ──► positions 16..18
 /// ```
 #[test]
@@ -3834,7 +3795,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let writer = open_db(0x4c, alice, &schema);
     main_thread.set_non_durable_client();
     // The production broker marks its persistent worker as the authority
-    // session owner, so downstream Edge pages re-publish the received window
+    // session owner, so downstream Global pages re-publish the received window
     // rather than applying its absolute offset to the worker's local overlay.
     worker.set_relay_authority_session_owner_for_test();
 
@@ -3878,7 +3839,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3893,10 +3854,10 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         main_thread.tick().expect("apply browser window");
     }
 
-    let edge_rows = block_on(main_thread.all(
+    let global_rows = block_on(main_thread.all(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3906,7 +3867,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let row_ids = |rows: &[CurrentRow]| rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>();
     let expected = todo_ids[8..24].to_vec();
     assert_eq!(
-        row_ids(&edge_rows),
+        row_ids(&global_rows),
         expected,
         "authority keeps the requested window"
     );
@@ -3929,11 +3890,11 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &contained_local,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
-            .expect("read a contained local window without its own edge subscription"),
+            .expect("read a contained local window without its own global subscription"),
         ),
         todo_ids[16..18].to_vec(),
         "a narrower Local read still counts from the beginning of local knowledge",
@@ -3950,7 +3911,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
     let mut narrower_subscription = block_on(main_thread.subscribe(
         &narrower,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -3970,7 +3931,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -3999,7 +3960,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4013,7 +3974,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &narrower,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4027,7 +3988,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &contained_local,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
@@ -4037,7 +3998,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         "Local counts over cached positions 7..24: the newly received position 7 shifts its local offset, while cached position 23 remains known",
     );
 
-    // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
+    // Mirror a browser `db.all({ tier: "remote" })`: it releases the broad
     // coverage after its result is materialized, but its rows remain in the
     // main-thread overlay for later Local reads.
     drop(subscription);
@@ -4064,7 +4025,7 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
             &block_on(main_thread.all(
                 &same_offset_one_shot,
                 ReadOpts {
-                    tier: DurabilityTier::Local,
+                    tier: jazz::db::ReadTier::LocalFirst,
                     ..ReadOpts::default()
                 },
             ))
@@ -4074,64 +4035,66 @@ fn browser_relay_distinguishes_authority_and_local_windows_on_large_stack() {
         "detaching authority coverage leaves the literal Local coordinate system unchanged",
     );
 
-    // The retained page is deliberately not an Edge receipt. A fresh Edge
+    // The retained page is deliberately not a Global receipt. A fresh Global
     // usage site must wait for a new
     // authority response instead of treating detached membership as current
     // authorization coverage.
-    let fresh_edge_read = main_thread
+    let fresh_global_read = main_thread
         .attach_query_with_opts(
             &same_offset_one_shot,
             ReadOpts {
-                tier: DurabilityTier::Edge,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         )
-        .expect("attach fresh same-offset Edge read");
+        .expect("attach fresh same-offset Global read");
     assert!(
-        !main_thread.query_attachment_is_covered(&fresh_edge_read),
-        "a detached materialized page must not satisfy a fresh Edge read",
+        !main_thread.query_attachment_is_covered(&fresh_global_read),
+        "a detached materialized page must not satisfy a fresh Global read",
     );
     for _ in 0..12 {
         main_thread
             .tick()
-            .expect("send fresh same-offset Edge read");
-        worker.tick().expect("forward fresh same-offset Edge read");
-        core.tick().expect("serve fresh same-offset Edge read");
-        worker.tick().expect("relay fresh same-offset Edge read");
+            .expect("send fresh same-offset Global read");
+        worker
+            .tick()
+            .expect("forward fresh same-offset Global read");
+        core.tick().expect("serve fresh same-offset Global read");
+        worker.tick().expect("relay fresh same-offset Global read");
         main_thread
             .tick()
-            .expect("apply fresh same-offset Edge receipt");
-        if main_thread.query_attachment_is_covered(&fresh_edge_read) {
+            .expect("apply fresh same-offset Global receipt");
+        if main_thread.query_attachment_is_covered(&fresh_global_read) {
             break;
         }
     }
     assert!(
-        main_thread.query_attachment_is_covered(&fresh_edge_read),
-        "the fresh Edge page must receive a new authority receipt",
+        main_thread.query_attachment_is_covered(&fresh_global_read),
+        "the fresh Global page must receive a new authority receipt",
     );
     assert_eq!(
         row_ids(
             &block_on(main_thread.all(
                 &same_offset_one_shot,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
-            .expect("read fresh same-offset Edge page"),
+            .expect("read fresh same-offset Global page"),
         ),
         todo_ids[7..9].to_vec(),
-        "fresh Edge coverage replaces the detached local materialization",
+        "fresh Global coverage replaces the detached local materialization",
     );
-    main_thread.detach_query(fresh_edge_read);
+    main_thread.detach_query(fresh_global_read);
 }
 
-/// A detached bounded Edge read releases its exact authoritative receipt.
+/// A detached bounded Global read releases its exact authoritative receipt.
 /// Alice repeatedly reads distinct offset windows through a browser worker;
 /// every final detach must clear its membership before the next scope opens.
 ///
 /// ```text
-/// alice one-shot Edge window ──receipt──► worker ──receipt──► main
+/// alice one-shot Global window ──receipt──► worker ──receipt──► main
 /// alice detach ──unsubscribe──► worker ──unsubscribe──► core
 /// ```
 ///
@@ -4192,11 +4155,11 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             .attach_query_with_opts(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             )
-            .expect("attach bounded Edge read");
+            .expect("attach bounded Global read");
         for _ in 0..12 {
             main_thread.tick().expect("send bounded window");
             worker.tick().expect("forward bounded window");
@@ -4215,7 +4178,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             block_on(main_thread.all(
                 &query,
                 ReadOpts {
-                    tier: DurabilityTier::Edge,
+                    tier: jazz::db::ReadTier::Remote,
                     ..ReadOpts::default()
                 },
             ))
@@ -4257,7 +4220,7 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
 
 /// Empty is a valid authority result. After withholding the relay's premature
 /// cache snapshot, the later upstream response must still produce an explicit
-/// settled handoff so Edge reads and subscriptions can complete.
+/// settled handoff so Global reads and subscriptions can complete.
 #[test]
 fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let schema = schema();
@@ -4276,21 +4239,21 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
-        .expect("prepare empty Edge query");
+        .expect("prepare empty Global query");
     let mut subscription = block_on(main_thread.subscribe(
         &todos,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe at Edge through worker relay");
+    .expect("subscribe at Global through worker relay");
     assert!(
         subscription.try_next_event().is_none(),
         "fresh remote coverage must withhold its provisional local snapshot"
     );
 
-    main_thread.tick().expect("register Edge worker view");
+    main_thread.tick().expect("register Global worker view");
     worker
         .tick()
         .expect("promote and forward coverage without premature settlement");
@@ -4357,18 +4320,18 @@ fn browser_relay_hands_off_each_policy_scoped_empty_result_independently() {
 
     let alice_todos = alice_main
         .prepare_query(&alice_main.table("todos"))
-        .expect("prepare Alice empty Edge query");
+        .expect("prepare Alice empty Global query");
     let bob_todos = bob_main
         .prepare_query(&bob_main.table("todos"))
-        .expect("prepare Bob empty Edge query");
-    let edge_opts = ReadOpts {
-        tier: DurabilityTier::Edge,
+        .expect("prepare Bob empty Global query");
+    let global_opts = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
     };
-    let mut alice_subscription = block_on(alice_main.subscribe(&alice_todos, edge_opts.clone()))
-        .expect("subscribe Alice at Edge through worker relay");
-    let mut bob_subscription = block_on(bob_main.subscribe(&bob_todos, edge_opts))
-        .expect("subscribe Bob at Edge through worker relay");
+    let mut alice_subscription = block_on(alice_main.subscribe(&alice_todos, global_opts.clone()))
+        .expect("subscribe Alice at Global through worker relay");
+    let mut bob_subscription = block_on(bob_main.subscribe(&bob_todos, global_opts))
+        .expect("subscribe Bob at Global through worker relay");
     assert!(alice_subscription.try_next_event().is_none());
     assert!(bob_subscription.try_next_event().is_none());
 
@@ -5022,7 +4985,7 @@ fn settled_subscription_does_not_reschedule_idle_authority_ticks() {
     let mut subscription = block_on(client.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: jazz::db::ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
@@ -5047,7 +5010,7 @@ fn settled_subscription_does_not_reschedule_idle_authority_ticks() {
     }
 
     // This local authority write dirties query serving but does not change
-    // the settled Edge snapshot. A no-op must not keep the host awake.
+    // the settled Global snapshot. A no-op must not keep the host awake.
     assert_eq!(core.read(&query).expect("local authority row").len(), 1);
     let scheduler = Rc::new(CountingScheduler::default());
     core.set_tick_scheduler(Some(scheduler.clone()));

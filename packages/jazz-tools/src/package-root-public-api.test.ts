@@ -18,8 +18,20 @@ const canonicalQueryExecutionOptions: QueryExecutionOptions = {
   base: "main",
 };
 const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
-const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
-  tier: "remote-if-possible",
+const localFirstServerWaitQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 2_000,
+};
+// @ts-expect-error Only local-first reads wait for the server on their first load.
+const remoteFirstLoadWait: QueryExecutionOptions = { tier: "remote", firstLoadRemoteWaitMs: 2_000 };
+const defaultTierFirstLoadWait: QueryExecutionOptions = { firstLoadRemoteWaitMs: 2_000 };
+const removedLocalFirstUnlessEmptyTier: QueryExecutionOptions = {
+  // @ts-expect-error local-first-unless-empty was removed; use local-first with firstLoadRemoteWaitMs.
+  tier: "local-first-unless-empty",
+};
+const removedGlobalReadTier: QueryExecutionOptions = {
+  // @ts-expect-error "global" is a write tier only; reads use "remote".
+  tier: "global",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate is not a public query option.
@@ -44,7 +56,11 @@ const internalLocalOnlyTier: QueryExecutionOptions = {
 
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
-void remoteIfPossibleQueryExecutionOptions;
+void localFirstServerWaitQueryExecutionOptions;
+void remoteFirstLoadWait;
+void defaultTierFirstLoadWait;
+void removedLocalFirstUnlessEmptyTier;
+void removedGlobalReadTier;
 void removedQueryExecutionOptions;
 void removedLocalUpdatesOption;
 void removedPropagationOption;
@@ -219,6 +235,8 @@ void (null as unknown as PackageRootBeginBatch);
 void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
+  "publishStoredSchema",
+  "publishStoredPermissions",
   "RowChangeKind",
   "NativeRuntimeAdapter",
   "WebSocketCarrier",
@@ -356,8 +374,9 @@ describe("package root public API", () => {
       "fetchStoredPermissions",
       "fetchStoredWasmSchema",
       "generateAuthSecret",
+      "isUnsupportedStorageCodecsError",
       "loadWasmModule",
-      "publishStoredPermissions",
+      "UnsupportedStorageCodecsError",
     ]) {
       expect(runtime, `runtime export ${publicRuntimeExport}`).toHaveProperty(publicRuntimeExport);
       expect(packageRoot, `package root export ${publicRuntimeExport}`).toHaveProperty(

@@ -3,6 +3,7 @@ target/
 
 # Node
 node_modules/
+node-compile-cache/
 dist/
 *.log
 
@@ -65,7 +66,6 @@ data-multi/
 /crates/opfs-btree/wasm-bench/bench-data/
 /bench-out/
 /dev/benchmarks/profiles/
-/dev/benchmarks/realistic/site/history.json
 
 # Lane-local Android SDK, NDK, JDK and emulator cache.
 /.cache/android-device-acceptance/

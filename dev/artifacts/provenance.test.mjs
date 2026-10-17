@@ -16,6 +16,7 @@ import {
   expectedManifest,
   manifestPath,
   nativeArtifactFingerprint,
+  pathBatches,
   verifyManifest,
   verifyPublishedNapiManifest,
   workspaceDependencyInputs,
@@ -250,6 +251,7 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "stage-napi-loader.mjs",
       "stage-native-fingerprints.mjs",
       "stage-napi-manifests.mjs",
+      "wasm-names.mjs",
       "provenance.test.mjs",
       "correctness-artifact-producer.mjs",
     ])
@@ -267,6 +269,10 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "// changed producer receipt helper\n",
     );
     assert.equal(nativeArtifactFingerprint(root, "napi", "release"), before);
+
+    const wasmBefore = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(artifacts, "wasm-names.mjs"), "// changed WASM post-processor\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), wasmBefore);
 
     writeFileSync(join(artifacts, "build.mjs"), "// changed authoritative builder\n");
     assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), before);
@@ -800,4 +806,52 @@ test("RN test bridge recipe changes NAPI provenance and fingerprint only", () =>
     else process.env.JAZZ_RN_TEST_BRIDGE = previous;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("excluded vendored path dependencies remain source-bound", () => {
+  const root = fixture();
+  try {
+    const vendor = "vendor/codec";
+    const workspaceManifest = join(root, "Cargo.toml");
+    writeFileSync(
+      workspaceManifest,
+      readFileSync(workspaceManifest, "utf8").replace(
+        "[workspace]",
+        '[workspace]\nexclude = ["vendor/codec"]',
+      ),
+    );
+    mkdirSync(join(root, vendor, "src"), { recursive: true });
+    writeFileSync(
+      join(root, vendor, "Cargo.toml"),
+      '[package]\nname = "fixture-codec"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n',
+    );
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn codec() {}\n");
+    const manifest = join(root, "crates/jazz-compression/Cargo.toml");
+    writeFileSync(
+      manifest,
+      readFileSync(manifest, "utf8").replace(
+        "[dependencies]",
+        '[dependencies]\nfixture-codec = { path = "../../vendor/codec" }',
+      ),
+    );
+    assert.ok(workspaceDependencyInputs(root, "crates/jazz-wasm/Cargo.toml").includes(vendor));
+    const before = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn changed_codec() {}\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dirty-input path batches keep every path, in order, under the argument budget", () => {
+  const paths = Array.from(
+    { length: 800 },
+    (_, i) => `crates/jazz/layers/engine/src/module_${i}.rs`,
+  );
+  const batches = pathBatches(paths);
+  assert.ok(batches.length > 1);
+  assert.deepEqual(batches.flat(), paths);
+  for (const batch of batches) assert.ok(batch.reduce((n, p) => n + p.length + 1, 0) <= 8000);
+  assert.deepEqual(pathBatches(["a-very-long-path"], 4), [["a-very-long-path"]]);
+  assert.deepEqual(pathBatches([]), []);
 });

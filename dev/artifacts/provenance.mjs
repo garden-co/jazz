@@ -197,6 +197,26 @@ function trackedFiles(root, paths) {
   return found.sort();
 }
 
+const maxPathBatchChars = 8000;
+
+/** Split paths into argument batches that stay well below Windows' command-line limit. */
+export function pathBatches(paths, maxChars = maxPathBatchChars) {
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+  for (const path of paths) {
+    if (batch.length > 0 && chars + path.length + 1 > maxChars) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(path);
+    chars += path.length + 1;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
 // Git's clean tracked blobs are the portable source identity. In particular,
 // a Windows checkout may smudge those blobs to CRLF while macOS and Linux keep
 // LF; hashing working-tree bytes would make the same committed source appear
@@ -211,14 +231,21 @@ function trackedInputContents(root, paths) {
   });
   const crlfSmudge = autocrlf.status === 0 && autocrlf.stdout.trim().toLowerCase() === "true";
 
+  // The tracked input list runs to hundreds of paths. Windows caps a command
+  // line at 32767 characters, so ask git about them in bounded batches.
   const dirtyPaths = new Set();
-  for (const args of [
-    ["diff", "--name-only", "-z", "--cached", "HEAD", "--", ...paths],
-    ["diff", "--name-only", "-z", "--", ...paths],
-  ]) {
-    const dirty = spawnSync("git", args, { cwd: root, encoding: "buffer" });
-    if (dirty.status !== 0) throw new Error("artifact provenance: could not inspect dirty inputs");
-    for (const path of dirty.stdout.toString("utf8").split("\0")) if (path) dirtyPaths.add(path);
+  for (const batch of pathBatches(paths)) {
+    for (const args of [
+      ["diff", "--name-only", "-z", "--cached", "HEAD", "--", ...batch],
+      ["diff", "--name-only", "-z", "--", ...batch],
+    ]) {
+      const dirty = spawnSync("git", args, { cwd: root, encoding: "buffer" });
+      if (dirty.status !== 0)
+        throw new Error(
+          `artifact provenance: could not inspect dirty inputs: ${dirty.error?.message ?? (dirty.stderr?.toString("utf8").trim() || "unknown error")}`,
+        );
+      for (const path of dirty.stdout.toString("utf8").split("\0")) if (path) dirtyPaths.add(path);
+    }
   }
   const cleanPaths = paths.filter(
     (path) => !dirtyPaths.has(path) && !lstatSync(join(root, path)).isSymbolicLink(),
@@ -294,6 +321,7 @@ const sharedInputs = [
   "dev/artifacts/stage-napi-loader.mjs",
   "dev/artifacts/stage-native-fingerprints.mjs",
   "dev/artifacts/stage-napi-manifests.mjs",
+  "dev/artifacts/wasm-names.mjs",
   "dev/artifacts/linux-napi/Dockerfile",
   "dev/artifacts/linux-napi/build.sh",
 ];
@@ -348,9 +376,34 @@ export function workspaceDependencyInputs(root, rootManifest) {
       if (!dependency.path || dependency.kind === "dev") continue;
       const dependencyDirectory = resolve(dependency.path);
       if (!packages.has(dependencyDirectory)) {
-        throw new Error(
-          `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+        // Excluded vendored packages are intentionally outside the root
+        // workspace, so --no-deps omits them. Ask their own manifest for the
+        // same declared dependency metadata, without resolving registry crates.
+        const vendored = spawnSync(
+          "cargo",
+          [
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            join(dependencyDirectory, "Cargo.toml"),
+          ],
+          { cwd: root, encoding: "utf8" },
         );
+        if (vendored.status !== 0) {
+          throw new Error(
+            `artifact provenance: cargo metadata failed for path dependency ${dependency.name}: ${vendored.stderr.trim()}`,
+          );
+        }
+        for (const nested of JSON.parse(vendored.stdout).packages) {
+          packages.set(dirname(resolve(nested.manifest_path)), nested);
+        }
+        if (!packages.has(dependencyDirectory)) {
+          throw new Error(
+            `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+          );
+        }
       }
       pending.push(dependencyDirectory);
     }

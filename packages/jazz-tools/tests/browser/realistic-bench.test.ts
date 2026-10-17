@@ -25,9 +25,9 @@ declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
 declare const __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: string;
 
-type PersistenceTier = "local" | "edge" | "core";
+type PersistenceTier = "local" | "core";
 
-function durabilityOptions(tier: PersistenceTier): { tier: "local" | "edge" | "global" } {
+function durabilityOptions(tier: PersistenceTier): { tier: "local" | "global" } {
   return { tier: tier === "core" ? "global" : tier };
 }
 
@@ -952,7 +952,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
     while (performance.now() < timeoutAt) {
       const rows = await onlineDb.all(
         query<CommentRow>("task_comments", [{ column: "task_id", op: "eq", value: targetTaskId }]),
-        "edge",
+        "global",
       );
       observed = rows.length;
       polls += 1;
@@ -964,7 +964,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
     }
     if (observed < target) {
       throw new Error(
-        `W3 timed out waiting for edge settlement (observed=${observed}, target=${target})`,
+        `W3 timed out waiting for Core settlement (observed=${observed}, target=${target})`,
       );
     }
     const reconnectMs = performance.now() - reconnectStart;
@@ -2264,7 +2264,7 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
   try {
     db = await createServerDb(appId, dbName, "realistic-b7");
     await seedDataset(db, largeConfig);
-    const warmRows = await db.all(hydrationQuery, { tier: "local" });
+    const warmRows = await db.all(hydrationQuery, { tier: "local-first" });
     rootRows = warmRows.length;
     commentRows = warmRows.reduce(
       (total, row) => total + (row.task_commentsViaTask?.length ?? 0),
@@ -2274,12 +2274,12 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
     const wallStart = performance.now();
     for (let cycle = 0; cycle < cycles; cycle += 1) {
       const startedAt = performance.now();
-      const rows = await db.all(hydrationQuery, { tier: "local" });
+      const rows = await db.all(hydrationQuery, { tier: "local-first" });
       latencies.push(performance.now() - startedAt);
       expect(rows.length).toBe(rootRows);
     }
     const wallMs = performance.now() - wallStart;
-    const validationRows = await db.all(hydrationQuery, { tier: "local" });
+    const validationRows = await db.all(hydrationQuery, { tier: "local-first" });
     const relationIdentity = (rows: typeof warmRows) =>
       rows.map((row) => [row.id, (row.task_commentsViaTask ?? []).map((comment) => comment.id)]);
     expect(relationIdentity(validationRows)).toEqual(relationIdentity(warmRows));

@@ -13,12 +13,17 @@ Expo example for local-first todos using `jazz-tools/react-native` + `jazz-rn`.
 - Keep `jazz-rn` as a **direct app dependency** so React Native codegen discovers `JazzRelaySpec` during prebuild.
 - RN storage is not wired up yet; do not rely on persistence or a `dataPath`
   option until the native relay binding is implemented.
-- Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`).
-- Server URL defaults:
+- Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`). The embedded managed server is HTTP-only.
+- Server URL defaults for local development:
   - iOS simulator: `http://127.0.0.1:1625`
   - Android emulator: `http://10.0.2.2:1625`
-  - Physical device: `http://<your-lan-ip>:1625`
-- If you set `EXPO_PUBLIC_JAZZ_SERVER_URL` to `localhost`/`127.0.0.1`, the app now rewrites it in dev when needed so devices can still reach your host machine.
+- The managed server started by `withJazz` from `jazz-tools/dev/expo` binds and advertises exactly `server.host`
+  (default `127.0.0.1`). It does not discover your LAN address; `server.host` must be a concrete IP
+  address, and wildcard addresses such as `0.0.0.0` are rejected.
+- Physical devices: either set `server.host` to your machine's LAN IP (plain HTTP; the device must be on
+  the same network and allow cleartext traffic), or provide an externally hosted, device-trusted
+  HTTPS/WSS endpoint. The embedded managed server does not terminate TLS.
+- When not using the managed server, set `EXPO_PUBLIC_JAZZ_SERVER_URL` to a device-reachable endpoint. The Expo adapter does not rewrite loopback HTTP URLs into a device endpoint.
 - Account preparation uses `createAccountManager` from `jazz-tools/expo`, backed by SecureStore with native atomic updates. Contexts receive an opaque account handle. A matching native development build is required; Expo Go is unsupported.
 - Todos carry `owner_id`, and mutations are authorized against `session.user`.
 

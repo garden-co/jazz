@@ -83,9 +83,9 @@ run_seed() {
     test_args=(--exact --ignored)
   fi
   log="$output/logs/${suite}-seed-${seed}.log"
-  replay="CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${case_timeout}s env ${env_args[*]} cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd ${test_name} -- ${test_args[*]}"
+  replay="CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${case_timeout}s env ${env_args[*]} cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd ${test_name} -- ${test_args[*]}"
   set +e
-  timeout --kill-after=30s "${case_timeout}s" env "${env_args[@]}" cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd "$test_name" -- "${test_args[@]}" >"$log" 2>&1
+  timeout --kill-after=30s "${case_timeout}s" env "${env_args[@]}" cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd "$test_name" -- "${test_args[@]}" >"$log" 2>&1
   status=$?
   set -e
   if (( status == 124 || status == 137 )); then result=timeout; else result=passed; (( status == 0 )) || result=failed; fi

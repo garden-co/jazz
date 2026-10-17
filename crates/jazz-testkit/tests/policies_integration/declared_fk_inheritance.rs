@@ -1,7 +1,7 @@
 use crate::JazzClient;
 use jazz::tools::TransactionId;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 
 use super::*;
 
@@ -98,7 +98,7 @@ async fn rebac_declared_fk_inheritance_grants_select_access_inner() {
 
     let (file_id, file_tx) = insert_file(&admin, super::BOB_ID, "bob-file");
     let (_, todo_tx) = insert_todo_with_image(&admin, super::ALICE_ID, "todo", file_id);
-    wait_for_edge_txs(&admin, &[file_tx, todo_tx]).await;
+    wait_for_global_txs(&admin, &[file_tx, todo_tx]).await;
 
     let visible_ids = query_ids(&alice, "files").await;
 
@@ -138,7 +138,7 @@ async fn rebac_declared_fk_inheritance_grants_update_access_inner() {
 
     let (file_id, file_tx) = insert_file(&admin, super::BOB_ID, "bob-file");
     let (_, todo_tx) = insert_todo_with_image(&admin, super::ALICE_ID, "todo", file_id);
-    wait_for_edge_txs(&admin, &[file_tx, todo_tx]).await;
+    wait_for_global_txs(&admin, &[file_tx, todo_tx]).await;
     assert!(query_ids(&alice, "files").await.contains(&file_id));
 
     let update = alice.update(
@@ -153,7 +153,7 @@ async fn rebac_declared_fk_inheritance_grants_update_access_inner() {
         update.is_ok(),
         "alice should update file via declared inherited access from todos row: {update:?}"
     );
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[update
             .expect("checked above")
@@ -197,7 +197,7 @@ async fn rebac_declared_fk_inheritance_array_membership_grants_access_inner() {
         "todo",
         vec![Value::Uuid(file_id), Value::Uuid(file_id)],
     );
-    wait_for_edge_txs(&admin, &[file_tx, todo_tx]).await;
+    wait_for_global_txs(&admin, &[file_tx, todo_tx]).await;
 
     let visible_ids = query_ids(&alice, "files").await;
 
@@ -380,7 +380,7 @@ async fn rebac_declared_fk_inheritance_reacts_to_fk_updates_inner() {
 
     let (file_id, file_tx) = insert_file(&admin, super::BOB_ID, "delayed-link");
     let (todo_id, todo_tx) = insert_todo_with_image(&admin, super::ALICE_ID, "todo", Value::Null);
-    wait_for_edge_txs(&admin, &[file_tx, todo_tx]).await;
+    wait_for_global_txs(&admin, &[file_tx, todo_tx]).await;
 
     let initially_visible = query_ids(&alice, "files").await;
     assert!(
@@ -400,7 +400,7 @@ async fn rebac_declared_fk_inheritance_reacts_to_fk_updates_inner() {
         )
         .expect("link todo image")
         .expect("todo update should commit immediately");
-    wait_for_edge_txs(&alice, &[update_tx]).await;
+    wait_for_global_txs(&alice, &[update_tx]).await;
 
     let visible_after_link = query_ids(&alice, "files").await;
     assert!(

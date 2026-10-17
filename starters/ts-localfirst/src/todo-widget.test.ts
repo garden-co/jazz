@@ -18,8 +18,8 @@ function localAndEdgeWrites() {
   const edge = deferred<void>();
   const write = {
     value: undefined,
-    wait({ tier }: { tier?: "local" | "edge" | "global" } = {}) {
-      return tier === "edge" ? edge.promise : local.promise;
+    wait({ tier }: { tier?: "local" | "global" | "global" } = {}) {
+      return tier === "global" ? edge.promise : local.promise;
     },
   };
   return { local, edge, write };

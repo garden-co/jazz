@@ -6,8 +6,8 @@ Parent: #2953, `cc6884178064b38d43129f1471c5e9e8545e2ff7`.
 Persist native data; keep subscription membership, authority receipts and
 resume cursors in memory. Local-first evaluates eligible retained data and
 pending writes. Remote waits for a fresh snapshot after restart.
-Remote-if-possible uses the same remote gate online and local knowledge only
-after explicit disconnect. Identity/claims/branch isolation is unchanged.
+The hybrid read tier of that time (since removed) used the same remote gate
+online and local knowledge only after explicit disconnect. Identity/claims/branch isolation is unchanged.
 
 The changed premise is semantic, not a repeat of a rejected encoding shortcut:
 we no longer require reconstructing an exact former remote scope on reopen.

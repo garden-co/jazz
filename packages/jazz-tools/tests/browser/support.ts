@@ -70,7 +70,7 @@ export async function waitForQuery<T>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "edge",
+  tier?: "local-first" | "remote",
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -108,7 +108,7 @@ export async function waitForQuery<T>(
  * Race a promise against a timeout.
  *
  * Useful for operations that should complete within a deadline (e.g.
- * `db.insert(...).wait({ tier: "edge" })`) but don't have built-in timeout support.
+ * `db.insert(...).wait({ tier: "global" })`) but don't have built-in timeout support.
  */
 export async function withTimeout<T>(
   promise: Promise<T>,
@@ -171,7 +171,14 @@ export function makeQuery<T>(table: string, wasmSchema: WasmSchema): QueryBuilde
  */
 export class TestCleanup {
   private dbs: Db[] = [];
+  private transports: Array<{ stop(): Promise<void> }> = [];
   private subscriptions: Array<() => void> = [];
+
+  /** Stop controlled transports after their clients during cleanup. */
+  trackTransport<T extends { stop(): Promise<void> }>(transport: T): T {
+    this.transports.push(transport);
+    return transport;
+  }
 
   /** Register a Db for shutdown during cleanup. Returns the same Db. */
   track(db: Db): Db {
@@ -218,6 +225,7 @@ export class TestCleanup {
         // Best effort
       }
     }
+    for (const transport of this.transports.splice(0)) await transport.stop();
   }
 }
 

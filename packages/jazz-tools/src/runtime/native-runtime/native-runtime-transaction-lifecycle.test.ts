@@ -72,7 +72,7 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
       row.bytes(source.rowId);
       row.bool(false);
       row.bytes(
-        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(source.title)])]),
+        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(source.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);
@@ -173,6 +173,56 @@ it("quiesces foreground mutation admission before capturing its final HLC", asyn
     "native runtime is closed",
   );
   expect(insert).not.toHaveBeenCalled();
+  await runtime.close();
+});
+
+it("keeps core ticks running while a foreground handoff drains started native work", async () => {
+  let scheduleTick: ((urgency: "immediate" | "deferred") => void) | undefined;
+  let releaseNode!: () => void;
+  const nodeReleased = new Promise<void>((resolve) => {
+    releaseNode = resolve;
+  });
+  let ticks = 0;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+            scheduleTick = callback;
+          },
+          // A started native future holds the node lock until a core tick
+          // completes its host continuation; the HLC readout waits for that lock.
+          foregroundTxTimeHighWater: async () => {
+            scheduleTick?.("immediate");
+            await nodeReleased;
+            return 9n;
+          },
+          tick: () => {
+            ticks += 1;
+            releaseNode();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  const stalled = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("the handoff waited for a core tick that never ran")), 1_000);
+  });
+  await expect(Promise.race([handoff, stalled])).resolves.toBe(9n);
+  expect(ticks).toBeGreaterThan(0);
+  // Once the drain has finished, the closed runtime schedules no further ticks.
+  ticks = 0;
+  scheduleTick?.("immediate");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(ticks).toBe(0);
   await runtime.close();
 });
 
@@ -726,7 +776,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         user_id: "00000000-0000-0000-0000-0000000000b2",
         claims: { team: "later-team" },
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1042,7 +1092,11 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     payload: new Uint8Array(),
     wait: async () => {
       await nextWriteStateChange();
-      if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
+      if (rejected) {
+        throw Object.assign(new Error("WriteRejected: AuthorizationDenied"), {
+          code: "write_rejected",
+        });
+      }
     },
     writeState: () => ({}),
   };
@@ -1069,7 +1123,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     null,
     "00000000-0000-0000-0000-000000000043",
   );
-  const wait = runtime.waitForTransaction(txId, "edge");
+  const wait = runtime.waitForTransaction(txId, "global");
   await Promise.resolve();
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());
@@ -1082,6 +1136,81 @@ it("does not emit onMutationError when an active wait handles the rejection", as
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(listener).not.toHaveBeenCalled();
 });
+
+const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
+it.each([
+  [
+    "ExclusiveConflict (reason: Exclusive transaction conflicted with another write)",
+    "exclusive_conflict",
+    "Exclusive transaction conflicted with another write",
+  ],
+  [
+    `Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } } (reason: Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected)`,
+    "cascade_rejected",
+    `Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected`,
+  ],
+  [
+    "CausalityViolation (reason: Transaction violated causal ordering)",
+    "causality_violation",
+    "Transaction violated causal ordering",
+  ],
+  [
+    "ClientClockTooFarAhead (reason: Client clock is too far ahead)",
+    "client_clock_too_far_ahead",
+    "Client clock is too far ahead",
+  ],
+  // Older native bindings without the appended readable reason.
+  [
+    "ExclusiveConflict",
+    "exclusive_conflict",
+    "Exclusive transaction conflicted with another write",
+  ],
+])(
+  "gives a readable reason for a %s wait rejection and keeps the core diagnostic",
+  async (debugReason, code, reason) => {
+    const txId = "00000000000070008000000000000044" as TxId;
+    const diagnostic = `WriteRejected: transaction TxId { time: TxTime(44), node: NodeUuid(00000000-0000-0000-0000-000000000044) } was rejected: ${debugReason}`;
+    const write = {
+      txId,
+      payload: new Uint8Array(),
+      wait: async () => {
+        throw Object.assign(new Error(diagnostic), { code: "write_rejected" });
+      },
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            onMutationError: () => undefined,
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "rejected" } },
+      null,
+      "00000000-0000-0000-0000-000000000044",
+    );
+    const rejection = await runtime
+      .waitForTransaction(txId, "global")
+      .catch((error: unknown) => error);
+
+    expect(rejection).toMatchObject({ kind: "rejected", transactionId: txId, code, reason });
+    expect((rejection as { reason: string }).reason).not.toMatch(/TxId|TxTime|NodeUuid/);
+    expect(Object.getOwnPropertyDescriptor(rejection, "message")).toMatchObject({
+      enumerable: false,
+      value: diagnostic,
+    });
+  },
+);
 
 it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
   const updatedAt = 1_704_067_200_123;
@@ -1306,7 +1435,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000b2",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([
@@ -1323,7 +1452,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         issuer: "https://issuer.example",
         user_id: "00000000-0000-0000-0000-0000000000a1",
       }),
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     ),
   ).resolves.toEqual([

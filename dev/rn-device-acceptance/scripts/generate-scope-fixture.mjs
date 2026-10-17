@@ -12,7 +12,7 @@ const fixture = JSON.parse(
       "-p",
       "jazz-native-relay",
       "--example",
-      "rn_edge_session_harness",
+      "rn_server_session_harness",
       "--",
       "--print-fixture",
     ],

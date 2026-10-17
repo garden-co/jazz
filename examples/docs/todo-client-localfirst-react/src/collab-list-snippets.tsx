@@ -50,9 +50,9 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   policy.projects.allowUpdate.where({ "$createdBy.account": session.user.account });
 
   // Tasks: inherit from project
-  policy.tasks.allowRead.where(allowedTo.read("projectId"));
-  policy.tasks.allowInsert.where(allowedTo.read("projectId"));
-  policy.tasks.allowUpdate.where(allowedTo.read("projectId"));
+  policy.tasks.allowRead.where(allowedTo.read("project"));
+  policy.tasks.allowInsert.where(allowedTo.read("project"));
+  policy.tasks.allowUpdate.where(allowedTo.read("project"));
 
   // Members: only the creator can manage
   policy.projectMembers.allowInsert.where((member) =>

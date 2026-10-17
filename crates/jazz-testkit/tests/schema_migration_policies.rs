@@ -22,7 +22,7 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use support::{
     TestingClient, collect_stream_deltas, has_added_id, has_any_change, publish_permissions,
-    push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_edge_txs, wait_for_query,
+    push_catalogue_in_memory, wait_for_global_txs, wait_for_query, wait_for_remote_query_ready,
     wait_for_subscription_update, wait_for_visible_row,
 };
 
@@ -48,7 +48,6 @@ async fn publish_schema_permissions(server: &JazzServer, schema: &Schema) {
         server.admin_secret(),
         schema,
         table_permissions,
-        None,
     )
     .await;
 }
@@ -68,11 +67,10 @@ async fn publish_generation(server: &JazzServer, schemas: &[Schema], lenses: &[L
     publish_schema_permissions(server, schemas.last().expect("at least one schema")).await;
 }
 
-/// Pushes the full two-generation lineage before any client connects; the
-/// permissions head then selects the active write generation. Post-migration
-/// writes require this order today: a lineage bundle published only at
-/// runtime leaves later writes unable to settle at the edge.
+/// Activate the initial generation before admitting future lineage, with both
+/// generations available before clients connect.
 async fn push_full_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[Lens]) {
+    publish_schema_permissions(server, schemas.first().expect("initial schema")).await;
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -95,7 +93,7 @@ async fn connect_with_fresh_client_id(builder: TestingClient<'_>) -> JazzClient 
     let client = jazz_testkit::connect(context)
         .await
         .expect("connect test client");
-    wait_for_edge_query_ready(&client, "documents", READY_TIMEOUT).await;
+    wait_for_remote_query_ready(&client, "documents", READY_TIMEOUT).await;
     client
 }
 
@@ -205,7 +203,7 @@ async fn seed_owner_documents_under_v1(
         alice_ids.push(id);
         alice_txs.push(tx.expect("ordinary mutation commits immediately"));
     }
-    wait_for_edge_txs(&alice, &alice_txs).await;
+    wait_for_global_txs(&alice, &alice_txs).await;
 
     let (mallory_id, _, mallory_tx) = mallory
         .insert(
@@ -217,7 +215,7 @@ async fn seed_owner_documents_under_v1(
             ),
         )
         .expect("mallory inserts her v1 document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &mallory,
         &[mallory_tx.expect("ordinary mutation commits immediately")],
     )
@@ -364,7 +362,6 @@ async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
         &[owner_lens_v1_to_v2()],
     )
     .await;
-    publish_schema_permissions(&server, &owner_schema_v1()).await;
     let (alice_ids, _mallory_id) = seed_owner_documents_under_v1(&server, 1).await;
     let doc_id = alice_ids[0];
     publish_schema_permissions(&server, &owner_schema_v2()).await;
@@ -390,7 +387,7 @@ async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
             vec![("name".into(), Value::Text("renamed".into()))],
         )
         .expect("alice updates her v1 document through the v2 schema");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -436,7 +433,6 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
         &[owner_lens_v1_to_v2()],
     )
     .await;
-    publish_schema_permissions(&server, &owner_schema_v1()).await;
     let (alice_ids, _mallory_id) = seed_owner_documents_under_v1(&server, 1).await;
     let doc_id = alice_ids[0];
     publish_schema_permissions(&server, &owner_schema_v2()).await;
@@ -454,7 +450,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
             let settled = mallory
                 .wait_for_transaction(
                     transaction_id.expect("ordinary mutation commits immediately"),
-                    DurabilityTier::EdgeServer,
+                    DurabilityTier::GlobalServer,
                 )
                 .await;
             assert!(
@@ -619,7 +615,7 @@ async fn seed_membership_rows_under_v1(server: &JazzServer) -> MembershipSeed {
             row_input!("folder_id" => other_folder_id, "name" => "doc-b"),
         )
         .expect("admin seeds the ungranted v1 document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[
             member_folder_tx.expect("ordinary mutation commits immediately"),
@@ -662,7 +658,6 @@ async fn migrated_membership_server(push: V2CataloguePush) -> (JazzServer, Membe
                 &[membership_lens_v1_to_v2()],
             )
             .await;
-            publish_schema_permissions(&server, &membership_schema_v1()).await;
             let seed = seed_membership_rows_under_v1(&server).await;
             publish_schema_permissions(&server, &membership_schema_v2()).await;
             (server, seed)
@@ -843,7 +838,7 @@ async fn v2_document_with_v1_membership_dependency_is_served_impl() {
             ),
         )
         .expect("admin inserts a v2 document in alice's folder");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -993,7 +988,7 @@ async fn local_query_honors_v1_membership_for_v2_documents_impl() {
             ),
         )
         .expect("admin inserts a v2 document in alice's folder");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )

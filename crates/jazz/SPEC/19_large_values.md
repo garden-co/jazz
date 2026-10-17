@@ -81,7 +81,7 @@ lowered to the same bounded byte-edit tail as all other large scalars; Jazz
 must not add an object-like patch, merge, or locator API at this boundary.
 
 The descriptor's V1 format selector jointly governs its root, nested edit
-records, and schema-known `Chunked = 3` physical scalar arm before Groove
+records, and schema-known `Chunked = 1` physical scalar arm before Groove
 interprets any of them. Groove reads only the outer enum tag and fixed version
 byte before dispatch, so a future version with malformed current-layout nested
 bytes fails `UnsupportedFormat` without being decoded as V1. The permanent V1 FastCDC/content-defined-grouping
@@ -167,6 +167,13 @@ authenticated parents. Possession after authorized discovery is sufficient.
 An authority evaluates ordinary Jazz read policy for a candidate row/version.
 After success, its view may disclose the row's descriptor. A receiver installs
 that descriptor into Groove; Groove then walks its own storage directly.
+
+Write-policy candidates and their inline query sources retain each column's
+schema-derived large-scalar kind, including JSON, across runtime re-encoding.
+Owner-only predicates do not materialize unrelated large payloads. Crossing the
+inline boundary does not change insert/update authorization or turn a denied
+write into a transport failure; candidate descriptors remain runtime carriers,
+not a new history or wire format.
 
 Read policies that themselves inspect a large value execute at an authority
 whose internal capability may resolve the candidate root for policy evaluation.
@@ -259,7 +266,7 @@ already match local storage; a conflicting or unauthenticated node yields the
 descriptor-scoped `Rejected` result without poisoning the peer connection.
 Download remains locator-driven pull with `ChunkRequestBatch` and
 `ChunkResponseBatch`; download bytes are not upload ingress and do not consume
-the upload rate limit. Edges terminate or forward push uploads before forwarding
+the upload rate limit. Relays terminate or forward push uploads before forwarding
 the referencing row, just as missing pull requests may be relayed independently.
 
 Groove persists each retainer claim's creation time and incoming byte/node
@@ -467,7 +474,7 @@ Jazz has no large-value-specific durable root registry. A Jazz version is an
 ordinary Groove physical record, and Groove's persisted record mutation owns
 the descriptor reference delta described in Groove chapter 9. Jazz updates and
 logical deletes append versions and therefore do not release old roots. The
-existing edge-cache eviction and rejected-version cleanup paths physically
+existing explicit client-cache eviction and rejected-version cleanup paths physically
 delete or move versions; their ordinary Groove batches account for descriptors
 like every other physical-record mutation.
 
@@ -542,6 +549,25 @@ schema/kind/nullability, and lower to Groove's ordinary binary edit-tail model;
 they do not create a JSON-specific storage model. All fields in one `update`
 call, including `applyDiffs`, commit atomically. There is deliberately no page staleness/CAS promise in this
 API revision.
+
+Transactions accept the same `applyDiffs` option on `tx.update` (#2087).
+Coordinates address the value the transaction reads: its snapshot overlaid with
+its own earlier writes, including earlier diffs, so repeated appends in one
+transaction compose. Each diff stages only the Groove nodes it touches, exactly
+like the root-context update, and the open transaction retains the staged root
+as engine-private provenance; nothing is visible outside the transaction until
+it commits, and the commit publishes one ordinary row version per row. The row
+read counts as a transaction point read, so an exclusive transaction conflicts
+if the row changes before commit. In a mergeable transaction the diffed column
+is authored like any patched column and resolves last-writer-wins at commit.
+The diff is authored by the transaction's bound identity, so session and
+attributed transactions need no separate path. A staged root that outlives the
+staging TTL before commit fails the commit with a staging-expired error rather
+than publishing a partial value. Roots superseded inside the transaction are
+evicted at commit, and rolling the transaction back evicts every root it
+staged; the staging TTL only covers evictions that fail. Branch views still reject `applyDiffs`
+explicitly, as do React Native transactions until its foreground codec carries
+the descriptor.
 
 Object-form partial selections apply to the root query only in this revision.
 Included relations may project complete fields by name, but object-form partial

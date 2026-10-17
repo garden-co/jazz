@@ -16,7 +16,7 @@ describe("real RN public subscription sorting (shared browser scenarios)", () =>
     ["moves limit/offset windows", assertSubscriptionWindow],
   ] as const) {
     it(name, async () => {
-      await withNativeRelayFixture({ wasmSchema: schema }, async (fixture) => {
+      await withNativeRelayFixture({ wasmSchema: schema }, {}, async (fixture) => {
         const db = await fixture.createDb();
         await scenario(db, (query, onRows) => db.subscribe(query, onRows));
       });

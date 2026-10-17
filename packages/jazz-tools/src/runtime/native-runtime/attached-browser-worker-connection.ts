@@ -17,6 +17,7 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"

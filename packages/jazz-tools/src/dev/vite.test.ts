@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createServer } from "vite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { jazzPlugin } from "./vite.js";
+import { jazzPlugin, __resetJazzVitePluginForTests } from "./vite.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
@@ -21,6 +21,8 @@ const originalCustomEnvValues = Object.fromEntries(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    changed: true,
+    published: { schemas: [hash], migrations: [] },
     warnings: [],
   };
 }
@@ -38,6 +40,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // The managed runtime is process-wide; tests that never close their fake
+  // server would otherwise leave it running for the next test.
+  await __resetJazzVitePluginForTests();
   vi.restoreAllMocks();
   await tempRoots.cleanup();
 
@@ -100,6 +105,7 @@ describe("jazzPlugin", () => {
   it("persists the generated app ID before Vite starts its server", async () => {
     const schemaDir = await tempRoots.create("jazz-vite-bootstrap-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({ schemaDir });
     const config = plugin.config as (
@@ -119,6 +125,7 @@ describe("jazzPlugin", () => {
     const appId = "00000000-0000-0000-0000-000000000121";
     const root = await tempRoots.create("jazz-vite-mode-env-test-");
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(root, ".env.development.local"),
       [
@@ -179,6 +186,7 @@ describe("jazzPlugin", () => {
     await mkdir(root, { recursive: true });
     await mkdir(sharedEnvDir, { recursive: true });
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(sharedEnvDir, ".env.production.local"),
       [
@@ -211,6 +219,7 @@ describe("jazzPlugin", () => {
   it("does not load env files when Vite is created with envFile:false", async () => {
     const root = await tempRoots.create("jazz-vite-env-file-disabled-test-");
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(root, ".env"),
       [
@@ -266,6 +275,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const plugin = jazzPlugin({
@@ -326,6 +336,97 @@ describe("jazzPlugin", () => {
     await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
   }, 30_000);
 
+  it("keeps the runtime alive when Vite restarts and closes the old server last", async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const watcherClose = vi.fn();
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000247",
+      port: 19877,
+      url: "http://127.0.0.1:19877",
+      dataDir: undefined as unknown as string,
+      adminSecret: "vite-restart-admin",
+      backendSecret: "vite-restart-backend",
+      stop,
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    let onPush: ((hash: string) => void | Promise<void>) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      onPush = opts.onPush;
+      return { close: watcherClose };
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const backendSecretBeforeStart = process.env.BACKEND_SECRET;
+
+    const root = await tempRoots.create("jazz-vite-restart-order-test-");
+    const pluginOptions = {
+      schemaDir: root,
+      adminSecret: "vite-restart-admin",
+      server: { port: 19877 },
+    };
+    function makeServer() {
+      const closeHandlers: (() => Promise<void> | void)[] = [];
+      const wsSend = vi.fn();
+      return {
+        closeHandlers,
+        wsSend,
+        server: {
+          config: {
+            root,
+            command: "serve" as const,
+            mode: "development",
+            env: {} as Record<string, string>,
+          },
+          httpServer: {
+            once(_event: string, cb: () => void) {
+              closeHandlers.push(cb);
+            },
+          },
+          ws: { send: wsSend },
+        },
+      };
+    }
+    async function start(plugin: ReturnType<typeof jazzPlugin>) {
+      await (
+        plugin.config as (
+          config: Record<string, unknown>,
+          env: { command: string; mode: string },
+        ) => unknown
+      )({ root }, { command: "serve", mode: "development" });
+      const vite = makeServer();
+      await (plugin.configureServer as (server: typeof vite.server) => Promise<void>)(vite.server);
+      return vite;
+    }
+
+    // Initial start.
+    const oldVite = await start(jazzPlugin(pluginOptions));
+    expect(process.env.VITE_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19877");
+
+    // Restart (.env or vite.config.ts change): Vite's restartServer builds the
+    // new server — fresh plugin instances run `config` and `configureServer` —
+    // before it closes the old server's httpServer.
+    const newVite = await start(jazzPlugin(pluginOptions));
+    for (const handler of oldVite.closeHandlers) await handler();
+
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+    expect(watcherClose).not.toHaveBeenCalled();
+    expect(process.env.VITE_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19877");
+    expect(process.env.BACKEND_SECRET).toBe("vite-restart-backend");
+    expect(newVite.server.config.env.VITE_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19877");
+
+    // Schema pushes after the restart reload the browser on the live server.
+    oldVite.wsSend.mockClear();
+    await onPush!("abc123def4567890");
+    expect(newVite.wsSend).toHaveBeenCalledWith({ type: "full-reload" });
+    expect(oldVite.wsSend).not.toHaveBeenCalled();
+
+    // Final shutdown: closing the last active server disposes the runtime.
+    for (const handler of newVite.closeHandlers) await handler();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(watcherClose).toHaveBeenCalledOnce();
+    expect(process.env.BACKEND_SECRET).toBe(backendSecretBeforeStart);
+  });
+
   it("does not inject a dev server url during build", async () => {
     const plugin = jazzPlugin();
     const fakeViteServer = {
@@ -353,6 +454,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       server: { port, adminSecret: "vite-env-test-admin" },
@@ -409,6 +511,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-reload-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wsSend = vi.fn();
     const fakeViteServer = {
@@ -454,6 +557,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-top-level-telemetry-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       server: { port: 19881, adminSecret: "vite-telemetry-admin" },
@@ -489,6 +593,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-existing-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const existingAppId = "00000000-0000-0000-0000-000000000001";
     await writeFile(join(schemaDir, ".env"), `VITE_JAZZ_APP_ID=${existingAppId}\n`);
@@ -539,6 +644,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-telemetry-string-server-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       appId: "00000000-0000-0000-0000-000000000090",

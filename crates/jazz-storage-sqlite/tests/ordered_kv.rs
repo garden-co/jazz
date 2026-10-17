@@ -6,10 +6,10 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::{
-    Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-    StorageLayout, collect_scan,
+    Error, LayoutStorage, OrderedKvStorage, ReopenableStorage, ScanRequest, StorageCodecProfile,
+    StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
 };
-use jazz_storage_sqlite::SqliteStorage;
+use jazz_storage_sqlite::{Durability, SqliteStorage};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -103,16 +103,16 @@ fn epoch_1_codec_fixture_schema() -> DatabaseSchema {
 }
 
 #[test]
-fn class_layout_v1_writes_exact_sqlite_marker_and_mapped_key_receipt() {
+fn class_layout_v3_writes_exact_sqlite_marker_and_mapped_key_receipt() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout.sqlite");
-        let logical_cf = "jazz_albums_history";
-        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([logical_cf]);
+        let logical_cf = "jazz_physical_258_history";
+        let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -133,10 +133,9 @@ fn class_layout_v1_writes_exact_sqlite_marker_and_mapped_key_receipt() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, b"class-cf-v1");
+        assert_eq!(marker, b"class-cf-v3");
 
-        let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
-        expected_key.extend_from_slice(logical_cf.as_bytes());
+        let mut expected_key = 258u32.to_be_bytes().to_vec();
         expected_key.extend_from_slice(b"row\0key");
         let value: Vec<u8> = connection
             .query_row(
@@ -151,7 +150,7 @@ fn class_layout_v1_writes_exact_sqlite_marker_and_mapped_key_receipt() {
 
         let reopened = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -166,16 +165,16 @@ fn class_layout_v1_writes_exact_sqlite_marker_and_mapped_key_receipt() {
 }
 
 #[test]
-fn class_layout_v1_reopen_rejects_a_future_marker_without_normalizing_it() {
+fn class_layout_v3_reopen_rejects_a_future_marker_without_normalizing_it() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout-future.sqlite");
-        let logical_cf = "jazz_albums_history";
-        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([logical_cf]);
+        let logical_cf = "jazz_physical_258_history";
+        let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -189,7 +188,7 @@ fn class_layout_v1_reopen_rejects_a_future_marker_without_normalizing_it() {
         connection
             .execute(
                 "UPDATE kv SET v = ?1 WHERE cf = (SELECT id FROM column_families WHERE name = ?2) AND k = ?3",
-                rusqlite::params![b"class-cf-v2", "__groove_class_meta", b"groove-storage-layout"],
+                rusqlite::params![b"class-cf-v4", "__groove_class_meta", b"groove-storage-layout"],
             )
             .unwrap();
         drop(connection);
@@ -197,7 +196,7 @@ fn class_layout_v1_reopen_rejects_a_future_marker_without_normalizing_it() {
         assert!(matches!(
             LayoutStorage::new(
                 SqliteStorage::open(&path, &refs).unwrap(),
-                StorageLayout::jazz_class_v1(),
+                StorageLayout::jazz_class_v3(),
             )
             .await,
             Err(Error::InvalidStorageLayout(_))
@@ -212,7 +211,7 @@ fn class_layout_v1_reopen_rejects_a_future_marker_without_normalizing_it() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, b"class-cf-v2");
+        assert_eq!(marker, b"class-cf-v4");
     });
 }
 
@@ -251,7 +250,7 @@ fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
 }
 
 #[test]
-fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen() {
+fn historical_epoch_1_sqlite_fixture_is_rejected_without_mutation() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let historical_path = directory.path().join("epoch-1.sqlite");
@@ -285,57 +284,16 @@ fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen()
         assert_eq!(snapshot, epoch_1_ordered_kv_pack());
         drop(read_only);
 
-        let current = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            current
-                .get("records".into(), b"user:2".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Grace".to_vec())
-        );
-        current
-            .write_many(vec![
-                OwnedWriteOperation::Set {
-                    cf: "records".into(),
-                    key: b"user:3".to_vec(),
-                    value: b"Lin".to_vec(),
-                },
-                OwnedWriteOperation::Delete {
-                    cf: "indices".into(),
-                    key: b"name:Ada".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "indices".into(),
-                    key: b"name:Lin".to_vec(),
-                    value: b"3".to_vec(),
-                },
-            ])
-            .await
-            .unwrap();
-        drop(current);
-
-        let reopened = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            reopened
-                .get("records".into(), b"user:3".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Lin".to_vec())
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Ada".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Lin".to_vec())
-                .await
-                .unwrap(),
-            Some(b"3".to_vec())
-        );
+        let before = std::fs::read(&historical_path).unwrap();
+        // The historical root declares the retired Groove v1 families, so
+        // admission names them instead of failing with a layout error.
+        assert!(matches!(
+            SqliteStorage::open(&historical_path, &["records", "indices"]),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+                if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                    && unknown.iter().any(|codec| codec == "groove.large-value.v1")
+        ));
+        assert_eq!(std::fs::read(&historical_path).unwrap(), before);
     });
 }
 
@@ -479,11 +437,11 @@ fn epoch_1_table_row_bytes_and_order_survive_a_fresh_sqlite_open() {
             vec![
                 (
                     vec![0x01, 0x00, 0x02],
-                    vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+                    vec![0x00, 0x02, 0x00, 0x00, 0x00, b'a'],
                 ),
                 (
                     vec![0x01, 0x12, 0x34],
-                    vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+                    vec![0x00, 0x34, 0x12, 0x01, 0x00, b'h', b'i'],
                 ),
             ],
             "SQLite must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",
@@ -870,4 +828,161 @@ fn rejects_foreign_table_shape_before_adopting_data() {
         SqliteStorage::open(&path, &["records"]),
         Err(Error::InvalidStorageLayout(_))
     ));
+}
+
+#[test]
+fn multi_page_scans_and_borrowed_batches_match_the_memory_oracle() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = open(&dir);
+        let oracle = groove::storage::MemoryStorage::new(&["records"]).unwrap();
+        let keys = (0u16..700)
+            .map(|index| {
+                let mut key = b"p:".to_vec();
+                key.extend_from_slice(&index.to_be_bytes());
+                key
+            })
+            .chain([b"o:before".to_vec(), b"q:after".to_vec()])
+            .collect::<Vec<_>>();
+        let values = keys
+            .iter()
+            .map(|key| [key.as_slice(), b"=value"].concat())
+            .collect::<Vec<_>>();
+        let writes = keys
+            .iter()
+            .zip(&values)
+            .map(|(key, value)| WriteOperation::Set {
+                cf: "records",
+                key,
+                value,
+            })
+            .collect::<Vec<_>>();
+        // Every third key is then deleted through the borrowed path too.
+        let deletes = keys
+            .iter()
+            .step_by(3)
+            .map(|key| WriteOperation::Delete { cf: "records", key })
+            .collect::<Vec<_>>();
+        for batch in [writes, deletes] {
+            assert!(matches!(
+                storage.write_many_borrowed_outcome(batch.clone()).await,
+                WriteManyOutcome::Committed
+            ));
+            assert!(matches!(
+                oracle.write_many_borrowed_outcome(batch).await,
+                WriteManyOutcome::Committed
+            ));
+        }
+
+        let mut range_start = b"p:".to_vec();
+        range_start.extend_from_slice(&100u16.to_be_bytes());
+        let mut range_end = b"p:".to_vec();
+        range_end.extend_from_slice(&650u16.to_be_bytes());
+        for max_items in [
+            None,
+            Some(1),
+            Some(255),
+            Some(256),
+            Some(257),
+            Some(400),
+            Some(10_000),
+        ] {
+            for reversed in [false, true] {
+                for request in [
+                    ScanRequest::prefix("records".into(), b"p:".to_vec()),
+                    ScanRequest::prefix("records".into(), Vec::new()),
+                    ScanRequest::range("records".into(), range_start.clone(), range_end.clone()),
+                ] {
+                    let request = match max_items {
+                        Some(max_items) => request.with_max_items(max_items),
+                        None => request,
+                    };
+                    let request = if reversed {
+                        request.reversed()
+                    } else {
+                        request
+                    };
+                    let expected = collect_scan(oracle.scan(request.clone()).await.unwrap())
+                        .await
+                        .unwrap();
+                    let mut cursor = storage.scan(request).await.unwrap();
+                    let mut actual = Vec::new();
+                    while let Some(batch) = cursor.next_batch().await.unwrap() {
+                        assert!(!batch.is_empty() && batch.len() <= 256);
+                        actual.extend(batch);
+                    }
+                    assert_eq!(
+                        actual, expected,
+                        "max_items {max_items:?}, reversed {reversed}"
+                    );
+                }
+            }
+        }
+
+        assert!(matches!(
+            storage
+                .write_many_borrowed_outcome(vec![WriteOperation::Delete {
+                    cf: "missing",
+                    key: b"p:",
+                }])
+                .await,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == "missing"
+        ));
+    });
+}
+
+#[test]
+fn reopen_with_added_family_keeps_caller_selected_codec_profile() {
+    // Regression for the SQLite twin of #3339: `reopen` used to drop a
+    // non-default codec profile, so adding a column family failed the
+    // pinned-profile check.
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jazz.sqlite");
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
+        let storage = SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &["records"],
+            Durability::WalNoSync,
+            &profile,
+        )
+        .unwrap();
+        storage
+            .set("records".into(), b"key".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+
+        let reopened = storage
+            .reopen(vec!["records".to_owned(), "extra".to_owned()])
+            .await
+            .expect("reopen with an added family keeps the pinned codec profile");
+        reopened
+            .set("extra".into(), b"key".to_vec(), b"more".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get("records".into(), b"key".to_vec())
+                .await
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+        drop(reopened);
+
+        // The store still requires the caller's profile after the reopen.
+        assert!(SqliteStorage::open(&path, &["records", "extra"]).is_err());
+        let again = SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &["records", "extra"],
+            Durability::WalNoSync,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(
+            again.get("extra".into(), b"key".to_vec()).await.unwrap(),
+            Some(b"more".to_vec())
+        );
+    });
 }

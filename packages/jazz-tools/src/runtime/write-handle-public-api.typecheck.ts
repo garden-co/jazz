@@ -7,9 +7,9 @@ import type {
   WriteResult,
 } from "../index.js";
 // @ts-expect-error `BatchId` was removed from the runtime transaction API.
-import type { BatchId } from "./client.js";
+import type { BatchId as _RemovedBatchId } from "./client.js";
 // @ts-expect-error `OpenBatchId` was removed from the runtime transaction API.
-import type { OpenBatchId } from "./client.js";
+import type { OpenBatchId as _RemovedOpenBatchId } from "./client.js";
 
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
@@ -54,11 +54,15 @@ async function assertWriteHandleContract() {
 
   const txId: Promise<string> = inserted.txId;
   // @ts-expect-error `txId` is the single public committed-write identity.
-  inserted.batchId;
+  void inserted.batchId;
   // @ts-expect-error `transactionId` was an obsolete compatibility alias.
-  inserted.transactionId;
+  void inserted.transactionId;
 
   inserted.wait({ tier: "local" });
+  // @ts-expect-error "edge" is no longer a write durability tier.
+  inserted.wait({ tier: "edge" });
+  // @ts-expect-error WriteHandle also rejects the removed "edge" tier.
+  updated.wait({ tier: "edge" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
   inserted.wait();
 
@@ -67,6 +71,8 @@ async function assertWriteHandleContract() {
     const _voidUpdate: void = tx.update(todos, row.id, { done: true });
     return row.id;
   });
+  callbackResult.wait({ tier: "global" });
+  // @ts-expect-error Transaction results use the same two write durability tiers.
   callbackResult.wait({ tier: "edge" });
 
   const exclusiveResult: ExclusiveWriteResult<string> = await db.exclusiveTransaction(
@@ -78,6 +84,9 @@ async function assertWriteHandleContract() {
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const exclusiveCommit: ExclusiveWriteHandle = db.beginExclusiveTransaction().commit();
+  exclusiveCommit.wait();
+  // @ts-expect-error Exclusive commits are confirmed by the authority without a tier.
+  exclusiveCommit.wait({ tier: "global" });
 
   void restored;
   void updated;

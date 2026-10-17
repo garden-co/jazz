@@ -22,6 +22,8 @@ export const KNOWN_STARTERS = [
   "ts-betterauth",
   "ts-localfirst",
   "ts-hybrid",
+  "ts-effect-localfirst",
+  "ts-effect-betterauth",
 ] as const;
 
 export type StarterName = (typeof KNOWN_STARTERS)[number];

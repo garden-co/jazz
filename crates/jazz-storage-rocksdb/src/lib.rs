@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
@@ -40,6 +40,13 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
         })
     }
 }
+
+mod memory;
+
+pub use memory::{
+    RocksDbMemoryBudget, RocksDbMemoryUsage, configure_process_memory_budget,
+    process_memory_budget, process_memory_usage,
+};
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 // Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
@@ -87,8 +94,16 @@ pub enum Durability {
 pub struct RocksDbStorage {
     path: PathBuf,
     durability: Durability,
+    /// The codec profile this handle was opened with. The store pins it in
+    /// its epoch manifest, so a column-family reopen must present it again.
+    codec_profile: StorageCodecProfile,
     column_families: BTreeSet<String>,
-    db: DB,
+    /// Reports this store's memory to [`process_memory_usage`] while open.
+    /// Declared before `db` so that it drops first: once it has left the
+    /// registry, `db` holds the only reference and the database closes with
+    /// the store.
+    _memory_registration: memory::Registration,
+    db: Arc<DB>,
     write_options: WriteOptions,
     mutation_gate: Mutex<()>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
@@ -279,11 +294,11 @@ impl RocksDbStorage {
                 "RocksDB internal column family name is reserved".to_owned(),
             ));
         }
-        // Share one 256MB block cache and one bounded write-buffer budget across
-        // all column families opened by this storage instance.
-        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
-        let write_buffer_manager =
-            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        // Every store in the process shares one block cache and one
+        // write-buffer budget (see `RocksDbMemoryBudget`).
+        let shared_memory = memory::shared_memory();
+        let block_cache = &shared_memory.block_cache;
+        let write_buffer_manager = &shared_memory.write_buffer_manager;
         let requested_column_families = column_families
             .iter()
             .map(|name| (*name).to_owned())
@@ -294,30 +309,23 @@ impl RocksDbStorage {
         write_options.set_sync(matches!(durability, Durability::FullSync));
 
         let listed_column_families = inspect_existing_column_families(&path)?;
-        let initialize_format = match &listed_column_families {
-            Some(existing) => {
-                validate_physical_storage_names(existing)?;
-                validate_raw_v1_store(
-                    &path,
-                    existing,
-                    &block_cache,
-                    &write_buffer_manager,
-                    codec_profile,
-                )?
-            }
-            None => true,
-        };
+        if let Some(existing) = &listed_column_families {
+            validate_physical_storage_names(existing)?;
+        }
 
         let mut opened_column_families = requested_column_families;
         opened_column_families.insert("default".to_owned());
-        if let Some(existing) = listed_column_families {
-            opened_column_families.extend(existing);
+        if let Some(existing) = &listed_column_families {
+            opened_column_families.extend(existing.iter().cloned());
         }
         opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
 
-        let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
+        let mut final_options = rocksdb_options(block_cache, write_buffer_manager);
         final_options.create_if_missing(true);
-        final_options.create_missing_column_families(true);
+        // An existing store must pass its epoch check before we add any
+        // requested families. Open it once with exactly its existing layout,
+        // validate on that handle, then create the admitted missing families.
+        final_options.create_missing_column_families(listed_column_families.is_none());
         if matches!(durability, Durability::FullSync) {
             final_options.set_use_fsync(true);
         }
@@ -326,17 +334,39 @@ impl RocksDbStorage {
             // It is not a persistence boundary; `flush_wal(true)` below is.
             final_options.set_wal_bytes_per_sync(1 << 20);
         }
-        let descriptors = opened_column_families
+        let families_to_open = listed_column_families
+            .as_ref()
+            .map(|existing| existing.iter().collect::<BTreeSet<_>>())
+            .unwrap_or_else(|| opened_column_families.iter().collect());
+        let descriptors = families_to_open
             .iter()
-            .map(String::as_str)
+            .map(|name| name.as_str())
             .filter(|name| *name != "default")
             .map(|name| {
                 ColumnFamilyDescriptor::new(
                     name,
-                    rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
+                    rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
                 )
             });
-        let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let mut db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let initialize_format = if let Some(existing) = &listed_column_families {
+            validate_raw_v1_store(&db, existing, codec_profile)?
+        } else {
+            true
+        };
+        if let Some(existing) = &listed_column_families {
+            let existing = existing.iter().collect::<BTreeSet<_>>();
+            for family in opened_column_families
+                .iter()
+                .filter(|name| !existing.contains(name))
+            {
+                db.create_cf(
+                    family,
+                    &rocksdb_options_for_cf(family, block_cache, write_buffer_manager),
+                )
+                .storage()?;
+            }
+        }
         let internal_cf = db
             .cf_handle(ROCKSDB_INTERNAL_CF)
             .expect("internal RocksDB column family was opened");
@@ -354,13 +384,16 @@ impl RocksDbStorage {
             );
             db.write_opt(&batch, &write_options).storage()?;
         }
+        let db = Arc::new(db);
         Ok(Self {
             path,
             durability,
+            codec_profile: codec_profile.clone(),
             column_families: opened_column_families
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
                 .collect(),
+            _memory_registration: memory::Registration::new(&db),
             db,
             write_options,
             mutation_gate: Mutex::new(()),
@@ -578,26 +611,10 @@ fn inspect_existing_column_families(path: &Path) -> Result<Option<Vec<String>>, 
 }
 
 fn validate_raw_v1_store(
-    path: &Path,
+    db: &DB,
     column_families: &[String],
-    block_cache: &Cache,
-    write_buffer_manager: &WriteBufferManager,
     codec_profile: &StorageCodecProfile,
 ) -> Result<bool, Error> {
-    let mut options = rocksdb_options(block_cache, write_buffer_manager);
-    options.create_if_missing(false);
-    options.create_missing_column_families(false);
-    let descriptors = column_families
-        .iter()
-        .map(String::as_str)
-        .filter(|name| *name != "default")
-        .map(|name| {
-            ColumnFamilyDescriptor::new(
-                name,
-                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
-            )
-        });
-    let db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
     if let Some(internal) = db.cf_handle(ROCKSDB_INTERNAL_CF) {
         match db
             .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
@@ -694,6 +711,12 @@ fn rocksdb_options_for_profile(
     }
     block_options.set_block_size(profile.block_size());
     block_options.set_block_cache(block_cache);
+    // Charge index and filter blocks to the shared cache so table-reader
+    // memory stays inside the budget as SST files accumulate. Pinning L0 and
+    // giving them high priority keeps the hot ones resident.
+    block_options.set_cache_index_and_filter_blocks(true);
+    block_options.set_cache_index_and_filter_blocks_with_high_priority(true);
+    block_options.set_pin_l0_filter_and_index_blocks_in_cache(true);
 
     let mut options = Options::default();
     options.set_block_based_table_factory(&block_options);
@@ -761,6 +784,7 @@ impl ReopenableStorage for RocksDbStorage {
             }
             let path = self.path.clone();
             let durability = self.durability;
+            let codec_profile = self.codec_profile.clone();
             // A column-family expansion replaces the RocksDB handle, but it
             // is not a durability boundary. Preserve both the cadence and
             // its outstanding WAL-sync debt so acknowledged batches before
@@ -773,7 +797,12 @@ impl ReopenableStorage for RocksDbStorage {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            let reopened = Self::open_with_durability(path, &column_families, durability)?;
+            let reopened = Self::open_with_durability_and_codec_profile(
+                path,
+                &column_families,
+                durability,
+                &codec_profile,
+            )?;
             *reopened.write_flush_cadence.borrow_mut() = write_flush_cadence;
             Ok(reopened)
         })
@@ -2248,6 +2277,35 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn stores_share_one_process_memory_budget() {
+        use groove::storage::OrderedKvStorage;
+
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = RocksDbStorage::open(first_dir.path(), &["records"]).unwrap();
+        let second = RocksDbStorage::open(second_dir.path(), &["records"]).unwrap();
+        ready(first.set("records".into(), b"a".to_vec(), vec![1; 64 * 1024])).unwrap();
+        ready(second.set("records".into(), b"b".to_vec(), vec![2; 64 * 1024])).unwrap();
+
+        // The budget is fixed once the shared cache exists: re-asserting it is
+        // fine, and a different budget reports the one in force.
+        let budget = crate::process_memory_budget();
+        assert_eq!(crate::configure_process_memory_budget(budget), Ok(()));
+        let other = crate::RocksDbMemoryBudget {
+            block_cache_bytes: budget.block_cache_bytes / 2,
+            ..budget
+        };
+        assert_eq!(crate::configure_process_memory_budget(other), Err(budget));
+
+        let usage = crate::process_memory_usage().expect("rocksdb reports memory usage");
+        assert!(
+            usage.block_cache_bytes <= budget.block_cache_bytes as u64,
+            "two stores must stay inside one shared cache budget: usage={usage:?}, budget={budget:?}"
+        );
+        drop((first, second));
     }
 
     #[test]

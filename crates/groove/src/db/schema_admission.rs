@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValueType;
 
 /// Validate application-selected physical names before an open or live schema
 /// admission can make a Groove storage mutation. Groove itself adds
@@ -25,12 +26,36 @@ pub(super) fn validate_application_storage_names(schema: &DatabaseSchema) -> Res
     Ok(())
 }
 
+fn is_supported_direct_store_key_type(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::String | ValueType::Bytes => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => is_supported_direct_store_tuple_member(value_type),
+    }
+}
+
+fn is_supported_direct_store_tuple_member(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::Bool
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => false,
+    }
+}
+
 pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
     for store in &schema.direct_record_stores {
         if store
             .key
             .iter()
-            .any(|(_, value_type)| value_type.contains_record())
+            .any(|(_, value_type)| !is_supported_direct_store_key_type(value_type))
         {
             return Err(Error::InvalidDirectRecordStoreKey(store.name.clone()));
         }
@@ -38,6 +63,7 @@ pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(),
     for table in &schema.tables {
         validate_table_schema_variants(table)?;
     }
+    schema.validate_interned_columns()?;
     Ok(())
 }
 
@@ -156,6 +182,18 @@ impl Database {
         // any storage/decode error, requires reopening instead of using a
         // partially rebuilt instance.
         self.poisoned = true;
+        // Declared indexes' id registrations become durable before any
+        // rebuilt entry that uses them.
+        let registrations = self.ivm_runtime.index_ids().borrow().pending();
+        if !registrations.is_empty() {
+            self.storage
+                .write_many(registrations.operations().to_vec())
+                .await?;
+            self.ivm_runtime
+                .index_ids()
+                .borrow_mut()
+                .mark_persisted(&registrations);
+        }
         self.ivm_runtime
             .rebuild_declared_indexes(&self.storage)
             .await?;
@@ -196,6 +234,7 @@ impl Database {
     /// [`Self::runtime_registry_checkpoint`].
     #[doc(hidden)]
     pub fn restore_runtime_registry(&mut self, checkpoint: RuntimeRegistryCheckpoint) {
+        self.batch_preparation_owner = Rc::new(());
         self.ivm_runtime = checkpoint.ivm_runtime;
         *self.stored_record_descriptors.borrow_mut() = checkpoint.stored_record_descriptors;
     }
@@ -210,6 +249,7 @@ impl Database {
     /// The backing storage layout must already be able to route the table's
     /// logical family (for example through a shared class family).
     pub fn register_table(&mut self, table: TableSchema) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         if self.ivm_runtime.table(&table.name).is_some() {
             return Err(Error::TableAlreadyExists(table.name));
@@ -248,6 +288,7 @@ impl Database {
         columns: impl IntoIterator<Item = crate::schema::ColumnSchema>,
         variant: TableVariant,
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let mut updated = self.table(table)?.clone();
         if !updated.has_variants() {
@@ -286,6 +327,9 @@ impl Database {
         }
         updated.variants.push(variant.clone());
         validate_table_schema_variants(&updated)?;
+        self.ivm_runtime
+            .schema()
+            .validate_table_interning(&updated)?;
         if !evolved_columns.is_empty() {
             self.ivm_runtime
                 .evolve_table_variant_registries(table, &evolved_columns)
@@ -303,6 +347,7 @@ impl Database {
         table: &str,
         columns: &[crate::schema::ColumnSchema],
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let existing = self.table(table)?;
         for desired in columns {
@@ -338,6 +383,7 @@ impl Database {
         table: &str,
         index: IndexSchema,
     ) -> Result<(), Error> {
+        self.batch_preparation_owner = Rc::new(());
         self.ensure_not_poisoned()?;
         let existing = self.table(table)?.clone();
         if let Some(registered) = existing

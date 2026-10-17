@@ -48,6 +48,13 @@ Set `BETTER_AUTH_SECRET` and the Jazz application/server variables supplied by t
 
 Use persistent Better Auth storage and deploy the configured Jazz server.
 
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:3000`. Better Auth and `withJazz`
+use it for matching issuer/audience settings and the JWKS endpoint.
+Production Jazz servers also need the matching issuer/audience and a
+reachable JWKS URL; JWKS alone is not sufficient for linking or signing in.
+
 ## Known limitations
 
 The included Better Auth adapter is in-memory.

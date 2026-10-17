@@ -21,7 +21,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: PROD ? "node --env-file=.env build" : "pnpm dev",
+    command: PROD
+      ? "node --env-file=.env build"
+      : "node node_modules/vite/bin/vite.js dev --port 5173 --strictPort",
     env: PROD ? { PORT: "5173", ORIGIN: BASE_URL } : {},
     url: BASE_URL,
     reuseExistingServer: false,

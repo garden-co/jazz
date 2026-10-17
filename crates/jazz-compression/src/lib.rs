@@ -174,3 +174,5 @@ mod tests {
         assert!(super::decompress_zstd(&compressed, payload.len() - 1).is_err());
     }
 }
+
+pub mod stream;

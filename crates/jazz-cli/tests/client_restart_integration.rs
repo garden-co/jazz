@@ -321,7 +321,7 @@ async fn wait_for_todos_count(
     );
 }
 
-async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
+async fn wait_for_remote_query_ready(client: &JazzClient, timeout: Duration) {
     let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
 
@@ -337,7 +337,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!("timed out waiting for GlobalServer query readiness");
 }
 
 #[tokio::test]
@@ -358,21 +358,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
-    let publish_schema_response = Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            APP_ID_STR
-        ))
-        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-        .json(&json!({ "schema": test_schema(), "permissions": null }))
-        .send()
-        .await
-        .expect("publish schema");
-    assert_eq!(
-        publish_schema_response.status(),
-        reqwest::StatusCode::CREATED
-    );
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
@@ -386,7 +371,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         .await
         .expect("enroll the restart fixture before public admission");
     let client = connect_native(context).await.expect("connect client");
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&client, Duration::from_secs(30)).await;
 
     let (_, _, transaction_id) = client
         .insert(
@@ -403,7 +388,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create before restart");
@@ -432,7 +417,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     assert_eq!(
         rows_after_restart.len(),
         1,
-        "existing client should continue serving Edge-settled queries after server restart"
+        "existing client should continue serving Remote-settled queries after server restart"
     );
 
     let (_, _, transaction_id) = client
@@ -450,7 +435,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create after restart");
@@ -465,7 +450,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     assert_eq!(
         rows_after_create.len(),
         2,
-        "mutations after restart should still settle at Edge without explicit catalogue re-sync"
+        "mutations after restart should still settle at Global without explicit catalogue re-sync"
     );
 
     client.shutdown().await.expect("shutdown client");

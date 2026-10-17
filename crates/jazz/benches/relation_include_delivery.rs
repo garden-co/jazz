@@ -282,7 +282,7 @@ fn relation_schema() -> JazzSchema {
     )
 }
 
-fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
+fn open_db(scale: usize, sample: usize) -> Db {
     let schema = relation_schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -347,7 +347,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
     }
 }
 
-fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
+fn seed_relation_fixture(db: &Db, child_rows: usize) -> RowUuid {
     let parent = row(1);
     block_on(db.insert(
         "parents",

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ivm::graph::{DurableStorage, ProjectExpr};
+use crate::ivm::graph::{DurableStorage, IndexCandidateFilter, ProjectExpr};
 use crate::records::{FieldIdentity, RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
 
@@ -34,6 +34,19 @@ pub struct TableSourceOp {
     pub variant_projection: Option<VariantProjectionTarget>,
 }
 
+/// A table source probed by the keys of the operator's only input.
+///
+/// `source.scan` is the static primary-key prefix (absent, `Prefix` or
+/// `Point` over leading key columns); the input's `key_fields` continue that
+/// prefix positionally over the following primary-key columns. Each live key
+/// is one storage prefix read.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LookupOp {
+    pub source: TableSourceOp,
+    pub key_descriptor: RecordDescriptor,
+    pub key_fields: Vec<usize>,
+}
+
 /// Runtime registry namespace selected by a heterogeneous table source.
 ///
 /// Named projections are caller-defined query boundaries. Schema-index
@@ -50,7 +63,11 @@ pub enum VariantProjectionTarget {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    /// Durable numeric ids of the indexes this source reads (boxed to keep
+    /// `OpType` variants balanced).
+    pub durable_ids: Box<IndexSourceDurableIds>,
     pub intersections: Vec<(String, StaticScanSpec)>,
+    pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.
@@ -67,6 +84,18 @@ pub struct IndexSourceOp {
     pub scan: Option<StaticScanSpec>,
 }
 
+/// Durable numeric ids (storage-key prefixes) of the indexes one
+/// [`IndexSourceOp`] reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexSourceDurableIds {
+    /// Id of the source's own index.
+    pub index: u32,
+    /// Ids of `intersections`, in the same order.
+    pub intersections: Vec<u32>,
+    /// Id of the candidate filter's index.
+    pub candidate: Option<u32>,
+}
+
 /// Static ordered-key scan supplied at graph construction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum StaticScanSpec {
@@ -74,9 +103,19 @@ pub enum StaticScanSpec {
     Prefix(Vec<LiteralValue>),
     /// A prefix scan whose physical source is proven to need no more than this
     /// many entries. This is deliberately distinct from cursor batching: it is
-    /// only emitted by conservative one-shot lowering after every downstream
-    /// operation that could discard or reorder a candidate has been ruled out.
+    /// only emitted by one-shot lowering when downstream operations cannot
+    /// change the page, or by a bounded probe that proves the page after
+    /// applying those operations and falls back if proof fails.
     PrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
+    /// Read the last `max_items` entries under a prefix, in descending key
+    /// order, bounded before row decoding. Jazz emits this (and an ordered
+    /// `PrefixLimit`) only for a one-shot ordered-page probe whose caller
+    /// re-proves the page after every downstream filter, and falls back to an
+    /// unbounded source when it cannot.
+    ReversePrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },
@@ -452,6 +491,43 @@ pub struct CollectByOp {
     pub limit: TopByLimit,
 }
 
+impl CollectByOp {
+    /// Every input field the collector reads to group, order, window and
+    /// render its output, sorted and deduplicated.
+    ///
+    /// Input fields outside this set never reach the output, so their large
+    /// values need not be rebuilt: a collector over a projected listing must
+    /// not fetch the chunks of columns it drops (#3830).
+    pub fn read_field_indices(&self) -> Vec<usize> {
+        let mut fields = Vec::new();
+        fields.extend(&self.group_field_indices);
+        fields.extend(self.parent_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.child_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.tuple_fields.iter().map(|field| field.field_idx));
+        fields.extend(&self.occurrence_id_field_indices);
+        fields.extend(&self.sort_field_indices);
+        for slot in &self.slots {
+            slot.extend_read_field_indices(&mut fields);
+        }
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    }
+}
+
+impl CollectBySlot {
+    fn extend_read_field_indices(&self, fields: &mut Vec<usize>) {
+        fields.extend(&self.group_field_indices);
+        fields.extend(self.child_fields.iter().map(|field| field.field_idx));
+        fields.extend(self.presence_field_index);
+        fields.extend(self.reference_array_field_index);
+        fields.extend(&self.sort_field_indices);
+        for slot in &self.slots {
+            slot.extend_read_field_indices(fields);
+        }
+    }
+}
+
 /// The rendered shape selected by the terminal [`CollectByOp`].
 ///
 /// Both variants consume the same grouped, ordered input and window.  Collect
@@ -517,6 +593,12 @@ pub enum PlanExpr {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PredicateExpr {
+    /// Process-local compiler argument. It must be bound before installation;
+    /// it has no row-evaluation, storage or wire meaning.
+    TemplateArgument {
+        slot: u32,
+        fields: Vec<String>,
+    },
     Eq {
         field: String,
         value: LiteralValue,
@@ -581,6 +663,7 @@ pub enum LiteralValue {
     U16(u16),
     U32(u32),
     U64(u64),
+    U48(u64),
     I64(i64),
     I32(i32),
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
@@ -609,6 +692,7 @@ impl From<Value> for LiteralValue {
             Value::U16(value) => Self::U16(value),
             Value::U32(value) => Self::U32(value),
             Value::U64(value) => Self::U64(value),
+            Value::U48(value) => Self::U48(value),
             Value::I64(value) => Self::I64(value),
             Value::I32(value) => Self::I32(value),
             Value::F64(value) => Self::F64(value.to_bits()),
@@ -631,12 +715,17 @@ impl From<Value> for LiteralValue {
 }
 
 impl LiteralValue {
-    pub(crate) fn value_type(&self) -> Option<ValueType> {
+    /// Infer the representation used by an untyped literal projection. This
+    /// is not a schema contract: null/empty arrays lack an element type and an
+    /// enum tag alone does not carry its registry. Use a declared type for
+    /// parameter and authorization-route projections.
+    pub fn value_type(&self) -> Option<ValueType> {
         match self {
             Self::U8(_) => Some(ValueType::U8),
             Self::U16(_) => Some(ValueType::U16),
             Self::U32(_) => Some(ValueType::U32),
             Self::U64(_) => Some(ValueType::U64),
+            Self::U48(_) => Some(ValueType::U48),
             Self::I64(_) => Some(ValueType::I64),
             Self::I32(_) => Some(ValueType::I32),
             Self::F64(_) => Some(ValueType::F64),
@@ -671,6 +760,7 @@ impl LiteralValue {
             Self::U16(value) => Value::U16(*value),
             Self::U32(value) => Value::U32(*value),
             Self::U64(value) => Value::U64(*value),
+            Self::U48(value) => Value::U48(*value),
             Self::I64(value) => Value::I64(*value),
             Self::I32(value) => Value::I32(*value),
             Self::F64(value) => Value::F64(f64::from_bits(*value)),
@@ -698,6 +788,27 @@ impl LiteralValue {
 }
 
 impl PredicateExpr {
+    pub(crate) fn accepts_template_argument(&self, argument: &Self) -> bool {
+        let Self::TemplateArgument { fields, .. } = self else {
+            return false;
+        };
+        if argument.has_template_arguments() {
+            return false;
+        }
+        let mut referenced = std::collections::BTreeSet::new();
+        argument.referenced_fields(&mut referenced);
+        referenced.iter().all(|field| fields.contains(field))
+    }
+    pub(crate) fn has_template_arguments(&self) -> bool {
+        match self {
+            Self::TemplateArgument { .. } => true,
+            Self::And(children) | Self::Or(children) => {
+                children.iter().any(Self::has_template_arguments)
+            }
+            Self::EnumMatch { payload, .. } => payload.has_template_arguments(),
+            _ => false,
+        }
+    }
     pub fn canonicalize(self) -> Self {
         match self {
             Self::And(predicates) => {
