@@ -3234,6 +3234,13 @@ where
                             }
                             message => {
                                 let admitted = *self.admitted_upstream_authority.borrow();
+                                let current_authority_receipt_eligible =
+                                    authority_receipt_eligible
+                                        && expected_scope_authority.is_some_and(|expected| {
+                                            admitted.is_some_and(|admitted| {
+                                                admitted.same_admitted_link(expected)
+                                            })
+                                        });
                                 let outbox_release_receipt_eligible =
                                     upload_answer_receipt_eligible(
                                         authority_receipt_eligible,
@@ -3249,7 +3256,7 @@ where
                                         global_time: Some(global_time),
                                         durability: Some(DurabilityTier::Global),
                                         ..
-                                    } if outbox_release_receipt_eligible => Some(*global_time),
+                                    } if current_authority_receipt_eligible => Some(*global_time),
                                     _ => None,
                                 };
                                 let routed_fate = match &message {
