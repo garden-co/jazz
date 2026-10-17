@@ -1557,7 +1557,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding(operation);
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeInsertOptions(table._schema, table._table, optionsSnapshot);
+    const normalized = normalizeSelectorOptions(table._schema, table._table, optionsSnapshot);
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
     const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
     const db = this.e2ee.db;
@@ -1774,10 +1774,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         ),
       );
       const updateOptions = structuredClone(
-        normalizeUpdateOptions(table._schema, table._table, options),
+        normalizeViewOptions(table._schema, table._table, options),
       );
       const insertOptions = structuredClone(
-        normalizeInsertOptions(table._schema, table._table, {
+        normalizeSelectorOptions(table._schema, table._table, {
           id,
           ...(options?.branch !== undefined && { branch: options.branch }),
         }),
@@ -1968,7 +1968,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
-    const normalized = normalizeUpdateOptions(table._schema, table._table, optionsSnapshot);
+    const normalized = normalizeViewOptions(table._schema, table._table, optionsSnapshot);
     const query = new TypedTableQueryBuilder<
       AnyTableMeta & { row: { id: string } & Record<string, unknown> }
     >(table._table, table._schema)
@@ -2029,7 +2029,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           return io.insertInternal(
             table._table,
             updates,
-            normalizeInsertOptions(table._schema, table._table, {
+            normalizeSelectorOptions(table._schema, table._table, {
               id,
               ...(optionsSnapshot?.updatedAt !== undefined && {
                 updatedAt: optionsSnapshot.updatedAt,
