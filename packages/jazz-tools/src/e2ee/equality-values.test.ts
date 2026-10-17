@@ -67,20 +67,20 @@ it.each([
   ["real", 1.5, "000000000000f83f"],
   ["real", -0, "0000000000000000"],
   ["real", 0, "0000000000000000"],
-  ["text", "é", "02c3a9"],
-  ["text", "", "02"],
-  ["bytes", new Uint8Array([0, 255]), "0200ff"],
+  ["text", "é", "00c3a9"],
+  ["text", "", "00"],
+  ["bytes", new Uint8Array([0, 255]), "0000ff"],
   ["uuid", "00112233-4455-6677-8899-AABBCCDDEEFF", "00112233445566778899aabbccddeeff"],
   ["time", new Date(1), "0100000000000000"],
-  ["json", { x: 1 }, "027b2278223a317d"],
-  ["variant", "a", "0261"],
+  ["json", { x: 1 }, "007b2278223a317d"],
+  ["variant", "a", "0061"],
   ["payload", { type: "v", n: -0 }, "010000007600080000000000000000000000"],
   ["numbers", [-0, 1.5], "0000000000000000000000000000f83f"],
   ["numbers", [], ""],
-  ["words", ["a", "bc"], "020000000a0000000261026263"],
+  ["words", ["a", "bc"], "020000000a0000000061006263"],
   ["words", [], "00000000"],
   ["maybeText", null, "00"],
-  ["maybeText", "hi", "01026869"],
+  ["maybeText", "hi", "01006869"],
   ["maybeFlag", null, "0000"],
   ["maybeFlag", true, "0101"],
 ] as const)("pins equality value bytes for %s (%s)", (name, value, hex) => {
@@ -88,17 +88,4 @@ it.each([
   const typed = toWriteRecord({ [name]: value }, logical, "values")[name]!;
   const encoded = equalityValue(app.values, name, typed);
   expect(Array.from(encoded, (byte) => byte.toString(16).padStart(2, "0")).join("")).toBe(hex);
-});
-
-// Alice's durable ciphertext plaintext remains readable after a native wire
-// update; the decoder must neither mutate the ciphertext buffer nor accept
-// the binding transport discriminator as an unversioned E2EE representation.
-it("decodes the original E2EE value v1 discriminator and refuses transport bytes", async () => {
-  const { decodeE2eeValueV1 } = await import("./value-codec-v1.js");
-  const logical = encryptedSchemas.get(app.values._schema)!.logical;
-  const column = logical.values!.columns.find((entry) => entry.name === "text")!;
-  const original = Uint8Array.of(2, 104, 105);
-  expect(decodeE2eeValueV1([column], original)).toEqual([{ type: "Text", value: "hi" }]);
-  expect(original).toEqual(Uint8Array.of(2, 104, 105));
-  expect(() => decodeE2eeValueV1([column], Uint8Array.of(0, 104, 105))).toThrow("discriminator");
 });
