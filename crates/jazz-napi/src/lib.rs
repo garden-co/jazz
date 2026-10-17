@@ -2810,6 +2810,7 @@ impl NapiDb {
     }
 
     #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
+    #[allow(clippy::too_many_arguments)]
     pub fn open_persistent_with_self_signed_proof(
         env: Env,
         data_path: String,
