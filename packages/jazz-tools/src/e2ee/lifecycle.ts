@@ -199,6 +199,7 @@ export async function withSpaceKeys<T, Init>(
   use: Parameters<Spaces["withKeys"]>[2],
   includeHistory = false,
   forWrite = false,
+  requiredEpochs?: ReadonlySet<string>,
 ): Promise<void> {
   e2eeForDb(db);
   let callbackFailure: { error: unknown } | undefined;
@@ -217,6 +218,7 @@ export async function withSpaceKeys<T, Init>(
     includeHistory,
     undefined,
     forWrite,
+    requiredEpochs,
   ).catch((error: unknown) => {
     // Key adapters can include secret material in their exceptions.
     // The operation owns its own crypto diagnostics and ordinary runtime errors.
@@ -795,7 +797,7 @@ export class E2ee {
     });
     currentSpaceKeys.set(
       db,
-      async (scope, identifier, use, includeHistory, _prepareOnline, forWrite) => {
+      async (scope, identifier, use, includeHistory, _prepareOnline, forWrite, requiredEpochs) => {
         await this.prepare(true);
         return this.requireSpaces().withKeys(
           scope,
@@ -804,6 +806,7 @@ export class E2ee {
           includeHistory,
           () => this.prepare(),
           forWrite,
+          requiredEpochs,
         );
       },
     );

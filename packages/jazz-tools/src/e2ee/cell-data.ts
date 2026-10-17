@@ -264,7 +264,10 @@ export async function decryptCellRows(
     if (initial) {
       await decrypt(initial.secret, initial.root);
     } else {
-      await withSpaceKeys(db, scope, identifier, decrypt, true);
+      const requiredEpochs = new Set(
+        entries.flatMap(({ pending }) => [...pending.values()].map((cell) => cell.epoch)),
+      );
+      await withSpaceKeys(db, scope, identifier, decrypt, true, false, requiredEpochs);
       if (group.length > 1) recheck.push(identifier);
       else if (epochs) histories!.set(identifier, epochs);
     }
