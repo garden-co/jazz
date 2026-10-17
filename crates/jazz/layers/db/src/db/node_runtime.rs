@@ -2846,7 +2846,6 @@ where
                     identity,
                     trust,
 
-                    admitted_write_authorization: false,
                     version_receipts_validated: false,
                 },
                 claims,

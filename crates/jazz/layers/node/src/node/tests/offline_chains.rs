@@ -982,7 +982,6 @@ fn unadmitted_writer_is_refused_over_an_unknown_predecessor() {
             Some(CommitUnitIngestContext {
                 identity,
                 trust: CommitUnitTrust::Session,
-                admitted_write_authorization: false,
                 version_receipts_validated: false,
             }),
         ));

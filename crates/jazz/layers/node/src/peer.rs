@@ -28,7 +28,7 @@ use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
+    SyncMessage, VersionBundle, VersionCarrier, expand_version_carriers,
 };
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;

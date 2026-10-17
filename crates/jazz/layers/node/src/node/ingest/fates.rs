@@ -662,7 +662,13 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Option<RejectionReason>, Error> {
-        let permission_subject = match commit_unit_admission_subject(tx, ingest_context) {
+        let permission_subject = match commit_unit_admission_subject(
+            tx,
+            ingest_context,
+            self.active_session_claims
+                .as_ref()
+                .map(|(identity, _)| *identity),
+        ) {
             Err(reason) => return Ok(Some(reason)),
             Ok(None) => return Ok(None),
             Ok(Some(subject)) => subject,
@@ -776,27 +782,6 @@ where
         )
     }
 
-    /// Evaluate every write policy of one candidate commit unit under the
-    /// active exact session scope, each write seeing the unit's other writes
-    /// (`INV-RLS-9`). Terminal relay admission uses this, under the
-    /// connection's admitted claims, before it may issue a non-wire
-    /// authorization receipt, so a relay and the fate authority decide the
-    /// unit alike.
-    pub async fn commit_unit_satisfies_write_policy(
-        &mut self,
-        versions: &[VersionRecord],
-        author: AuthorSubject,
-        candidate_tx_id: TxId,
-    ) -> Result<bool, Error> {
-        // Boxed so fate and relay admission frames stay as small as they
-        // were with one policy evaluation per version.
-        Ok(
-            Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id))
-                .await?
-                == crate::node::policy::UnitWritePolicyDecision::Allowed,
-        )
-    }
-
     pub(super) fn park_commit_unit_if_missing_schema_versions_with_mode(
         &mut self,
         tx: &Transaction,
@@ -817,6 +802,10 @@ where
         if schemas_known && !behind_parked_predecessor {
             return Ok(false);
         }
+        let session_claim_binding = match mode.ingress_role {
+            ParkedIngressRole::Authority => self.active_session_claims.as_ref(),
+            ParkedIngressRole::Relay => None,
+        };
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -824,13 +813,21 @@ where
             if !CommitUnitIngestContext::same_parked_authority(
                 existing.ingest_context,
                 mode.ingest_context,
-            ) {
+            ) || (existing.ingress_role == ParkedIngressRole::Authority
+                && mode.ingress_role == ParkedIngressRole::Authority
+                && existing.session_claim_binding.as_ref() != session_claim_binding)
+            {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if let (Some(existing), Some(resent)) =
                 (existing.ingest_context.as_mut(), mode.ingest_context)
             {
                 existing.version_receipts_validated &= resent.version_receipts_validated;
+            }
+            if existing.ingress_role == ParkedIngressRole::Relay
+                && mode.ingress_role == ParkedIngressRole::Authority
+            {
+                existing.session_claim_binding = session_claim_binding.cloned();
             }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
@@ -848,6 +845,7 @@ where
                 now_ms,
                 ingest_context: mode.ingest_context,
                 ingress_role: mode.ingress_role,
+                session_claim_binding: session_claim_binding.cloned(),
             },
         );
         Ok(true)
@@ -933,13 +931,16 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                let outcome = self.ingest_commit_unit_once(
-                    unit.tx,
-                    unit.versions,
-                    unit.now_ms,
-                    unit.ingest_context,
-                ).await?;
-                updates.extend(outcome);
+                let mut node = self.scoped_session_claim_binding(unit.session_claim_binding);
+                updates.extend(
+                    node.ingest_commit_unit_once(
+                        unit.tx,
+                        unit.versions,
+                        unit.now_ms,
+                        unit.ingest_context,
+                    )
+                    .await?,
+                );
             }
         }
         Ok(updates)
@@ -1117,6 +1118,7 @@ where
 pub(super) fn commit_unit_admission_subject(
     tx: &Transaction,
     ingest_context: Option<CommitUnitIngestContext>,
+    active_claims_identity: Option<AuthorSubject>,
 ) -> Result<Option<AuthorSubject>, RejectionReason> {
     let permission_subject = match ingest_context {
         Some(context) => {
@@ -1133,11 +1135,10 @@ pub(super) fn commit_unit_admission_subject(
                 // topology-owned admission path; it cannot borrow SYSTEM
                 // or the transport identity here.
                 CommitUnitTrust::Relay => {
-                    return if context.admitted_write_authorization {
-                        Ok(None)
-                    } else {
-                        Err(RejectionReason::AuthorizationDenied)
-                    };
+                    if active_claims_identity != Some(context.identity) {
+                        return Err(RejectionReason::AuthorizationDenied);
+                    }
+                    context.identity
                 }
                 CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
                     tx.permission_subject.unwrap_or(tx.made_by)

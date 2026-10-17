@@ -605,7 +605,15 @@ where
                 durability: None,
             }]));
         }
-        if let Err(reason) = commit_unit_admission_subject(&tx, ingest_context) {
+        // The cheap identity checks run before the predecessor check below,
+        // so only an admitted writer is ever asked to retry.
+        if let Err(reason) = commit_unit_admission_subject(
+            &tx,
+            ingest_context,
+            self.active_session_claims
+                .as_ref()
+                .map(|(identity, _)| *identity),
+        ) {
             let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {

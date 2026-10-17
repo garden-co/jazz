@@ -316,6 +316,19 @@ inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,
 `INV-BVIEW-10`).
 
+Live one-shot `include_deleted` reads retain deleted head row images. Deleting
+an inherited row creates a head image with absent non-branch cells. That image
+masks the base body even when a current base is explicitly selected. Its
+creation and update provenance come from the head image. Deleting a row with
+its own head content retains that content and its creation provenance, with
+update provenance from the deletion. Restoring an empty head with supplied
+content replaces its body; it does not fetch content from the base.
+
+Physical head presence is decided before compatibility projection. A head
+image that an older reader must omit still masks base content. Trusted
+non-System reads evaluate the selected row image under the effective head's
+policy, including when that image is deleted and has no body (`INV-RLS-8`).
+
 Masking precedes predicates. If base row A has `status="open"` and head row A
 has `status="closed"`, a query for open rows must not return base A. Index plans
 must therefore anti-join base matches against all head-touched row ids for the
