@@ -86,6 +86,7 @@
 //! ```
 
 pub mod macros;
+mod transcode;
 mod values;
 
 use std::ops::Deref;
@@ -97,6 +98,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, U48, assert_record_field_layout};
+pub use transcode::RecordTranscoder;
+pub(crate) use transcode::{logical_record_descriptor, validate_dictionary_value};
 pub use values::collect_by_ordered_scalar;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, U48_MAX, Value,
@@ -2208,6 +2211,16 @@ pub enum Error {
     ProjectSourceDescriptorMismatch,
     #[error("unexpected end of record")]
     UnexpectedEof,
+    #[error(
+        "a descriptor with a column interned into dictionary {dictionary} cannot be encoded: interning is storage-only"
+    )]
+    InternedTypeNotEncodable { dictionary: String },
+    #[error(
+        "field {field} nests an interned type; interning is supported only for a top-level column, optionally nullable"
+    )]
+    UnsupportedInternedPlacement { field: String },
+    #[error("a dictionary value cannot hold an indirect large value")]
+    IndirectDictionaryValue,
 }
 
 #[cfg(test)]

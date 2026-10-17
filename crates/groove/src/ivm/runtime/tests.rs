@@ -3680,7 +3680,10 @@ fn source_batch_prepares_one_descriptor_per_variant() {
         rows.push(crate::records::encode_variant_record(tag, &payload));
     }
     crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
-    let groups = NodeState::group_source_rows(&table, rows.iter().map(Vec::as_slice)).unwrap();
+    let dictionaries = crate::dictionary::SharedDictionaries::default();
+    let groups =
+        NodeState::group_source_rows(&table, &dictionaries, rows.iter().map(Vec::as_slice))
+            .unwrap();
     assert_eq!(
         crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
         2
@@ -3699,7 +3702,7 @@ fn source_batch_prepares_one_descriptor_per_variant() {
     }
     let unknown = crate::records::encode_variant_record(3, &[]);
     assert!(matches!(
-        NodeState::group_source_rows(&table, [unknown.as_slice()]),
+        NodeState::group_source_rows(&table, &dictionaries, [unknown.as_slice()]),
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }

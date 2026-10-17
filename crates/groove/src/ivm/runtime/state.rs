@@ -36,9 +36,21 @@ pub struct RuntimeStats {
     pub hydration_memo_distinct_computed_nodes: usize,
     pub arrangement_rows: usize,
     pub arrangement_encoded_bytes: usize,
+    /// Arrangements read from storage by key instead of held.
+    pub stored_arrangement_count: usize,
+    /// Estimated bytes of the resident buckets of stored arrangements.
+    pub stored_arrangement_resident_bytes: usize,
     pub recursive_state_count: usize,
     pub recursive_accumulated_rows: usize,
     pub recursive_accumulated_encoded_bytes: usize,
+    /// Arg-max/min, top-by and collect operators keeping grouped state. Not
+    /// counted: a root collector's order indexes and lookup operators' rows.
+    pub grouped_operator_state_count: usize,
+    pub grouped_operator_state_groups: usize,
+    pub grouped_operator_state_rows: usize,
+    /// Group keys, sort values and row bytes; row bytes are measured like
+    /// `arrangement_encoded_bytes`.
+    pub grouped_operator_state_encoded_bytes: usize,
     pub logical_nodes_requested: u64,
     pub deduped_graph_nodes: usize,
 }

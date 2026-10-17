@@ -8,7 +8,7 @@ where
     pub(super) fn admit_contribution_merge_for_storage(
         &self,
         tx: &Transaction,
-    ) -> Result<Value, Error> {
+    ) -> Result<Option<OwnedRecord>, Error> {
         self.validate_contribution_merge_operation_identities(tx)?;
         self.contribution_merge_storage_value(tx.contribution_merge.as_ref())
     }

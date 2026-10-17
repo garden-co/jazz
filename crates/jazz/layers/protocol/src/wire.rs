@@ -979,6 +979,46 @@ mod tests {
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 
+    /// An exclusive transaction's aggregate read travels with the result it
+    /// observed (garden-co/jazz#3768). The wire form of `PredicateRead` ends
+    /// with `aggregate_result` as a postcard option of length-prefixed bytes:
+    /// `00` when absent, `01 <len> <jazz.aggregate-read-result.v1 bytes>` when
+    /// present. The layout is pinned here because a serializer's default is
+    /// not a contract; the result bytes themselves are opaque at this layer.
+    #[test]
+    fn predicate_read_aggregate_result_wire_bytes_are_pinned() {
+        use crate::tx::{AggregateReadResult, PredicateRead};
+        let read = |aggregate_result| PredicateRead {
+            table: "t".to_owned(),
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
+            shape: Query::from("t"),
+            binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
+            binding_values: BTreeMap::new(),
+            aggregate_result,
+        };
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let without = postcard::to_allocvec(&read(None)).unwrap();
+        let result = AggregateReadResult(vec![0x01, 0xab, 0xcd]);
+        let with = postcard::to_allocvec(&read(Some(result.clone()))).unwrap();
+        assert_eq!(hex(&without), PREDICATE_READ_WITHOUT_RESULT_HEX);
+        assert_eq!(hex(&with), PREDICATE_READ_WITH_RESULT_HEX);
+        assert_eq!(&without[..without.len() - 1], &with[..without.len() - 1]);
+        assert_eq!(&with[without.len() - 1..], [0x01, 0x03, 0x01, 0xab, 0xcd]);
+        assert_eq!(
+            decode_postcard_exact::<PredicateRead>(&with).unwrap(),
+            read(Some(result))
+        );
+        // A present result cannot be cut short or padded.
+        assert!(decode_postcard_exact::<PredicateRead>(&with[..with.len() - 1]).is_err());
+        let mut padded = with.clone();
+        padded.push(0);
+        assert!(decode_postcard_exact::<PredicateRead>(&padded).is_err());
+    }
+
+    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000010555555555555555555555555555555550000";
+    const PREDICATE_READ_WITH_RESULT_HEX: &str = "0174104444444444444444444444444444444401740000000000000000000000000000105555555555555555555555555555555500010301abcd";
+
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]
     fn wire_v5_peer_role_tags() {

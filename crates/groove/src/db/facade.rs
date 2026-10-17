@@ -386,8 +386,16 @@ impl Database {
         // Durable index ids must be known before schema indexes compile. This
         // also refuses an `indices` family written by an earlier index layout.
         let index_ids = crate::ivm::runtime::IndexIdRegistry::load(storage.as_ref()).await?;
-        let ivm_runtime =
-            IvmRuntime::new_with_index_ids(schema, Rc::new(std::cell::RefCell::new(index_ids)))?;
+        // Interned columns decode synchronously, so every dictionary is
+        // resident and validated before the first read or write.
+        let dictionaries =
+            crate::dictionary::DictionaryRegistry::load(storage.as_ref(), &schema.dictionaries)
+                .await?;
+        let ivm_runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::new(std::cell::RefCell::new(index_ids)),
+            Rc::new(std::cell::RefCell::new(dictionaries)),
+        )?;
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
                 crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
@@ -583,11 +591,23 @@ impl Database {
         );
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let mut runtime =
-            IvmRuntime::new_with_index_ids(schema, Rc::clone(self.ivm_runtime.index_ids()))?;
+        // Dictionaries are loaded only at open: a rebuild may keep using
+        // them, but cannot declare one the open did not load.
+        self.ivm_runtime
+            .dictionaries()
+            .borrow()
+            .check_declares(&schema.dictionaries)?;
+        let mut runtime = IvmRuntime::new_with_shared_state(
+            schema,
+            Rc::clone(self.ivm_runtime.index_ids()),
+            Rc::clone(self.ivm_runtime.dictionaries()),
+        )?;
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        // A rebuild keeps how this database reads stored tables.
+        runtime.set_stored_arrangements_enabled(self.ivm_runtime.stored_arrangements_enabled());
+        runtime.set_cache_memory_budget(self.ivm_runtime.own_cache_memory_budget());
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -639,6 +659,19 @@ impl Database {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Read arrangements of stored tables by primary key from storage instead
+    /// of holding them, for arrangements compiled from now on. On by default.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Bound the memory the buckets of stored arrangements keep resident;
+    /// `None` (the default) is unbounded. See
+    /// `IvmRuntime::set_cache_memory_budget`.
+    pub fn set_cache_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_cache_memory_budget(budget);
     }
 
     /// Enable or disable generic root positions (insert indices and moves in
@@ -2061,6 +2094,11 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Live subscriptions, without the state walk of `runtime_stats()`.
+    pub fn active_subscription_count(&self) -> usize {
+        self.ivm_runtime.active_subscription_count()
     }
 
     /// Lifetime topology-cache counters, independent of transactional state.

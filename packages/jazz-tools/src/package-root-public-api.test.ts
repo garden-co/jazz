@@ -374,7 +374,9 @@ describe("package root public API", () => {
       "fetchStoredPermissions",
       "fetchStoredWasmSchema",
       "generateAuthSecret",
+      "isUnsupportedStorageCodecsError",
       "loadWasmModule",
+      "UnsupportedStorageCodecsError",
     ]) {
       expect(runtime, `runtime export ${publicRuntimeExport}`).toHaveProperty(publicRuntimeExport);
       expect(packageRoot, `package root export ${publicRuntimeExport}`).toHaveProperty(

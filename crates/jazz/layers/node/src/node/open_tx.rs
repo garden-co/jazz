@@ -559,6 +559,7 @@ where
                 shape: shape.query().clone(),
                 binding_id: binding.binding_id(),
                 binding_values: binding.values().clone(),
+                aggregate_result: None,
             });
         Ok(current)
     }
@@ -1446,14 +1447,21 @@ where
                     if comparison.is_none() {
                         let query = &predicate.shape;
                         // This comparison advances only root-table history.
-                        // Preserve conservative rejection for relational reads
-                        // and aggregates, whose output hides input rewrites.
+                        // Preserve conservative rejection for relational reads.
+                        // A root-table aggregate is compared by its output
+                        // (`aggregate_query_outputs_equivalent`), matching the
+                        // authority, which validates it by its recorded result
+                        // (garden-co/jazz#3768): a rewrite that leaves the
+                        // result unchanged is not a conflict. Both sides of
+                        // this comparison evaluate the same way, so it stays
+                        // exact even where the snapshot evaluator's identity
+                        // differs from the transaction's; the authority then
+                        // re-checks the recorded result as that identity.
                         let narrowed = open_tx
                             .narrowed_predicate_reads
                             .contains(&(predicate.shape_id, predicate.binding_id));
-                        if query.aggregate.is_some()
-                            || (!narrowed
-                                && (!query.joins.is_empty() || !query.array_subqueries.is_empty()))
+                        if (!narrowed
+                            && (!query.joins.is_empty() || !query.array_subqueries.is_empty()))
                             || query.flat_join.is_some()
                             || !query.policy_branches.is_empty()
                             || !query.reachable.is_empty()
@@ -2105,7 +2113,7 @@ where
             let source_table = self.table_in_schema_ref(version.table(), source_schema)?;
             let mut cells = self.materialized_cells_for_version(source_table, version)?;
             let projected_table =
-                self.translate_cells(source_schema, schema_version, version.table(), &mut cells)?;
+                self.translate_version_cells(source_schema, schema_version, version, &mut cells)?;
             if projected_table.as_deref() == Some(table) {
                 Some(
                     self.table_in_schema_ref(table, schema_version)?

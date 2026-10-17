@@ -85,8 +85,16 @@ impl IvmRuntime {
         for arrangement in self.arrangement_states.values() {
             stats.arrangement_rows += arrangement.value().row_count();
             stats.arrangement_encoded_bytes += arrangement.value().encoded_bytes();
+            stats.stored_arrangement_count += usize::from(arrangement.value().is_stored());
+            stats.stored_arrangement_resident_bytes += arrangement.value().resident_bytes();
         }
         for state in self.operator_states.values() {
+            if let Some(footprint) = state.grouped_footprint() {
+                stats.grouped_operator_state_count += 1;
+                stats.grouped_operator_state_groups += footprint.groups;
+                stats.grouped_operator_state_rows += footprint.rows;
+                stats.grouped_operator_state_encoded_bytes += footprint.encoded_bytes;
+            }
             let OperatorState::Recursive(recursive) = state else {
                 continue;
             };
@@ -107,6 +115,11 @@ impl IvmRuntime {
                 _ => None,
             })
             .sum()
+    }
+
+    /// Live subscriptions, without the walk `stats()` makes.
+    pub fn active_subscription_count(&self) -> usize {
+        self.multisink_subscriptions.len()
     }
 
     pub(super) fn cheap_stats(&self) -> RuntimeStats {
@@ -369,7 +382,16 @@ impl IvmRuntime {
     }
 
     pub(super) fn initialize_node_runtime(&mut self, node: NodeId) {
-        self.node_meta.entry(node).or_default();
+        let meta = self.node_meta.entry(node).or_default();
+        if self.stored_arrangements_enabled && meta.stored_arrangement.is_none() {
+            meta.stored_arrangement = stored_arrangement::plan_stored_arrangement(
+                &self.graph,
+                &self.schema,
+                node,
+                Arc::clone(&self.arrangement_use_tracking),
+            )
+            .map(Arc::new);
+        }
         let Some(graph_node) = self.graph.node(node) else {
             return;
         };
