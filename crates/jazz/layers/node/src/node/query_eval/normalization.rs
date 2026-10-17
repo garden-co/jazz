@@ -3082,7 +3082,14 @@ where
                 .tables
                 .iter()
                 .find(|table| table.name == table_name)
-                .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+                .ok_or_else(|| {
+                    Error::TableNotFound(format!(
+                        "{} [{}:{}]",
+                        table_name.to_owned(),
+                        file!(),
+                        line!()
+                    ))
+                })?;
             let dependency_policy =
                 authorization::read_policy_authorization_context(policy.clone(), table_name);
             let dependency = self

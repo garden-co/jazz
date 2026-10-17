@@ -1355,7 +1355,16 @@ where
             .tables
             .iter()
             .find(|candidate| candidate.name == table_name)
-            .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+            .ok_or_else(|| {
+                Error::TableNotFound(format!(
+                    "{} [{}:{} policy={policy_schema_version:?} write={:?} local={:?}]",
+                    table_name.to_owned(),
+                    file!(),
+                    line!(),
+                    self.catalogue.active_schema.schema,
+                    self.catalogue.local_schema_version_id
+                ))
+            })?;
         let policy = read_policy_authorization_context(
             self.query_program_policy_context(identity),
             table_name,
@@ -1469,7 +1478,16 @@ where
             .tables
             .iter()
             .find(|candidate| candidate.name == table_name)
-            .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+            .ok_or_else(|| {
+                Error::TableNotFound(format!(
+                    "{} [{}:{} policy={policy_schema_version:?} write={:?} local={:?}]",
+                    table_name.to_owned(),
+                    file!(),
+                    line!(),
+                    self.catalogue.active_schema.schema,
+                    self.catalogue.local_schema_version_id
+                ))
+            })?;
         let policy = read_policy_authorization_context(
             self.query_program_policy_context(identity),
             table_name,

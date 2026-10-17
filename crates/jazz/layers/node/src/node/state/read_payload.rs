@@ -9,7 +9,7 @@ where
             .tables
             .iter()
             .find(|candidate| candidate.name == table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+            .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())))
     }
 
     pub(super) fn table_in_schema(
@@ -33,7 +33,7 @@ where
                 .tables
                 .iter()
                 .find(|candidate| candidate.name == table)
-                .ok_or_else(|| Error::TableNotFound(table.to_owned()));
+                .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())));
         }
         self.catalogue
             .catalogue_schemas
@@ -50,7 +50,7 @@ where
                     .then(|| self.table(table).ok())
                     .flatten()
             })
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+            .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!())))
     }
 
     pub(super) fn shortest_lens_path_cached(

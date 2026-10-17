@@ -195,7 +195,12 @@ where
             .tables
             .iter()
             .find(|candidate| candidate.name == table)
-            .ok_or(Error::TableNotFound(table.to_owned()))?;
+            .ok_or(Error::TableNotFound(format!(
+                "{} [{}:{}]",
+                table.to_owned(),
+                file!(),
+                line!()
+            )))?;
         let read_mapping = self
             .catalogue
             .physical_mappings
@@ -203,10 +208,16 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "read schema physical mapping is missing",
             ))?;
-        let read_table_mapping = read_mapping
-            .tables
-            .get(table)
-            .ok_or(Error::TableNotFound(table.to_owned()))?;
+        let read_table_mapping =
+            read_mapping
+                .tables
+                .get(table)
+                .ok_or(Error::TableNotFound(format!(
+                    "{} [{}:{}]",
+                    table.to_owned(),
+                    file!(),
+                    line!()
+                )))?;
         let selected_by_name = selected.values.iter().cloned().collect::<BTreeMap<_, _>>();
         let selected_by_physical = read_table
             .branch_by

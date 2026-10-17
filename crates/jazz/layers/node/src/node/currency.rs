@@ -826,7 +826,12 @@ where
         sources.sort();
         sources.dedup();
         if sources.is_empty() {
-            return Err(Error::TableNotFound(table.to_owned()));
+            return Err(Error::TableNotFound(format!(
+                "{} [{}:{}]",
+                table.to_owned(),
+                file!(),
+                line!()
+            )));
         }
         self.query
             .version_storage_sources_cache

@@ -24,7 +24,9 @@ impl<S: OrderedKvStorage> NodeState<S> {
             .physical_mappings
             .get(&schema)
             .and_then(|mapping| mapping.identities.tables.get(table))
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?
+            .ok_or_else(|| {
+                Error::TableNotFound(format!("{} [{}:{}]", table.to_owned(), file!(), line!()))
+            })?
             .id;
         Ok(CurrentRowCoordinate {
             schema,

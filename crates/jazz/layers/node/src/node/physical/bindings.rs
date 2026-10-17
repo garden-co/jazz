@@ -598,7 +598,7 @@ pub(super) fn physical_history_source_table(
         .iter()
         .any(|table| table.name == logical_table)
     {
-        return Err(Error::TableNotFound(logical_table.to_owned()));
+        return Err(Error::TableNotFound(format!("{} [{}:{}]", logical_table.to_owned(), file!(), line!())));
     }
     if !schema_version_aliases.contains_key(&schema_version) {
         return Err(Error::InvalidStoredValue(
@@ -642,7 +642,7 @@ pub(super) fn physical_current_source_table(
         .iter()
         .any(|table| table.name == logical_table)
     {
-        return Err(Error::TableNotFound(logical_table.to_owned()));
+        return Err(Error::TableNotFound(format!("{} [{}:{}]", logical_table.to_owned(), file!(), line!())));
     }
     physical_current_storage_table(physical_mappings, schema_version, logical_table, class)
 }
@@ -681,7 +681,7 @@ pub(super) fn physical_rejected_version_binding(
         .tables
         .iter()
         .find(|table| table.name == logical_table)
-        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+        .ok_or_else(|| Error::TableNotFound(format!("{} [{}:{}]", logical_table.to_owned(), file!(), line!())))?;
     let mapping = physical_mappings
         .get(&schema_version)
         .and_then(|mapping| mapping.tables.get(logical_table))

@@ -132,7 +132,14 @@ impl CandidateProofBudget {
                 .tables
                 .iter()
                 .find(|table| &table.name == parent_name)
-                .ok_or_else(|| Error::TableNotFound(parent_name.clone()))?;
+                .ok_or_else(|| {
+                    Error::TableNotFound(format!(
+                        "{} [{}:{}]",
+                        parent_name.clone(),
+                        file!(),
+                        line!()
+                    ))
+                })?;
             let policy = match inherits.operation {
                 crate::query::InheritsOperation::Select => parent.read_policy.as_ref(),
                 crate::query::InheritsOperation::Insert => {
