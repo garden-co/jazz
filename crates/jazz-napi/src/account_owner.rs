@@ -273,6 +273,7 @@ mod tests {
 }
 
 impl NapiDb {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_open_persistent_account_owner_with_self_signed_proof(
         data_path: String,
         schema: Uint8Array,
@@ -292,14 +293,14 @@ impl NapiDb {
         // The serialized config has the existing untrusted placeholder. Native
         // proof verification checks the actual host claim before root admission.
         let identity = core_open_identity(&config, Some(&proof))?;
-        Ok(open_owner(
+        open_owner(
             data_path,
             schema,
             config,
             identity,
             storage_owner,
             cached_catalogue,
-        )?)
+        )
     }
 }
 
@@ -313,13 +314,13 @@ impl NapiDb {
     ) -> std::result::Result<Self, PersistentOpenError> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
-        Ok(open_owner(
+        open_owner(
             data_path,
             schema,
             config,
             identity,
             storage_owner,
             cached_catalogue,
-        )?)
+        )
     }
 }
