@@ -861,13 +861,16 @@ where
                 None
             };
             let outcome = async {
-                let mut next = Box::pin(stream.next_event());
                 let event = std::future::poll_fn(|cx| {
                     if coverage_expired() {
-                        if let Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) =
-                            std::future::Future::poll(next.as_mut(), cx)
-                        {
-                            return Poll::Ready(Ok(Some(event)));
+                        loop {
+                            match Stream::poll_next(Pin::new(&mut stream), cx) {
+                                Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                                    return Poll::Ready(Ok(Some(event)));
+                                }
+                                Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
+                                _ => break,
+                            }
                         }
                         return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
@@ -888,10 +891,9 @@ where
                     {
                         return Poll::Pending;
                     }
-                    std::future::Future::poll(next.as_mut(), cx).map(Ok)
+                    Stream::poll_next(Pin::new(&mut stream), cx).map(Ok)
                 })
                 .await?;
-                drop(next);
                 match event {
                     Some(SubscriptionEvent::Delta { reset: true, .. }) => {
                         let mut snapshot = stream.settled_receiver_local_snapshot()?;
