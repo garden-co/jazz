@@ -163,3 +163,82 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
   );
   await deploy({ ...server, schema: target, migration, permissions: {} });
 });
+
+it("keeps a single historical migration separate from the deployment head", async () => {
+  const old = { notes: s.table({ title: s.string() }, {}) };
+  const middle = { notes: s.table({ title: s.string(), a: s.string() }, {}) };
+  const target = s.defineApp({
+    notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
+  });
+  const hashes = await Promise.all(
+    [s.defineApp(old), s.defineApp(middle), target].map((app) => computeSchemaHash(app.wasmSchema)),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/migrations/graph"))
+        return reply({ activeSchemaHash: hashes[2], schemas: hashes, migrations: [] });
+      expect(input.endsWith("/admin/deploy")).toBe(true);
+      const body = JSON.parse(String(init?.body)) as DeploymentRequest;
+      expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
+        [hashes[0], hashes[1]],
+      ]);
+      return reply({ changed: true, published: { schemas: [], migrations: body.migrations } });
+    }),
+  );
+  await deploy({
+    ...server,
+    schema: target,
+    migration: m.defineMigration({
+      from: old,
+      to: middle,
+      migrate: { notes: { a: m.add.string({ default: "" }) } },
+    }),
+    permissions: {},
+  });
+});
+
+it.each([false, true])(
+  "requires an explicit source for ambiguous partial witnesses (explicit: %s)",
+  async (explicit) => {
+    const common = s.table({ title: s.string() }, {});
+    const added = s.table({ value: s.string() }, {});
+    const first = s.defineApp({ common, first: common });
+    const second = s.defineApp({ common, second: common });
+    const target = s.defineApp({ common, first: common, second: common, added });
+    const [fromHash, otherHash, toHash] = await Promise.all(
+      [first, second, target].map((app) => computeSchemaHash(app.wasmSchema)),
+    );
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/migrations/graph"))
+        return reply({
+          activeSchemaHash: toHash,
+          schemas: [fromHash, otherHash, toHash],
+          migrations: [
+            { fromHash, toHash },
+            { fromHash: otherHash, toHash },
+          ],
+        });
+      if (input.endsWith(`/schema/${fromHash}`))
+        return reply({ schema: { tables: first.wasmSchema } });
+      expect(input.endsWith("/admin/deploy")).toBe(true);
+      expect(JSON.parse(String(init?.body)).migrations).toEqual([]);
+      return reply({ changed: false, published: { schemas: [], migrations: [] } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const migration = m.defineMigration({
+      from: { common },
+      to: { common, added },
+      createTables: { added: true },
+      ...(explicit ? { fromHash } : {}),
+    });
+    const deploying = deploy({ ...server, schema: target, migration, permissions: {} });
+    if (explicit) await expect(deploying).resolves.toMatchObject({ changed: false });
+    else {
+      await expect(deploying).rejects.toThrow(
+        "Partial migration source is ambiguous; supply fromHash.",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  },
+);

@@ -2,13 +2,14 @@ import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
-import { initialRecipientIds } from "../e2ee/space-lifecycle.js";
+import { initialRecipientIds, SpaceInitialisationRequired } from "../e2ee/space-lifecycle.js";
 import { acceptInitialHistory, discardInitialHistory } from "../e2ee/accepted-history.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
   prepareInitialSpaceForTransaction,
   prepareInitialSpaceRows,
+  prepareMissingSpaceWrite,
   withSpaceKeys,
   type E2ee,
 } from "../e2ee/lifecycle.js";
@@ -1028,6 +1029,10 @@ type DbTransactionHandleBinding = {
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
 const initialisingTransactions = new WeakSet<Transaction>();
+const standaloneWriteRetries = new WeakMap<
+  Transaction,
+  { prepare: (tx: Transaction) => void; branch: boolean } | null
+>();
 
 function getDbTxHandleBinding(handle: Transaction, operation: string): DbTransactionHandleBinding {
   const binding = dbTxHandleBindings.get(handle);
@@ -1332,6 +1337,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private failedRead = false;
   private failedReadCleanupComplete = false;
   private cancelled = false;
+  private mayInitialiseSpace = false;
   private readonly initialSpaceKeys = new Map<string, { secret: Uint8Array; root: SpaceRoot }>();
   private readonly encryptedScopes = new Map<string, string>();
   private encryptedInsertBatch?: EncryptedInsertBatch;
@@ -1414,9 +1420,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       txId = ownerClient.commitTransaction(openTransactionId).txId;
     }
     this.committing = true;
-    const initialRoots: SpaceRoot[] | undefined = initialisingTransactions.has(this)
-      ? []
-      : undefined;
+    const requiresInitialAcceptance = initialisingTransactions.has(this);
+    const initialRoots: SpaceRoot[] | undefined =
+      requiresInitialAcceptance || this.mayInitialiseSpace ? [] : undefined;
     const finishCommit = () => {
       this.committing = false;
       if (initialRoots)
@@ -1430,7 +1436,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       // acceptance floor on txId also preserves it through callback/map handles.
       txId = txId
         .then(async (id) => {
-          await ownerClient.waitForExclusiveTransaction(id, "global");
+          if (requiresInitialAcceptance || initialRoots.length)
+            await ownerClient.waitForExclusiveTransaction(id, "global");
           // Cache preparation with its accepted identity. The cache cannot reject
           // this receipt and does not perform another authority read.
           for (const root of initialRoots) await acceptInitialHistory(this.e2ee!.db, root, id);
@@ -1497,7 +1504,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (encryption) {
       if (initialisesSpace)
         throw new Error("Encrypted scope rows require dependent scope preparation");
-      return this.prepareEncryptedRow(table, transformedData, options, "insert", previousBatch);
+      return this.prepareEncryptedRow(
+        table,
+        transformedData,
+        options,
+        "insert",
+        undefined,
+        previousBatch,
+      );
     }
     const values = toWriteRecordForOperation(
       "Insert",
@@ -1551,13 +1565,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: InsertOptions,
     operation: "insert" | "restore" = "insert",
+    preparedValues?: ReturnType<typeof toWriteRecord>,
     previousBatch?: EncryptedInsertBatch,
   ): T {
     if (!this.e2ee) throw new Error("Encrypted writes require an authenticated E2EE context");
     const metadata = encryptedSchemas.get(table._schema)!;
     const declaration = metadata.tables.get(table._table)!;
     const logicalTable = metadata.logical[table._table]!;
-    const values = structuredClone(toWriteRecord(data, metadata.logical, table._table));
+    const values =
+      preparedValues ?? structuredClone(toWriteRecord(data, metadata.logical, table._table));
     const physical = { ...values };
     for (const name of declaration.columns) {
       const column = logicalTable.columns.find((column) => column.name === name)!;
@@ -1576,6 +1592,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const { ownerClient, openTransactionId, session, attribution } = binding;
     const normalized = normalizeSelectorOptions(table._schema, table._table, optionsSnapshot);
     const preview = ownerClient.previewInsertInternal(table._table, physical, normalized?.id);
+    if (operation === "insert" && standaloneWriteRetries.has(this)) {
+      const retryOptions = { ...optionsSnapshot, id: preview.id };
+      standaloneWriteRetries.set(this, {
+        branch: optionsSnapshot?.branch !== undefined,
+        prepare: (tx) => {
+          tx.bindTable(table);
+          tx.prepareEncryptedRow(table, data, retryOptions, "insert", values);
+        },
+      });
+    }
+    if (operation === "insert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
     const db = this.e2ee.db;
     const prepare: EncryptedInsertBatch["writes"][number] = async (io, borrowed) => {
@@ -1656,7 +1683,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
-        await withSpaceKeys(db, scope, identifier.value, stage, false, true);
+        await this.withWriteSpaceKeys(
+          scope,
+          identifier.value,
+          stage,
+          binding,
+          io,
+          operation === "insert",
+        );
       }
     };
     if (operation === "restore") {
@@ -1690,8 +1724,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             ? this.initialSpaceKeys.get(`${await db.tableIdentity(scope)}:${identifier.value}`)
             : undefined;
           let epoch: string | undefined;
+          let initialisedHere = false;
           const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
             epoch = root.epochId;
+            initialisedHere = this.initialSpaceKeys.has(`${root.scopeId}:${root.identifier}`);
             for (const write of batch.writes) await write(io, { secret, root });
           };
           if (initial) {
@@ -1699,15 +1735,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           } else {
             // Borrow a key only while this bounded batch runs. Reobserve accepted
             // authority after encryption, before preparation can permit commit.
-            await withSpaceKeys(db, scope, identifier.value, stage, false);
-            await withSpaceKeys(
-              db,
+            await this.withWriteSpaceKeys(scope, identifier.value, stage, binding, io, true);
+            // A newly staged root remains owned by this transaction's initial
+            // acceptance boundary; it is not yet eligible for a global recheck.
+            if (initialisedHere) return;
+            await this.withWriteSpaceKeys(
               scope,
               identifier.value,
               async (_secret, root) => {
                 if (root.epochId !== epoch)
                   throw new Error("Encryption space changed during transaction preparation");
               },
+              binding,
+              io,
               false,
             );
           }
@@ -1724,6 +1764,48 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       ),
     };
     return transformOutputRow(table, transformRow(logicalRow, metadata.logical, table._table));
+  }
+
+  private async withWriteSpaceKeys<T, Init>(
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
+    binding: DbTransactionHandleBinding,
+    io: TransactionPreparationIO,
+    mayCreate: boolean,
+  ): Promise<void> {
+    const db = this.e2ee!.db;
+    let entered = false;
+    try {
+      await withSpaceKeys(
+        db,
+        scope,
+        identifier,
+        async (secret, root) => {
+          entered = true;
+          await stage(secret, root);
+        },
+        false,
+        true,
+      );
+    } catch (error) {
+      if (
+        entered ||
+        !mayCreate ||
+        !(error instanceof E2eeDataError) ||
+        error.code !== "key-unavailable"
+      )
+        throw error;
+      const prepared =
+        this.kind === "exclusive" ? preparedTransactionScope(binding, io) : undefined;
+      if (
+        !(await prepareMissingSpaceWrite(db, prepared, scope, identifier, async (secret, root) => {
+          await this.retainInitialSpaceKey(secret, root);
+          await stage(secret, root);
+        }))
+      )
+        throw error;
+    }
   }
 
   /**
@@ -1931,7 +2013,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       (Object.hasOwn(transformedData, encrypted.space) ||
         encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
     ) {
-      return this.updateEncrypted(table, id, transformedData, options, "update", previousBatch);
+      return this.updateEncrypted(
+        table,
+        id,
+        transformedData,
+        options,
+        "update",
+        undefined,
+        previousBatch,
+      );
     }
     const updates = toWriteRecordForOperation(
       "Update",
@@ -1974,18 +2064,35 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: UpdateOptions,
     operation: "update" | "upsert" = "update",
+    preparedUpdates?: ReturnType<typeof toWriteRecord>,
     previousBatch?: EncryptedUpdateBatch,
   ): void {
     const metadata = encryptedSchemas.get(table._schema)!;
     const declaration = metadata.tables.get(table._table)!;
-    const changed = declaration.columns.filter((name) => Object.hasOwn(data, name));
+    const changed = declaration.columns.filter((name) =>
+      Object.hasOwn(preparedUpdates ?? data, name),
+    );
     if (changed.length && !this.e2ee)
       throw new Error("Encrypted writes require an authenticated E2EE context");
-    const updates = structuredClone(toWriteRecord(data, metadata.logical, table._table));
+    const updates = structuredClone(
+      preparedUpdates ?? toWriteRecord(data, metadata.logical, table._table),
+    );
     const optionsSnapshot = options ? structuredClone(options) : undefined;
+    if (operation === "upsert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
     const normalized = normalizeViewOptions(table._schema, table._table, optionsSnapshot);
+    if (operation === "upsert" && standaloneWriteRetries.has(this)) {
+      const retryValues = structuredClone(updates);
+      const retryOptions = optionsSnapshot;
+      standaloneWriteRetries.set(this, {
+        branch: optionsSnapshot?.branch !== undefined,
+        prepare: (tx) => {
+          tx.bindTable(table);
+          tx.updateEncrypted(table, id, data, retryOptions, "upsert", retryValues);
+        },
+      });
+    }
     const query = new TypedTableQueryBuilder<
       AnyTableMeta & { row: { id: string } & Record<string, unknown> }
     >(table._table, table._schema)
@@ -2120,7 +2227,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         withKey: (use) =>
           initial
             ? use(initial.secret, initial.root)
-            : withSpaceKeys(db, scope, identifier, use, false, true),
+            : this.withWriteSpaceKeys(scope, identifier, use, binding, io, creating),
       };
     };
     // Explicit branch writes retain their independent preparation path.
@@ -3044,8 +3151,11 @@ export class Db {
     kind: TransactionKind,
     client: JazzClient,
     write: (tx: Transaction) => T,
+    initialiseMissingSpace = false,
   ): WriteResult<T> {
-    const tx = this.createTransaction(kind);
+    const context = this.getAccessContext();
+    const tx = this.createTransaction(kind, context);
+    if (initialiseMissingSpace && kind === "mergeable") standaloneWriteRetries.set(tx, null);
     let value: T;
     try {
       value = write(tx);
@@ -3061,7 +3171,18 @@ export class Db {
     return this.wrapWriteWait(
       new WriteResult(
         value,
-        committed.then((result) => result.txId),
+        committed
+          .then((result) => result.txId)
+          .catch(async (error) => {
+            const retry = standaloneWriteRetries.get(tx);
+            if (!(error instanceof SpaceInitialisationRequired) || !retry) throw error;
+            if (retry.branch)
+              throw new Error(
+                "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
+              );
+            const exclusive = this.createTransaction("exclusive", context);
+            return (await runInTransaction(exclusive, () => retry.prepare(exclusive), client)).txId;
+          }),
         client,
       ),
     );
@@ -3359,6 +3480,7 @@ export class Db {
         encryption.scopes.has(table._table) ? "exclusive" : "mergeable",
         client,
         (tx) => tx.insert(table, data, options),
+        true,
       );
     }
     const transformedData = transformInputColumns(table, data);
@@ -3538,6 +3660,7 @@ export class Db {
         encryption.scopes.has(table._table) ? "exclusive" : "mergeable",
         client,
         (tx) => tx.upsert(table, id, data, options),
+        true,
       );
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
@@ -3680,10 +3803,12 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+  private createTransaction<TKind extends TransactionKind>(
+    kind: TKind,
+    context = this.getAccessContext(),
+  ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
-    const context = this.getAccessContext();
     const configuredSchema = e2eeSchemaForDb(this);
     const ownerClient =
       this.getCurrentClient() ?? (configuredSchema ? this.getClient(configuredSchema) : null);
