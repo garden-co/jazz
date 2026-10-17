@@ -1322,7 +1322,7 @@ fn reset_accepts_identical_annotated_duplicates() {
             ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
         }
         assert!(reader.query_transaction(tx_id).unwrap().is_some());
-        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 1);
+        assert_eq!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 1);
 
         let conflicting = version_record(row(1), Vec::new(), title_cells("one"), None);
         let replay = ViewUpdateParts {
@@ -1364,7 +1364,7 @@ fn reset_accepts_identical_annotated_duplicates() {
             ),
             "expected conflicting replay, got {result:?}"
         );
-        let stored = reader.query_versions_for_tx(tx_id).unwrap();
+        let stored = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(
             reader
@@ -1417,7 +1417,7 @@ fn reset_scope_merge_is_order_independent_and_complete_dominates() {
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert!(!stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 2);
-        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 2);
     }
 }
 
@@ -1450,7 +1450,7 @@ fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert!(stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 2);
-        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 2);
     }
 }
 
@@ -1501,7 +1501,7 @@ fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
             Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
         ));
         assert!(reader.query_transaction(tx_id).unwrap().is_none());
-        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty());
         assert_eq!(authority_hydration_receipts(&reader).0, state_before);
         assert!(
             !authority_hydration_receipts(&reader)
@@ -1554,7 +1554,7 @@ fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
             Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
         ));
         assert!(reader.query_transaction(tx_id).unwrap().is_none());
-        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty());
     }
 }
 
@@ -1613,7 +1613,7 @@ fn reopened_scope_conflicts_preserve_persisted_transaction() {
         ));
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.is_partial, !stored_complete);
-        let versions = reader.query_versions_for_tx(tx_id).unwrap();
+        let versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(reader.version_record_from_row(&versions[0]).unwrap(), first);
     }
@@ -1802,7 +1802,7 @@ fn assert_reset_authored_columns_conflict(
         );
     }
     assert!(reader.query_transaction(tx_id).unwrap().is_none());
-    assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+    assert!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty());
     assert!(reader.query_all_versions().unwrap().is_empty());
     assert!(
         reader
@@ -1923,7 +1923,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
     ));
     assert_eq!(
-        reader.query_versions_for_tx(tx_id).unwrap().len(),
+        reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(),
         1,
         "the conflicting completing fragment must not be stored"
     );
@@ -2484,7 +2484,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.tx.n_total_writes, 0);
         assert!(stored.is_partial);
-        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty());
         assert!(reader.query_local_winner("todos", row(1)).unwrap().is_none());
         reader.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
         // A duplicate discarded Pending header must leave a terminal identity intact.
@@ -2499,7 +2499,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         assert!(stored.is_partial);
         assert_eq!(stored.tx.n_total_writes, 0);
         assert_eq!(stored.fate, Fate::Accepted);
-        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty());
         assert!(reader.query_local_winner("todos", row(1)).unwrap().is_none());
         register_whole_table_receiver(&mut reader, "todos");
         let subscription = reader.whole_table_subscription_key("todos").unwrap();
@@ -2519,7 +2519,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
         assert_eq!(stored.tx.n_total_writes, 2);
         assert_eq!(stored.is_partial, scope == ViewScoped);
-        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 2);
         assert_eq!(stored.fate, Fate::Accepted, "later pending carrier must preserve terminal identity ({scope:?})");
         assert_eq!(stored.global_time, Some(GlobalTime(1)));
         assert_eq!(stored.durability, DurabilityTier::Global);
@@ -2530,7 +2530,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         assert_eq!(stored.global_time, Some(GlobalTime(1)));
         assert_eq!(stored.durability, DurabilityTier::Global);
         assert_eq!(stored.tx.n_total_writes, 2);
-        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+        assert_eq!(reader.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 2);
     }
 }
 
@@ -2583,5 +2583,5 @@ fn known_transaction_matching_probes_only_incoming_history_keys() {
     reset_query_versions_for_tx_call_count();
     writer.ingest_known_transaction(tx, versions, state.fate.clone(), state.global_time, state.durability).unwrap();
     assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
-    assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
+    assert_eq!(writer.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 32);
 }

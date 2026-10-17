@@ -40,3 +40,7 @@ dev/t --test integration --exact storage_format_refusal::published_alpha56_rocks
 dev/t --test integration --exact storage_format_refusal::pre_linear_native_corpora_are_refused_before_any_mutation
 dev/t --test integration --exact storage_format_refusal::linear_history_root_without_the_durable_index_family_is_refused
 dev/t --test integration --exact storage_format_refusal::linear_history_root_without_the_durability_v2_family_is_refused
+# The refusal stays typed on the public surfaces applications match on: the
+# native tools client error and the binding-facing core error code.
+dev/t --test integration --exact storage_format_refusal::native_client_reports_an_old_store_as_a_typed_unsupported_storage_codecs_error
+dev/t --test integration --exact storage_format_refusal::binding_error_for_an_old_store_has_the_unsupported_storage_codecs_code

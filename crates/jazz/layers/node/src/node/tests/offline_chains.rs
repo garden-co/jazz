@@ -72,7 +72,7 @@ fn post_image_at_core(
     core: &mut NodeState,
     tx: TxId,
 ) -> (Option<DeletionEvent>, BTreeMap<String, Value>) {
-    let versions = core.query_versions_for_tx(tx).resolve().unwrap();
+    let versions = core.stored_versions_for_tx_for_test(tx).resolve().unwrap();
     assert_eq!(versions.len(), 1, "one row written");
     let version = &versions[0];
     let schema_version = core
@@ -557,7 +557,7 @@ fn inserts_and_blind_updates_are_never_flagged() {
     let (_, dave_unit) = offline_edit(&mut writers[0].1, target, 50, &[("title", "dave")]);
     let dave_seq = accepted_seq(&core_fate(&mut core, dave_unit));
     assert!(
-        core.query_versions_for_tx(frank_tx).resolve().unwrap().is_empty(),
+        core.stored_versions_for_tx_for_test(frank_tx).resolve().unwrap().is_empty(),
         "the blind update has not reached Core yet"
     );
     let SyncMessage::CommitUnit { versions, .. } = &blind else {

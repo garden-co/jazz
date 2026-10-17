@@ -2,18 +2,25 @@
 //!
 //! These receipts open real committed roots through the public adapter entry
 //! point with the node profile, exactly as the server shell, the native
-//! client, NAPI and the native relay do. They are adapter-level rather than
+//! client, NAPI and the native relay do. Most are adapter-level rather than
 //! `JazzServer` tests because the refusal happens at manifest admission,
-//! before any node state exists; the public client path reports the same
-//! typed error through its display text.
+//! before any node state exists. The last two follow the same refusal out
+//! through the public surfaces applications match on: the native tools
+//! client's `JazzError::UnsupportedStorageCodecs` and the binding-facing
+//! `jazz::db::Error` code `unsupported_storage_codecs`.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use groove::storage::Error as StorageError;
+use jazz::db::{ErrorCode, StorageCodecMismatch};
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::node_storage_codec_profile;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    AppContext, ClientStorage, ColumnType, JazzClient, JazzError, Schema, SchemaBuilder,
+    TableSchemaBuilder,
+};
 use sha2::{Digest, Sha256};
 
+const DICTIONARY_V1: &str = "groove.dictionary.v1";
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
 const TRANSACTION_RECORD: &str = "jazz.transaction-record.v1";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
@@ -41,9 +48,12 @@ fn assert_legacy_profile_refused(
     result: Result<(), StorageError>,
     old: &groove::storage::StorageCodecProfile,
 ) {
-    let mut expected_missing = vec!["jazz.node-storage.v1"];
+    let mut expected_missing = vec!["jazz.node-storage.v2"];
     if !old.codec_ids().any(|id| id == DURABLE_INDEX_V2) {
         expected_missing.insert(0, DURABLE_INDEX_V2);
+    }
+    if !old.codec_ids().any(|id| id == DICTIONARY_V1) {
+        expected_missing.insert(0, DICTIONARY_V1);
     }
     let expected_unknown = old
         .codec_ids()
@@ -55,11 +65,54 @@ fn assert_legacy_profile_refused(
     );
 }
 
-fn notes_schema() -> JazzSchema {
-    let source = SchemaBuilder::new()
+fn notes_source_schema() -> Schema {
+    SchemaBuilder::new()
         .table(TableSchemaBuilder::new("notes").column("body", ColumnType::Text))
-        .build();
-    JazzSchema::new(&source).expect("notes schema compiles")
+        .build()
+}
+
+fn notes_schema() -> JazzSchema {
+    JazzSchema::new(&notes_source_schema()).expect("notes schema compiles")
+}
+
+fn published_alpha54_archive() -> Vec<u8> {
+    checked_fixture(
+        include_str!("../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
+        "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
+    )
+}
+
+fn alpha54_missing() -> Vec<String> {
+    vec![
+        DICTIONARY_V1.to_owned(),
+        DURABLE_INDEX_V2.to_owned(),
+        "groove.large-value.v2".to_owned(),
+        "groove.ordered-chunk-storage.v2".to_owned(),
+        "jazz.node-storage.v2".to_owned(),
+    ]
+}
+
+/// Codec families an alpha.54 root names that the current node profile no
+/// longer carries.
+const ALPHA54_UNKNOWN: [&str; 11] = [
+    "groove.large-value.v1",
+    "groove.ordered-chunk-storage.v1",
+    "jazz.branch-key.v1",
+    "jazz.catalogue.activation.v1",
+    "jazz.catalogue.bootstrap-ready.v1",
+    "jazz.catalogue.lens.v1",
+    "jazz.catalogue.lineage.v1",
+    "jazz.catalogue.physical-mapping.v1",
+    "jazz.catalogue.schema.v1",
+    "jazz.catalogue.write-pointer.v1",
+    "jazz.subscription-program-fact-key.v1",
+];
+
+fn alpha54_unknown() -> Vec<String> {
+    ALPHA54_UNKNOWN
+        .iter()
+        .map(|codec| (*codec).to_owned())
+        .collect()
 }
 
 fn checked_fixture(base64: &str, sha256: &str) -> Vec<u8> {
@@ -125,30 +178,9 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
             unknown,
         }) => {
             assert_eq!(epoch, 1, "{store}");
-            assert_eq!(
-                missing,
-                vec![
-                    DURABLE_INDEX_V2.to_owned(),
-                    "groove.large-value.v2".to_owned(),
-                    "groove.ordered-chunk-storage.v2".to_owned(),
-                    "jazz.node-storage.v1".to_owned(),
-                ],
-                "{store}"
-            );
+            assert_eq!(missing, alpha54_missing(), "{store}");
             let mut expected_unknown = expected_unknown.to_vec();
-            expected_unknown.extend([
-                "groove.large-value.v1",
-                "groove.ordered-chunk-storage.v1",
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.subscription-program-fact-key.v1",
-            ]);
+            expected_unknown.extend(ALPHA54_UNKNOWN);
             expected_unknown.sort();
             assert_eq!(unknown, expected_unknown, "{store}");
         }
@@ -158,25 +190,22 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 }
 
 /// A published alpha.54 client root (DAG layout) is refused at open with the
-/// typed `UnsupportedStorageCodecs` error naming the durable-index,
-/// node-storage profiles it lacks, instead of opening and failing later with a record decode error.
+/// typed `UnsupportedStorageCodecs` error naming the dictionary,
+/// durable-index and node-storage families it lacks, instead of opening and failing later with a record decode error.
 ///
 /// Actors: `alice` upgrades her native app from alpha.54 over the same
 /// data directory.
 ///
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                               missing [groove.durable-index.v2,
-///                                                        jazz.node-storage.v1]
+///                                               missing [groove.dictionary.v1,
+///                                                        groove.durable-index.v2,
+///                                                        jazz.node-storage.v2]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
     let directory = tempfile::tempdir().unwrap();
-    let archive = checked_fixture(
-        include_str!("../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
-        "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
-    );
-    let path = unpack_rocksdb(directory.path(), &archive);
+    let path = unpack_rocksdb(directory.path(), &published_alpha54_archive());
     assert_refused(open_rocksdb(&path), &[], "published alpha.54 RocksDB");
     // Refusal is stable: the first attempt admitted nothing.
     assert_refused(
@@ -271,7 +300,9 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 ///
 /// ```text
 /// dave's pre-index-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                              missing [groove.durable-index.v2, jazz.node-storage.v1]
+///                                              missing [groove.dictionary.v1,
+///                                                       groove.durable-index.v2,
+///                                                       jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durable_index_family_is_refused() {
@@ -306,7 +337,8 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 ///
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                                  missing [jazz.node-storage.v1]
+///                                                  missing [groove.dictionary.v1,
+///                                                           jazz.node-storage.v2]
 /// ```
 #[test]
 fn linear_history_root_without_the_durability_v2_family_is_refused() {
@@ -339,6 +371,91 @@ fn linear_history_root_without_the_durability_v2_family_is_refused() {
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }
 
+/// The native tools client refuses a published alpha.54 data directory with
+/// the typed `JazzError::UnsupportedStorageCodecs`, carrying the same epoch
+/// and codec lists as the adapter error, so an application can match the
+/// variant, delete its data directory and resync from Core. The refused
+/// store is not opened, so a second connect is refused the same way.
+///
+/// Actors: `alice` upgrades her native app from alpha.54 and reconnects over
+/// the same data directory.
+///
+/// ```text
+/// alice ──JazzClient::connect(data_dir with alpha.54 jazz-core.rocksdb)
+///                 └──✗ JazzError::UnsupportedStorageCodecs { epoch: 1, missing, unknown }
+/// ```
+#[tokio::test]
+async fn native_client_reports_an_old_store_as_a_typed_unsupported_storage_codecs_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let unpacked = unpack_rocksdb(directory.path(), &published_alpha54_archive());
+    let data_dir = directory.path().join("alice");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::rename(&unpacked, data_dir.join("jazz-core.rocksdb")).unwrap();
+
+    let mut context = AppContext::test(notes_source_schema());
+    context.data_dir = data_dir;
+    context.storage = ClientStorage::Persistent;
+    context.storage_factory = Some(std::sync::Arc::new(
+        jazz_storage_rocksdb::RocksDbStorageFactory,
+    ));
+
+    for attempt in ["first connect", "second connect"] {
+        match JazzClient::connect(context.clone()).await {
+            Err(JazzError::UnsupportedStorageCodecs {
+                epoch,
+                missing,
+                unknown,
+            }) => {
+                assert_eq!(epoch, 1, "{attempt}");
+                assert_eq!(missing, alpha54_missing(), "{attempt}");
+                assert_eq!(unknown, alpha54_unknown(), "{attempt}");
+            }
+            Err(other) => panic!("{attempt}: expected a typed format refusal, got {other}"),
+            Ok(_) => panic!("{attempt}: an alpha.54 store must not open"),
+        }
+    }
+}
+
+/// The binding-facing `jazz::db::Error` that NAPI, WASM and the native relay
+/// build from an adapter refusal carries the stable code
+/// `unsupported_storage_codecs` and the codec lists as structured fields,
+/// not only in its message.
+///
+/// White-box at the conversion rather than through a binding: the bindings
+/// throw into a JavaScript engine, which a Rust test cannot host. Their
+/// TypeScript tests cover the thrown object.
+///
+/// ```text
+/// alice's alpha.54 root ──open──✗ storage::Error::UnsupportedStorageCodecs
+///                                   └─► db::Error { code: "unsupported_storage_codecs",
+///                                                   storage_codecs: { epoch, missing, unknown } }
+/// ```
+#[test]
+fn binding_error_for_an_old_store_has_the_unsupported_storage_codecs_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = unpack_rocksdb(directory.path(), &published_alpha54_archive());
+    let refusal = open_rocksdb(&path).expect_err("an alpha.54 root must not open");
+    let display = refusal.to_string();
+
+    let error = jazz::db::Error::from(refusal);
+
+    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
+    assert_eq!(error.code.as_str(), "unsupported_storage_codecs");
+    assert_eq!(error.message, display, "the adapter's text is kept");
+    assert_eq!(
+        error.storage_codecs,
+        Some(StorageCodecMismatch {
+            epoch: 1,
+            missing: alpha54_missing(),
+            unknown: alpha54_unknown(),
+        })
+    );
+
+    let other = jazz::db::Error::from(StorageError::InvalidStorageLayout("bad".to_owned()));
+    assert_eq!(other.code, ErrorCode::Storage);
+    assert_eq!(other.storage_codecs, None);
+}
+
 /// Alice opens a database with the former nullable transaction marker. The
 /// adapter refuses its profile before touching records or changing the file.
 #[test]
@@ -362,4 +479,50 @@ fn transaction_string_marker_root_is_refused_before_mutation() {
     let before = std::fs::read(&path).unwrap();
     assert_legacy_profile_refused(open_sqlite(&path), &old);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A node root written before interned author columns (no
+/// `groove.dictionary.v1`) is refused at manifest admission, naming only the
+/// dictionary family, before any author column is decoded: its rows hold
+/// full authors where the current layout expects 4-byte codes. The SQLite
+/// file is left byte-for-byte unchanged.
+///
+/// Actors: `frank` upgrades a client whose store holds uninterned authors.
+///
+/// ```text
+/// frank's pre-dictionary root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                                missing [groove.dictionary.v1]
+/// ```
+#[test]
+fn node_root_without_the_dictionary_family_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let pre_dictionary_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs([DURABLE_INDEX_V2, "jazz.node-storage.v2"])
+        .expect("pre-dictionary node profile");
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &pre_dictionary_profile,
+        )
+        .expect("pre-dictionary profile root"),
+    );
+    let before = std::fs::read(&path).unwrap();
+    match open_sqlite(&path) {
+        Err(StorageError::UnsupportedStorageCodecs {
+            epoch: 1,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(missing, vec![DICTIONARY_V1.to_owned()]);
+            assert!(unknown.is_empty());
+        }
+        Err(other) => panic!("expected a typed format refusal, got {other}"),
+        Ok(()) => panic!("a root without the dictionary family must not open"),
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }

@@ -3022,7 +3022,7 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
         .node
         .node
         .borrow_mut()
-        .commit_unit_for(tx_id)
+        .stored_commit_unit_for_test(tx_id)
         .unwrap();
     let SyncMessage::CommitUnit { tx, .. } = &mut forged else {
         unreachable!("commit_unit_for returns a CommitUnit");
@@ -3038,8 +3038,11 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     core.tick().unwrap();
     client.tick().unwrap();
 
-    let SyncMessage::CommitUnit { tx, .. } =
-        core.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+    let SyncMessage::CommitUnit { tx, .. } = core
+        .node()
+        .borrow_mut()
+        .stored_commit_unit_for_test(tx_id)
+        .unwrap()
     else {
         unreachable!("core retained the accepted transaction");
     };
@@ -3533,8 +3536,11 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     server.tick().unwrap();
     backend.tick().unwrap();
 
-    let SyncMessage::CommitUnit { tx, .. } =
-        server.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+    let SyncMessage::CommitUnit { tx, .. } = server
+        .node()
+        .borrow_mut()
+        .stored_commit_unit_for_test(tx_id)
+        .unwrap()
     else {
         panic!("expected stored commit unit");
     };
@@ -3805,7 +3811,7 @@ fn core_attributed_insert_uses_core_identity_for_policy_and_user_for_made_by() {
     let unit = core
         .node()
         .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
+        .stored_commit_unit_for_test(write.mergeable_tx_id())
         .unwrap();
     let SyncMessage::CommitUnit { tx, .. } = unit else {
         panic!("commit unit expected");
@@ -4275,7 +4281,7 @@ fn attributed_streaming_uses_system_admission_without_losing_provenance() {
         .node
         .node
         .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
+        .stored_commit_unit_for_test(write.mergeable_tx_id())
         .unwrap()
     else {
         panic!("streamed attributed write must publish a commit unit");

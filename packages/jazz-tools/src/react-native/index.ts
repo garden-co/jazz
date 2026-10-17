@@ -34,6 +34,10 @@ export {
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   REACT_NATIVE_UNSUPPORTED_ERROR,
 } from "./errors.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "../runtime/unsupported-storage-codecs-error.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
 

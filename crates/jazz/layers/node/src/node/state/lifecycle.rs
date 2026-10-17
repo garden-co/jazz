@@ -66,7 +66,7 @@ impl NodeState {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
-            StorageLayout::jazz_class_v2(),
+            StorageLayout::jazz_class_v3(),
         )
         .await?;
         let requested_key = [
@@ -238,7 +238,7 @@ impl NodeState {
         // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
@@ -462,7 +462,7 @@ impl NodeState {
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut genesis = None;
         let mut active = None;
@@ -681,11 +681,15 @@ impl NodeState {
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let registration_ranks = catalogue_ranks(
+            active_lineages_by_target.values().chain(staged_lineages.values()),
+        );
         let mut database = Self::open_full_database(
             &schema,
             &registration_schemas,
             &registration_aliases,
             &registration_mappings,
+            &registration_ranks,
             storage,
         )
         .await?;
@@ -855,7 +859,6 @@ impl NodeState {
             absent_node_alias: None,
             ahead_current_keys: AheadCurrentKeys::default(),
             tx_touched_dirty: BTreeMap::new(),
-            history_tx_authors: BTreeMap::new(),
             history_tx_seqs: RefCell::new(FxHashMap::default()),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
@@ -942,6 +945,7 @@ impl NodeState {
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
@@ -950,9 +954,10 @@ impl NodeState {
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
+            catalogue_ranks,
         )?;
         lowered.tables.extend(current_tables);
-        let layout = StorageLayout::jazz_class_v2();
+        let layout = StorageLayout::jazz_class_v3();
         let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
         // Jazz publishes plain ordered results from membership and version
         // deltas and never reads their generic root positions; only root
@@ -1855,6 +1860,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
         )?);
         self.database.rebuild(lowered)?;
         self.database.set_missing_chunk_resolver(self.chunk_resolver.clone());
@@ -1942,7 +1948,7 @@ where
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();

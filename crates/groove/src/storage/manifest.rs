@@ -41,6 +41,15 @@ pub const GROOVE_EPOCH_1_CODECS: &[&str] = &[
 /// admission instead of being misread.
 pub const GROOVE_DURABLE_INDEX_V2_CODEC: &str = "groove.durable-index.v2";
 
+/// Groove dictionaries of interned columns: one `__groove_dictionary_<name>`
+/// family per dictionary, keyed by the 4-byte big-endian code, valued by the
+/// canonical encoding of the value (see [`crate::dictionary`]). Rows of an
+/// interned column store the 4-byte little-endian code in place of the value.
+///
+/// Like [`GROOVE_DURABLE_INDEX_V2_CODEC`], only roots whose schema declares a
+/// dictionary carry it; such a root composes it into its profile.
+pub const GROOVE_DICTIONARY_V1_CODEC: &str = "groove.dictionary.v1";
+
 /// A closed, deterministic set of persistent payload codecs required by one
 /// storage root.
 ///
