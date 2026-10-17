@@ -5148,8 +5148,8 @@ enum InFlightExclusiveReplay {
     Unchanged,
     /// bob changes the row alice read; Core must reject the replay.
     ConcurrentUpdate,
-    /// The audit row is rewritten as a build without persisted read evidence
-    /// wrote it (slots 5-8 null); Core must keep rejecting it.
+    /// The proof side record is removed to reproduce a store written without
+    /// persisted read evidence; Core must keep rejecting its replay.
     WithoutPersistedEvidence,
 }
 
