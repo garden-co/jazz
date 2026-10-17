@@ -265,5 +265,7 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
       await rm(directory, { recursive: true, force: true });
     }
   },
-  60000,
+  // Native nested-group rotation needs the same full-CI budget as the other
+  // group integration tests; all reads and revocation assertions remain bounded.
+  120_000,
 );
