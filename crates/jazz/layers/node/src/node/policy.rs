@@ -1096,7 +1096,14 @@ where
                 .iter()
                 .find(|table| table.name == version.table())
                 .cloned()
-                .ok_or_else(|| Error::TableNotFound(version.table().to_owned()))?;
+                .ok_or_else(|| {
+                    Error::TableNotFound(format!(
+                        "{} [{}:{}]",
+                        version.table().to_owned(),
+                        file!(),
+                        line!()
+                    ))
+                })?;
             let cells = table
                 .columns
                 .iter()
@@ -1354,7 +1361,14 @@ where
             .tables
             .iter()
             .find(|table| table.name == commit.table)
-            .ok_or_else(|| Error::TableNotFound(commit.table.clone()))?;
+            .ok_or_else(|| {
+                Error::TableNotFound(format!(
+                    "{} [{}:{}]",
+                    commit.table.clone(),
+                    file!(),
+                    line!()
+                ))
+            })?;
         let version = VersionRecord::from_commit(&commit, table, write_schema_version)?;
         self.write_policy_allows_version_record_for_view(
             &version,

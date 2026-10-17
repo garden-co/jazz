@@ -308,7 +308,7 @@ where
                     })
                     .collect::<BTreeSet<_>>();
                 if table_ids.is_empty() {
-                    return Err(Error::TableNotFound(request.table.to_string()));
+                    return Err(Error::TableNotFound(format!("{} [{}:{}]", request.table.to_string(), file!(), line!())));
                 }
                 Ok((
                     request.row_uuid,
@@ -561,7 +561,7 @@ where
                         })
                         .collect::<BTreeSet<_>>();
                     if candidates.is_empty() {
-                        return Err(Error::TableNotFound(request.table.to_string()));
+                        return Err(Error::TableNotFound(format!("{} [{}:{}]", request.table.to_string(), file!(), line!())));
                     }
                     if candidates.len() != 1 {
                         return Ok(false);

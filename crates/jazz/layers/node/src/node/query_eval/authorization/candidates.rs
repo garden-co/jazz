@@ -107,7 +107,14 @@ impl CandidateProofBudget {
             .tables
             .iter()
             .find(|table| table.name == policy.table)
-            .ok_or_else(|| Error::TableNotFound(policy.table.clone()))?;
+            .ok_or_else(|| {
+                Error::TableNotFound(format!(
+                    "{} [{}:{}]",
+                    policy.table.clone(),
+                    file!(),
+                    line!()
+                ))
+            })?;
         for inherits in policy.inherits.iter().chain(
             policy
                 .policy_branches
