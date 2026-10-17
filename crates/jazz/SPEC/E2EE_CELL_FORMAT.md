@@ -95,3 +95,18 @@ covered by the cell-type and native-row codec corpora respectively.
 The implementation clears temporary plaintext buffers after encryption or
 decoding, and transaction-owned initial epoch keys after submission failure,
 commit or rollback. This reduces lifetime; it does not promise VM-wide erasure.
+
+## Logical value encoding v1
+
+`jazz.e2ee.logical-value.v1` is the plaintext record encoding used by encrypted
+cells and equality inputs. It retains the original typed-record framing and
+inline discriminator `02` for text, JSON, enum names and byte strings, including
+nullable, array and nested row cases. It is independent of the current native
+binding transport, whose inline discriminator is `00`. The envelope and equality
+protocol versions do not change. Existing ciphertext and equality tokens must
+remain readable/comparable across a native wire codec update. Decoders reject
+other inline discriminators and indirect values. The hand-authored literals in
+`packages/jazz-tools/src/e2ee/equality-values.test.ts` pin scalar, nullable,
+array and enum payload bytes; its legacy decode test pins refusal and preserves
+the caller's original bytes. Equality normalises signed zero before encoding;
+ordinary cell plaintext retains the original value.
