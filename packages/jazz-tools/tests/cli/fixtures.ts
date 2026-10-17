@@ -120,7 +120,7 @@ export function createCliFixtures(moduleUrl: string) {
           // changing cwd alone does not change TypeScript's type-root lookup.
           typeRoots: [join(dirname(packageRoot), "node_modules", "@types")],
         },
-        files: [migrationPath],
+        files: [migrationPath, join(packageRoot, "types", "fs-native-extensions.d.ts")],
       }),
     );
     const result = spawnSync(

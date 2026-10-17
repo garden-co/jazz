@@ -988,6 +988,42 @@ impl WasmDbInner {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn all_settled_serialized_query(
+        &self,
+        query: Vec<u8>,
+        opts: ReadOpts,
+        open_tx: OpenTransactionId,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_budget_ms: f64,
+    ) -> Result<jazz::db::BindingSettledRead, Error> {
+        let owner = Rc::clone(&self.db);
+        let release_db = Rc::clone(&self.db);
+        let pending = self.db.enqueue_transaction_read(open_tx, async move {
+            if opts.tier == jazz::db::ReadTier::LocalOnly {
+                owner
+                    .restrict_e2ee_observation_snapshot_for_binding(open_tx)
+                    .await?;
+            }
+            let coverage_deadline_ms = js_sys::Date::now() + coverage_budget_ms;
+            owner
+                .all_settled_serialized_query_for_binding(
+                    &query,
+                    opts,
+                    open_tx,
+                    request_scope,
+                    author,
+                    require_coverage,
+                    || js_sys::Date::now() >= coverage_deadline_ms,
+                    move |attachment| release_db.detach_query(attachment),
+                )
+                .await
+        });
+        pending.await.map_err(transaction_read_cancelled)?
+    }
+
     fn begin_exclusive(
         &self,
         id: OpenTransactionId,
@@ -1517,6 +1553,36 @@ impl WasmDb {
         Self::open_browser_runtime(page_store, schema, config, storage_owner).await
     }
 
+    /// Read an accepted table UUID after pending owner work completes.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, table: String) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            let id = inner.db.table_identity(&table).await.map_err(to_js_error)?;
+            let bytes = id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec());
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+        }))
+    }
+
+    /// Read an accepted column UUID after pending owner work completes.
+    #[wasm_bindgen(js_name = columnIdentity)]
+    pub fn column_identity(
+        &self,
+        table: String,
+        column: String,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            let id = inner
+                .db
+                .column_identity(&table, &column)
+                .await
+                .map_err(to_js_error)?;
+            let bytes = id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec());
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+        }))
+    }
+
     /// Register a typed schema view backed by this same runtime owner.
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
@@ -1667,6 +1733,105 @@ impl WasmDb {
             .map_err(to_js_error)
         });
         wasm_read_or_pending(future)
+    }
+
+    /// Refresh opened-schema catalogue coverage through the cancelable read owner.
+    #[wasm_bindgen(js_name = coverCatalogue)]
+    pub fn cover_catalogue(
+        &self,
+        table: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let has_explicit_author = author.is_some();
+        let author = self.read_author(author)?;
+        let admission = if has_explicit_author {
+            author
+                .map(|author| Ok::<_, JsValue>((author, claims_from_js(author, claims)?)))
+                .transpose()?
+        } else {
+            None
+        };
+        wasm_read_or_pending(Box::pin(async move {
+            let deadline = js_sys::Date::now() + 15_000.0;
+            let release_db = Rc::clone(&inner.db);
+            inner
+                .db
+                .cover_catalogue_for_binding(
+                    &table,
+                    admission,
+                    author,
+                    || js_sys::Date::now() >= deadline,
+                    move |attachment| release_db.detach_query(attachment),
+                )
+                .await
+                .map_err(to_js_error)?;
+            Ok(Vec::new())
+        }))
+    }
+
+    /// Opt-in E2EE transaction sidecar; global snapshot acceptance is separate.
+    #[wasm_bindgen(js_name = allSettlementMetadata)]
+    pub fn all_settlement_metadata(
+        &self,
+        query: Vec<u8>,
+        opts: JsValue,
+        open_transaction_id: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+        include_rows: Option<bool>,
+    ) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let has_explicit_author = author.is_some();
+        let author = self.read_author(author)?;
+        let admission = if has_explicit_author {
+            author
+                .map(|author| Ok::<_, JsValue>((author, claims_from_js(author, claims)?)))
+                .transpose()?
+        } else {
+            None
+        };
+        let non_durable_client = self.non_durable_client.get();
+        let tx_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        wasm_read_or_pending(Box::pin(async move {
+            let requires_coverage = non_durable_client || opts.tier == jazz::db::ReadTier::Remote;
+            let result = inner
+                .all_settled_serialized_query(
+                    query,
+                    opts,
+                    tx_id,
+                    admission,
+                    author,
+                    requires_coverage,
+                    15_000.0,
+                )
+                .await
+                .map_err(to_js_error)?;
+            let jazz::db::BindingSettledRead { rows, settlements } = result;
+            let mut metadata = Vec::with_capacity(rows.len());
+            for (row, (tx, position)) in rows.iter().zip(settlements) {
+                metadata.push(serde_json::json!({
+                    "rowId": row.row_uuid().0.to_string(),
+                    "transactionId": TransactionId::from_committed_tx(tx).to_string(),
+                    "position": position.0.to_string(),
+                }));
+            }
+            let metadata = serde_json::to_vec(&metadata).map_err(to_js_error)?;
+            if include_rows != Some(true) {
+                return Ok(metadata);
+            }
+            // Binding-only frame: u32 LE JSON length, JSON settlements, existing row codec.
+            // Both parts describe the same covered read; global acceptance is still required.
+            let length = u32::try_from(metadata.len()).map_err(to_js_error)?;
+            let mut payload = length.to_le_bytes().to_vec();
+            payload.extend_from_slice(&metadata);
+            payload.extend_from_slice(&encode_rows(&rows).map_err(to_js_error)?);
+            Ok(payload)
+        }))
     }
 
     /// Bind correlation claims to this already-open client's own identity.

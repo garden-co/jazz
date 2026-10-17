@@ -73,6 +73,19 @@ where
             .map_err(Into::into)
     }
 
+    /// Prepare an accepted-only local snapshot for internal E2EE observation.
+    #[doc(hidden)]
+    pub async fn restrict_e2ee_observation_snapshot_for_binding(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        self.lock_for_transaction_operation(tx_id)
+            .await?
+            .restrict_e2ee_observation_snapshot(tx_id)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -1097,6 +1110,7 @@ where
             self.identity.author,
             opts,
             QueryAuthorizationMode::ClientLocal,
+            None,
         )
         .await
     }
@@ -1115,6 +1129,7 @@ where
             author,
             opts,
             QueryAuthorizationMode::TrustedServing,
+            None,
         )
         .await
     }
@@ -1230,6 +1245,29 @@ where
         Ok(snapshot)
     }
 
+    pub(super) async fn transaction_all_settled_for_binding(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+        settlements: &mut Vec<(TxId, GlobalTime)>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            author.unwrap_or(self.identity.author),
+            opts,
+            if author.is_some() {
+                QueryAuthorizationMode::TrustedServing
+            } else {
+                QueryAuthorizationMode::ClientLocal
+            },
+            Some(settlements),
+        )
+        .await
+    }
+
     async fn transaction_all_in_authorization_mode(
         &self,
         tx_id: OpenTransactionId,
@@ -1237,6 +1275,7 @@ where
         author: AuthorSubject,
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
+        settlements: Option<&mut Vec<(TxId, GlobalTime)>>,
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
@@ -1262,6 +1301,14 @@ where
                 .await
                 .map_err(Error::from)?,
         };
+        if let Some(settlements) = settlements {
+            *settlements = node
+                .tx_content_settlements_for_binding(tx_id, prepared.shape().schema_version(), &rows)
+                .await?
+                .ok_or_else(|| {
+                    Error::new(ErrorCode::NotObserved, "Authority settlement unavailable")
+                })?;
+        }
         node.hydrate_current_rows(&mut rows).await?;
         Ok(rows)
     }

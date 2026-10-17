@@ -162,6 +162,11 @@ export interface Runtime {
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Report the host's view of the server link to the core read gate. */
   setRemoteLinkHint?(state: RemoteLinkState): void;
+  /** @internal Obtain fresh global catalogue coverage without returning row bodies. */
+  coverCatalogue?(table: string, sessionJson?: string | null): Promise<void>;
+  /** @internal Portable accepted catalogue identity; never a locally allocated alias. */
+  tableIdentity?(table: string): Promise<string | null>;
+  columnIdentity?(table: string, column: string): Promise<string | null>;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -509,6 +514,7 @@ export function isPublicQueryReadTier(value: unknown): value is ReadTier {
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
+  settlementMetadata?: boolean | "with-rows";
   tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
@@ -523,6 +529,7 @@ export interface ResolvedQueryExecutionOptions {
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
+  settlementMetadata?: boolean | "with-rows";
   openTransactionId?: OpenTransactionId;
 };
 
@@ -598,6 +605,14 @@ export interface RestoreOptions extends TimestampOverrideOptions {
 export interface Row {
   id: string;
   values: Value[];
+}
+
+/** @internal Authority metadata for immutable E2EE rows, not snapshot coverage. */
+export interface RowSettlement {
+  rowId: string;
+  transactionId: string;
+  /** Decimal u64; never round through a JavaScript number. */
+  position: string;
 }
 
 export type WriteReceipt =
@@ -693,6 +708,7 @@ function encodeQueryExecutionOptions(
   options: ResolvedInternalQueryExecutionOptions,
 ): string | undefined {
   const payload: {
+    settlement_metadata?: boolean | "with-rows";
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
     read_view?: {
@@ -709,6 +725,7 @@ function encodeQueryExecutionOptions(
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
   }
+  if (options.settlementMetadata) payload.settlement_metadata = options.settlementMetadata;
   if (options.firstLoadRemoteWaitMs !== undefined && options.firstLoadRemoteWaitMs > 0) {
     payload.first_load_remote_wait_ms = options.firstLoadRemoteWaitMs;
   }
@@ -908,17 +925,27 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 /**
  * Returned by explicitly-committed exclusive transactions.
  *
- * Exclusive transactions are accepted or rejected by the global authority, so
- * callers do not choose a durability tier when waiting for confirmation.
+ * Pass `{ tier: "global" }` to require an authoritative receipt even without
+ * a configured upstream. Omitting options preserves offline local durability.
  */
 export class ExclusiveWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  override wait(options: { tier: "edge" }): Promise<void>;
+  /**
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    */
-  override async wait(): Promise<void> {
-    await this.client().waitForExclusiveTransaction(await this.txId);
+  override wait(options?: { tier: DurabilityTier }): Promise<void>;
+  override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
+    await this.client().waitForExclusiveTransaction(
+      await this.txId,
+      options === undefined ? undefined : resolveWriteWaitTier(options.tier),
+    );
   }
 }
 
@@ -927,13 +954,23 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
  */
 export class ExclusiveWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  override wait(options: { tier: "edge" }): Promise<T>;
+  /**
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    * @returns the callback result.
    */
-  override async wait(): Promise<T> {
-    await this.client().waitForExclusiveTransaction(await this.txId);
+  override wait(options?: { tier: DurabilityTier }): Promise<T>;
+  override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
+    await this.client().waitForExclusiveTransaction(
+      await this.txId,
+      options === undefined ? undefined : resolveWriteWaitTier(options.tier),
+    );
     return this.value;
   }
 
@@ -1327,10 +1364,12 @@ export class JazzClient {
     if (!options?.openTransactionId) {
       return resolved;
     }
-    return {
+    const result: ResolvedInternalQueryExecutionOptions = {
       ...resolved,
       openTransactionId: options.openTransactionId,
     };
+    if (options.settlementMetadata) result.settlementMetadata = options.settlementMetadata;
+    return result;
   }
 
   /**
@@ -1625,6 +1664,16 @@ export class JazzClient {
       : undefined;
     if (preparation) await preparation;
     return this.queryWithoutPreparation(query, options, session);
+  }
+
+  /** @internal Cover the catalogue outside transaction and mutation preparation. */
+  async coverCatalogue(table: string, session?: Session): Promise<void> {
+    if (!this.runtime.coverCatalogue) throw new Error("Runtime does not expose catalogue coverage");
+    const effectiveSession = session ?? this.resolvedSession;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
+    await this.runtime.coverCatalogue(table, sessionJson);
   }
 
   private async queryWithoutPreparation(
@@ -2051,10 +2100,10 @@ export class JazzClient {
   }
 
   /** @internal */
-  async waitForExclusiveTransaction(txId: TxId): Promise<void> {
+  async waitForExclusiveTransaction(txId: TxId, requiredTier?: DurabilityTier): Promise<void> {
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local");
+    await this.waitForTransaction(txId, requiredTier ?? (hasAuthority ? "global" : "local"));
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
