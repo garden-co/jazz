@@ -29,6 +29,8 @@ mod lookup_join;
 mod multisink_subscription;
 #[path = "../operator_pipeline.rs"]
 mod operator_pipeline;
+#[path = "../operator_state_stats.rs"]
+mod operator_state_stats;
 #[path = "../plain_output_positions_unbounded.rs"]
 mod plain_output_positions_unbounded;
 #[path = "../plain_output_root_positions.rs"]
@@ -53,6 +55,8 @@ mod route_barrier_parked_publication;
 mod snapshot_subscription_regressions;
 #[path = "../storage_residency.rs"]
 mod storage_residency;
+#[path = "../stored_arrangement.rs"]
+mod stored_arrangement;
 #[path = "../terminal_occurrence_keys.rs"]
 mod terminal_occurrence_keys;
 #[path = "../top_by_terminal_identity.rs"]

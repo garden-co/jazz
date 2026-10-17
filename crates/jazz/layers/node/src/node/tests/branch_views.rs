@@ -1141,7 +1141,7 @@ fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
                 .cells(cells(branch_title.clone())),
         )
         .unwrap();
-    let versions = futures::executor::block_on(node.query_versions_for_tx(tx_id)).unwrap();
+    let versions = futures::executor::block_on(node.stored_versions_for_tx_for_test(tx_id)).unwrap();
     let branched = versions
         .iter()
         .find(|version| version.branch_key().is_canonical() && *version.branch_key() != BranchKey::default())
@@ -1973,6 +1973,61 @@ fn branch_commit_unit_schema() -> JazzSchema {
     )
 }
 
+/// Actors: one writer committing branch writes in transactions of 1 and 40
+/// rows, then reopening.
+///
+/// Branch-write provenance grows with a transaction's writes, so it is stored
+/// beside the transaction record. The record that status reads load stays the
+/// same size whatever the write count, and the provenance survives a reopen.
+#[test]
+fn transaction_record_size_is_independent_of_branch_write_count() {
+    let schema = branch_commit_unit_schema();
+    let (dir, mut writer) = open_node_with_schema(node(0xb5), schema.clone());
+    let mut committed = Vec::new();
+    for (first_row, writes) in [(0x10u8, 1u8), (0x20, 40)] {
+        let commits = (0..writes)
+            .map(|index| {
+                MergeableCommit::new("todos", row(first_row + index), 10)
+                    .branch(branch_selector(0xa5))
+                    .cells(BTreeMap::from([("title".to_owned(), v("sized"))]))
+            })
+            .collect();
+        let tx_id = writer.commit_mergeable_many_settled(commits).unwrap();
+        let alias = writer.node_aliases[&tx_id.node];
+        let key = [Value::U64(tx_id.time.0), Value::U64(alias.0)];
+        let header = crate::local_executor::block_on(
+            writer.database.primary_key_get_raw("jazz_transactions", &key),
+        )
+        .unwrap()
+        .unwrap();
+        let provenance = crate::local_executor::block_on(
+            writer.database.primary_key_get_raw(TX_PROVENANCE_TABLE, &key),
+        )
+        .unwrap()
+        .expect("branch-write provenance is stored beside the transaction record");
+        committed.push((tx_id, writes, header.raw().len(), provenance.raw().len()));
+    }
+    assert_eq!(committed[0].2, committed[1].2, "transaction records: {committed:?}");
+    assert!(committed[1].3 > committed[0].3, "provenance records: {committed:?}");
+
+    let units = committed
+        .iter()
+        .map(|(tx_id, ..)| writer.commit_unit_for(*tx_id).unwrap())
+        .collect::<Vec<_>>();
+    drop(writer);
+    let mut reopened = reopen_node_at(&dir, node(0xb5), schema);
+    for ((tx_id, writes, ..), unit) in committed.iter().zip(units) {
+        let SyncMessage::CommitUnit { tx, .. } = &unit else {
+            panic!("expected commit unit");
+        };
+        assert_eq!(
+            tx.contribution_merge.as_ref().unwrap().branch_write_intents.len(),
+            usize::from(*writes)
+        );
+        assert_eq!(unit, reopened.commit_unit_for(*tx_id).unwrap());
+    }
+}
+
 #[test]
 fn immediate_branch_commit_unit_matches_durable_replay() {
     // The wire envelope is the boundary under test: immediate publication must
@@ -2044,9 +2099,9 @@ fn concurrent_branch_inserts_do_not_bypass_read_or_update_policy() {
         if expected == Fate::Accepted {
             // Linear history: Core folds the later write over the current row;
             // no DAG merge version with both writes as parents is minted.
-            assert!(!core.query_versions_for_tx(right_tx).unwrap().is_empty());
+            assert!(!core.stored_versions_for_tx_for_test(right_tx).unwrap().is_empty());
         } else {
-            assert!(core.query_versions_for_tx(right_tx).unwrap().is_empty());
+            assert!(core.stored_versions_for_tx_for_test(right_tx).unwrap().is_empty());
         }
     }
 }

@@ -6,10 +6,18 @@
 
 use crate::groove::storage::{Error, StorageCodecProfile};
 
-/// Node-owned format plus its durable schema indexes.
+/// Node-owned format plus its durable schema indexes and Groove's dictionary
+/// of interned column values.
+///
+/// `groove.dictionary.v1`: every stored author column (`made_by`,
+/// `created_by`, `updated_by`) holds a 4-byte code into the node-local
+/// `authors` dictionary instead of the full author. A node root written before
+/// interned author columns lacks it and is refused with
+/// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
 pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &[
+    crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
     crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
-    "jazz.node-storage.v1",
+    "jazz.node-storage.v2",
 ];
 /// Format owned by the independent server catalogue.
 pub const JAZZ_CATALOGUE_STORAGE_CODECS: &[&str] = &["jazz.catalogue-storage.v1"];
@@ -51,13 +59,38 @@ mod tests {
     #[test]
     fn root_profiles_have_pinned_manifest_bytes() {
         for (profile, expected) in [
-            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x05\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v1\x00".as_slice()),
+            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x00".as_slice()),
             (catalogue_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x19jazz.catalogue-storage.v1\x00".as_slice()),
             (account_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x17jazz.account-storage.v1\x00".as_slice()),
         ] {
             assert_eq!(manifest(&profile).encode().unwrap(), expected);
             assert_eq!(StorageEpochManifest::decode(expected).unwrap().encode().unwrap(), expected);
             assert_eq!(profile.codec_ids().filter(|id| id.starts_with("jazz.")).count(), 1);
+        }
+    }
+
+    /// Node format v2 adds union row cases (SPEC 10 §10.3). Alice's v2 build
+    /// refuses a v1 node root at open, and a v1 build refuses her v2 root
+    /// at open instead of failing at its first union row.
+    #[test]
+    fn node_storage_v1_and_v2_roots_refuse_each_other() {
+        let v2 = node_storage_codec_profile().unwrap();
+        let v1 = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs([
+                crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
+                crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
+                "jazz.node-storage.v1",
+            ])
+            .unwrap();
+        for (opener, root, missing_id, unknown_id) in [
+            (&v2, &v1, "jazz.node-storage.v2", "jazz.node-storage.v1"),
+            (&v1, &v2, "jazz.node-storage.v1", "jazz.node-storage.v2"),
+        ] {
+            assert!(matches!(
+                manifest(opener).admit_existing(&manifest(root).encode().unwrap()),
+                Err(Error::UnsupportedStorageCodecs { missing, unknown, .. })
+                    if missing == [missing_id] && unknown == [unknown_id]
+            ));
         }
     }
 

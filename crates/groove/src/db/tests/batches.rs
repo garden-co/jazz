@@ -6674,7 +6674,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
     async fn run(layout: StorageLayout) -> StorageWriteMetrics {
         let schema = DatabaseSchema::new([
             TableSchema::new(
-                "jazz_docs_history",
+                "jazz_physical_7_history",
                 [
                     ColumnSchema::new("row_uuid", ColumnType::Uuid),
                     ColumnSchema::new("tx_time", ColumnType::U64),
@@ -6692,7 +6692,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
                 ["tx_time", "tx_node_id", "row_uuid"],
             )),
             TableSchema::new(
-                "jazz_docs_global_current",
+                "jazz_physical_7_global_current",
                 [
                     ColumnSchema::new("row_uuid", ColumnType::Uuid),
                     ColumnSchema::new("tx_time", ColumnType::U64),
@@ -6703,7 +6703,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
             .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]))
             .with_index(IndexSchema::new("by_app_parent", ["_app_parent"])),
             TableSchema::new(
-                "jazz_docs_register_global_current",
+                "jazz_physical_8_global_current",
                 [
                     ColumnSchema::new("row_uuid", ColumnType::Uuid),
                     ColumnSchema::new("tx_time", ColumnType::U64),
@@ -6759,7 +6759,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
 
         let mut batch = database.open_batch();
         batch.insert(
-            "jazz_docs_history",
+            "jazz_physical_7_history",
             vec![
                 Value::Uuid(row_uuid),
                 Value::U64(1),
@@ -6768,7 +6768,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
             ],
         );
         batch.insert(
-            "jazz_docs_global_current",
+            "jazz_physical_7_global_current",
             vec![
                 Value::Uuid(row_uuid),
                 Value::U64(1),
@@ -6777,7 +6777,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
             ],
         );
         batch.insert(
-            "jazz_docs_register_global_current",
+            "jazz_physical_8_global_current",
             vec![Value::Uuid(row_uuid), Value::U64(1)],
         );
         batch.insert(
@@ -6802,16 +6802,18 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
     assert_eq!(writes.total.count, 9);
     assert_eq!(writes.history_rows.count, 1);
     assert_eq!(writes.history_indexes.count, 1);
-    assert_eq!(writes.global_current_rows.count, 1);
+    // Class table ids exist only for catalogue per-table families, which
+    // never use register names, so the second current table is a plain one.
+    assert_eq!(writes.global_current_rows.count, 2);
     assert_eq!(writes.global_current_indexes.count, 1);
-    assert_eq!(writes.register_global_current_rows.count, 1);
+    assert_eq!(writes.register_global_current_rows.count, 0);
     assert_eq!(writes.global_changes_rows.count, 1);
     assert_eq!(writes.global_changes_indexes.count, 1);
     assert_eq!(writes.transactions_rows.count, 1);
     assert_eq!(writes.transactions_indexes.count, 1);
     assert_eq!(writes.other.count, 0);
 
-    let class_writes = run(StorageLayout::jazz_class_v2()).await;
+    let class_writes = run(StorageLayout::jazz_class_v3()).await;
     assert_eq!(class_writes, writes);
 }
 
@@ -7205,6 +7207,10 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
             ColumnSchema::new("label", ColumnType::String),
         ],
     )
+    .with_primary_key(crate::schema::PrimaryKey::new(
+        "id",
+        crate::schema::IntegerKeyType::U64,
+    ))
     .with_variant(1, ["id"])
     .with_variant(2, ["id", "label"]);
     let first = table.record_schema_for_variant(1).unwrap();
@@ -7242,8 +7248,14 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
         .iter()
         .map(|_| RecordStore::new(&storage, "variant_rows", &carrier))
         .collect::<Vec<_>>();
+    let database = Database::new(
+        schema,
+        MemoryStorage::new(&["variant_rows"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
-    let deltas = compute_table_deltas(&writes, &stores, &schema)
+    let deltas = compute_table_deltas(&writes, &stores, &database)
         .await
         .unwrap();
     assert_eq!(
@@ -7281,7 +7293,7 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
         .await
         .unwrap();
     assert!(matches!(
-        compute_table_deltas(&writes[..1], &stores[..1], &schema).await,
+        compute_table_deltas(&writes[..1], &stores[..1], &database).await,
         Err(Error::UnknownTableVariant { version: 3, .. })
     ));
 }

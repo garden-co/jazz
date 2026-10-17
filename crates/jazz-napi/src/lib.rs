@@ -2678,40 +2678,30 @@ impl NapiDb {
 
     #[napi(factory, js_name = "openPersistent")]
     pub fn open_persistent(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
     ) -> js::Result<Self> {
-        let (schema, config) = decode_core_open_args(&schema, &config)?;
-        let identity = core_open_identity(&config, None)?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
-        let db = open_core_db(schema, storage, config, identity, false)?;
-        Ok(Self::runtime_owner(
-            NapiDbInnerStorage::persistent(Rc::new(db)),
-            false,
-        ))
+        Self::try_open_persistent(data_path, schema, config).map_err(|error| error.throw(&env))
     }
 
     /// Open a deliberate persistent backend runtime. This is intentionally a
     /// distinct ABI from the public raw-open entrypoint.
     #[napi(factory, js_name = "openPersistentAsBackend")]
     pub fn open_persistent_as_backend(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
     ) -> js::Result<Self> {
-        let (schema, config) = decode_core_open_args(&schema, &config)?;
-        let identity = core_open_backend_identity(&config)?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
-        let db = open_core_db(schema, storage, config, identity, true)?;
-        Ok(Self::runtime_owner(
-            NapiDbInnerStorage::persistent(Rc::new(db)),
-            true,
-        ))
+        Self::try_open_persistent_as_backend(data_path, schema, config)
+            .map_err(|error| error.throw(&env))
     }
 
     #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
     pub fn open_persistent_with_self_signed_proof(
+        env: Env,
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
@@ -2719,19 +2709,15 @@ impl NapiDb {
         app_id: String,
         claimed_author: String,
     ) -> js::Result<Self> {
-        let (schema, config) = decode_core_open_args(&schema, &config)?;
-        let proof = CoreSelfSignedClientProof {
+        Self::try_open_persistent_with_self_signed_proof(
+            data_path,
+            schema,
+            config,
             token,
             app_id,
             claimed_author,
-        };
-        let identity = core_open_identity(&config, Some(&proof))?;
-        let storage = open_persistent_core_storage(data_path, &schema)?;
-        let db = open_core_db(schema, storage, config, identity, false)?;
-        Ok(Self::runtime_owner(
-            NapiDbInnerStorage::persistent(Rc::new(db)),
-            false,
-        ))
+        )
+        .map_err(|error| error.throw(&env))
     }
 
     /// Read an accepted table UUID without blocking pending native storage.
@@ -3728,10 +3714,13 @@ fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
 /// Groove-only convenience open: the runtime can persist every Jazz codec
 /// family in `node_storage_codec_profile`, so its root must declare all of
 /// them before any bytes are admitted.
+///
+/// A root written in a storage format this build does not read is the
+/// typed refusal [`PersistentOpenError::UnsupportedStorageCodecs`].
 fn open_persistent_core_storage(
     data_path: String,
     schema: &JazzSchema,
-) -> napi::Result<CoreRocksDbStorage> {
+) -> std::result::Result<CoreRocksDbStorage, PersistentOpenError> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let codec_profile = node_storage_codec_profile().map_err(napi_error)?;
@@ -3741,7 +3730,129 @@ fn open_persistent_core_storage(
         CoreRocksDbDurability::WalNoSync,
         &codec_profile,
     )
-    .map_err(napi_error)
+    .map_err(|error| match error {
+        error @ jazz::groove::storage::Error::UnsupportedStorageCodecs { .. } => {
+            PersistentOpenError::UnsupportedStorageCodecs(jazz::db::Error::from(error))
+        }
+        other => PersistentOpenError::Other(BindingError::from(napi_error(other))),
+    })
+}
+
+/// Why a persistent open failed, before it is thrown in JavaScript.
+#[derive(Debug)]
+pub(crate) enum PersistentOpenError {
+    /// The store's root was written in a storage format this build does not
+    /// read (#3728).
+    UnsupportedStorageCodecs(jazz::db::Error),
+    Other(BindingError),
+}
+
+impl From<BindingError> for PersistentOpenError {
+    fn from(error: BindingError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<napi::Error> for PersistentOpenError {
+    fn from(error: napi::Error) -> Self {
+        Self::Other(BindingError::from(error))
+    }
+}
+
+impl PersistentOpenError {
+    /// Throw a storage-format refusal as a JavaScript `Error` whose
+    /// `message` is the core display text, whose `code` is
+    /// `"unsupported_storage_codecs"`, and which carries `epoch`, `missing`
+    /// and `unknown` (the codec-family lists) as own properties, so callers
+    /// can detect it and wipe the store without parsing the message. Any
+    /// other failure is returned as is.
+    ///
+    /// napi-rs builds a thrown error from only a code and a message, so this
+    /// throws the complete object itself and returns the pending-exception
+    /// status, which the generated wrapper leaves in place.
+    fn throw(self, env: &Env) -> BindingError {
+        let error = match self {
+            Self::UnsupportedStorageCodecs(error) => error,
+            Self::Other(error) => return error,
+        };
+        let Some(mismatch) = error.storage_codecs.as_ref() else {
+            return BindingError::from(napi_core_error(&error));
+        };
+        let thrown = env
+            .create_error(napi::Error::new(
+                napi::Status::GenericFailure,
+                error.to_string(),
+            ))
+            .and_then(|mut object| {
+                object.set_named_property("code", error.code.as_str())?;
+                object.set_named_property("epoch", u32::from(mismatch.epoch))?;
+                object.set_named_property("missing", mismatch.missing.clone())?;
+                object.set_named_property("unknown", mismatch.unknown.clone())?;
+                env.throw(object)
+            });
+        match thrown {
+            Ok(()) => BindingError::from(napi::Error::from_status(napi::Status::PendingException)),
+            Err(_) => BindingError::from(napi_core_error(&error)),
+        }
+    }
+}
+
+/// The persistent opens without a JavaScript environment: the exported
+/// factories call these and throw a [`PersistentOpenError`] in JavaScript,
+/// and Rust tests call them directly.
+impl NapiDb {
+    pub(crate) fn try_open_persistent(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+    ) -> std::result::Result<Self, PersistentOpenError> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let db = open_core_db(schema, storage, config, identity, false)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            false,
+        ))
+    }
+
+    pub(crate) fn try_open_persistent_as_backend(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+    ) -> std::result::Result<Self, PersistentOpenError> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_backend_identity(&config)?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let db = open_core_db(schema, storage, config, identity, true)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            true,
+        ))
+    }
+
+    pub(crate) fn try_open_persistent_with_self_signed_proof(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> std::result::Result<Self, PersistentOpenError> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = core_open_identity(&config, Some(&proof))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
+        let db = open_core_db(schema, storage, config, identity, false)?;
+        Ok(Self::runtime_owner(
+            NapiDbInnerStorage::persistent(Rc::new(db)),
+            false,
+        ))
+    }
 }
 
 fn memory_core_storage(schema: &JazzSchema) -> CoreMemoryStorage {
@@ -5147,7 +5258,7 @@ mod tests {
         let ordinary_path = ordinary_dir.path().join("ordinary.rocksdb");
         plant_groove_only_persistent_root(&ordinary_path, schema);
         assert!(
-            NapiDb::open_persistent(
+            NapiDb::try_open_persistent(
                 ordinary_path.to_string_lossy().into_owned(),
                 Uint8Array::from(schema.to_vec()),
                 Uint8Array::from(config.clone()),
@@ -5160,7 +5271,7 @@ mod tests {
         let backend_path = backend_dir.path().join("backend.rocksdb");
         plant_groove_only_persistent_root(&backend_path, schema);
         assert!(
-            NapiDb::open_persistent_as_backend(
+            NapiDb::try_open_persistent_as_backend(
                 backend_path.to_string_lossy().into_owned(),
                 Uint8Array::from(schema.to_vec()),
                 Uint8Array::from(config.clone()),
@@ -5186,7 +5297,7 @@ mod tests {
             serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, verified.user_id))
                 .unwrap();
         assert!(
-            NapiDb::open_persistent_with_self_signed_proof(
+            NapiDb::try_open_persistent_with_self_signed_proof(
                 proof_path.to_string_lossy().into_owned(),
                 Uint8Array::from(schema.to_vec()),
                 Uint8Array::from(config),
@@ -6464,7 +6575,7 @@ mod tests {
             external_author,
             Some("malformed.backend.credential".to_owned()),
         );
-        let result = NapiDb::open_persistent(
+        let result = NapiDb::try_open_persistent(
             persistent_path.to_string_lossy().into_owned(),
             Uint8Array::from(b"{}".to_vec()),
             Uint8Array::from(persistent_credential),
@@ -6559,7 +6670,7 @@ mod tests {
             "test path must be fresh: {}",
             persistent_path.display()
         );
-        let result = NapiDb::open_persistent_with_self_signed_proof(
+        let result = NapiDb::try_open_persistent_with_self_signed_proof(
             persistent_path.to_string_lossy().into_owned(),
             Uint8Array::from(b"{}".to_vec()),
             Uint8Array::from(encode_config(external_author, None)),
