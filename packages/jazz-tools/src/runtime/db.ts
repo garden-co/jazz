@@ -3789,7 +3789,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ?? {};
+    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const equality = encryptedSchemas.has(query._schema)
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;

@@ -5,6 +5,8 @@ import {
   type NativeRelationSubscriptionSnapshot,
   type NativeRemovedRow,
   type DescriptorField,
+  createRecord,
+  writeDescriptor,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
