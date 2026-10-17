@@ -315,7 +315,11 @@ where
             .query_shape_cache
             .retain(|(cached_shape, _, _), _| *cached_shape != shape_id);
         self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
+        // Logical families keep full requests, source blueprints and lowered
+        // programs. Retire them with the query as before; preserve only the
+        // bounded, source-free physical compiler cache for fresh promotions.
+        // Catalogue/runtime invalidation still clears both cache levels.
+        self.query.query_program_templates.clear_logical_templates();
         self.query.supported_query_program_requests.clear();
         self.query
             .applied_view_update_generations
