@@ -590,11 +590,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
-  it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
+  it("turns a pump failure during a parked read into one transport error without an uncaught exception or unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const pumpFailure = new Error("core tick failed");
     let failTicks = false;
-    let polls = 0;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -608,7 +607,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             },
             all: () => ({
               poll: () => {
-                polls += 1;
                 failTicks = true;
                 return null;
               },
@@ -626,7 +624,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const unhandled = vi.fn();
+    const uncaught = vi.fn();
     process.on("unhandledRejection", unhandled);
+    process.on("uncaughtException", uncaught);
     try {
       const terminal = vi.fn();
       runtime.onServerTransportError(terminal);
@@ -638,11 +638,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       ).rejects.toThrow("core tick failed");
       await waitForServerPumpTimer();
 
-      expect(polls).toBeGreaterThan(0);
       expect(terminal).toHaveBeenCalledWith(pumpFailure);
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(uncaught).not.toHaveBeenCalled();
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandled);
+      process.off("uncaughtException", uncaught);
       await runtime.close().catch(() => undefined);
     }
   });

@@ -228,6 +228,11 @@ it("automatically isolates private device records and keeps group, space and row
     try {
       await started;
       await creator.e2ee.spaces.revoke(app.projects, project.id, bob.account.id).wait();
+      // Later layers prepare from coherent retained authority. Establish that this
+      // client knows the revocation before the cipher hands control back.
+      expect(
+        await recipient.e2ee.explain({ scope: app.projects, identifier: project.id }),
+      ).toMatchObject({ state: "refused" });
     } finally {
       clearTimeout(timeout!);
       resume();

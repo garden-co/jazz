@@ -3,6 +3,7 @@ import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { initialRecipientIds } from "../e2ee/space-lifecycle.js";
+import { acceptInitialHistory, discardInitialHistory } from "../e2ee/accepted-history.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
@@ -1413,20 +1414,32 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       txId = ownerClient.commitTransaction(openTransactionId).txId;
     }
     this.committing = true;
-    const requiresInitialAcceptance = initialisingTransactions.has(this);
+    const initialRoots: SpaceRoot[] | undefined = initialisingTransactions.has(this)
+      ? []
+      : undefined;
     const finishCommit = () => {
       this.committing = false;
-      this.clearInitialSpaceKeys();
+      if (initialRoots)
+        for (const { root } of this.initialSpaceKeys.values()) initialRoots.push(root);
+      this.clearInitialSpaceKeys(true);
     };
     // Observe completion without delaying application waits on the transaction ID.
     void txId.then(finishCommit, finishCommit);
-    if (requiresInitialAcceptance) {
-      // Local durability cannot authorise a provisional epoch. Preserve this
-      // acceptance floor through callback and mapped write handles as well.
-      txId = txId.then(async (id) => {
-        await ownerClient.waitForExclusiveTransaction(id, "global");
-        return id;
-      });
+    if (initialRoots) {
+      // Local durability cannot authorise a provisional epoch. Keeping the
+      // acceptance floor on txId also preserves it through callback/map handles.
+      txId = txId
+        .then(async (id) => {
+          await ownerClient.waitForExclusiveTransaction(id, "global");
+          // Cache preparation with its accepted identity. The cache cannot reject
+          // this receipt and does not perform another authority read.
+          for (const root of initialRoots) await acceptInitialHistory(this.e2ee!.db, root, id);
+          return id;
+        })
+        .catch((error) => {
+          for (const root of initialRoots) discardInitialHistory(this.e2ee!.db, root);
+          throw error;
+        });
     }
     if (this.kind === "exclusive") {
       return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
@@ -1450,8 +1463,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return ownerClient.rollbackTransaction(openTransactionId);
   }
 
-  private clearInitialSpaceKeys(): void {
-    for (const { secret } of this.initialSpaceKeys.values()) secret.fill(0);
+  private clearInitialSpaceKeys(committing = false): void {
+    for (const { secret, root } of this.initialSpaceKeys.values()) {
+      secret.fill(0);
+      if (!committing && this.e2ee) discardInitialHistory(this.e2ee.db, root);
+    }
     this.initialSpaceKeys.clear();
     this.encryptedScopes.clear();
   }
@@ -1521,6 +1537,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private async retainInitialSpaceKey(secret: Uint8Array, root: SpaceRoot): Promise<void> {
     if (this.cancelled) {
+      if (this.e2ee) discardInitialHistory(this.e2ee.db, root);
       throw new Error("Transaction was rolled back during E2EE preparation");
     }
     this.initialSpaceKeys.set(`${root.scopeId}:${root.identifier}`, {
@@ -1639,7 +1656,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
-        await withSpaceKeys(db, scope, identifier.value, stage, false);
+        await withSpaceKeys(db, scope, identifier.value, stage, false, true);
       }
     };
     if (operation === "restore") {
@@ -2103,7 +2120,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         withKey: (use) =>
           initial
             ? use(initial.secret, initial.root)
-            : withSpaceKeys(db, scope, identifier, use, false),
+            : withSpaceKeys(db, scope, identifier, use, false, true),
       };
     };
     // Explicit branch writes retain their independent preparation path.
@@ -3215,13 +3232,19 @@ export class Db {
     return this.connection.getRuntimeSchema();
   }
 
-  /** @internal Observe explicit reconnection until this Db shuts down. */
+  /** @internal Reconcile known spaces when the configured server becomes reachable. */
   onE2eeReconnect(listener: () => void): void {
-    let wasOffline = this.connection.isExplicitlyOffline();
-    this.connection.onExplicitOfflineChange((offline) => {
-      const reconnected = wasOffline && !offline;
-      wasOffline = offline;
-      if (reconnected) listener();
+    let connected = this.connection.remoteLinkState() === "connected";
+    let interrupted = this.connection.remoteLinkState() === "unavailable";
+    this.connection.onRemoteLinkStateChange((state) => {
+      if (state === "connected") {
+        const recovered = interrupted;
+        connected = true;
+        interrupted = false;
+        if (recovered) listener();
+      } else if (connected || state === "unavailable") {
+        interrupted = true;
+      }
     }, this.shutdownAbort.signal);
   }
 
@@ -3238,11 +3261,14 @@ export class Db {
     this.assertOpen();
     if (!queries.length || queries.some((query) => !query._table.startsWith("__e2ee_")))
       throw new Error("E2EE observations require metadata queries");
-    this.getClient(queries[0]!._schema);
-    // Hydrate the durable owner's inputs before freezing a browser snapshot.
-    // Discard these potentially pending rows; only the accepted-only read below
-    // supplies observation evidence.
-    await Promise.all(queries.map((query) => this.all(query, { tier: "local-first" })));
+    for (const query of queries) this.getClient(query._schema);
+    // A browser foreground must load the durable owner's local query inputs
+    // before freezing its snapshot. These results may include pending writes:
+    // discard them; only the accepted-only observation below validates history.
+    // Keep ordinary propagation so the foreground can reach its durable worker.
+    if (this.connection.requiresLocalObservationHydration)
+      await Promise.all(queries.map((query) => this.all(query, { tier: "local-first" })));
+    else await this.ensureReady("runtime");
     const tx = beginDbTransactionAfter(this, async () => {});
     const binding = getDbTxHandleBinding(tx, "query");
     const local: Pick<JazzClient, "queryInternal"> = {
