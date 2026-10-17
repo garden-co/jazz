@@ -47,14 +47,17 @@ async function firstWriterRace(grantLoser: boolean) {
   const reached = [signal(), signal()];
   const resume = signal();
   let armed = false;
+  let phase = "deploy old schema";
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
     await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
     const creator = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(creator);
+    phase = "insert legacy project";
     const project = await creator
       .insert(oldApp.projects, { title: "Legacy scope" })
       .wait({ tier: "global" });
+    phase = "deploy encrypted schema";
     await deploy({
       ...target,
       schema: app,
@@ -69,6 +72,7 @@ async function firstWriterRace(grantLoser: boolean) {
     const writers: Awaited<ReturnType<typeof createDb>>[] = [];
     for (const [index, account] of accounts.entries()) {
       let saved: string | null = null;
+      phase = `open writer ${index}`;
       const db = await createDb({
         ...account,
         e2ee: {
@@ -97,8 +101,10 @@ async function firstWriterRace(grantLoser: boolean) {
       });
       clients.push(db);
       writers.push(db);
+      phase = `prepare writer ${index} device`;
       await db.e2ee.devices.list();
     }
+    phase = "race first writes";
     armed = true;
     const writes = writers.map((db, index) =>
       db.insert(app.notes, {
@@ -127,23 +133,30 @@ async function firstWriterRace(grantLoser: boolean) {
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;
+    phase = "read winning root";
     const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
     expect(roots[0]).toMatchObject({ accountId: accounts[winnerIndex]!.account.id });
+    phase = "read winning grants";
     expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toMatchObject([
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);
+    phase = "read winning ciphertext";
     expect(await winner.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
     if (grantLoser) {
+      phase = "grant losing writer";
       await winner.e2ee.spaces
         .grant(app.projects, project.id, accounts[loserIndex]!.account.id)
         .wait();
+      phase = "read loser after grant";
       expect(await loser.all(app.notes, { tier: "remote" })).toEqual([writes[winnerIndex]!.value]);
+      phase = "write loser after grant";
       const allowed = loser.insert(app.notes, {
         projectId: project.id,
         body: "Allowed after winner grant",
       });
       await allowed.wait({ tier: "global" });
+      phase = "read winner after loser write";
       expect(new Set(await winner.all(app.notes, { tier: "remote" }))).toEqual(
         new Set([allowed.value, writes[winnerIndex]!.value]),
       );
@@ -161,6 +174,8 @@ async function firstWriterRace(grantLoser: boolean) {
         { id: writes[winnerIndex]!.value.id },
       ]);
     }
+  } catch (error) {
+    throw new Error(`First-write race grantLoser=${grantLoser} phase=${phase}`, { cause: error });
   } finally {
     armed = false;
     resume.resolve();

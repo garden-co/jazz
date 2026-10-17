@@ -1,201 +1,106 @@
-name: CI
-
+name: Focused E2EE coverage diagnostics
 on:
   workflow_dispatch:
-  # Deliberately unfiltered so every layer of a stacked PR receives CI even
-  # when its base is another feature branch. ready_for_review starts the fast
-  # check when a draft is marked ready.
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  # merge-group/** pushes are the Review Loop's batches; a ruleset limits who
-  # can push them, so they run trusted and write the shared compile cache.
-  push:
-    branches: [main, release, "merge-group/**"]
-
-concurrency:
-  # For pushes, this lets concurrent runs happen, so each push gets a result.
-  # But for other events (e.g. PRs), we can cancel the previous runs.
-  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: true
-
-# Security boundary: the repository's workflow maintainers and write-capable
-# collaborators are trusted. A same-repository author who can modify this file
-# could directly request OIDC or reference Actions secrets, which YAML in this
-# same repository cannot prevent. For the unmodified base workflow enforced
-# below, untrusted PRs (including forks and Dependabot) and workflow_dispatch
-# receive no OIDC permission, inherited secrets, or credentialed cross-ref
-# cache access. GitHub's native repository/ref-scoped cache remains available
-# without any explicit cloud credential from this workflow.
+    inputs:
+      trusted-cache:
+        type: boolean
+        default: false
+      sccache-write:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  packages: read
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
 jobs:
-  # A main push whose tree a green merge group already tested skips the suite
-  # (dev/ci/main-push-coverage.sh). Any failure here runs the suite.
-  main-coverage:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      statuses: read
-    outputs:
-      covered: ${{ steps.coverage.outputs.covered }}
+  focused-e2ee:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Allow complete artifact preparation and bounded consumer suites.
+    # This outer cap does not change individual test deadlines or concurrency.
+    timeout-minutes: 90
+    # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
+    # jazz-napi .node files fail dlopen on the Linux runners deterministically
+    # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.
+
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
-          fetch-depth: 0
-          filter: blob:none
-          persist-credentials: false
-      - name: Look for a merge group that already tested this tree
-        id: coverage
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          if group="$(dev/ci/main-push-coverage.sh "${HEAD_SHA}")"; then
-            echo "::notice::Full suite already passed on this tree in ${group}; skipping it"
-            echo "covered=true" >> "${GITHUB_OUTPUT}"
-          fi
-
-  untrusted:
-    if: github.event_name != 'push' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
-    permissions:
-      contents: read
-      id-token: none
-      packages: read
-    uses: ./.github/workflows/ci-suite.yml
-    with:
-      trusted-cache: false
-      sccache-write: false
-      # Ready PRs get lint and typecheck only; the Review Loop proves them with
-      # the full suite on a merge-group/* push. Drafts run nothing.
-      scope: ${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
-
-  trusted:
-    needs: [main-coverage]
-    if: >-
-      !cancelled() && needs.main-coverage.outputs.covered != 'true' &&
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
-    permissions:
-      contents: read
-      id-token: write
-      packages: read
-    uses: ./.github/workflows/ci-suite.yml
-    with:
-      # Release branch OIDC trust has not been enabled in the external cache roles.
-      # Keep ordinary GitHub caches without attempting credentialed cross-ref reads.
-      trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/') }}
-      sccache-write: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/')) }}
-      # Ready PRs get lint and typecheck only; the Review Loop proves them with
-      # the full suite on a merge-group/* push. Drafts run nothing.
-      scope: ${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
-    secrets: inherit
-
-  # Preserve the branch-protection check name while the implementation jobs
-  # live in the reusable suite. Exactly one invocation must have completed.
-  test-rust:
-    if: always()
-    needs: [main-coverage, untrusted, trusted]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 2
-    permissions:
-      contents: read
-    steps:
-      - name: Require the selected CI suite
-        env:
-          UNTRUSTED_RESULT: ${{ needs.untrusted.result }}
-          TRUSTED_RESULT: ${{ needs.trusted.result }}
-          DRAFT: ${{ github.event.pull_request.draft == true }}
-          COVERED: ${{ needs.main-coverage.outputs.covered == 'true' }}
-        run: |
-          # A draft's suite runs no jobs, so its invocation reports skipped. So
-          # does a main push whose tree a green merge group already tested.
-          if [ "${DRAFT}" = true ] || [ "${COVERED}" = true ]; then
-            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:skipped" && exit 0
-          fi
-          test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
-            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
-
-  # Check runs from workflow_dispatch are not associated with any pull request,
-  # so they never satisfy the required `test-rust` check. The release workflow
-  # dispatches CI on the bot-opened Version Packages PR, whose own pull_request
-  # runs wait for manual approval (#3790). Mirror the dispatched result as a
-  # commit status on the same SHA, which rulesets match whatever event ran it.
-  report-dispatched-test-rust:
-    if: always() && github.event_name == 'workflow_dispatch'
-    needs: [test-rust]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 2
-    permissions:
-      statuses: write
-    steps:
-      - name: Report test-rust as a commit status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-          RESULT: ${{ needs.test-rust.result }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          case "${RESULT}" in
-            success) state=success ;;
-            failure) state=failure ;;
-            *) state=error ;;
-          esac
-          gh api --method POST "repos/${REPO}/statuses/${SHA}" \
-            -f state="${state}" \
-            -f context=test-rust \
-            -f description="Dispatched CI: ${RESULT}" \
-            -f target_url="${TARGET_URL}"
-
-  # `test-rust` passes on ready PRs even though they only run the fast scope, so
-  # it cannot prove full-suite coverage (#4091). `full-suite` is a commit status
-  # posted only after the full suite passed: on the run's own head, and for a
-  # merge-group/* push also on every PR head the group cleanly merged along its
-  # first-parent chain (dev/ci/full-suite-coverage.sh). A PR head no green full
-  # run covered carries no `full-suite` status, so a ruleset requiring it blocks
-  # that merge. A new push to a covered PR moves its head off the covered SHA
-  # and so voids coverage.
-  report-full-suite:
-    if: >-
-      always() && needs.test-rust.result == 'success' && (
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'push' && needs.trusted.result == 'success' ||
-        github.event_name == 'pull_request' && needs.trusted.result == 'success' && github.base_ref == 'release'
-      )
-    needs: [trusted, test-rust]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      statuses: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-          filter: blob:none
-      - name: Report full-suite on covered heads
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IS_GROUP: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') }}
-          REF_NAME: ${{ github.ref_name }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
         run: |
-          set -euo pipefail
-          if [ "${IS_GROUP}" = true ]; then
-            description="Full suite passed in ${REF_NAME}"
-            covered="$(dev/ci/full-suite-coverage.sh origin/main "${HEAD_SHA}")"
-          else
-            description="Full suite passed on this commit"
-            covered="${HEAD_SHA}"
-          fi
-          for sha in ${covered}; do
-            echo "full-suite success on ${sha}"
-            gh api --method POST "repos/${REPO}/statuses/${sha}" \
-              -f state=success \
-              -f context=full-suite \
-              -f description="${description}" \
-              -f target_url="${TARGET_URL}" > /dev/null
-          done
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - name: Export trusted Turbo cache signing key
+        if: inputs.trusted-cache
+        env:
+          CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+        run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
+      - name: Set up signed Turbo Remote Cache
+        if: inputs.trusted-cache
+        uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
+        with:
+          team: garden-co
+          policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
+          audience: https://github.com/garden-co
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+
+      # Restore compiler state only; tsc still checks current source and native
+      # declarations. Compatible prior revisions are invalidated by TypeScript.
+      - name: Restore TypeScript test compiler state
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: packages/jazz-tools/node_modules/.cache/tsc
+          key: test-ts-tsc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'packages/jazz-tools/tsconfig*.json', '.github/workflows/ci-suite.yml') }}-${{ github.sha }}
+          restore-keys: |
+            test-ts-tsc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'packages/jazz-tools/tsconfig*.json', '.github/workflows/ci-suite.yml') }}-
+
+      # Builds provenance-checked test artifacts, then runs the parallel Node /
+      # browser suites. The local CI-equivalent gate calls this exact partition.
+      # The integration-branch workspace target-class check that used to run
+      # first here now runs in the lint partition, off this job's critical path.
+      - name: Run focused E2EE diagnostics with producer and consumer provenance
+        run: |
+          pnpm build:correctness-artifacts
+          node dev/gates/diagnose-e2ee-coverage.mjs
+      - name: Upload BandChat failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: band-chat-browser-failure-screenshots
+          # This fixture renders synthetic users and rooms; do not broaden to
+          # browser traces, storage profiles, or arbitrary application captures.
+          path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # The ordinary TypeScript consumer suite intentionally excludes
+  # tests/react-native. Keep this bridge-enabled producer and the RN tests in
+  # their own named partition so a green web framework suite cannot stand in
+  # for native bridge coverage.

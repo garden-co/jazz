@@ -79,6 +79,7 @@ it.each([
         saved = transform(saved);
       },
     };
+    let phase = "setup";
     try {
       const target = {
         serverUrl: server.url,
@@ -106,6 +107,7 @@ it.each([
       };
       writer = await createDb({ ...account, e2ee: { app, store, crypto: { keyEnvelope } } });
       if (mode === "crypto-error") {
+        phase = "prepare writer device";
         await writer.e2ee.devices.list();
         failWrapping = true;
       }
@@ -210,6 +212,7 @@ it.each([
       }
       if (mode.startsWith("hidden-existing")) {
         let outsiderSaved: string | null = null;
+        phase = "open outsider";
         outsider = await createDb({
           ...(await localAccountConfig(server.appId, server.url)),
           e2ee: {
@@ -224,7 +227,9 @@ it.each([
             },
           },
         });
+        phase = "prepare outsider device";
         await outsider.e2ee.devices.list();
+        phase = "read hidden root as outsider";
         expect(await outsider.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
         await expect(
           outsider
@@ -256,6 +261,8 @@ it.each([
           expected,
         );
       }
+    } catch (error) {
+      throw new Error(`First-write initialization mode=${mode} phase=${phase}`, { cause: error });
     } finally {
       await outsider?.shutdown();
       await writer?.shutdown();
