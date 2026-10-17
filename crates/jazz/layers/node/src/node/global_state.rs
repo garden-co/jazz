@@ -51,11 +51,10 @@ where
     /// `position`, in seq order, read from the current table's `by_seq` index.
     async fn global_current_records_after(
         &mut self,
-        table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
         position: GlobalTime,
     ) -> Result<Vec<groove::records::OwnedRecord>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let table_id = self.physical_table_alias_for_identity(physical_table)?;
         let current_table = physical_global_current_table_name(table_id);
         let branch = Value::Bytes(BranchKey::default().canonical_bytes());
         Ok(self
@@ -81,11 +80,14 @@ where
     /// Rows of `table` whose global current changed after `position`.
     pub(super) async fn global_rows_changed_after(
         &mut self,
-        table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
         position: GlobalTime,
     ) -> Result<BTreeSet<RowUuid>, Error> {
         let mut rows = BTreeSet::new();
-        for record in self.global_current_records_after(table, position).await? {
+        for record in self
+            .global_current_records_after(physical_table, position)
+            .await?
+        {
             rows.insert(RowUuid(
                 record
                     .borrowed()
@@ -108,7 +110,10 @@ where
         predecessor: [u8; 16],
     ) -> Result<crate::protocol::SupportingRowsUpdate, Error> {
         let mut moved = BTreeMap::new();
-        for record in self.global_current_records_after(table, position).await? {
+        for record in self
+            .global_current_records_after(physical_table, position)
+            .await?
+        {
             let record = record.borrowed();
             let alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(

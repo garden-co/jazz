@@ -373,11 +373,12 @@ where
     async fn storage_backed_maintained_deletion_winner(
         &mut self,
         table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
         row_uuid: RowUuid,
         tier: DurabilityTier,
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
-        self.storage_backed_current_image(table, row_uuid, tier, context, true)
+        self.storage_backed_current_image(table, physical_table, row_uuid, tier, context, true)
             .await
     }
 
@@ -386,13 +387,13 @@ where
     async fn storage_backed_current_image(
         &mut self,
         table: &str,
+        physical_table: crate::ids::GlobalPhysicalTableId,
         row_uuid: RowUuid,
         tier: DurabilityTier,
         context: &mut ViewEvaluationContext,
         deletion_only: bool,
     ) -> Result<Option<VersionRow>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let table_id = self.physical_table_alias_for_identity(physical_table)?;
         let tx_id = match tier {
             // Global current storage already represents the settled winner.
             DurabilityTier::Global => {
@@ -1203,6 +1204,12 @@ where
                             None if allow_storage_witness_fallback => {
                                 self.storage_backed_maintained_deletion_winner(
                                     entry_table,
+                                    *maintained_facts
+                                        .physical_tables
+                                        .get(&groove::Intern::new(entry_table.to_owned()))
+                                        .ok_or(Error::InvalidStoredValue(
+                                            "maintained source physical identity missing",
+                                        ))?,
                                     *row_uuid,
                                     tier,
                                     &mut context,
@@ -1310,6 +1317,11 @@ where
                     None if allow_storage_witness_fallback => {
                         self.storage_backed_maintained_deletion_winner(
                             entry_table,
+                            *maintained_facts.physical_tables.get(entry_table).ok_or(
+                                Error::InvalidStoredValue(
+                                    "maintained source physical identity missing",
+                                ),
+                            )?,
                             *row_uuid,
                             tier,
                             &mut context,
@@ -1413,10 +1425,12 @@ where
             &supporting_update,
             known_state_position.or(leave_scan_after),
         ) {
-            let tables = logical_tables.values().copied().collect::<BTreeSet<_>>();
-            for table in tables {
-                for row_uuid in self.global_rows_changed_after(table, position).await? {
-                    let key = (table.to_owned(), row_uuid);
+            for (physical_table, table) in &logical_tables {
+                for row_uuid in self
+                    .global_rows_changed_after(*physical_table, position)
+                    .await?
+                {
+                    let key = ((*table).to_owned(), row_uuid);
                     if !supporting_now.contains(&key) {
                         cursor_left.insert(key.clone());
                     }
@@ -1441,12 +1455,15 @@ where
         // still read it; otherwise only a deletion ships.
         let mut unreadable_left = BTreeSet::new();
         for (table, row_uuid) in &catch_up_left {
-            if self
-                .table(table)?
-                .read_policy
-                .as_ref()
-                .is_none_or(crate::peer::read_policy_admits_every_row)
-            {
+            // A table added after this node opened may exist only in the
+            // admitted active schema. Skip this local-schema shortcut there;
+            // the ordinary covered read below resolves the active schema.
+            if self.table(table).is_ok_and(|table| {
+                table
+                    .read_policy
+                    .as_ref()
+                    .is_none_or(crate::peer::read_policy_admits_every_row)
+            }) {
                 continue;
             }
             let (read_shape, read_binding) = self.whole_table_shape_binding(table)?;
@@ -1478,6 +1495,12 @@ where
                     let winner = self
                         .storage_backed_current_image(
                             entry_table,
+                            *maintained_facts
+                                .physical_tables
+                                .get(&groove::Intern::new(entry_table.to_owned()))
+                                .ok_or(Error::InvalidStoredValue(
+                                    "maintained source physical identity missing",
+                                ))?,
                             *row_uuid,
                             tier,
                             &mut context,
