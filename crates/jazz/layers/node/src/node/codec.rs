@@ -3789,10 +3789,9 @@ pub(super) fn stage_transaction_record(
         }
         TransactionRecordWrite::Update => batch.update("jazz_transactions", header),
     }
-    match pending_transaction_values(node_alias, tx, status)? {
-        Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
-        // Redacted view receipts cannot erase a complete retained proof.
-        None => {}
+    // Redacted view receipts cannot erase a complete retained proof.
+    if let Some(values) = pending_transaction_values(node_alias, tx, status)? {
+        batch.update(PENDING_TRANSACTIONS_TABLE, values);
     }
     Ok(())
 }
