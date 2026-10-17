@@ -63,6 +63,9 @@ try {
     export function keyReadiness(device: DeviceInfo): "verified" | "not-verified" {
       return device.keyReadiness;
     }
+    import { E2eeRecoveryError } from "jazz-tools/e2ee";
+    import type { E2eeRecoveryErrorCode } from "jazz-tools/e2ee";
+    export const reason: E2eeRecoveryErrorCode = new E2eeRecoveryError("recovery-material-unusable").code;
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import { E2EeSodiumStream } from "jazz-napi";
@@ -108,7 +111,7 @@ try {
       "-e",
       `
     import { strict as assert } from "node:assert";
-    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions } from "jazz-tools/e2ee";
+    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
     import { schema as s } from "jazz-tools";
     const app = s.defineApp({
       ...deviceRequestSchema,
@@ -116,6 +119,10 @@ try {
     });
     assert.ok(app.__e2ee_device_requests);
     assert.ok(deviceRequestPermissions.__e2ee_device_requests);
+    const error = new E2eeRecoveryError("recovery-material-unusable");
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, "recovery-material-unusable");
+    assert.equal(error.cause, undefined);
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import {

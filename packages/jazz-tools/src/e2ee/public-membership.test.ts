@@ -95,6 +95,7 @@ async function fixture() {
       predecessor: epochId,
       epochId: crypto.randomUUID(),
       signerId: creatorId,
+      action: "remove-device" as const,
       removedDeviceId: creatorId,
       membership: encodeEpochIds([]),
       revision: encodePublicApprovalRevision(revision),

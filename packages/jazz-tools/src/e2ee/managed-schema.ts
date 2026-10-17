@@ -3,6 +3,25 @@ import { defineTable } from "../table-definition.js";
 import { rel, reverse } from "../relationships.js";
 
 export const deviceRequestSchema = {
+  __e2ee_recovery_protectors: defineTable(
+    {
+      rootId: s.uuid(),
+      material: s.bytes(),
+    },
+    {
+      root: rel("__e2ee_recovery_roots", "rootId"),
+    },
+  ),
+  __e2ee_recovery_deliveries: defineTable(
+    {
+      rootId: s.uuid(),
+      epochId: s.string(),
+      envelope: s.bytes(),
+    },
+    {
+      root: rel("__e2ee_recovery_roots", "rootId"),
+    },
+  ),
   __e2ee_recovery_roots: defineTable(
     {
       accountId: s.uuid(),
@@ -27,7 +46,9 @@ export const deviceRequestSchema = {
       predecessor: s.string(),
       epochId: s.string(),
       signerId: s.uuid(),
-      removedDeviceId: s.uuid(),
+      action: s.enum("remove-device", "retire-recovery-root"),
+      removedDeviceId: s.uuid().optional(),
+      retiredRecoveryRootId: s.uuid().optional(),
       membership: s.bytes(),
       revision: s.bytes(),
       signature: s.bytes(),
@@ -36,6 +57,7 @@ export const deviceRequestSchema = {
       account: rel("__e2ee_account_identities", "accountId"),
       signer: rel("__e2ee_device_requests", "signerId"),
       removedDevice: rel("__e2ee_device_requests", "removedDeviceId"),
+      retiredRecoveryRoot: rel("__e2ee_recovery_roots", "retiredRecoveryRootId"),
     },
   ),
   __e2ee_public_device_approvals: defineTable(
@@ -87,7 +109,9 @@ export const deviceRequestSchema = {
       predecessor: s.string(),
       epochId: s.string(),
       signerId: s.uuid(),
-      removedDeviceId: s.uuid(),
+      action: s.enum("remove-device", "retire-recovery-root"),
+      removedDeviceId: s.uuid().optional(),
+      retiredRecoveryRootId: s.uuid().optional(),
       membership: s.bytes(),
       revision: s.bytes(),
       verification: s.bytes(),
@@ -99,6 +123,7 @@ export const deviceRequestSchema = {
       account: rel("__e2ee_account_identities", "accountId"),
       signer: rel("__e2ee_device_requests", "signerId"),
       removedDevice: rel("__e2ee_device_requests", "removedDeviceId"),
+      retiredRecoveryRoot: rel("__e2ee_recovery_roots", "retiredRecoveryRootId"),
     },
   ),
   __e2ee_device_challenges: defineTable(

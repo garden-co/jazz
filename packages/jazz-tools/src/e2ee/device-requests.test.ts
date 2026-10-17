@@ -5,7 +5,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
-it("keeps device administration account-scoped despite public-key visibility", async () => {
+it("keeps device administration and immutable recovery roots account-scoped", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
@@ -16,11 +16,14 @@ it("keeps device administration account-scoped despite public-key visibility", a
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
+    const accounts: string[] = [];
     for (let i = 0; i < 2; i++) {
+      const config = await localAccountConfig(server.appId, server.url);
+      accounts.push(config.account.id);
       let stored: string | null = null;
       clients.push(
         await createDb({
-          ...(await localAccountConfig(server.appId, server.url)),
+          ...config,
           e2ee: {
             store: {
               async read() {
@@ -51,6 +54,42 @@ it("keeps device administration account-scoped despite public-key visibility", a
     expect(identities).toHaveLength(1);
     expect(identities[0]!.deviceId).toBe(bobDevice!.id);
     expect(await alice!.e2ee.devices.list()).toEqual([aliceDevice]);
+
+    const identity = await alice!.one(deviceRequestApp.__e2ee_account_identities, {
+      tier: "remote",
+    });
+    const roots = deviceRequestApp.__e2ee_recovery_roots;
+    // Inert public bytes test ordinary policy, not cryptographic recovery authority.
+    const values = {
+      accountId: accounts[0]!,
+      signerId: aliceDevice!.id,
+      epochId: identity!.epochId,
+      signingMechanism: "jazz.sodium.sign",
+      signingVersion: 1,
+      signingPublicKey: new Uint8Array(32).fill(1),
+      mechanism: "jazz.sodium.key",
+      version: 1,
+      publicKey: new Uint8Array(32).fill(2),
+      signature: new Uint8Array(64),
+    };
+    const root = await alice!.insert(roots, values).wait({ tier: "global" });
+    expect(await bob!.all(roots, { tier: "remote" })).toEqual([root]);
+    await expect(bob!.insert(roots, values).wait({ tier: "global" })).rejects.toThrow();
+    await expect(
+      alice!.insert(roots, { ...values, signerId: bobDevice!.id }).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(
+      alice!.insert(roots, { ...values, accountId: accounts[1]! }).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    for (const client of clients) {
+      await expect(
+        client
+          .update(roots, root.id, { publicKey: new Uint8Array(32).fill(3) })
+          .wait({ tier: "global" }),
+      ).rejects.toThrow();
+      await expect(client.delete(roots, root.id).wait({ tier: "global" })).rejects.toThrow();
+    }
+    expect(await alice!.one(roots.where({ id: root.id }), { tier: "remote" })).toEqual(root);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
