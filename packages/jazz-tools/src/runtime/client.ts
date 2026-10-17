@@ -24,6 +24,8 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
+import { toError } from "./util.js";
+import { parseUuidBytes } from "./hex.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -91,19 +93,14 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       return envelope(5, payload); // Groove I64
     }
     case "Uuid": {
-      const hex = value.value.replaceAll("-", "");
-      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
-      return envelope(
-        7, // Groove UUID
-        Uint8Array.from({ length: 16 }, (_, index) =>
-          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
-        ),
-      );
+      const bytes = parseUuidBytes(value.value);
+      if (!bytes) throw new Error(`invalid branch UUID ${value.value}`);
+      return envelope(7, bytes); // Groove UUID
     }
     case "Text": {
       const text = new TextEncoder().encode(value.value);
       const payload = new Uint8Array(1 + text.length);
-      payload[0] = 2; // Groove stored-scalar Primitive case
+      payload[0] = 0; // Groove stored-scalar Primitive case
       payload.set(text, 1);
       return envelope(6, payload); // Groove String
     }
@@ -1120,10 +1117,9 @@ export class JazzClient {
     attribution?: string,
   ): OpenTransactionId {
     const id = createOpenTransactionId();
-    const effectiveSession = this.resolveWriteSession(session, attribution);
     const prerequisite = transactionAdmission.get(this);
     if (prerequisite) {
-      const context = this.encodeWriteContext(effectiveSession, attribution);
+      const context = this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
@@ -1150,7 +1146,7 @@ export class JazzClient {
     const opened = requireTransactionalRuntime(this.runtime).beginTransaction(
       kind,
       id,
-      this.encodeWriteContext(effectiveSession, attribution),
+      this.writeContext(session, attribution),
     );
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
@@ -1198,14 +1194,7 @@ export class JazzClient {
           },
           insertInternal: (table, values, options, session, attribution) => {
             assertActive();
-            const effectiveSession = this.resolveWriteSession(session, attribution);
-            const writeContext = this.encodeWriteContext(
-              effectiveSession,
-              attribution,
-              id,
-              options?.updatedAt,
-              options?.branch ? { head: options.branch } : undefined,
-            );
+            const writeContext = this.writeContext(session, attribution, id, options);
             const row = this.runtime.insert(table, values, writeContext, options?.id);
             return { ...row, values: row.values as Value[] };
           },
@@ -1220,38 +1209,17 @@ export class JazzClient {
             branch,
           ) => {
             assertActive();
-            const effectiveSession = this.resolveWriteSession(session, attribution);
-            const writeContext = this.encodeWriteContext(
-              effectiveSession,
-              attribution,
-              id,
-              updatedAt,
-              branch,
-            );
+            const writeContext = this.writeContext(session, attribution, id, { updatedAt, branch });
             return this.runtime.update(table, objectId, updates, writeContext);
           },
           upsertInternal: (table, objectId, values, options, session, attribution) => {
             assertActive();
-            const effectiveSession = this.resolveWriteSession(session, attribution);
-            const writeContext = this.encodeWriteContext(
-              effectiveSession,
-              attribution,
-              id,
-              options?.updatedAt,
-              options?.branch,
-            );
+            const writeContext = this.writeContext(session, attribution, id, options);
             return this.runtime.upsert(table, objectId, values, writeContext);
           },
           restoreInternal: (table, objectId, values, options, session, attribution) => {
             assertActive();
-            const effectiveSession = this.resolveWriteSession(session, attribution);
-            const writeContext = this.encodeWriteContext(
-              effectiveSession,
-              attribution,
-              id,
-              options?.updatedAt,
-              options?.branch ? { head: options.branch } : undefined,
-            );
+            const writeContext = this.writeContext(session, attribution, id, options);
             const row = this.runtime.restore(table, objectId, values, writeContext);
             return { ...row, values: row.values as Value[] };
           },
@@ -1416,13 +1384,24 @@ export class JazzClient {
     return result;
   }
 
-  private encodeWriteContext(
-    session?: Session,
+  /**
+   * Resolve the writing session and encode the runtime write context. An
+   * insert/restore branch selector is lowered to a head-only branch view.
+   */
+  private writeContext(
+    explicitSession?: Session,
     attribution?: string,
     openTransactionId?: OpenTransactionId,
-    updatedAt?: number,
-    branch?: BranchView,
+    {
+      updatedAt,
+      branch: selected,
+    }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
   ): string | undefined {
+    // An explicit attribution without a session writes as no session, not the client's.
+    const session =
+      explicitSession ||
+      (attribution === undefined ? (this.resolvedSession ?? undefined) : undefined);
+    const branch = selected && ("head" in selected ? selected : { head: selected });
     if (
       !session &&
       attribution === undefined &&
@@ -1462,16 +1441,6 @@ export class JazzClient {
       };
     }
     return JSON.stringify(payload);
-  }
-
-  private resolveWriteSession(session?: Session, attribution?: string): Session | undefined {
-    if (session) {
-      return session;
-    }
-    if (attribution !== undefined) {
-      return undefined;
-    }
-    return this.resolvedSession ?? undefined;
   }
 
   /**
@@ -1574,18 +1543,7 @@ export class JazzClient {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      undefined,
-      options?.updatedAt,
-      options?.branch
-        ? mutation === "insert"
-          ? { head: options.branch as BranchSelector }
-          : (options.branch as BranchView)
-        : undefined,
-    );
+    const writeContext = this.writeContext(session, attribution, undefined, options);
     const result = await this.runtime.streamingMutation(
       mutation,
       table,
@@ -1612,14 +1570,7 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): InsertResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      options?.updatedAt,
-      options?.branch ? { head: options.branch } : undefined,
-    );
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
     const row = this.stageRowMutation(
       openTransactionId,
       table,
@@ -1660,14 +1611,7 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): InsertResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      options?.updatedAt,
-      options?.branch ? { head: options.branch } : undefined,
-    );
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
     const row = this.stageRowMutation(openTransactionId, table, values, objectId, (prepared) =>
       this.runtime.restore(table, objectId, prepared, writeContext),
     );
@@ -1704,14 +1648,7 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      options?.updatedAt,
-      options?.branch,
-    );
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
     return this.stageMutation(openTransactionId, values, (prepared) =>
       this.runtime.upsert(table, objectId, prepared, writeContext),
     );
@@ -1839,13 +1776,7 @@ export class JazzClient {
     if (branch) {
       throw new Error("Partial-value updates are not yet supported in branch views.");
     }
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
-      updatedAt,
-    );
+    const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }
@@ -1865,14 +1796,10 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, {
       updatedAt,
       branch,
-    );
+    });
     return this.stageMutation(openTransactionId, updates, (prepared) =>
       this.runtime.update(table, objectId, prepared, writeContext),
     );
@@ -2020,14 +1947,10 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(
-      effectiveSession,
-      attribution,
-      openTransactionId,
+    const writeContext = this.writeContext(session, attribution, openTransactionId, {
       updatedAt,
       branch,
-    );
+    });
     return this.stageMutation(openTransactionId, {}, () =>
       this.runtime.delete(table, objectId, writeContext),
     );
@@ -2119,7 +2042,7 @@ export class JazzClient {
         } catch (error) {
           // User callback failures must not escape through the native tick or
           // leave a live source publishing behind the terminal notification.
-          terminate(error instanceof Error ? error : new Error(String(error)), true);
+          terminate(toError(error), true);
         }
       });
     } catch (error) {
@@ -2201,10 +2124,7 @@ export class JazzClient {
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
-    return (
-      rejectionFromRuntimeWaitError(error) ??
-      (error instanceof Error ? error : new Error(String(error)))
-    );
+    return rejectionFromRuntimeWaitError(error) ?? toError(error);
   }
 
   /**

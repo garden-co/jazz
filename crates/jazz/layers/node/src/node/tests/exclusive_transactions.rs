@@ -181,6 +181,7 @@ fn exclusive_tx_reads_own_pending_writes() {
             shape: predicate_shape.query().clone(),
             binding_id: predicate_binding.binding_id(),
             binding_values: predicate_binding.values().clone(),
+            aggregate_result: None,
         }]
     );
 }
@@ -270,11 +271,9 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         node.open_tx(tx_id)
             .unwrap()
             .base_snapshot_rows
-            .contains_key(&(
-                node.current_write_schema().unwrap().schema,
-                "todos".to_owned(),
-                row
-            ))
+            .get(&("todos".to_owned(), row))
+            .is_some_and(|by_schema| by_schema
+                .contains_key(&node.current_write_schema().unwrap().schema))
     );
 
     node.tx_write(tx_id, "todos", row, title_cells("updated"), None)
@@ -284,11 +283,9 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .open_tx(tx_id)
             .unwrap()
             .base_snapshot_rows
-            .contains_key(&(
-                node.current_write_schema().unwrap().schema,
-                "todos".to_owned(),
-                row
-            ))
+            .get(&("todos".to_owned(), row))
+            .is_some_and(|by_schema| by_schema
+                .contains_key(&node.current_write_schema().unwrap().schema))
     );
 
     let (_exclusive, unit) = node
@@ -1686,7 +1683,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     // The maintained-view producer must preserve the receiver's partial
     // cardinality when it relays this selected row downstream.
     let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-    let versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     let downstream_bundle = reader
         .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
         .unwrap();
@@ -2733,6 +2730,7 @@ fn notes_tx_fate(
                 shape: shape.query().clone(),
                 binding_id: binding.binding_id(),
                 binding_values: binding.values().clone(),
+                aggregate_result: None,
             });
         }
     }

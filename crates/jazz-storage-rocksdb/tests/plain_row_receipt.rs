@@ -285,11 +285,11 @@ async fn epoch_1_table_row_bytes_and_order_survive_a_fresh_rocksdb_open() {
         vec![
             (
                 vec![0x01, 0x00, 0x02],
-                vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+                vec![0x00, 0x02, 0x00, 0x00, 0x00, b'a'],
             ),
             (
                 vec![0x01, 0x12, 0x34],
-                vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+                vec![0x00, 0x34, 0x12, 0x01, 0x00, b'h', b'i'],
             ),
         ],
         "RocksDB must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",

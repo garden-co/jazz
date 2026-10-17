@@ -1476,7 +1476,7 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let bundles_before = peer.metrics.version_bundles_out;
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
-    let update = peer.reset_current_rows(core, "todos").unwrap();
+    let update = peer.rehydrate_current_rows(core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = &update else {
         panic!("expected view update");
     };
@@ -1589,6 +1589,9 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let mut oracle = Oracle::new();
     let mut oracle_txs = BTreeSet::new();
     let mut exclusive_txs = Vec::new();
+    // Parents the harness delivers after their chained child, against the
+    // per-writer order the transport keeps (`INV-HIST-23`).
+    let mut late_parents = BTreeMap::new();
     let rows = [row(1), row(2), row(3)];
     let mut upstream = VecDeque::new();
     let mut fate_a = VecDeque::new();
@@ -1851,6 +1854,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 commits_started += 2;
                 oracle_txs.insert(parent_ref);
                 oracle_txs.insert(child_ref);
+                late_parents.insert(parent_ref, child_ref);
                 let SyncMessage::CommitUnit { tx, versions } = &parent_message else {
                     panic!("expected parent commit unit");
                 };
@@ -1894,17 +1898,23 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     .unwrap();
                 let updates = settle_outcome(&mut core, outcome).unwrap();
                 for fate in updates {
-                    if let SyncMessage::RetryLater { .. } = &fate {
-                        // Core stored nothing; the uploading writer resends
-                        // the unit after its predecessor, which is still
-                        // queued behind it.
-                        upstream.push_back(message.clone());
-                        message_counts.upstream_enqueued += 1;
-                        continue;
-                    }
                     let SyncMessage::FateUpdate { tx_id, .. } = &fate else {
                         panic!("core should only emit fate updates here");
                     };
+                    if let Some(child) = late_parents.get(tx_id)
+                        && matches!(
+                            core.transaction_state_settled(*child),
+                            Some((Fate::Accepted, ..))
+                        )
+                    {
+                        // The child reached Core first and was applied as
+                        // written; its parent arriving afterwards is never
+                        // applied over it.
+                        assert!(
+                            matches!(&fate, SyncMessage::FateUpdate { fate: Fate::Rejected(_), .. }),
+                            "seed {seed}: a parent delivered after its accepted child must be refused: {fate:?}"
+                        );
+                    }
                     record_fate_update_in_oracle(&mut oracle, &fate);
                     let queue = if tx_id.node == node(1) {
                         &mut fate_a
@@ -1985,7 +1995,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_a.len() as u64;
                     views_a.clear();
                     link_a = PeerState::client_link(author_a);
-                    views_a.push_back(link_a.reset_current_rows(&mut core, "todos").unwrap());
+                    views_a.push_back(link_a.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 } else {
                     drop(reader_b);
@@ -1994,7 +2004,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     message_counts.view_dropped_on_disconnect += views_b.len() as u64;
                     views_b.clear();
                     link_b = PeerState::client_link(author_b);
-                    views_b.push_back(link_b.reset_current_rows(&mut core, "todos").unwrap());
+                    views_b.push_back(link_b.rehydrate_current_rows(&mut core, "todos").unwrap());
                     message_counts.view_enqueued += 1;
                 }
             }

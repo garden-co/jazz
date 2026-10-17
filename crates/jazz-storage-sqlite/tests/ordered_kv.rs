@@ -6,8 +6,8 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::{
-    Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-    StorageCodecProfile, StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
+    Error, LayoutStorage, OrderedKvStorage, ReopenableStorage, ScanRequest, StorageCodecProfile,
+    StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
 };
 use jazz_storage_sqlite::{Durability, SqliteStorage};
 use sha2::{Digest, Sha256};
@@ -103,16 +103,16 @@ fn epoch_1_codec_fixture_schema() -> DatabaseSchema {
 }
 
 #[test]
-fn class_layout_v2_writes_exact_sqlite_marker_and_mapped_key_receipt() {
+fn class_layout_v3_writes_exact_sqlite_marker_and_mapped_key_receipt() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout.sqlite");
-        let logical_cf = "jazz_albums_history";
-        let physical_cfs = StorageLayout::jazz_class_v2().physical_column_families([logical_cf]);
+        let logical_cf = "jazz_physical_258_history";
+        let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v2(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -133,10 +133,9 @@ fn class_layout_v2_writes_exact_sqlite_marker_and_mapped_key_receipt() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, b"class-cf-v2");
+        assert_eq!(marker, b"class-cf-v3");
 
-        let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
-        expected_key.extend_from_slice(logical_cf.as_bytes());
+        let mut expected_key = 258u32.to_be_bytes().to_vec();
         expected_key.extend_from_slice(b"row\0key");
         let value: Vec<u8> = connection
             .query_row(
@@ -151,7 +150,7 @@ fn class_layout_v2_writes_exact_sqlite_marker_and_mapped_key_receipt() {
 
         let reopened = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v2(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -166,16 +165,16 @@ fn class_layout_v2_writes_exact_sqlite_marker_and_mapped_key_receipt() {
 }
 
 #[test]
-fn class_layout_v2_reopen_rejects_a_future_marker_without_normalizing_it() {
+fn class_layout_v3_reopen_rejects_a_future_marker_without_normalizing_it() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("class-layout-future.sqlite");
-        let logical_cf = "jazz_albums_history";
-        let physical_cfs = StorageLayout::jazz_class_v2().physical_column_families([logical_cf]);
+        let logical_cf = "jazz_physical_258_history";
+        let physical_cfs = StorageLayout::jazz_class_v3().physical_column_families([logical_cf]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let layout = LayoutStorage::new(
             SqliteStorage::open(&path, &refs).unwrap(),
-            StorageLayout::jazz_class_v2(),
+            StorageLayout::jazz_class_v3(),
         )
         .await
         .unwrap();
@@ -189,7 +188,7 @@ fn class_layout_v2_reopen_rejects_a_future_marker_without_normalizing_it() {
         connection
             .execute(
                 "UPDATE kv SET v = ?1 WHERE cf = (SELECT id FROM column_families WHERE name = ?2) AND k = ?3",
-                rusqlite::params![b"class-cf-v3", "__groove_class_meta", b"groove-storage-layout"],
+                rusqlite::params![b"class-cf-v4", "__groove_class_meta", b"groove-storage-layout"],
             )
             .unwrap();
         drop(connection);
@@ -197,7 +196,7 @@ fn class_layout_v2_reopen_rejects_a_future_marker_without_normalizing_it() {
         assert!(matches!(
             LayoutStorage::new(
                 SqliteStorage::open(&path, &refs).unwrap(),
-                StorageLayout::jazz_class_v2(),
+                StorageLayout::jazz_class_v3(),
             )
             .await,
             Err(Error::InvalidStorageLayout(_))
@@ -212,7 +211,7 @@ fn class_layout_v2_reopen_rejects_a_future_marker_without_normalizing_it() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, b"class-cf-v3");
+        assert_eq!(marker, b"class-cf-v4");
     });
 }
 
@@ -251,7 +250,7 @@ fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
 }
 
 #[test]
-fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen() {
+fn historical_epoch_1_sqlite_fixture_is_rejected_without_mutation() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let historical_path = directory.path().join("epoch-1.sqlite");
@@ -285,57 +284,16 @@ fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen()
         assert_eq!(snapshot, epoch_1_ordered_kv_pack());
         drop(read_only);
 
-        let current = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            current
-                .get("records".into(), b"user:2".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Grace".to_vec())
-        );
-        current
-            .write_many(vec![
-                OwnedWriteOperation::Set {
-                    cf: "records".into(),
-                    key: b"user:3".to_vec(),
-                    value: b"Lin".to_vec(),
-                },
-                OwnedWriteOperation::Delete {
-                    cf: "indices".into(),
-                    key: b"name:Ada".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "indices".into(),
-                    key: b"name:Lin".to_vec(),
-                    value: b"3".to_vec(),
-                },
-            ])
-            .await
-            .unwrap();
-        drop(current);
-
-        let reopened = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            reopened
-                .get("records".into(), b"user:3".to_vec())
-                .await
-                .unwrap(),
-            Some(b"Lin".to_vec())
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Ada".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            reopened
-                .get("indices".into(), b"name:Lin".to_vec())
-                .await
-                .unwrap(),
-            Some(b"3".to_vec())
-        );
+        let before = std::fs::read(&historical_path).unwrap();
+        // The historical root declares the retired Groove v1 families, so
+        // admission names them instead of failing with a layout error.
+        assert!(matches!(
+            SqliteStorage::open(&historical_path, &["records", "indices"]),
+            Err(Error::UnsupportedStorageCodecs { epoch: 1, missing, unknown })
+                if missing.iter().any(|codec| codec == "groove.large-value.v2")
+                    && unknown.iter().any(|codec| codec == "groove.large-value.v1")
+        ));
+        assert_eq!(std::fs::read(&historical_path).unwrap(), before);
     });
 }
 
@@ -479,11 +437,11 @@ fn epoch_1_table_row_bytes_and_order_survive_a_fresh_sqlite_open() {
             vec![
                 (
                     vec![0x01, 0x00, 0x02],
-                    vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+                    vec![0x00, 0x02, 0x00, 0x00, 0x00, b'a'],
                 ),
                 (
                     vec![0x01, 0x12, 0x34],
-                    vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+                    vec![0x00, 0x34, 0x12, 0x01, 0x00, b'h', b'i'],
                 ),
             ],
             "SQLite must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",

@@ -14,7 +14,7 @@ use jazz::db::ReadOpts;
 use jazz::query::{Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::policy_expr::rel;
-use jazz::tools::public_schema::{RelPredicateCmpOp, RelValueRef, RowIdRef};
+use jazz::tools::public_schema::{RelationCmpOp, RelationRowIdRef, RelationValueRef};
 use jazz::tools::test_support::{disconnect_client, reconnect_client};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, ReadTier, Schema, SchemaBuilder, TableSchema,
@@ -43,8 +43,8 @@ fn schema() -> Schema {
         rel::eq_literal("status", Value::Text("accepted".into())),
         rel::cmp(
             "playlist_id",
-            RelPredicateCmpOp::Eq,
-            RelValueRef::RowId(RowIdRef::Outer),
+            RelationCmpOp::Eq,
+            RelationValueRef::RowId(RelationRowIdRef::Outer),
         ),
     ])));
     SchemaBuilder::new()

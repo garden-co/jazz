@@ -647,6 +647,225 @@ fn unit_with_unknown_schema_waits_and_is_decided_once_it_arrives() {
     );
 }
 
+/// INV-HIST-20, INV-HIST-23: a write chained on a predecessor that Core
+/// holds parked (its schema is not known yet) parks behind it, even though
+/// the write's own schema is known. When the schema arrives Core decides the
+/// predecessor first, then the write, so neither is refused as late.
+///
+/// ```text
+/// carol ── p (evolved schema) ──► core   parked: schema unknown
+/// carol ── w (chained on p) ────► core   parked behind p
+/// core  ◄── evolved schema               p accepted, then w accepted
+/// ```
+#[test]
+fn write_chained_on_a_parked_predecessor_parks_behind_it() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let (_evolved_dir, mut carol_evolved) = open_node_with_schema(node(0x32), evolved.clone());
+    let (_base_dir, mut carol_base) = open_node_with_schema(node(0x32), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x39), base.clone());
+    let target = row(0x81);
+    let (p, p_unit) = carol_evolved
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", target, 50).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("parked")),
+                ("body".to_owned(), v("evolved")),
+            ]),
+        ))
+        .unwrap();
+    let (w, w_unit) = carol_base
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 51).cells(title_cells("behind")),
+        )
+        .unwrap();
+    assert_eq!(p.node, w.node);
+    assert!(p.time < w.time);
+    let SyncMessage::CommitUnit { tx, versions } = w_unit else {
+        panic!("expected a commit unit");
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            version.with_base(crate::protocol::RowBase {
+                seq: None,
+                pending: Some(p),
+            })
+        })
+        .collect();
+    let w_unit = SyncMessage::CommitUnit { tx, versions };
+
+    assert!(core.apply_sync_message_settled(p_unit).unwrap().is_empty());
+    assert!(
+        core.apply_sync_message_settled(w_unit).unwrap().is_empty(),
+        "w waits behind its parked predecessor"
+    );
+    assert!(core.query_transaction(w).unwrap().is_none());
+    assert!(core.parking.parked_commit_units.contains_key(&w));
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let decided = updates
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate,
+                global_time,
+                ..
+            } if *tx_id == p || *tx_id == w => Some((*tx_id, fate.clone(), *global_time)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            decided.as_slice(),
+            [
+                (first, Fate::Accepted, Some(p_seq)),
+                (second, Fate::Accepted, Some(w_seq)),
+            ] if *first == p && *second == w && p_seq < w_seq
+        ),
+        "p then w, both accepted: {decided:?}"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+}
+
+/// INV-HIST-20, INV-HIST-23: the wait behind a parked predecessor is
+/// bounded. Once the predecessor has been parked for
+/// `PARKED_PREDECESSOR_WAIT_MS` on Core's ingest clock, the next authority
+/// ingest decides the chained write as written; the predecessor, when its
+/// schema finally arrives, is late and refused, so the row keeps the newer
+/// write.
+///
+/// ```text
+/// carol ── p (evolved schema) ──► core   parked: schema unknown
+/// carol ── w (chained on p) ────► core   parked behind p
+/// ...  the wait runs out; the next ingest decides w: accepted
+/// core  ◄── evolved schema               p rejected (late)
+/// ```
+#[test]
+fn write_parked_behind_a_predecessor_is_decided_when_the_wait_runs_out() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let (_evolved_dir, mut carol_evolved) = open_node_with_schema(node(0x33), evolved.clone());
+    let (_base_dir, mut carol_base) = open_node_with_schema(node(0x33), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x3a), base.clone());
+    let target = row(0x82);
+    let (p, p_unit) = carol_evolved
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", target, 50).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("stuck")),
+                ("body".to_owned(), v("evolved")),
+            ]),
+        ))
+        .unwrap();
+    let (w, w_unit) = carol_base
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 51).cells(title_cells("newer")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = w_unit else {
+        panic!("expected a commit unit");
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            version.with_base(crate::protocol::RowBase {
+                seq: None,
+                pending: Some(p),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(core.apply_sync_message_settled(p_unit).unwrap().is_empty());
+    let w_unit = SyncMessage::CommitUnit {
+        tx: tx.clone(),
+        versions: versions.clone(),
+    };
+    assert!(core.apply_sync_message_settled(w_unit).unwrap().is_empty());
+    assert!(core.parking.parked_commit_units.contains_key(&w), "w waits behind p");
+
+    // Still within the wait: a resend of w keeps waiting.
+    let p_parked_at = p.time.physical_ms();
+    let resent = crate::local_executor::block_on(core.ingest_commit_unit(
+        tx.clone(),
+        versions.clone(),
+        p_parked_at + crate::node::ingest::PARKED_PREDECESSOR_WAIT_MS - 1,
+    ))
+    .unwrap();
+    assert!(settle_outcome(&mut core, resent).unwrap().is_empty());
+    assert!(core.query_transaction(w).unwrap().is_none());
+
+    // The wait runs out: the next ingest decides w.
+    let decided = crate::local_executor::block_on(core.ingest_commit_unit(
+        tx,
+        versions,
+        p_parked_at + crate::node::ingest::PARKED_PREDECESSOR_WAIT_MS,
+    ))
+    .unwrap();
+    let decided = settle_outcome(&mut core, decided).unwrap();
+    assert!(
+        decided.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Accepted, .. } if *tx_id == w
+        )),
+        "{decided:?}"
+    );
+    assert!(!core.parking.parked_commit_units.contains_key(&w));
+    assert!(core.parking.parked_commit_units.contains_key(&p));
+
+    let updates = publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert!(
+        updates.iter().any(|message| matches!(
+            message,
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+                ..
+            } if *tx_id == p && reason.contains("arrived after a later write of its writer")
+        )),
+        "{updates:?}"
+    );
+    assert!(core.parking.parked_commit_units.is_empty());
+}
+
 /// INV-TX-23: a node that relays a client's commit unit upstream is not the
 /// fate authority. It keeps the unit pending: no fate, no seq, nothing at the
 /// Global tier. Only Core's fate settles it there.
@@ -912,19 +1131,17 @@ fn counter_schema_with_notes() -> JazzSchema {
     compile_public_test_schema(&source)
 }
 
-/// A merge-column write whose schema differs from the schema the row's
-/// current image is stored under. Core cannot apply the op yet: across
-/// layouts the row is still whole-row last-writer-wins (#3899), which would
-/// store the counter's delta as its value, or drop it when the write loses.
-/// Core refuses the write with an explicit reason instead, and the row keeps
-/// its value.
+/// #3899: a merge-column write whose schema differs from the schema the
+/// row's current image was written under. Core merges per physical column,
+/// so bob's +5 applies to the counter alice's v1 write set, and the column
+/// v2 added reads its lens default until someone writes it.
 ///
 /// ```text
-/// alice (v1) ──count=1──► core            row stored under v1
-/// bob   (v2) ──count +5──► core ──✗ Rejected("… not supported yet …")
+/// alice (v1) ──count=1──► core            count=1
+/// bob   (v2) ──count +5──► core            count=6, notes=""
 /// ```
 #[test]
-fn merge_column_write_over_a_row_of_another_schema_is_refused() {
+fn merge_column_write_over_a_row_of_another_schema_applies_its_op() {
     let base = counter_schema();
     let evolved_schema = counter_schema_with_notes();
     let evolved = SchemaVersion::new(evolved_schema.clone());
@@ -966,19 +1183,31 @@ fn merge_column_write_over_a_row_of_another_schema_is_refused() {
                 .cells(BTreeMap::from([("count".to_owned(), Value::I32(5))])),
         )
         .unwrap();
-    let fate = core_fate(&mut core, bob_unit);
-    let SyncMessage::FateUpdate {
-        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
-        ..
-    } = &fate
-    else {
-        panic!("Core must refuse a cross-schema merge op, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet"), "{reason}");
+    assert_accepted(&core_fate(&mut core, bob_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
-        BTreeMap::from([(target, counter_cells(1, "base"))])
+        BTreeMap::from([(target, counter_cells(6, "base"))])
     );
+    let mut evolved_row = counter_cells(6, "base");
+    evolved_row.insert("notes".to_owned(), v(""));
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "counters", evolved.id),
+        BTreeMap::from([(target, evolved_row)])
+    );
+}
+
+/// Core's current rows of `table` as a reader of `schema` sees them.
+fn rows_for_schema_at_core(
+    core: &mut NodeState,
+    table: &str,
+    schema: SchemaVersionId,
+) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+    core.current_rows_for_schema(table, schema, DurabilityTier::Global)
+        .resolve()
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect()
 }
 
 /// A Core with `base` as its schema and `evolved` published as a descendant
@@ -986,6 +1215,17 @@ fn merge_column_write_over_a_row_of_another_schema_is_refused() {
 fn core_with_descendant_schema(
     base: JazzSchema,
     evolved: JazzSchema,
+    ops: Vec<LensOp>,
+) -> (tempfile::TempDir, NodeState) {
+    core_with_descendant_table_schema(base, evolved, "counters", ops)
+}
+
+/// A Core with `base` as its schema and `evolved` published as a descendant
+/// through `ops` on `table`.
+fn core_with_descendant_table_schema(
+    base: JazzSchema,
+    evolved: JazzSchema,
+    table: &str,
     ops: Vec<LensOp>,
 ) -> (tempfile::TempDir, NodeState) {
     let evolved_version = SchemaVersion::new(evolved);
@@ -997,8 +1237,8 @@ fn core_with_descendant_schema(
             base.version_id(),
             evolved_version.id,
             vec![TableLens {
-                source_table: "counters".to_owned(),
-                target_table: "counters".to_owned(),
+                source_table: table.to_owned(),
+                target_table: table.to_owned(),
                 ops,
             }],
         )
@@ -1032,9 +1272,9 @@ fn assert_accepted(fate: &SyncMessage) {
 
 /// INV-HIST-10 across schema versions: a plain-column write made under a
 /// descendant schema must not carry its stale snapshot of a merge column over
-/// ops Core already accepted. Across layouts the row is whole-row
-/// last-writer-wins (#3899), and bob's patch holds the counter he saw as an
-/// absolute value; Core keeps the counter's settled value instead.
+/// ops Core already accepted. bob's patch holds the counter he saw as an
+/// absolute value, but he does not author it, so Core's per-column merge
+/// keeps the counter's settled value (#3899).
 ///
 /// ```text
 /// base  (v1) ──count=1──────────► core   count=1
@@ -1161,10 +1401,11 @@ fn plain_column_write_across_schemas_keeps_accepted_gset_additions() {
 }
 
 /// A cross-schema plain write whose schema maps the merge column to another
-/// name cannot carry the settled value without guessing: Core refuses it
-/// with the explicit not-supported-yet reason, and the row keeps its counter.
+/// name. The rename keeps the column's physical id, so bob's write, which
+/// does not author the counter, leaves its settled value in place under
+/// both names.
 #[test]
-fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
+fn plain_column_write_across_schemas_with_a_renamed_merge_column_keeps_the_counter() {
     let base = counter_schema();
     let evolved = {
         let source = [(
@@ -1186,6 +1427,7 @@ fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
     }];
     ops.extend(add_notes_lens());
     let (_core_dir, mut core) = core_with_descendant_schema(base.clone(), evolved.clone(), ops);
+    let evolved_id = evolved.version_id();
     let (_base_dir, mut base_writer) = open_node_with_schema(node(1), base);
     let (_bob_dir, mut bob) = open_node_with_schema(node(3), evolved);
     let target = row(0x74);
@@ -1206,18 +1448,21 @@ fn plain_column_write_across_schemas_with_a_renamed_merge_column_is_refused() {
                 .authored_columns(BTreeSet::from(["notes".to_owned()])),
         )
         .unwrap();
-    let fate = core_fate(&mut core, bob_unit);
-    let SyncMessage::FateUpdate {
-        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
-        ..
-    } = &fate
-    else {
-        panic!("Core must refuse the write, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
+    assert_accepted(&core_fate(&mut core, bob_unit));
     assert_eq!(
         rows_at(&mut core, "counters", DurabilityTier::Global),
         BTreeMap::from([(target, counter_cells(6, "base"))])
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "counters", evolved_id),
+        BTreeMap::from([(
+            target,
+            BTreeMap::from([
+                ("total".to_owned(), Value::I32(6)),
+                ("title".to_owned(), v("base")),
+                ("notes".to_owned(), v("bob")),
+            ])
+        )])
     );
 }
 
@@ -1430,16 +1675,17 @@ fn likes_row_at_core(core: &mut NodeState, target: RowUuid) -> BTreeMap<String, 
     .1
 }
 
-fn assert_refused_across_schemas(fate: &Fate) {
-    let Fate::Rejected(RejectionReason::MalformedCommit(reason)) = fate else {
-        panic!("Core must refuse the older-schema write, got {fate:?}");
-    };
-    assert!(reason.contains("not supported yet (#3899)"), "{reason}");
-}
-
-/// After the refusal, bob's next v2 write (notes only) leaves his accepted
-/// +5 in place.
-fn assert_bob_keeps_likes(core: &mut NodeState, bob: &mut NodeState, target: RowUuid) {
+/// The older-schema write was accepted and set the title, and the row still
+/// holds bob's accepted +5; bob's next v2 write (notes only) keeps both.
+fn assert_bob_keeps_likes(
+    core: &mut NodeState,
+    bob: &mut NodeState,
+    target: RowUuid,
+    title: &str,
+) {
+    let row = likes_row_at_core(core, target);
+    assert_eq!(row.get("likes"), Some(&Value::I32(5)), "{row:?}");
+    assert_eq!(row.get("title"), Some(&v(title)), "{row:?}");
     let (_bob_tx, bob_unit) = bob
         .commit_mergeable_unit_settled(
             MergeableCommit::new("counters", target, 40)
@@ -1452,22 +1698,22 @@ fn assert_bob_keeps_likes(core: &mut NodeState, bob: &mut NodeState, target: Row
     bob.apply_sync_message_settled(fate).unwrap();
     let row = likes_row_at_core(core, target);
     assert_eq!(row.get("likes"), Some(&Value::I32(5)), "{row:?}");
-    assert_eq!(row.get("title"), Some(&v("t")), "{row:?}");
+    assert_eq!(row.get("title"), Some(&v(title)), "{row:?}");
     assert_eq!(row.get("notes"), Some(&v("bob")), "{row:?}");
 }
 
-/// INV-HIST-10: a write under an older schema that lacks a merge column the
-/// row's current image holds would win the row whole and drop the column;
-/// the next newer-schema write would then take the lens default (0) and
-/// silently lose bob's accepted +5. Core refuses the older write instead.
+/// INV-HIST-10, #3899: a write under an older schema that lacks a merge
+/// column the row's current image holds. Core merges it per physical
+/// column into the row's union layout, so the counter it does not author
+/// keeps bob's accepted +5 instead of falling back to the lens default (0).
 ///
 /// ```text
-/// bob   (v2) ──likes=5───────► core   image v2, likes=5
-/// alice (v1) ──title="alice"─► core ──✗ Rejected("… not supported yet (#3899)")
+/// bob   (v2) ──likes=5───────► core   likes=5
+/// alice (v1) ──title="alice"─► core   title="alice", likes=5
 /// bob   (v2) ──notes="bob"───► core   likes=5
 /// ```
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_foreign_unit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_foreign_unit() {
     let target = row(0x78);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let (_alice_dir, mut alice) = open_node_with_schema(node(1), likes_schema(false));
@@ -1478,17 +1724,14 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_foreign_unit() {
                 .authored_columns(BTreeSet::from(["title".to_owned()])),
         )
         .unwrap();
-    let SyncMessage::FateUpdate { fate, .. } = core_fate(&mut core, alice_unit) else {
-        unreachable!()
-    };
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_accepted(&core_fate(&mut core, alice_unit));
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "alice");
 }
 
-/// The same refusal when Core itself writes under the older schema and
+/// The same merge when Core itself writes under the older schema and
 /// self-finalizes the mergeable commit.
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_local_mergeable_commit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_mergeable_commit() {
     let target = row(0x79);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let tx_id = core
@@ -1500,13 +1743,13 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_local_mergeable_co
         .unwrap();
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
     let fate = core.query_transaction(tx_id).resolve().unwrap().unwrap().fate;
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_eq!(fate, Fate::Accepted);
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "core");
 }
 
-/// The same refusal for Core's own exclusive commit under the older schema.
+/// The same merge for Core's own exclusive commit under the older schema.
 #[test]
-fn older_schema_write_without_a_merge_column_is_refused_for_a_local_exclusive_commit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_exclusive_commit() {
     let target = row(0x7a);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let open = OpenTransactionId::new();
@@ -1529,8 +1772,8 @@ fn older_schema_write_without_a_merge_column_is_refused_for_a_local_exclusive_co
         crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
             .unwrap();
     let fate = crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap();
-    assert_refused_across_schemas(&fate);
-    assert_bob_keeps_likes(&mut core, &mut bob, target);
+    assert_eq!(fate, Fate::Accepted);
+    assert_bob_keeps_likes(&mut core, &mut bob, target, "core");
 }
 
 /// An originator settles its own accepted write when the fate arrives by
@@ -1638,4 +1881,811 @@ fn originator_late_accepted_fate_does_not_count_its_op_twice() {
         rows_at(&mut alice, "counters", DurabilityTier::Global)[&target].get("count"),
         Some(&Value::I32(6))
     );
+}
+
+/// `todos` with the given text and boolean columns, in order.
+fn todos_schema(columns: &[(&str, PublicColumnType)]) -> JazzSchema {
+    let source = [(
+        PublicTableName::new("todos"),
+        PublicTableSchema::new(PublicRowDescriptor::new(
+            columns
+                .iter()
+                .map(|(name, column_type)| PublicColumnDescriptor::new(*name, column_type.clone()))
+                .collect(),
+        )),
+    )]
+    .into_iter()
+    .collect::<PublicSchema>();
+    compile_public_test_schema(&source)
+}
+
+fn todo_row(cells: &[(&str, Value)]) -> BTreeMap<String, Value> {
+    cells
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), value.clone()))
+        .collect()
+}
+
+/// One write of `cells` to `todos`, authoring exactly those cells, decided
+/// by Core.
+fn write_todo(
+    writer: &mut NodeState,
+    core: &mut NodeState,
+    target: RowUuid,
+    time: u64,
+    cells: &[(&str, Value)],
+) {
+    let cells = todo_row(cells);
+    let authored = cells.keys().cloned().collect::<BTreeSet<_>>();
+    let (_tx, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, time)
+                .cells(cells)
+                .authored_columns(authored),
+        )
+        .unwrap();
+    assert_accepted(&core_fate(core, unit));
+}
+
+/// #3562: v2 adds `dueDate`. A v1 client's partial update must not reset
+/// it for v2 readers: Core merges the write into the row per physical
+/// column, and `dueDate` keeps the value alice's v2 write set.
+///
+/// ```text
+/// alice (v2) ──{a, done=false, dueDate=10-01}──► core
+/// bob   (v1) ──done=true──────────────────────► core   v2 reads {a, true, 10-01}
+/// alice (v2) ──title=b────────────────────────► core   v2 reads {b, true, 10-01}
+/// ```
+#[test]
+fn older_schema_partial_update_keeps_a_column_added_later() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![LensOp::AddColumn {
+            column: "dueDate".to_owned(),
+            default: v(""),
+        }],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1);
+    let target = row(0x90);
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(&mut bob, &mut core, target, 20, &[("done", Value::Bool(true))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("a")),
+            ("done", Value::Bool(true)),
+            ("dueDate", v("10-01")),
+        ]),
+        "bob's v1 update must keep alice's dueDate"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v1_id)[&target],
+        todo_row(&[("title", v("a")), ("done", Value::Bool(true))]),
+    );
+
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("b")),
+            ("done", Value::Bool(true)),
+            ("dueDate", v("10-01")),
+        ]),
+    );
+}
+
+/// #3838: v2 drops `legacy` and adds `dueDate`. A v1 client edits `legacy`
+/// and `done` over alice's v2 row. Core keeps `legacy` as a column of the
+/// row's union layout, so v1 readers see bob's value, v2 readers keep
+/// `dueDate`, and later v2 writes keep `legacy` for v1 readers.
+///
+/// ```text
+/// alice (v2) ──{a, false, dueDate=10-01}──► core
+/// bob   (v1) ──legacy=x, done=true────────► core   v1 {a, true, x}; v2 {a, true, 10-01}
+/// alice (v2) ──title=b────────────────────► core   v1 {b, true, x}; v2 {b, true, 10-01}
+/// bob   (v1) ──done=false─────────────────► core   v1 {b, false, x}; v2 {b, false, 10-01}
+/// ```
+#[test]
+fn older_schema_edit_of_a_dropped_column_keeps_both_layouts_columns() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1);
+    let target = row(0x91);
+    let both = |core: &mut NodeState, title: &str, done: bool| {
+        assert_eq!(
+            rows_for_schema_at_core(core, "todos", v1_id)[&target],
+            todo_row(&[
+                ("title", v(title)),
+                ("done", Value::Bool(done)),
+                ("legacy", v("x")),
+            ]),
+            "v1 readers keep bob's legacy"
+        );
+        assert_eq!(
+            rows_for_schema_at_core(core, "todos", v2_id)[&target],
+            todo_row(&[
+                ("title", v(title)),
+                ("done", Value::Bool(done)),
+                ("dueDate", v("10-01")),
+            ]),
+            "v2 readers keep alice's dueDate"
+        );
+    };
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+    both(&mut core, "a", true);
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    both(&mut core, "b", true);
+    write_todo(&mut bob, &mut core, target, 40, &[("done", Value::Bool(false))]);
+    both(&mut core, "b", false);
+}
+
+/// #3838 at a receiver: Core's union image of the row reaches a client
+/// that knows both schema versions, which reads the row as Core's readers
+/// of each schema do: v1 keeps bob's `legacy`, v2 keeps alice's `dueDate`.
+#[test]
+fn receivers_read_a_union_image_as_core_does() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x92);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+
+    let v1_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(true)),
+        ("legacy", v("x")),
+    ]);
+    let v2_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(true)),
+        ("dueDate", v("10-01")),
+    ]);
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v1_id)[&target],
+        v1_row,
+        "a v1 reader at the receiver keeps bob's legacy"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver keeps alice's dueDate"
+    );
+}
+
+/// The lineage's schemas need not be registered in lens order: here v1 is
+/// published as a descendant of v2, so v1 is the newest schema on every node
+/// and Core lays images out in v1's union case, carrying v2's `dueDate` as an
+/// extra. Readers of each schema still see what writers of it wrote.
+#[test]
+fn union_image_laid_out_in_a_schema_older_than_the_readers_reads_as_written() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v1_id, v2_id) = (v1.version_id(), v2.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v2.clone(),
+        v1.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "dueDate".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "legacy".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x93);
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("legacy", v("x")),
+        ],
+    );
+    write_todo(&mut alice, &mut core, target, 20, &[("dueDate", v("10-01"))]);
+    let v1_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(false)),
+        ("legacy", v("x")),
+    ]);
+    let v2_row = todo_row(&[
+        ("title", v("a")),
+        ("done", Value::Bool(false)),
+        ("dueDate", v("10-01")),
+    ]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v2_id)[&target], v2_row);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v1_id)[&target], v1_row);
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v2);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver sees alice's dueDate"
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v1_id)[&target],
+        v1_row,
+        "a v1 reader at the receiver keeps bob's legacy"
+    );
+}
+
+/// The originator of a write whose own schema is not the one Core lays the
+/// row out in: v1 is published as a descendant of v2, so Core's image is in
+/// v1's union case. Alice (v2) updates bob's v1-era row; once Core's fate
+/// and image reach her, she reads her own write.
+#[test]
+fn originator_reads_its_write_from_a_union_image_in_another_schema() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let v2_id = v2.version_id();
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v2.clone(),
+        v1.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "dueDate".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "legacy".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2.clone());
+    alice
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x94);
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("legacy", v("x")),
+        ],
+    );
+    sync_table_rows_to(&mut core, &mut alice, "todos");
+
+    let cells = todo_row(&[("dueDate", v("10-01"))]);
+    let authored = cells.keys().cloned().collect::<BTreeSet<_>>();
+    let (_tx, unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 20)
+                .cells(cells)
+                .authored_columns(authored),
+        )
+        .unwrap();
+    let fate = core_fate(&mut core, unit);
+    assert_accepted(&fate);
+    alice.apply_sync_message_settled(fate).unwrap();
+    sync_table_rows_to(&mut core, &mut alice, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut alice, "todos", v2_id)[&target],
+        todo_row(&[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ]),
+        "alice reads her own dueDate from Core's image"
+    );
+}
+
+/// A one-table `todos` lens from `base` to `evolved`.
+fn todos_lens(base: &JazzSchema, evolved: &JazzSchema, ops: Vec<LensOp>) -> MigrationLens {
+    MigrationLens::new(
+        base.version_id(),
+        SchemaVersion::new(evolved.clone()).id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops,
+        }],
+    )
+    .expect("valid migration lens")
+}
+
+/// A copy (`CopyColumn`) is a column of its own, also when it is an extra of
+/// the row's union layout. v2 copies `title` into `displayTitle`; v3 is a
+/// sibling of v2 (both descend from v1) that adds `dueDate`, so v3 ranks
+/// last and Core lays the row out in v3's union case, where `displayTitle`
+/// is an extra. alice's v2 writes of `displayTitle` are stored there: v2
+/// reads them back at Core and at a receiver, not the projection of `title`.
+///
+/// ```text
+/// v1 {title} ──copy title→displayTitle──► v2 {title, displayTitle}
+///    └────────add dueDate───────────────► v3 {title, dueDate}   (ranked last)
+/// alice (v2) ──{a, Custom}──► core     v2 reads {a, Custom}
+/// alice (v2) ──displayTitle=Custom2──► core   v2 reads {a, Custom2}; v3 {a, ""}
+/// ```
+#[test]
+fn copy_target_write_is_stored_in_a_sibling_union_layout() {
+    let v1 = todos_schema(&[("title", PublicColumnType::Text)]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("displayTitle", PublicColumnType::Text),
+    ]);
+    let v3 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let (v2_id, v3_id) = (v2.version_id(), v3.version_id());
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![LensOp::CopyColumn {
+            from: "title".to_owned(),
+            to: "displayTitle".to_owned(),
+        }],
+    );
+    publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(v3.clone()),
+        todos_lens(
+            &v1,
+            &v3,
+            vec![LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("v3 publishes as a sibling of v2");
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let target = row(0x95);
+
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[("title", v("a")), ("displayTitle", v("Custom"))],
+    );
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        todo_row(&[("title", v("a")), ("displayTitle", v("Custom"))]),
+    );
+    write_todo(&mut alice, &mut core, target, 20, &[("displayTitle", v("Custom2"))]);
+    let v2_row = todo_row(&[("title", v("a")), ("displayTitle", v("Custom2"))]);
+    let v3_row = todo_row(&[("title", v("a")), ("dueDate", v(""))]);
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", v2_id)[&target],
+        v2_row,
+        "alice's accepted displayTitle is stored, not replaced by the copy of title"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", v3_id)[&target], v3_row);
+
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", v2_id)[&target],
+        v2_row,
+        "a v2 reader at the receiver sees alice's displayTitle"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut receiver, "todos", v3_id)[&target], v3_row);
+}
+
+/// Which extras a union case stores is fixed when its schema is published.
+/// Rows sit in G's union case with E's `notes` stored; then H is published
+/// with both G and E as predecessors, which adds lens routes between them.
+/// The stored `notes` stays readable for E at Core and at a receiver that
+/// learns the catalogue (and so H) before the rows, and a later G write,
+/// laid out under H, keeps it.
+///
+/// ```text
+/// v1 {title} ──add notes──► E {title, notes}
+///    └───────add dueDate──► G {title, dueDate}          (ranked after E)
+/// G, E ──────────────────► H {title, dueDate, notes}   (published later)
+/// alice (G) ──{a, 10-01}──► core
+/// carol (E) ──notes=n─────► core     row in G's union case, notes stored
+/// publish H                          E reads {a, n}; G reads {a, 10-01}
+/// alice (G) ──title=b─────► core     E reads {b, n}
+/// ```
+#[test]
+fn stored_union_extras_survive_a_later_schema_with_several_predecessors() {
+    let v1 = todos_schema(&[("title", PublicColumnType::Text)]);
+    let e = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("notes", PublicColumnType::Text),
+    ]);
+    let g = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let h = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("dueDate", PublicColumnType::Text),
+        ("notes", PublicColumnType::Text),
+    ]);
+    let (e_id, g_id) = (e.version_id(), g.version_id());
+    let add = |column: &str| LensOp::AddColumn {
+        column: column.to_owned(),
+        default: v(""),
+    };
+    let (_core_dir, mut core) =
+        core_with_descendant_table_schema(v1.clone(), e.clone(), "todos", vec![add("notes")]);
+    publish_schema_lineage(
+        &mut core,
+        SchemaVersion::new(g.clone()),
+        todos_lens(&v1, &g, vec![add("dueDate")]),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("G publishes as a sibling of E");
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), g.clone());
+    let (_carol_dir, mut carol) = open_node_with_schema(node(2), e.clone());
+    let target = row(0x96);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[("title", v("a")), ("dueDate", v("10-01"))],
+    );
+    write_todo(&mut carol, &mut core, target, 20, &[("notes", v("n"))]);
+    let e_row = |title: &str| todo_row(&[("title", v(title)), ("notes", v("n"))]);
+    let g_row = |title: &str| todo_row(&[("title", v(title)), ("dueDate", v("10-01"))]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", e_id)[&target], e_row("a"));
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("a"));
+
+    let publication = core
+        .author_schema_from_predecessors(
+            SchemaVersion::new(h.clone()),
+            vec![
+                crate::protocol::SchemaPredecessor {
+                    lens: todos_lens(&g, &h, vec![add("notes")]),
+                    new_tables: Vec::new(),
+                    dropped_tables: Vec::new(),
+                },
+                crate::protocol::SchemaPredecessor {
+                    lens: todos_lens(&e, &h, vec![add("dueDate")]),
+                    new_tables: Vec::new(),
+                    dropped_tables: Vec::new(),
+                },
+            ],
+        )
+        .unwrap();
+    let catalogue_seq = core.active_catalogue_seq() + 1;
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq,
+        publication: Box::new(publication),
+    })
+    .expect("H publishes with G and E as predecessors");
+
+    assert_eq!(
+        rows_for_schema_at_core(&mut core, "todos", e_id)[&target],
+        e_row("a"),
+        "carol's notes stays stored in G's union case after H"
+    );
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("a"));
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
+    sync_table_rows_to(&mut core, &mut receiver, "todos");
+    assert_eq!(
+        rows_for_schema_at_core(&mut receiver, "todos", e_id)[&target],
+        e_row("a"),
+        "a receiver that knows H admits and reads Core's G union image"
+    );
+
+    write_todo(&mut alice, &mut core, target, 30, &[("title", v("b"))]);
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", e_id)[&target], e_row("b"));
+    assert_eq!(rows_for_schema_at_core(&mut core, "todos", g_id)[&target], g_row("b"));
+}
+
+/// A receiver admits a Core image's union cells only as exactly the
+/// layout's stored extras, each entry in its schema's column order and
+/// typed as that schema's cells (SPEC 10 §10.3, SPEC 16). Here v2 drops
+/// v1's `legacy`, so Core's image of bob's v1 write is v2's union case
+/// carrying `legacy` from v1. A tampered entry is refused before anything
+/// of the row is stored; the untampered one is admitted.
+#[test]
+fn receivers_reject_union_cells_that_are_not_the_layouts_stored_extras() {
+    let v1 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("legacy", PublicColumnType::Text),
+    ]);
+    let v2 = todos_schema(&[
+        ("title", PublicColumnType::Text),
+        ("done", PublicColumnType::Boolean),
+        ("dueDate", PublicColumnType::Text),
+    ]);
+    let v1_id = v1.version_id();
+    let (_core_dir, mut core) = core_with_descendant_table_schema(
+        v1.clone(),
+        v2.clone(),
+        "todos",
+        vec![
+            LensOp::DropColumn {
+                column: "legacy".to_owned(),
+                backwards_default: v(""),
+            },
+            LensOp::AddColumn {
+                column: "dueDate".to_owned(),
+                default: v(""),
+            },
+        ],
+    );
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), v2);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), v1.clone());
+    let target = row(0x93);
+    write_todo(
+        &mut alice,
+        &mut core,
+        target,
+        10,
+        &[
+            ("title", v("a")),
+            ("done", Value::Bool(false)),
+            ("dueDate", v("10-01")),
+        ],
+    );
+    write_todo(
+        &mut bob,
+        &mut core,
+        target,
+        20,
+        &[("legacy", v("x")), ("done", Value::Bool(true))],
+    );
+
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let bundles = version_bundles_for_update(&update);
+    let (bundle_index, version_index) = bundles
+        .iter()
+        .enumerate()
+        .find_map(|(bundle_index, bundle)| {
+            bundle
+                .versions
+                .iter()
+                .position(|version| !version.extra_cells().is_empty())
+                .map(|version_index| (bundle_index, version_index))
+        })
+        .expect("Core's image is a union row");
+    let image = bundles[bundle_index].versions[version_index].clone();
+    let fields = image.extra_cells()[0]
+        .record()
+        .descriptor()
+        .fields()
+        .iter()
+        .map(|field| field.name.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (image.extra_cells().len(), image.extra_cells()[0].schema_version(), fields),
+        (1, v1_id, vec!["_app_legacy".to_owned()]),
+        "the image carries exactly v1's legacy"
+    );
+    let request = crate::protocol::RowVersionRef::new(
+        image.table().to_owned(),
+        image.row_uuid(),
+        bundles[bundle_index].tx.tx_id,
+    );
+    let text = |value: &str| Value::Nullable(Some(Box::new(v(value))));
+    let nullable = |value_type| records::ValueType::Nullable(Box::new(value_type));
+    let entry = |cells: Vec<(&str, records::ValueType, Value)>| {
+        let descriptor = records::RecordDescriptor::new(
+            cells
+                .iter()
+                .map(|(name, value_type, _)| ((*name).to_owned(), value_type.clone())),
+        );
+        let values = cells.into_iter().map(|(_, _, value)| value).collect::<Vec<_>>();
+        crate::protocol::UnionExtraCells::new(
+            v1_id,
+            "todos",
+            records::OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+        )
+    };
+    let receive = |extras: Option<Vec<crate::protocol::UnionExtraCells>>| {
+        let mut bundles = bundles.clone();
+        if let Some(extras) = extras {
+            bundles[bundle_index].versions[version_index] = image.clone().with_extra_cells(extras);
+        }
+        let (_receiver_dir, mut receiver) = open_node_with_schema(node(3), v1.clone());
+        receiver
+            .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+            .unwrap();
+        receiver
+            .apply_row_version_payloads_for_requests(&[request.clone()], bundles)
+            .resolve()
+            .map(|_| ())
+    };
+
+    const NOT_EXTRAS: &str = "row version union cells are not its schema's union extras";
+    const NOT_SCHEMA: &str = "row version union cells do not match their schema";
+    for (case, expected, extras) in [
+        (
+            "a column of the layout itself",
+            NOT_EXTRAS,
+            vec![entry(vec![("_app_title", nullable(records::ValueType::String), text("a"))])],
+        ),
+        (
+            "cells out of the schema's column order",
+            NOT_SCHEMA,
+            vec![entry(vec![
+                ("_app_legacy", nullable(records::ValueType::String), text("x")),
+                ("_app_title", nullable(records::ValueType::String), text("a")),
+            ])],
+        ),
+        (
+            "a cell of the wrong type",
+            NOT_SCHEMA,
+            vec![entry(vec![(
+                "_app_legacy",
+                nullable(records::ValueType::Bool),
+                Value::Nullable(Some(Box::new(Value::Bool(true)))),
+            )])],
+        ),
+        (
+            "an extra the layout does not store besides the one it does",
+            NOT_EXTRAS,
+            vec![entry(vec![
+                ("_app_done", nullable(records::ValueType::Bool), Value::Nullable(None)),
+                ("_app_legacy", nullable(records::ValueType::String), text("x")),
+            ])],
+        ),
+    ] {
+        let result = receive(Some(extras));
+        assert!(
+            matches!(result, Err(Error::MalformedViewUpdate(message)) if message == expected),
+            "{case}: {result:?}"
+        );
+    }
+    receive(None).expect("Core's own union cells are admitted");
 }

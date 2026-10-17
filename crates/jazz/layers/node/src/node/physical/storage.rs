@@ -287,7 +287,7 @@ where
     pub(super) fn contribution_merge_storage_value(
         &self,
         provenance: Option<&ContributionMergeProvenance>,
-    ) -> Result<Value, Error> {
+    ) -> Result<Option<OwnedRecord>, Error> {
         super::codec::contribution_merge_storage_value(
             provenance,
             |table| self.contribution_table_id_for_storage(table),
@@ -315,7 +315,15 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "authored columns schema version alias missing",
             ))?;
-        let ids = version.authored_column_ids()?;
+        let mut ids = version.authored_column_ids()?;
+        // A union row's authored set can name columns its schema does not map
+        // (an older schema's write merged into this layout); those cells live
+        // in the row's union extras and have no name under its schema.
+        if let Some(ids) = ids.as_mut() {
+            for (extra, _) in version.union_extra_cells()? {
+                ids.remove(&extra);
+            }
+        }
         self.authored_column_names_for_ids(
             schema_version,
             version.table(),
@@ -329,12 +337,46 @@ where
         logical_table: &str,
         target: PhysicalWriteTarget,
     ) -> Result<Arc<PreparedPhysicalWritePlan>, Error> {
+        self.prepared_physical_write_plan_for_layout(schema_version, logical_table, target, false)
+    }
+
+    /// The write plan of the row case `version` is laid out in: its schema's
+    /// union case when it carries union extras, its authored case otherwise.
+    pub(super) fn prepared_physical_write_plan_for_row(
+        &mut self,
+        version: &VersionRow,
+        target: PhysicalWriteTarget,
+    ) -> Result<Arc<PreparedPhysicalWritePlan>, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "stored row schema version alias missing while preparing storage write",
+            ))?;
+        let union = !version.union_extra_cells()?.is_empty();
+        self.prepared_physical_write_plan_for_layout(
+            schema_version,
+            version.table(),
+            target,
+            union,
+        )
+    }
+
+    /// `union` selects the schema's union case (SPEC 10 §10.3, "Union row
+    /// cases"): the authored layout followed by the lineage's other columns,
+    /// stored in their physical spelling.
+    pub(super) fn prepared_physical_write_plan_for_layout(
+        &mut self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        target: PhysicalWriteTarget,
+        union: bool,
+    ) -> Result<Arc<PreparedPhysicalWritePlan>, Error> {
         if let Some(plan) = self
             .catalogue
             .physical_write_plan_cache
             .get(&schema_version)
             .and_then(|tables| tables.get(logical_table))
-            .and_then(|targets| targets.get(&target))
+            .and_then(|targets| targets.get(&(target, union)))
         {
             return Ok(Arc::clone(plan));
         }
@@ -370,6 +412,52 @@ where
             )?,
         };
         let physical_table = Arc::new(self.database.table_schema(&storage_table)?.clone());
+        let extras = if union {
+            let extras = union_extra_columns(
+                &self.catalogue.physical_mappings,
+                &self.catalogue_ranks(),
+                schema_version,
+                logical_table,
+            )?;
+            if extras.is_empty() {
+                return Err(Error::InvalidStoredValue(
+                    "union row of a schema whose lineage has no other columns",
+                ));
+            }
+            extras
+                .iter()
+                .map(|column_id| {
+                    let name = physical_user_column_field(*column_id);
+                    let column_type = physical_table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == name)
+                        .ok_or(Error::InvalidStoredValue("union column missing"))?
+                        .column_type
+                        .clone();
+                    Ok((name, column_type))
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+        } else {
+            Vec::new()
+        };
+        let with_extras = |descriptor: records::RecordDescriptor| {
+            if extras.is_empty() {
+                return descriptor;
+            }
+            records::RecordDescriptor::new(
+                descriptor
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.clone().expect("Jazz row fields are named"),
+                            field.value_type.clone(),
+                        )
+                    })
+                    .chain(extras.iter().cloned()),
+            )
+        };
         let logical_descriptor = match target {
             PhysicalWriteTarget::History => source_table.history_storage_table().record_schema(),
             PhysicalWriteTarget::GlobalCurrent => {
@@ -387,9 +475,14 @@ where
                 physical_current_field_names(&source_table, &source_mapping)?
             }
         };
+        let base_width = physical_names.len();
+        let history_base_width = source_table.history_storage_table().record_schema().fields().len();
+        let mut physical_names = physical_names;
+        physical_names.extend(extras.iter().map(|(name, _)| name.clone()));
+        let logical_descriptor = with_extras(logical_descriptor);
         let physical_descriptor =
             physical_write_descriptor(&logical_descriptor, &physical_names, &physical_table)?;
-        let history_descriptor = source_table.history_storage_table().record_schema();
+        let history_descriptor = with_extras(source_table.history_storage_table().record_schema());
         let enum_remaps =
             self.prepare_authored_enum_cells_for_physical(&source_table, &source_mapping)?;
         let current = target != PhysicalWriteTarget::History;
@@ -403,8 +496,10 @@ where
             .iter()
             .enumerate()
             .map(|(index, field)| {
-                if !current && index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
-                    return PhysicalWriteField::HistoryUpdatedBy;
+                // Union extras follow every authored field in both layouts
+                // and are already in their physical spelling.
+                if index >= base_width {
+                    return PhysicalWriteField::Copy(history_base_width + (index - base_width));
                 }
                 if current {
                     match index {
@@ -456,6 +551,7 @@ where
             history_descriptor,
             write_fields,
             enum_remaps,
+            union,
         });
         self.catalogue
             .physical_write_plan_cache
@@ -463,7 +559,7 @@ where
             .or_default()
             .entry(logical_table.to_owned())
             .or_default()
-            .insert(target, Arc::clone(&plan));
+            .insert((target, union), Arc::clone(&plan));
         Ok(plan)
     }
 
@@ -790,14 +886,10 @@ where
         Ok(())
     }
 
-    /// Encode `version` for its history table. `tx_author` is the `made_by`
-    /// of the transaction that wrote it: the image stores `updated_by` only
-    /// when it differs (SPEC 2 §2.7.1). Every caller writes or holds that
-    /// transaction record, so a read can always fill the author back in.
+    /// Encode `version` for its history table.
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
-        tx_author: AuthorSubject,
     ) -> Result<
         (
             groove::Intern<String>,
@@ -810,18 +902,14 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "stored row schema version alias missing while preparing storage write",
             ))?;
-        let plan = self.prepared_physical_write_plan(
-            schema_version,
-            version.table(),
-            PhysicalWriteTarget::History,
-        )?;
+        let plan = self.prepared_physical_write_plan_for_row(version, PhysicalWriteTarget::History)?;
         // Every history write goes through this binding; list the row in its
         // transaction record when the batch is flushed.
         let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
         self.mark_tx_touched_row(table_id, version);
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
-            self.encode_physical_version_record(&plan, version, None, Some(tx_author))?,
+            self.encode_physical_version_record(&plan, version, None)?,
         ))
     }
 
@@ -833,23 +921,16 @@ where
         plan: &PreparedPhysicalWritePlan,
         version: &VersionRow,
         global_time: Option<GlobalTime>,
-        tx_author: Option<AuthorSubject>,
     ) -> Result<groove::records::ValidatedVariantRecord, Error> {
         let input = version.record.borrowed();
-        let history_updated_by = |version: &VersionRow| -> Result<Value, Error> {
-            let tx_author = tx_author.ok_or(Error::InvalidStoredValue(
-                "a history image is written with its transaction author",
-            ))?;
-            let updated_by = version.updated_by();
-            Ok(if row_author_value(updated_by)? == row_author_value(tx_author)? {
-                Value::Nullable(None)
-            } else {
-                history_updated_by_value(updated_by)?
-            })
-        };
         let matching_layout = input.descriptor() == plan.history_descriptor;
+        let tag = if plan.union {
+            union_variant_tag(version.schema_version_alias())?
+        } else {
+            groove_variant_tag(version.schema_version_alias())?
+        };
         let encoded = groove::records::ValidatedVariantRecord::create_with_encoded_fields::<Error>(
-            groove_variant_tag(version.schema_version_alias())?,
+            tag,
             plan.physical_descriptor,
             input.raw().len() + 16,
             |index, output| {
@@ -869,7 +950,6 @@ where
                         Value::U64(version.updated_at().physical_ms())
                     }
                     PhysicalWriteField::UpdatedBy => row_author_value(version.updated_by())?,
-                    PhysicalWriteField::HistoryUpdatedBy => history_updated_by(version)?,
                     PhysicalWriteField::GlobalTime => {
                         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0))))
                     }
@@ -906,9 +986,7 @@ where
             let mut values = if current {
                 global_current_values(&plan.source_table, version, global_time)?
             } else {
-                let mut values = version.record.to_values()?;
-                values[HistoryRowRecord::FIELD_UPDATED_BY_IDX] = history_updated_by(version)?;
-                values
+                version.record.to_values()?
             };
             self.remap_authored_enum_cells_for_physical(
                 &mut values,

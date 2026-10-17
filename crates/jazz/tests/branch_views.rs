@@ -3159,3 +3159,193 @@ fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
         rows
     });
 }
+
+/// An older reader omits a head row it cannot decode, but that head row still
+/// masks the base row underneath: the reader never sees the base body.
+///
+/// base/open ──v2 head/closed──► v1 reader of head-over-base sees neither
+#[test]
+fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
+    let schema = |variants: &[&str]| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("todos")
+                        .column("branch_id", ColumnType::Uuid)
+                        .column("title", ColumnType::Text)
+                        .column(
+                            "status",
+                            ColumnType::ScalarEnum {
+                                name: "Status".to_owned(),
+                                variants: variants
+                                    .iter()
+                                    .map(|variant| (*variant).to_owned())
+                                    .collect(),
+                            },
+                        )
+                        .branch_by("branch_id"),
+                )
+                .build(),
+        )
+    };
+    let v1 = schema(&["open"]);
+    let db = open_history_complete_db_with_schema(v1.clone());
+    let old = block_on(db.register_schema_view(v1.clone())).unwrap();
+    let base = selector(0x51);
+    let head = selector(0x52);
+    let incompatible = RowUuid::from_bytes([0x53; 16]);
+    let inherited = RowUuid::from_bytes([0x54; 16]);
+    for (row, title) in [
+        (incompatible, "base incompatible"),
+        (inherited, "base inherited"),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("status".to_owned(), Value::EnumTag(0)),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let v2 = schema(&["open", "closed"]);
+    let target = jazz::protocol::SchemaVersion::new(v2.clone());
+    let lens = jazz::protocol::MigrationLens::new(
+        v1.version_id(),
+        target.id,
+        vec![jazz::protocol::TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![jazz::protocol::LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    )
+    .unwrap();
+    let publication = db
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    block_on(db.publish_schema_with_lens(1, publication)).unwrap();
+    block_on(
+        db.activate_catalogue_schema_for_test(jazz::protocol::CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        }),
+    )
+    .unwrap();
+    let new = block_on(db.register_schema_view(v2.clone())).unwrap();
+    new.insert(
+        "todos",
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("head incompatible".to_owned()),
+            ),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(incompatible),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let table = v1
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+    let whole = old.prepare_query(&old.table("todos")).unwrap();
+    let composed = ReadOpts {
+        tier: jazz::db::ReadTier::LocalOnly,
+        ..ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)))
+    };
+    assert_eq!(
+        block_on(old.all(&whole, composed))
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.row_uuid(), row.cell(table, "title")))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(inherited, Some(Value::String("base inherited".to_owned())))]),
+        "the omitted head row masks the base body"
+    );
+}
+
+/// An enum branch column keeps its enum type in branch-view reads, on both
+/// the head and the inherited base rows.
+///
+/// base/open + head/closed ──read head-over-base──► branch cells stay enums
+#[test]
+fn branch_view_reads_keep_enum_branch_columns() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column(
+                        "branch",
+                        ColumnType::ScalarEnum {
+                            name: "Branch".to_owned(),
+                            variants: vec!["base".to_owned(), "head".to_owned()],
+                        },
+                    )
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch"),
+            )
+            .build(),
+    );
+    let table = &schema.tables()[0];
+    let db = open_history_complete_db_with_schema(schema.clone());
+    let base = BranchSelector::new([("branch", Value::EnumTag(0))]);
+    let head = BranchSelector::new([("branch", Value::EnumTag(1))]);
+    let inherited = RowUuid::from_bytes([0x7a; 16]);
+    let own = RowUuid::from_bytes([0x7b; 16]);
+    for (row, branch, title) in [
+        (inherited, base.clone(), "inherited"),
+        (own, head.clone(), "own"),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let branches = |opts: ReadOpts| {
+        block_on(db.all(&query, opts))
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.row_uuid(), row.cell(table, "branch")))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let exact = ReadOpts {
+        tier: jazz::db::ReadTier::LocalOnly,
+        ..ReadOpts::default().branch_view(head.clone(), None)
+    };
+    assert_eq!(
+        branches(exact.clone()),
+        BTreeMap::from([(own, Some(Value::EnumTag(1)))])
+    );
+    assert_eq!(
+        branches(exact.branch_view(head, Some(BranchViewBase::Current(base)))),
+        BTreeMap::from([
+            (inherited, Some(Value::EnumTag(1))),
+            (own, Some(Value::EnumTag(1))),
+        ])
+    );
+}

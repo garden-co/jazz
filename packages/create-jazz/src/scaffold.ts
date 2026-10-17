@@ -38,7 +38,7 @@ export const KNOWN_STARTERS = [
 ] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 
-function isKnownStarter(name: string): name is StarterName {
+export function isKnownStarter(name: string): name is StarterName {
   return (KNOWN_STARTERS as readonly string[]).includes(name);
 }
 

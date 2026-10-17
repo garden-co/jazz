@@ -24,6 +24,16 @@ fn version_provenance(version: &VersionRecord) -> RowProvenance {
     }
 }
 
+/// `version`'s update stamped over a row whose creation is `previous`.
+fn updated_provenance(previous: RowProvenance, version: &VersionRecord) -> RowProvenance {
+    RowProvenance {
+        created_by: previous.created_by,
+        created_at: previous.created_at,
+        updated_by: version.updated_by(),
+        updated_at: version.updated_at_ms(),
+    }
+}
+
 fn stored_version_provenance(version: &VersionRow) -> RowProvenance {
     RowProvenance {
         created_by: version.created_by(),
@@ -639,7 +649,8 @@ where
                 // An inherited clause evaluates another table's policy; accept
                 // it as monotone only when every policy of the schema is.
                 known = self
-                    .policy_schema_for_monotonicity(policy_schema)
+                    .catalogue
+                    .schema_for_version(policy_schema)
                     .is_some_and(|schema| {
                         schema.tables.iter().all(|table| {
                             table
@@ -654,19 +665,6 @@ where
             monotone.push(known);
         }
         Ok(monotone)
-    }
-
-    fn policy_schema_for_monotonicity(&self, schema: SchemaVersionId) -> Option<&JazzSchema> {
-        if schema == self.catalogue.active_schema.schema {
-            Some(&self.catalogue.active_schema.compiled)
-        } else if schema == self.catalogue.local_schema_version_id {
-            Some(&self.catalogue.schema)
-        } else {
-            self.catalogue
-                .catalogue_schemas
-                .get(&schema)
-                .map(|entry| &entry.schema)
-        }
     }
 
     /// Check one write of a unit against a round's shared overlay, leaving
@@ -775,16 +773,10 @@ where
                             .unwrap_or_default();
                         after_cells.extend(cells);
                         let provenance = match &previous {
-                            Some(previous) => {
-                                let previous =
-                                    previous.provenance()?.unwrap_or_else(unresolved_provenance);
-                                RowProvenance {
-                                    created_by: previous.created_by,
-                                    created_at: previous.created_at,
-                                    updated_by: content.updated_by(),
-                                    updated_at: content.updated_at_ms(),
-                                }
-                            }
+                            Some(previous) => updated_provenance(
+                                previous.provenance()?.unwrap_or_else(unresolved_provenance),
+                                content,
+                            ),
                             None => version_provenance(content),
                         };
                         let after = current_row_from_cells_with_explicit_provenance(
@@ -843,15 +835,7 @@ where
             return Ok(true);
         };
         let read_policy = super::query_eval::authorization_query_from_read_policy(&table);
-        let previous_cells = table
-            .columns
-            .iter()
-            .filter_map(|column| {
-                previous
-                    .cell(&table, &column.name)
-                    .map(|value| (column.name.clone(), value))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let previous_cells = current_row_cells(&table, &previous);
         let provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
         self.read_policy_query_allows_candidate_with_provenance_for_schema(
             policy_schema_version,
@@ -990,15 +974,7 @@ where
                 }
                 None => return Ok(false),
             };
-            let current_cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    current
-                        .cell(&table, &column.name)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect();
+            let current_cells = current_row_cells(&table, &current);
             let provenance = current.provenance()?.unwrap_or_else(unresolved_provenance);
             return self
                 .write_policy_query_allows_candidate_over_transaction(
@@ -1014,7 +990,7 @@ where
                 )
                 .await;
         }
-        let is_update = self
+        if let Some(previous) = self
             .policy_previous_content_subject_row(
                 policy_schema_version,
                 &table,
@@ -1022,28 +998,8 @@ where
                 candidate_tx_id,
             )
             .await?
-            .is_some();
-        if is_update {
-            let Some(previous) = self
-                .policy_previous_content_subject_row(
-                    policy_schema_version,
-                    &table,
-                    version,
-                    candidate_tx_id,
-                )
-                .await?
-            else {
-                return Ok(false);
-            };
-            let previous_cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    previous
-                        .cell(&table, &column.name)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
+        {
+            let previous_cells = current_row_cells(&table, &previous);
             let previous_provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
             if let Some(policy) = table.write_policies.update_using.clone() {
                 if !self
@@ -1073,12 +1029,7 @@ where
             };
             let mut effective_cells = previous_cells;
             effective_cells.extend(cells.clone());
-            let update_check_provenance = RowProvenance {
-                created_by: previous_provenance.created_by,
-                created_at: previous_provenance.created_at,
-                updated_by: version.updated_by(),
-                updated_at: version.updated_at_ms(),
-            };
+            let update_check_provenance = updated_provenance(previous_provenance, version);
             // WITH CHECK judges the row the transaction leaves behind, so its
             // evidence includes the transaction's other writes (INV-RLS-9).
             return self
@@ -1115,11 +1066,7 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     #[doc(hidden)]
     pub async fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
-        let write_schema_version = self.catalogue.active_schema.schema;
-        let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
-        let table = self.table_in_schema_ref(&commit.table, write_schema_version)?;
-        let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(&version, permission_subject, None, &[])
+        self.dry_run_mergeable_write_allows_in_schema(self.catalogue.active_schema.schema, commit)
             .await
     }
 
@@ -1201,20 +1148,12 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
     ) -> Result<bool, Error> {
-        let schema = if schema_version == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if schema_version == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema_version)
+        let schema =
+            self.catalogue
+                .schema_for_version(schema_version)
                 .ok_or(Error::InvalidStoredValue(
                     "repair request schema is missing from catalogue",
-                ))?
-                .schema
-        };
+                ))?;
         // `id` resolves to a declared user column when a table has one, so an
         // internal physical-row probe must use the dedicated access-path API.
         let shape = crate::query::Query::from(table_name)
@@ -1317,14 +1256,11 @@ where
         table: &TableSchema,
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
-        if self
+        let Some(version) = self
             .query_local_winner(&table.name, row_uuid)
             .await?
-            .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
-        {
-            return Ok(None);
-        }
-        let Some(version) = self.query_local_winner(&table.name, row_uuid).await? else {
+            .filter(|version| version.deletion() != Some(DeletionEvent::Deleted))
+        else {
             return Ok(None);
         };
         let (_policy_schema_version, projected_table, cells) =
