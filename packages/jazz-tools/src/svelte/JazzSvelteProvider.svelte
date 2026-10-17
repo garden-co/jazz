@@ -10,6 +10,7 @@ serialises shutdown before starting a replacement.
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
 	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
 	import { assertNoClassicProviderProps } from '../classic-api.js';
+	import { toError } from '../runtime/util.js';
 
 	interface Props {
 		config: DbConfig;
@@ -67,10 +68,6 @@ serialises shutdown before starting a replacement.
 		// the async handover an immutable snapshot while retaining opaque refs.
 		const captured = cloneConfigValue(config, new WeakMap()) as DbConfig;
 		return captured;
-	}
-
-	function toError(reason: unknown): Error {
-		return reason instanceof Error ? reason : new Error(String(reason));
 	}
 
 	let { config, children, fallback, autoAttachDevTools = true, ...otherProps }: Props = $props();

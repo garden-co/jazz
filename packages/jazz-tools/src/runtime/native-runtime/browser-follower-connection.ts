@@ -17,6 +17,7 @@ import {
   inspectorControlAbortError,
   waitForInspectorOpening,
 } from "./inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -65,11 +66,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly readyPromise: Promise<void>;
   private inspectorAttachmentPhysicalDbName: string | null = null;
   private peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+  private workerRealmId?: string;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
   private failed: Error | null = null;
   private readonly disposeQueryCoverageTrace: (() => void) | null;
+  private readonly disposeLocalSettlementObserver: () => void;
+  private localSettlementsPending = false;
+  private resumeProbePending = false;
   private readonly connectionId = crypto.randomUUID();
   private nextProbeNonce = 1;
   private probeNonce: number | null = null;
@@ -99,6 +104,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.start();
     globalThis.addEventListener?.("pageshow", this.onResume);
     globalThis.document?.addEventListener("visibilitychange", this.onVisibilityChange);
+    globalThis.document?.addEventListener("resume", this.onResume);
+    this.disposeLocalSettlementObserver = runtime.onLocalSettlementChange((pending) => {
+      this.localSettlementsPending = pending;
+      if (this.hasPendingWork()) this.armWatchdog();
+      else this.clearWatchdog();
+    });
     this.disposeQueryCoverageTrace = traceRelay
       ? runtime.onQueryCoverageTrace((entry) => {
           if (this.closed) return;
@@ -135,7 +146,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           );
         },
         (error) => {
-          const failure = asError(error);
+          const failure = toError(error);
           // Retirement can itself fail after the causal transport failure.
           // Preserve the first error and notify remote waiters before teardown.
           if (this.failed || this.closed) return;
@@ -154,7 +165,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
     })();
     this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
-    void this.readyPromise.catch((error: unknown) => this.fail(asError(error)));
+    void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
   }
 
   async ready(): Promise<void> {
@@ -219,7 +230,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       );
     } catch (error) {
       channel.port2.close();
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
     try {
       await promise;
@@ -257,7 +268,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           sessionClaims,
         } satisfies BrowserFollowerPortRequest);
       })
-      .catch((error: unknown) => this.fail(asError(error)));
+      .catch((error: unknown) => this.fail(toError(error)));
   }
 
   async shutdown(releaseContext = false): Promise<void> {
@@ -296,7 +307,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     try {
       this.port.postMessage(message satisfies BrowserFollowerPortRequest);
     } catch (error) {
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
     return promise;
   }
@@ -309,8 +320,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   }
 
   private armWatchdog(): void {
-    if (this.closed || this.failed || this.pending.size === 0 || this.watchdogTimer !== null)
-      return;
+    if (this.closed || this.failed || !this.hasPendingWork() || this.watchdogTimer !== null) return;
     this.scheduleWatchdog(probeTiming.intervalMs, false);
   }
 
@@ -320,7 +330,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.watchdogTimer = setTimeout(() => {
       if (epoch !== this.watchdogEpoch || this.closed || this.failed) return;
       this.watchdogTimer = null;
-      if (this.pending.size === 0) {
+      if (!this.hasPendingWork()) {
         this.clearWatchdog();
         return;
       }
@@ -340,7 +350,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   private sendProbe(): void {
     this.clearWatchdog();
-    if (this.closed || this.failed || this.pending.size === 0) return;
+    if (this.closed || this.failed || !this.hasPendingWork()) return;
     const nonce = this.nextProbeNonce++;
     this.probeNonce = nonce;
     // Arm first so a synchronous adapter reply cannot leave an expiry behind.
@@ -352,13 +362,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         nonce,
       } satisfies BrowserFollowerPortRequest);
     } catch (error) {
-      this.fail(asError(error));
+      this.fail(toError(error));
     }
   }
 
   private readonly onResume = (): void => {
+    // A worker can die while the page survives, even without an outstanding
+    // control RPC. One matching pong returns an otherwise idle follower to rest.
+    this.resumeProbePending = true;
     this.sendProbe();
   };
+
+  private hasPendingWork(): boolean {
+    return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+  }
 
   private readonly onVisibilityChange = (): void => {
     if (globalThis.document?.visibilityState === "visible") this.onResume();
@@ -369,6 +386,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const message = event.data;
     if (message.type === "runtime-pong") {
       if (message.connectionId !== this.connectionId || message.nonce !== this.probeNonce) return;
+      this.resumeProbePending = false;
       this.clearWatchdog();
       this.armWatchdog();
       return;
@@ -414,7 +432,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.pending.delete(id);
         pending.resolve();
       }
-      if (this.pending.size === 0) this.clearWatchdog();
+      if (!this.hasPendingWork()) this.clearWatchdog();
       this.port.postMessage({
         type: "storage-reset-observed",
         resetId: message.resetId,
@@ -439,12 +457,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    if (this.pending.size === 0) this.clearWatchdog();
+    if (!this.hasPendingWork()) this.clearWatchdog();
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
       this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
-      if (pending.type === "init") this.peerAuthority = message.peerAuthority;
+      if (pending.type === "init") {
+        this.peerAuthority = message.peerAuthority;
+        this.workerRealmId = message.workerRealmId;
+      }
       pending.resolve();
     }
   };
@@ -452,6 +473,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly onMessageError = (): void => {
     this.fail(new Error("Browser follower port message error"));
   };
+
+  getWorkerRealmId(): string | undefined {
+    return this.workerRealmId;
+  }
 
   private fail(error: Error): void {
     if (this.failed || this.closed) return;
@@ -476,6 +501,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.clearWatchdog();
     globalThis.removeEventListener?.("pageshow", this.onResume);
     globalThis.document?.removeEventListener("visibilitychange", this.onVisibilityChange);
+    globalThis.document?.removeEventListener("resume", this.onResume);
+    this.disposeLocalSettlementObserver();
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
     this.disposeQueryCoverageTrace?.();
@@ -485,8 +512,4 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

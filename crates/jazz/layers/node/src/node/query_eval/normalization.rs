@@ -2909,6 +2909,25 @@ fn normalize_policy_branch_authorization(
         });
     }
 
+    Ok(authorize_by_union(
+        nodes,
+        current,
+        union_inputs,
+        root_source,
+        prefix,
+    ))
+}
+
+/// Keep the rows of `current` whose root row id appears in any authorized
+/// branch of `union_inputs`, registering the `{prefix}:authorized_rows`
+/// union and the `{prefix}:authorize` inner join.
+fn authorize_by_union(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    current: RowSetNodeId,
+    union_inputs: Vec<UnionInput>,
+    root_source: &SourceId,
+    prefix: &str,
+) -> RowSetNodeId {
     let union_node = RowSetNodeId(format!("{prefix}:authorized_rows"));
     nodes.insert(
         union_node.clone(),
@@ -2933,7 +2952,7 @@ fn normalize_policy_branch_authorization(
             },
         },
     );
-    Ok(join_node)
+    join_node
 }
 
 fn policy_branch_semantic_label(
@@ -3144,18 +3163,10 @@ where
         binding: &Binding,
         param_types: &BTreeMap<String, ColumnType>,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
-            &self.catalogue.active_schema.compiled
-        } else if shape.schema_version() == self.catalogue.local_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-                .schema
-        };
+        let schema = self
+            .catalogue
+            .schema_for_version(shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let query = shape.query();
         if let Some(relation) = &query.relation
             && crate::query::relation_union_parts(&relation.rel).is_some()
@@ -3249,32 +3260,13 @@ where
                         )?,
                     });
                 }
-                let union_node =
-                    RowSetNodeId(format!("policy_factor:{factor_index}:authorized_rows"));
-                nodes.insert(
-                    union_node.clone(),
-                    RowSetExpr::Union {
-                        inputs: union_inputs,
-                    },
+                current = authorize_by_union(
+                    &mut nodes,
+                    current,
+                    union_inputs,
+                    &root_source,
+                    &format!("policy_factor:{factor_index}"),
                 );
-                let join_node = RowSetNodeId(format!("policy_factor:{factor_index}:authorize"));
-                nodes.insert(
-                    join_node.clone(),
-                    RowSetExpr::Join {
-                        left: current,
-                        right: union_node,
-                        mode: NormalizedJoinMode::Inner,
-                        on: NormalizedPredicateExpr::Compare {
-                            left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
-                            op: NormalizedComparisonOp::Eq,
-                            right: NormalizedValueRef::SourceField {
-                                source: root_source.clone(),
-                                field: "row_uuid".to_owned(),
-                            },
-                        },
-                    },
-                );
-                current = join_node;
             }
         } else if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
             let mut union_inputs = Vec::new();
@@ -3372,31 +3364,13 @@ where
                 });
             }
 
-            let union_node = RowSetNodeId("policy_branch:authorized_rows".to_owned());
-            nodes.insert(
-                union_node.clone(),
-                RowSetExpr::Union {
-                    inputs: union_inputs,
-                },
+            current = authorize_by_union(
+                &mut nodes,
+                current,
+                union_inputs,
+                &root_source,
+                "policy_branch",
             );
-            let join_node = RowSetNodeId("policy_branch:authorize".to_owned());
-            nodes.insert(
-                join_node.clone(),
-                RowSetExpr::Join {
-                    left: current,
-                    right: union_node,
-                    mode: NormalizedJoinMode::Inner,
-                    on: NormalizedPredicateExpr::Compare {
-                        left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
-                        op: NormalizedComparisonOp::Eq,
-                        right: NormalizedValueRef::SourceField {
-                            source: root_source.clone(),
-                            field: "row_uuid".to_owned(),
-                        },
-                    },
-                },
-            );
-            current = join_node;
         } else {
             current = normalize_policy_atom_chain(
                 &mut nodes,

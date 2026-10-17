@@ -30,15 +30,13 @@ use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::public_schema::{CmpOp, RelValueRef};
+use jazz::tools::public_schema::{CmpOp, RelationValueRef};
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{
-    FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
-    WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
-};
+use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
+use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
 type BenchDb = Db<BoxedStorage>;
@@ -161,7 +159,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
+        RelationValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
     );
 
     schema_fixture::compile(
@@ -337,7 +335,7 @@ fn byte_duplex_with_session(
         epoch,
         identity: Some(identity),
     };
-    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS;
+    let features = 0;
     (
         Box::new(WireTransportAdapter::new(
             left_transport,

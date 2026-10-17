@@ -62,6 +62,9 @@ impl ActivationPlan {
                 OpType::TableSource(source) => {
                     tables.insert(source.table.clone());
                 }
+                OpType::Lookup(lookup) => {
+                    tables.insert(lookup.source.table.clone());
+                }
                 OpType::BindingSource(source) => {
                     bindings.insert(source.key.clone());
                 }
@@ -282,6 +285,7 @@ mod tests {
                 storage: crate::ivm::DurableStorage {
                     column_family: "durable".into(),
                     key_prefix: Vec::new(),
+                    name: "durable".into(),
                 },
             },
         );

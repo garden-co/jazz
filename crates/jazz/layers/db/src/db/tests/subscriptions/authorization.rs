@@ -1750,6 +1750,70 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     );
 }
 
+/// With the query cache at budget 0, every read of the parent resources
+/// goes to storage; rows must still move in and out of visibility exactly as
+/// the policy says.
+#[test]
+fn inherited_child_policy_holds_with_no_query_cache() {
+    let schema = customer_inherited_child_policy_schema();
+    let server = open_core(0x67, AuthorSubject::SYSTEM, &schema);
+    {
+        let node = server.node();
+        let mut node = node.borrow_mut();
+        node.set_stored_arrangements_enabled_for_test(true);
+        node.set_query_cache_budget_for_test(Some(0));
+    }
+    let member = AuthorSubject::for_test_bytes([0x1b; 16]);
+    let other = AuthorSubject::for_test_bytes([0x1c; 16]);
+    let (child, _grandchild, other_child, _other_grandchild) =
+        seed_inherited_child_fixture(&server, member, other);
+    let visible =
+        |author| served_subscription_rows_for_author(&schema, &server, author, "res_i_child");
+    assert_eq!(visible(member), vec![child]);
+    assert_eq!(visible(other), vec![other_child]);
+    let stats = server.node().borrow().runtime_stats_for_test();
+    assert!(stats.stored_arrangement_count > 0, "{stats:?}");
+    assert_eq!(stats.stored_arrangement_resident_bytes, 0, "{stats:?}");
+
+    let set_admin = |administrator: bool| {
+        server
+            .update(
+                "res_i_access_edges",
+                row(0xbb),
+                BTreeMap::from([("administrator".to_owned(), Value::Bool(administrator))]),
+            )
+            .unwrap();
+    };
+    set_admin(true);
+    assert!(visible(member).is_empty());
+    assert_eq!(visible(other), vec![other_child]);
+    set_admin(false);
+    assert_eq!(visible(member), vec![child]);
+
+    let second = row(0xef);
+    server
+        .insert_with_id(
+            "res_i_child",
+            second,
+            child_cells(row(0xdd), "open", "second"),
+        )
+        .unwrap();
+    let mut rows = visible(member);
+    rows.sort();
+    let mut expected = vec![child, second];
+    expected.sort();
+    assert_eq!(rows, expected);
+    server
+        .update(
+            "res_i_child",
+            child,
+            BTreeMap::from([("status".to_owned(), Value::String("closed".to_owned()))]),
+        )
+        .unwrap();
+    assert_eq!(visible(member), vec![second]);
+    assert_eq!(visible(other), vec![other_child]);
+}
+
 #[test]
 fn inherited_child_policy_composes_with_local_predicates() {
     let schema = customer_inherited_child_policy_schema();
@@ -2699,4 +2763,106 @@ fn recursive_reachable_scoped_receiver_settles_once_on_small_frontier() {
         vec![row(0xc1), row(0xc2)],
         "a worker relay must forward one scoped closure, not repeatedly reopen it"
     );
+}
+
+/// Contract: a server shares one prepared program across sessions of an
+/// identity, so claims must stay part of each session's binding. Two
+/// sessions of the same identity with different `sub` claims each see only
+/// the rows their own claim admits, at open and as rows arrive (#4017).
+#[test]
+fn same_identity_sessions_with_different_claims_stay_isolated_on_server() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner_id", &["claims", "sub"])),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0x17; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let message_cells = |body: &str, owner: &str| {
+        BTreeMap::from([
+            ("body".to_owned(), Value::String(body.to_owned())),
+            ("owner_id".to_owned(), Value::String(owner.to_owned())),
+        ])
+    };
+    server
+        .insert_with_id("messages", row(0xa1), message_cells("first", "subject-a"))
+        .unwrap();
+    server
+        .insert_with_id("messages", row(0xb1), message_cells("first", "subject-b"))
+        .unwrap();
+
+    let sessions = ["subject-a", "subject-b"].map(|subject| {
+        let claims = BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(subject.to_owned()),
+        )]);
+        let client = open_db(
+            if subject == "subject-a" { 0x63 } else { 0x64 },
+            author,
+            &schema,
+        );
+        client.set_test_provider_claims(author, claims.clone());
+        let (client_transport, server_transport) = duplex();
+        let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+        let subscriber = server.accept_subscriber_with_claims(server_transport, author, claims);
+        let subscription = prepared_subscribe(
+            &client,
+            &Query::from("messages"),
+            ReadOpts {
+                tier: crate::db::ReadTier::Remote,
+                ..ReadOpts::default()
+            },
+        )
+        .unwrap();
+        (client, upstream, subscriber, subscription)
+    });
+    let [mut a, mut b] = sessions;
+    let tick = |a: &(Db<_>, _, _, _), b: &(Db<_>, _, _, _)| {
+        a.0.tick().unwrap();
+        b.0.tick().unwrap();
+        server.tick().unwrap();
+        a.0.tick().unwrap();
+        b.0.tick().unwrap();
+    };
+    tick(&a, &b);
+    assert_eq!(
+        row_ids(&opened_rows(block_on(a.3.next_event()).unwrap())),
+        vec![row(0xa1)]
+    );
+    assert_eq!(
+        row_ids(&opened_rows(block_on(b.3.next_event()).unwrap())),
+        vec![row(0xb1)]
+    );
+
+    server
+        .insert_with_id("messages", row(0xb2), message_cells("second", "subject-b"))
+        .unwrap();
+    tick(&a, &b);
+    let (added, _, _) = delta_rows(block_on(b.3.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(0xb2)]);
+    while let Some(event) = a.3.try_next_event() {
+        if let SubscriptionEvent::Delta { added, updated, .. } = event {
+            assert!(added.is_empty(), "subject-a must not see subject-b's row");
+            assert!(updated.is_empty());
+        }
+    }
+
+    server
+        .insert_with_id("messages", row(0xa2), message_cells("second", "subject-a"))
+        .unwrap();
+    tick(&a, &b);
+    let (added, _, _) = delta_rows(block_on(a.3.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(0xa2)]);
+    while let Some(event) = b.3.try_next_event() {
+        if let SubscriptionEvent::Delta { added, updated, .. } = event {
+            assert!(added.is_empty(), "subject-b must not see subject-a's row");
+            assert!(updated.is_empty());
+        }
+    }
 }

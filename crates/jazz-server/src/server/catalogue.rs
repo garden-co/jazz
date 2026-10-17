@@ -13,7 +13,7 @@ use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
-    validate_permissions_relation_unions,
+    validate_permissions_relations,
 };
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
@@ -197,14 +197,6 @@ impl StoredCatalogue {
         Ok(store)
     }
 
-    #[cfg(any(test, feature = "embedded-server"))]
-    #[allow(dead_code)]
-    pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), CatalogueError> {
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.add_schema(schema);
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn local_durability_tiers_for_test(
         &self,
@@ -305,11 +297,7 @@ struct CatalogueIndex {
 impl CatalogueIndex {
     fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
-        let mut entries = storage.scan_catalogue_entries()?;
-        // Read references first so an empty schema used by an active selection
-        // or migration is distinguished from a legacy initialization sentinel.
-        entries
-            .sort_by_key(|entry| entry.object_type() == Some(ObjectType::CatalogueSchema.as_str()));
+        let entries = storage.scan_catalogue_entries()?;
         for entry in entries {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
@@ -415,19 +403,6 @@ impl CatalogueIndex {
                 let schema = decode_schema(&entry.content).map_err(|error| {
                     corrupt_catalogue_entry(entry, format!("decode schema payload: {error}"))
                 })?;
-                if schema.is_empty()
-                    && self
-                        .active_schema
-                        .is_none_or(|active| active.schema_hash != SchemaHash::compute(&schema))
-                    && !self.lens_edges.iter().any(|(from, to)| {
-                        *from == SchemaHash::compute(&schema) || *to == SchemaHash::compute(&schema)
-                    })
-                {
-                    // Old servers could write the empty-schema sentinel before
-                    // initialization. It is a valid, forward-compatible value
-                    // that must remain invisible to rehydration.
-                    return Ok(());
-                }
                 let declared_hash = entry
                     .metadata
                     .get(MetadataKey::SchemaHash.as_str())
@@ -699,7 +674,7 @@ impl CatalogueStore for StoredCatalogue {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
-        validate_permissions_relation_unions(&permissions)
+        validate_permissions_relations(&permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         // Catalogue mutations take storage before the in-memory index. Holding
         // both locks makes parent validation and head advancement linearizable
@@ -895,11 +870,41 @@ mod tests {
     use std::time::Duration;
 
     use jazz::tools::public_schema::{
-        PolicyExpr, RelExpr, RelUnionArm, SchemaBuilder, TableName, TablePolicies,
+        PolicyExpr, RelationExpr, RelationUnionArm, SchemaBuilder, TableName, TablePolicies,
     };
 
     use super::{CatalogueStore, StoredCatalogue};
     use crate::server::catalogue_storage::CatalogueMemoryStorage;
+
+    /// Alice's unreferenced empty schema survives catalogue loading and must
+    /// carry valid metadata. This storage-boundary test exercises records that
+    /// the public publisher cannot create with malformed metadata.
+    #[test]
+    fn unreferenced_empty_schema_is_loaded_and_validated() {
+        use crate::server::catalogue_storage::CatalogueStorage;
+
+        let app_id = jazz::tools::AppId::from_name("empty-schema-catalogue");
+        let schema = SchemaBuilder::new().build();
+        let (hash, entry) = super::schema_entry(app_id, schema.clone(), 42);
+        let mut storage = CatalogueMemoryStorage::new();
+        storage.upsert_catalogue_entry(&entry).unwrap();
+        let index = super::CatalogueIndex::from_storage(&storage, app_id).unwrap();
+        assert_eq!(index.schemas.get(&hash), Some(&schema));
+        assert_eq!(index.schema_published_at.get(&hash), Some(&42));
+
+        for field in [
+            super::MetadataKey::SchemaHash,
+            super::MetadataKey::PublishedAt,
+        ] {
+            let mut malformed = entry.clone();
+            malformed.metadata.remove(field.as_str());
+            storage.upsert_catalogue_entry(&malformed).unwrap();
+            assert!(matches!(
+                super::CatalogueIndex::from_storage(&storage, app_id),
+                Err(super::CatalogueError::DecodeError { .. })
+            ));
+        }
+    }
 
     #[test]
     fn concurrent_permissions_publications_compare_and_swap_the_parent() {
@@ -967,8 +972,8 @@ mod tests {
             Box::new(CatalogueMemoryStorage::new()),
         )
         .expect("catalogue");
-        let leaf = || RelExpr::TableScan {
-            table: TableName::new("todos"),
+        let leaf = || RelationExpr::TableScan {
+            table: String::from("todos"),
             alias: None,
         };
         for labels in [
@@ -980,10 +985,10 @@ mod tests {
             let permissions = std::collections::HashMap::from([(
                 TableName::new("todos"),
                 TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                    rel: RelExpr::Union {
+                    rel: RelationExpr::Union {
                         inputs: labels
                             .into_iter()
-                            .map(|label| RelUnionArm {
+                            .map(|label| RelationUnionArm {
                                 label,
                                 input: leaf(),
                             })

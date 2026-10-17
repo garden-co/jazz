@@ -381,7 +381,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
             let coordinate = (physical, version.row_uuid());
             let eligible = selection.is_insert()
                 && version.branch_key().values.is_empty()
-                && version.parents().is_empty()
+                && version.base().is_empty()
                 && version.deletion().is_none()
                 && !duplicates.contains(&coordinate)
                 && absent_coordinates.contains(&coordinate);

@@ -8,9 +8,17 @@ on:
         required: true
         type: boolean
       sccache-write:
-        description: Use the main-only sccache writer role instead of the trusted PR reader role.
+        description: Use the sccache writer role (main and merge-group/** pushes) instead of the trusted PR reader role.
         required: true
         type: boolean
+      scope:
+        # full: every partition (main, release and merge-group/** pushes,
+        # dispatches and release PRs). fast: lint and
+        # typecheck only (ready PRs). none: nothing (draft PRs).
+        description: Which partitions to run, full, fast or none.
+        required: false
+        type: string
+        default: full
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
@@ -22,6 +30,7 @@ env:
 
 jobs:
   lint:
+    if: inputs.scope != 'none'
     # Full workspace compilation and checks exceed the four-core job budget.
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -71,6 +80,7 @@ jobs:
         run: sccache --show-stats
 
   test-rust-workspace:
+    if: inputs.scope == 'full'
     # Full workspace compilation and checks exceed the four-core job budget.
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -125,6 +135,7 @@ jobs:
   # real-browser corpus is the same kind of exact receipt in test-ts, which
   # already seals the NAPI/WASM pair it needs.
   test-storage-compat:
+    if: inputs.scope == 'full'
     # The corpus tests take seconds; the job is compile-bound, so it gets the same
     # 16-vCPU runner and trusted shared compile cache as the other compile
     # jobs. On four cores without the S3 tier it was the CI long pole.
@@ -181,7 +192,7 @@ jobs:
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded M3 differential partition.
   test-rust:
-    if: always()
+    if: always() && inputs.scope == 'full'
     needs: [test-rust-workspace, test-storage-compat]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
@@ -197,6 +208,7 @@ jobs:
           test "${STORAGE_COMPAT_RESULT}" = success
 
   test-ts:
+    if: inputs.scope == 'full'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # Allow complete artifact preparation and bounded consumer suites.
     # This outer cap does not change individual test deadlines or concurrency.
@@ -275,6 +287,7 @@ jobs:
   # their own named partition so a green web framework suite cannot stand in
   # for native bridge coverage.
   test-react-native:
+    if: inputs.scope == 'full'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:

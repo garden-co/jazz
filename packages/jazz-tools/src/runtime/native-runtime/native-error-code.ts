@@ -20,7 +20,8 @@ export type NativeCoreErrorCode =
   | "protocol"
   | "backpressure"
   | "not_observed"
-  | "historical_read_requires_server";
+  | "historical_read_requires_server"
+  | "unsupported_storage_codecs";
 
 /** Read the string `code` of a thrown value, or `undefined` when it has none. */
 export function nativeErrorCode(error: unknown): string | undefined {
@@ -39,6 +40,7 @@ const NATIVE_CORE_ERROR_CODES: ReadonlySet<string> = new Set<NativeCoreErrorCode
   "backpressure",
   "not_observed",
   "historical_read_requires_server",
+  "unsupported_storage_codecs",
 ]);
 
 /** The core `ErrorCode` a thrown value carries, or `undefined` for any other value. */

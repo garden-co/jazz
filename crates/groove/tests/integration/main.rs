@@ -23,10 +23,14 @@ mod inline_records_snapshot;
 mod large_value_leaf_codec;
 #[path = "../large_value_query.rs"]
 mod large_value_query;
+#[path = "../lookup_join.rs"]
+mod lookup_join;
 #[path = "../multisink_subscription.rs"]
 mod multisink_subscription;
 #[path = "../operator_pipeline.rs"]
 mod operator_pipeline;
+#[path = "../operator_state_stats.rs"]
+mod operator_state_stats;
 #[path = "../plain_output_positions_unbounded.rs"]
 mod plain_output_positions_unbounded;
 #[path = "../plain_output_root_positions.rs"]
@@ -37,6 +41,8 @@ mod prepared_batches;
 mod prepared_binding_regressions;
 #[path = "../prepared_binding_scale.rs"]
 mod prepared_binding_scale;
+#[path = "../query_template_shared_inputs.rs"]
+mod query_template_shared_inputs;
 #[path = "../query_templates.rs"]
 mod query_templates;
 #[path = "../recursive_cycle_regressions.rs"]
@@ -49,6 +55,8 @@ mod route_barrier_parked_publication;
 mod snapshot_subscription_regressions;
 #[path = "../storage_residency.rs"]
 mod storage_residency;
+#[path = "../stored_arrangement.rs"]
+mod stored_arrangement;
 #[path = "../terminal_occurrence_keys.rs"]
 mod terminal_occurrence_keys;
 #[path = "../top_by_terminal_identity.rs"]

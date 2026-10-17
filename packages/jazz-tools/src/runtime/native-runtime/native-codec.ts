@@ -4,14 +4,13 @@ import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
   type NativeRemovedRow,
-  type NativeSubscriptionDelta,
   type DescriptorField,
   createRecord,
+  writeDescriptor,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
-  writeDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
@@ -22,9 +21,7 @@ const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export {
   createRecord,
-  decodeRecordBool,
   decodeRecordBytes,
-  decodeRecordString,
   fieldIndex,
   nativeRowDescriptorPublicName,
   readNativeRowBatch,
@@ -49,30 +46,6 @@ export type {
   ValueType,
 } from "./native-row-codec.js";
 
-export type SubscriptionDeltaChunk = {
-  type: "delta";
-  delta: NativeSubscriptionDelta;
-  settled?: boolean;
-  tier?: string;
-};
-export type SubscriptionRejectedChunk = {
-  type: "rejected";
-  reason:
-    | {
-        type: "UnsupportedShapeCapability";
-        detail: string;
-      }
-    | {
-        type: "ServerFailure";
-        code: string;
-      }
-    | {
-        type: "InvalidAuthoritySourceClosure";
-        transition: string;
-      };
-};
-export type SubscriptionStreamChunk = SubscriptionDeltaChunk | SubscriptionRejectedChunk;
-
 /** A self-signed proof may derive a Jazz-owned client author only at DB open. */
 export type NativeSelfSignedClientProof = {
   token: string;
@@ -95,16 +68,6 @@ export function authorForNativeOpenConfig(
   selfSignedClientProof?: NativeSelfSignedClientProof,
 ): Uint8Array {
   return selfSignedClientProof ? SELF_SIGNED_OPEN_CONFIG_AUTHOR : author;
-}
-
-export async function readSubscriptionDelta(
-  reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,
-): Promise<SubscriptionDeltaChunk> {
-  const next = await reader.read();
-  if (next.done || next.value.type !== "delta") {
-    throw new Error("expected subscription delta chunk");
-  }
-  return next.value;
 }
 
 export function tableSchema(tableName: string, descriptor: DescriptorField[]): Uint8Array {
@@ -173,23 +136,6 @@ function canonicalOpenAuthor(author: Uint8Array): string {
 
 export function queryFromTable(table: string): Uint8Array {
   return queryWithPredicates(table, []);
-}
-
-export function queryWhereBool(table: string, column: string, value: boolean): Uint8Array {
-  return queryWithEqFilters(table, [{ column, value: { type: "Boolean", value } }]);
-}
-
-export function queryWhereStringContains(
-  table: string,
-  column: string,
-  value: string,
-  limit?: number,
-): Uint8Array {
-  return queryWithPredicates(
-    table,
-    [{ column, op: "Contains", value: { type: "Text", value } }],
-    limit,
-  );
 }
 
 export type QueryLiteral =
@@ -275,18 +221,6 @@ export type QueryOptions = {
   /** Relation expression carried in Query.relation by the public IR adapter. */
   relation?: unknown;
 };
-
-export function queryWithEqFilters(
-  table: string,
-  filters: Array<{ column: string; value: QueryLiteral }>,
-  limit?: number,
-): Uint8Array {
-  return queryWithPredicates(
-    table,
-    filters.map((filter) => ({ ...filter, op: "Eq" })),
-    limit,
-  );
-}
 
 export function queryWithPredicates(
   table: string,
@@ -819,14 +753,6 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
-}
-
-export function normalizePayloadBytes(value: unknown, label = "payload"): Uint8Array {
-  return assertBytes(value, label);
-}
-
-export function optionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
 }
 
 export function utf8(value: string): Uint8Array {

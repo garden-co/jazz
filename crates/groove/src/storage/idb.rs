@@ -304,6 +304,45 @@ where
         }
     }
 
+    /// Apply `operation` and return `written`, unless `settled` maps the
+    /// current value at the operation's key to an outcome. A generation
+    /// conflict reloads the tree and repeats the check, so the condition and
+    /// the write always observe the same durable tree.
+    async fn write_unless<T>(
+        &self,
+        operation: OwnedWriteOperation,
+        settled: impl Fn(Option<Value>) -> Option<T>,
+        written: T,
+    ) -> Result<T, Error> {
+        let (OwnedWriteOperation::Set { cf, key, .. } | OwnedWriteOperation::Delete { cf, key }) =
+            &operation;
+        self.ensure_cf(cf)?;
+        let _guard = self.mutation_gate.lock().await;
+        self.ensure_ready().await?;
+        let encoded_key = self.encoded_key(cf, key)?;
+        let operations = [operation];
+        for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
+            let tree = self.tree();
+            if let Some(outcome) = settled(tree.get(&encoded_key).await?) {
+                return Ok(outcome);
+            }
+            match self.write_many_once(&tree, &operations).await {
+                Ok(()) => return Ok(written),
+                Err(error) if Self::is_generation_conflict(&error) => {
+                    self.reopen_after_generation_conflict().await?;
+                    if retry == MAX_GENERATION_CONFLICT_RETRIES {
+                        return Err(Error::IdbGenerationContention {
+                            retries: MAX_GENERATION_CONFLICT_RETRIES,
+                        });
+                    }
+                    Self::back_off_after_generation_conflict(retry).await;
+                }
+                Err(error) => return Err(self.discard_failed_tree(error).await),
+            }
+        }
+        unreachable!("bounded retry loop returns")
+    }
+
     async fn write_many_replaying_generation_conflicts(
         &self,
         operations: &[OwnedWriteOperation],
@@ -379,37 +418,11 @@ where
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-        Box::pin(async move {
-            self.ensure_cf(&cf)?;
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
-            let encoded_key = self.encoded_key(&cf, &key)?;
-            for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
-                let tree = self.tree();
-                if let Some(existing) = tree.get(&encoded_key).await? {
-                    return Ok(Some(existing));
-                }
-                let operations = vec![OwnedWriteOperation::Set {
-                    cf: cf.clone(),
-                    key: key.clone(),
-                    value: value.clone(),
-                }];
-                match self.write_many_once(&tree, &operations).await {
-                    Ok(()) => return Ok(None),
-                    Err(error) if Self::is_generation_conflict(&error) => {
-                        self.reopen_after_generation_conflict().await?;
-                        if retry == MAX_GENERATION_CONFLICT_RETRIES {
-                            return Err(Error::IdbGenerationContention {
-                                retries: MAX_GENERATION_CONFLICT_RETRIES,
-                            });
-                        }
-                        Self::back_off_after_generation_conflict(retry).await;
-                    }
-                    Err(error) => return Err(self.discard_failed_tree(error).await),
-                }
-            }
-            unreachable!("bounded retry loop returns")
-        })
+        Box::pin(self.write_unless(
+            OwnedWriteOperation::Set { cf, key, value },
+            |existing| existing.map(Some),
+            None,
+        ))
     }
 
     fn compare_and_delete(
@@ -418,36 +431,11 @@ where
         key: Vec<u8>,
         expected: Vec<u8>,
     ) -> StorageFuture<'_, Result<bool, Error>> {
-        Box::pin(async move {
-            self.ensure_cf(&cf)?;
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
-            let encoded_key = self.encoded_key(&cf, &key)?;
-            for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
-                let tree = self.tree();
-                if tree.get(&encoded_key).await?.as_deref() != Some(expected.as_slice()) {
-                    return Ok(false);
-                }
-                let operations = vec![OwnedWriteOperation::Delete {
-                    cf: cf.clone(),
-                    key: key.clone(),
-                }];
-                match self.write_many_once(&tree, &operations).await {
-                    Ok(()) => return Ok(true),
-                    Err(error) if Self::is_generation_conflict(&error) => {
-                        self.reopen_after_generation_conflict().await?;
-                        if retry == MAX_GENERATION_CONFLICT_RETRIES {
-                            return Err(Error::IdbGenerationContention {
-                                retries: MAX_GENERATION_CONFLICT_RETRIES,
-                            });
-                        }
-                        Self::back_off_after_generation_conflict(retry).await;
-                    }
-                    Err(error) => return Err(self.discard_failed_tree(error).await),
-                }
-            }
-            unreachable!("bounded retry loop returns")
-        })
+        Box::pin(self.write_unless(
+            OwnedWriteOperation::Delete { cf, key },
+            move |current| (current.as_deref() != Some(expected.as_slice())).then_some(false),
+            true,
+        ))
     }
 
     fn set(

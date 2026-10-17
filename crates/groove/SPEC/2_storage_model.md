@@ -18,13 +18,15 @@ Invariant digest:
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
-- `INV-STORAGE-35`: The epoch-1 Jazz class-CF layout MUST use its one frozen marker, classifier precedence, class-family names, and length-framed mapped-key grammar; a missing, malformed, old, or future marker in a nonempty class store fails closed before a logical read or write.
+- `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v3`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the logical family's class table id (u32 big-endian, at most 2^24-1) followed by the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. The id is derived from the family name alone: a per-table family `jazz_physical_{id}_{history|global_current|ahead_current|rejected_versions}` carries its catalogue physical table id (at most 2^24-257), each fixed Jazz system family has a static id above that range, and an operation on any other mapped family fails closed before storage access. Missing, malformed, old (`class-cf-v1`, `class-cf-v2`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
 - `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
 - `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
-- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian order-preserving member encoding.
+- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple members MUST use the big-endian order-preserving member encoding on encode, decode and structural validation alike, recursively through nested tuple and nullable members (a present nullable member's payload is itself a member), with `F64` members in the §2.8 ordered-index transform.
+- `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
+- `INV-STORAGE-38`: Durable index ids MUST be assigned per `(table, index, definition)` from a monotonic counter starting at 1, recorded in the `indices` registry (`\0groove-index-id\0` keys) no later than the storage-atomic write of the first entry that uses them, stable across reopen and index reordering, and never reused: a changed definition or a runtime (re)registration receives a fresh id, so entries of an earlier incarnation are never read. An `indices` family holding entries without the `groove-durable-index-v2` layout marker, or with another marker, MUST fail open with `InvalidStorageLayout`; node roots declare `groove.durable-index.v2` in their manifest.
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
@@ -36,10 +38,10 @@ Invariant digest:
 - `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable `Persist` writes.
 - `INV-STORAGE-20`: Directly exposed record stores MUST be typed record stores with record-encoded values and order-preserving typed primary keys, while bypassing table batches, primary-key table scans, durable index maintenance, query planning, and IVM ticks. A single trailing variable-width `Bytes` value column MUST encode as exactly the stored bytes.
 - `INV-STORAGE-21`: `DatabaseSchema::column_families()` MUST include the `"indices"` column family whenever any table declares an `IndexSchema`, and MUST omit it when no schema index exists.
-- `INV-STORAGE-22`: Non-unique durable index logical keys MUST append a `0xff` separator and encoded primary-key bytes; unique index keys MUST omit that suffix.
+- `INV-STORAGE-22`: A durable index entry key MUST be the minimal LEB128 durable index id (never 0) followed by the concatenated `encode_key_part` index-column parts with no second escaping or wrapper. A non-unique index whose columns do not cover the primary key MUST append a `0xff` separator and the encoded primary-key columns the index lacks; a unique or primary-key-covering index MUST omit that suffix. The value MUST be empty, except that a unique index not covering the primary key stores exactly the encoded primary-key columns the index lacks.
 - `INV-STORAGE-23`: Durable unique-index ownership MUST be resolved from the consolidated final deltas of one storage-atomic batch. A different record may replace the durable owner only when that batch fully retracts the old owner and leaves at most one positive owner; competing positive owners MUST be rejected.
-- `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
-- `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
+- `INV-STORAGE-24`: Persisted index scans MUST rebuild the primary key from the decoded index-column parts plus the entry's `0xff` suffix (non-unique) or stored value (unique), consuming both exactly, and fetch the current base table record; a malformed entry, or a missing base record for a primary-key table, MUST make the index invalid.
+- `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys; concatenated parts of mixed column types, including NUL/0xff bytes and variable-length strings, MUST be prefix-free and decode back exactly.
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
 - `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and its encoder MUST emit canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 - `INV-STORAGE-28`: Every enum occurrence has an independent persistent registry identity; nested enums and the hidden whole-row enum never share or flatten registry state.
@@ -159,16 +161,20 @@ or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
 IDs, and sorted decode-relevant adapter parameters. Groove contributes the
-mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v1`, and
-`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
-contain all three before an adapter may mutate. `groove.large-value.v1` covers
+mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v2`, and
+`groove.ordered-chunk-storage.v2`; every profile and decoded manifest MUST
+contain all three before an adapter may mutate. `groove.large-value.v2` covers
 the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
-envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+envelopes; `groove.ordered-chunk-storage.v2` covers that adapter's independent
 install-receipt wrapper. The caller composes this closed base with its own
 persistent codec profile before opening the adapter. The adapter treats
 higher-layer IDs as opaque and never learns their semantics. A Jazz root, for
 example, supplies the complete profile in `jazz::storage_codec_profile`, while
-a Groove-only root uses exactly the mandatory Groove base. Omission, addition,
+a Groove-only root uses exactly the mandatory Groove base. Groove also owns
+`groove.durable-index.v2` (§2.5, "Durable index layout"), which is not in the
+mandatory base: a root that declares schema indexes composes it into its
+profile (Jazz node roots do), so a root written by an earlier index layout is
+refused at manifest admission. Omission, addition,
 duplication, or substitution of a codec ID is invalid for the selected profile
 even when the rest of the manifest is canonical. The manifest envelope is the
 root boundary rather than an entry in its own registry. Adding an authoritative
@@ -384,7 +390,7 @@ close-time memtable flush is performance maintenance, not a second commit.
 
 ### Jazz class-CF layout (epoch 1)
 
-Jazz uses the `JazzClassV1` view above the ordered-KV adapter to keep the
+Jazz uses the `JazzClassV3` view above the ordered-KV adapter to keep the
 logical table name at the Groove boundary while grouping known Jazz logical
 families into a small, fixed set of physical families. This is a durable
 layout, not a RocksDB-only tuning: the same keys are stored in SQLite's `kv`
@@ -392,16 +398,19 @@ table and are the bytes that a future logical export/import must preserve.
 
 The class-layout marker is exactly one entry in
 `__groove_class_meta`: key ASCII `groove-storage-layout`, value ASCII
-`class-cf-v1`. A fresh store may create precisely that entry. Every other
-marker value (including `class-cf-v0`, `class-cf-v2`, a prefix/suffix, or empty
-bytes) is invalid. A missing marker is valid only when no classifier-matching
+`class-cf-v3`. A fresh store may create precisely that entry. Every other
+marker value (including `class-cf-v0`, the retired `class-cf-v1` and
+`class-cf-v2`, `class-cf-v4`, a prefix/suffix, or empty bytes) is invalid.
+`class-cf-v1` (alpha.59 and before) also framed `indices` keys like every other
+class; `class-cf-v1` and `class-cf-v2` framed every other mapped key with the
+u32 length and UTF-8 bytes of its logical family name instead of a table id. A missing marker is valid only when no classifier-matching
 legacy logical family exists and every class family is empty; otherwise open
 fails closed before a logical read or write. This deliberately rejects even an
 empty legacy logical family, because its existence proves the store was opened
 under a different physical layout. Epoch 1 has no legacy-layout migration or
 dual read.
 
-The classifier runs in this exact precedence order. `JazzClassV1` maps every
+The classifier runs in this exact precedence order. `JazzClassV3` maps every
 classified logical family; it has no caller-selected subset or alternate
 interpretation under the same marker. Unclassified names remain their own
 physical family with their unmodified keys. V1 requires the adapter to
@@ -420,17 +429,52 @@ empty class store is not a legacy logical-family store.
 | starts `jazz_`                                                                                              | `__groove_class_meta`           |
 
 For a mapped logical family `L` and its logical key `K`, the physical key is
-exactly `u32be(len(utf8(L))) | utf8(L) | K`. `len` is the UTF-8 byte length,
-not Unicode scalar or UTF-16 length, and `L` is admitted by the portable
-column-family-name rules before this framing. There is no tag, separator,
-escaping, checksum, or second table prefix. Prefix/range scans frame their
-logical boundary the same way and strip exactly `4 + len(utf8(L))` bytes after
-the physical adapter returns a key. Thus two logical families cannot alias even
-when one name is a prefix of the other. The exact marker, classifier, order,
-and key grammar are part of epoch 1 (`INV-STORAGE-35`); changing any requires
-a new storage epoch rather than a fallback decoder. The layout validates a
-logical family against the portable no-NUL/`u16::MAX` UTF-8 bound before it
-calculates the framing length on every mapped operation.
+exactly `u32be(id(L)) | K`, except in `__groove_class_indices`: its classifier
+admits only the one logical family `indices`, so its physical key is exactly
+`K`. `id(L)` is the class table id of `L`, at most `2^24 - 1`, so the first
+byte of every framed key is `0x00` and no framed key in `__groove_class_meta`
+can equal or prefix the marker key. There is no tag,
+separator, escaping, checksum, or second table prefix. Prefix/range scans
+frame their logical boundary the same way and strip exactly 4 bytes (zero for
+`indices`) after the physical adapter returns a key, so two logical families
+cannot alias even when one name is a prefix of the other. The layout validates
+a logical family against the portable no-NUL/`u16::MAX` UTF-8 bound on every
+mapped operation.
+
+Class table ids are derived from the family name, so the layout stores no id
+registry and every family's keys are framed the same way before and after its
+first write. A per-table family is spelled exactly
+`jazz_physical_{id}_{suffix}` with `id` in unsigned decimal (no sign, no
+leading zero except `0` itself) and `suffix` one of `history`,
+`global_current`, `ahead_current`, or `rejected_versions`; its class table id
+is the catalogue physical table id `id`, which Jazz allocates at schema ingest
+and refuses above `2^24 - 257`. The four suffixes land in four different
+classes, so one catalogue id never frames two families of one class. The
+fixed Jazz system families have static ids above every catalogue id:
+
+| family                            | id           |
+| --------------------------------- | ------------ |
+| `jazz_nodes`                      | `0x00FFFF01` |
+| `jazz_schema_versions`            | `0x00FFFF02` |
+| `jazz_catalogue`                  | `0x00FFFF03` |
+| `jazz_transactions`               | `0x00FFFF04` |
+| `jazz_pending_transactions`       | `0x00FFFF05` |
+| `jazz_tx_provenance`              | `0x00FFFF06` |
+| `jazz_tx_touched_rows`            | `0x00FFFF07` |
+| `jazz_rejected_transactions`      | `0x00FFFF08` |
+| `jazz_history_horizon`            | `0x00FFFF09` |
+| `jazz_authority_policy_bindings`  | `0x00FFFF0A` |
+| `jazz_subscription_watermarks_v1` | `0x00FFFF0B` |
+| `jazz_local_row_availability_v1`  | `0x00FFFF0C` |
+| `jazz_superseded_writes_v1`       | `0x00FFFF0D` |
+| `jazz_global_changes`             | `0x00FFFF0E` |
+
+Any other classified family (for example a name with a different suffix, a
+padded id, or an id above the catalogue range) has no class table id: every
+read, scan, write, or compare on it fails closed with `InvalidStorageLayout`
+before storage access. The exact marker, classifier, order, key grammar, and id
+assignment are part of epoch 1 (`INV-STORAGE-35`); changing any requires a new
+storage epoch rather than a fallback decoder.
 
 SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
 `user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
@@ -616,13 +660,22 @@ rejection is the graph-validation rule in ch. 3.
 
 ### Canonical persisted descriptor values
 
-The existing v1 persisted descriptor contract is an ordinary Groove record with
-one field `nodes: Array<Record<Node>>`. In declaration order `Node` contains
-`tag: U8`, `name: Nullable<RawString>`, `registry_id: U64`, `children: U32`, and
-`strings: Array<RawString>`. Raw-string, array, nullable and record framing are
-exactly §2.7; there is no serializer-defined payload. The enclosing durable
-value/key contract selects this v1 grammar; it has no additional magic or version
-byte and must not be replaced in place with a different node layout.
+The persisted descriptor v2 contract is an ordinary Groove record with one
+field `nodes: Array<Enum<Node>>`. Each node's permanent tag selects its payload:
+
+| Node kind                          | Stored payload                                                     |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| Descriptor, tuple                  | `children: U32`                                                    |
+| Field                              | `name: Nullable<RawString>`                                        |
+| Scalar enum                        | `name: RawString`, `registry_id: U64`, `strings: Array<RawString>` |
+| Payload enum                       | `name: RawString`, `registry_id: U64`, `children: U32`             |
+| Enum case                          | `name: RawString`                                                  |
+| Primitive, array, nullable, record | Empty                                                              |
+
+Enum tags and payloads use the canonical Groove enum/record framing in §2.7.
+A field, array, nullable, record, or enum case has exactly one child; that count
+is implicit. Primitive and scalar-enum nodes have no child nodes. Names are
+required for enums and cases; only field names remain optional.
 
 Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
 
@@ -635,16 +688,16 @@ Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
 | 17, 18 | UUID, scalar enum                        |
 | 19–22  | Tuple, Array, Nullable, Record           |
 | 23, 24 | Payload enum, enum case                  |
+| 25     | U48                                      |
 
 A descriptor declares its field count; each field retains its exact optional
 name and one type child. Tuple nodes declare their type-child count; Array and
 Nullable have one type child, Record one descriptor child. Payload enums retain
 their name, registry identity and ordered case children; each named case has one
 descriptor child. Scalar enums retain name, registry identity and ordered variant
-names in `strings`. Unused names are absent, unused registry/count fields are
-zero, and unused string arrays are empty. The reader rejects inconsistent
-metadata, trailing nodes/bytes, invalid types, and any tree whose canonical
-re-encoding differs.
+names in `strings`. Irrelevant metadata has no field in the selected payload.
+The reader rejects unknown tags, malformed payloads, trailing nodes/bytes,
+invalid types, and any tree whose canonical re-encoding differs.
 
 `encode_persisted_record_descriptor` and its matching reader implement this
 contract. They preserve exact durable field names and nested enum registry
@@ -709,22 +762,74 @@ persistent caches and opaque binary content.
 
 A durable secondary index is stored separately from the base table rows it
 indexes, while each entry remains tied back to a primary-keyed base record.
-Schema indices are persisted in the `"indices"` record store under
-`durable_index_key_prefix(table, index)`, as records with descriptor
-`("key": Bytes, "value": Bytes)`. `DatabaseSchema::column_families()` includes
-`"indices"` whenever any table declares an `IndexSchema` (`INV-STORAGE-21`).
+Schema indices are persisted in the `"indices"` family.
+`DatabaseSchema::column_families()` includes `"indices"` whenever any table
+declares an `IndexSchema` (`INV-STORAGE-21`).
+
+### Durable index layout
+
+Codec family `groove.durable-index.v2`. Every schema index has a durable
+numeric id `N >= 1`. An entry is:
+
+```text
+key   = leb128(N) | part(c1) | ... | part(ck) [ | ff | pk-suffix ]
+value = empty, or pk-suffix for a unique index
+```
+
+`leb128(N)` is the minimal unsigned LEB128 encoding, so ids below 128 cost one
+byte, and it is prefix-free. `part(c)` is `encode_key_part` of each declared
+index column in order: tagged, fixed width or `00 ff`-escaped with a `00 00`
+terminator, so the concatenation is itself prefix-free and order-preserving
+and is written once, with no second `Bytes` wrapper (`INV-STORAGE-25`).
+`pk-suffix` is the primary-key encoding (`INV-STORAGE-14`) of only the
+primary-key columns that are not index columns, in primary-key order. A
+non-unique index appends `ff | pk-suffix` to the key; a unique index keeps the
+key to the index columns and stores `pk-suffix` as the value; an index whose
+columns cover the primary key has neither, and its value is empty
+(`INV-STORAGE-22`). A reader rebuilds the primary key from the decoded index
+columns and the suffix and requires both to be consumed exactly
+(`INV-STORAGE-24`).
+
+Worked example: the Jazz fk index `[branch_key, _app_project_id]` on a table
+keyed `(branch_key, row_uuid)`, id 1, branch `01 00 00 00 00`:
+
+```text
+01                                   index id 1
+07 01 00ff 00ff 00ff 00ff 0000       branch_key (Bytes), 12 B
+09 0a <16 B uuid>                    _app_project_id (nullable uuid), 18 B
+ff                                   separator
+0a <16 B uuid>                       row_uuid, the only pk column not indexed
+value: empty                         49 B in all (was 138 + 66)
+```
+
+Ids are assigned by a registry stored in the same family. Registry key
+`00 | "groove-index-id" | 00 | u16be(len(table)) | table | index`; value
+`u32be(N) | unique:u8 | u16be(column count) | (u16be(len) | column)*`. The
+layout marker is key `00 | "groove-index-layout"` with value ASCII
+`groove-durable-index-v2`. Metadata keys start with `00` and id 0 is never
+assigned, so no metadata key is an entry key. A pair `(table, index)` keeps
+its id while its definition (unique flag and ordered columns) is unchanged,
+across reopen and reordering. A changed definition, or a runtime
+`register_table_index` (a (re)creation), receives the next id from a
+monotonic counter; retired ids are never reused, so entries of an earlier
+incarnation are never read (they remain as unreferenced bytes). An id and the
+marker become durable in the same storage-atomic write as the first entry
+that uses them, or before it (`INV-STORAGE-38`). Opening a store whose
+`indices` family holds entries but no marker, or another marker, fails with
+`InvalidStorageLayout`; node roots additionally declare
+`groove.durable-index.v2` in the storage manifest, so an older root is refused
+at admission first.
 
 Jazz startup repairs declared indexes (`INV-STORAGE-36`) using one database-wide generation record
 in logical `indices`: key bytes `00` followed by ASCII
 `groove-declared-index-generation`, value exactly eight bytes encoding an unsigned
 64-bit big-endian generation. Alpha55 uses generation 1 (`00 00 00 00 00 00 00
-01`). This key contains exactly one NUL; every declared-index prefix contains
-two NUL separators, so no declared-index prefix can contain this marker, even
-for empty names. It is independent of the class-layout and catalogue markers.
+01`). Like every metadata key it starts with `00`, which no index-id prefix
+does. It is independent of the class-layout and catalogue markers.
 Missing or older generations trigger repair after physical variants have been
 registered and before index-dependent recovery. Malformed or future generations
-fail startup. Repair deletes only each declared index's logical prefix and
-replays its primary table through its existing index projection and persistence
+fail startup. Repair first makes the declared indexes' id registrations durable,
+then deletes only each declared index's id prefix and replays its primary table through its existing index projection and persistence
 encoding. Primary records, history, fate records, and pending writes are untouched.
 Deletes and replay writes use batches of at most 1024 entries; hydration currently
 materializes one index snapshot, so peak memory still scales with that snapshot.
@@ -739,17 +844,17 @@ guarantee: it can corrupt indexes without invalidating the completion marker.
 
 Index entries use ordered keys produced by `encode_key_part`, which preserves
 logical order and rejects arrays as keys (`INV-STORAGE-25`). An index scan
-decodes each entry's `"value"` as primary-key bytes and fetches the
-corresponding base record.
+rebuilds each entry's primary key and fetches the corresponding base record.
 
 _Further invariants._ `INV-STORAGE-22` — a non-unique index key appends a `0xff`
-separator + the encoded primary key; a unique index omits that suffix.
+separator + the primary-key columns the index lacks; a unique index omits that
+suffix and stores it as the value.
 `INV-STORAGE-23` — unique-index ownership is resolved from the consolidated
 final deltas of one storage-atomic batch. A different record may replace the
 durable owner only when that batch fully retracts the old owner and leaves at
 most one positive owner; competing positive owners are rejected.
-`INV-STORAGE-24` — an index scan resolves the entry's `"value"` as primary-key
-bytes and fetches the base record; a missing base record for a primary-keyed
+`INV-STORAGE-24` — an index scan rebuilds the primary key from the entry's
+index columns and suffix and fetches the base record; a missing base record for a primary-keyed
 table means the persisted index is invalid.
 
 **Target design (unified arrangement model, ch. 4 §4.6).** Indices are
@@ -764,6 +869,52 @@ shorthand for the declared durable pk-ref case.)
 **Implementation-status note.** Declared indices currently use the dedicated
 `IndexBy`/`Persist` path; they have not yet been folded into the target unified
 arrangement abstraction.
+
+### Interned columns and dictionaries
+
+Codec family `groove.dictionary.v1`. A table column may be declared
+**interned** into a named dictionary with `ValueType::interned(dictionary,
+logical)`. A row then stores the 4-byte code of the column's value instead of
+the value: a fixed-width little-endian `u32`, or, for
+`Nullable(Interned)`, a presence byte followed by the code (`00` and four zero
+bytes when null). Interning is declared per Groove physical column, so every
+variant payload that declares the interned type stores codes too.
+
+Each dictionary is declared by a `DictionarySchema { name, value_type }` and
+stored in its own Groove-owned column family `__groove_dictionary_<name>`:
+
+```text
+key   = code as u32 big-endian (4 bytes)
+value = canonical Groove encoding of the value (value_type)
+```
+
+Codes are dense from 0: the entries of a dictionary are exactly the codes
+`0..n`, and one value has one code. A value holds no indirect large value.
+Groove owns the whole mapping. It allocates the next code synchronously
+while preparing a write, and every publication carries every entry not yet
+durable in its single atomic `write_many`, so an entry is durable with, or
+before, the first row that stores its code. An allocation is never undone: a
+code reserved by a dropped batch keeps its value and its entry is written by
+the next publication. Opening loads each declared dictionary into memory and
+refuses (`DictionaryError::InvalidDictionary`) a key that is not 4 bytes, a
+gap in the codes, a value that is not canonical, and a repeated value.
+
+Interned columns are storage-only. `TableSchema::record_schema` and
+`record_schema_for_variant` return the **logical** descriptor (each interned
+field has its logical type); `storage_record_schema*` return the physical one.
+Every point, scan and index read, every old row of a write's delta, and every
+IVM table source resolves codes before a caller or operator sees the record,
+so queries, policies and the wire only ever see values. A descriptor carrying
+an interned type cannot be encoded as a persisted or wire descriptor
+(`records::Error::InternedTypeNotEncodable`).
+
+Schema admission refuses (`InternedColumnError`) an interned column in a
+primary key, an index or a foreign key, in a direct record store, nested
+anywhere but at top level or directly under a top-level `Nullable`, naming an
+undeclared dictionary or a different value type than the dictionary holds,
+and a dictionary whose value type contains an engine storage type or an enum.
+A schema rebuild keeps the dictionaries loaded at open and refuses to declare
+another (`DictionaryError::NotLoaded`).
 
 ### 2.6 Commit ordering
 
@@ -819,9 +970,15 @@ The first variable value starts immediately after the fixed fields and offset
 table. The last variable value ends at the record's end, so its end offset is
 implicit. Multi-byte scalar fields and offsets are little-endian, measured from
 the record start (`INV-STORAGE-9`). Fixed-width tuple members use concatenated
-order-preserving member encodings: integer tuple members are big-endian, `Bool`
-is `0|1`, `Uuid` is raw bytes, enum values are their `u8` discriminants, and
-nested fixed-width tuple/nullable members recurse (`INV-STORAGE-9`).
+order-preserving member encodings: integer tuple members are big-endian (signed
+ones with the sign bit flipped), `F64` members use the §2.8 ordered-index
+transform big-endian (NaN invalid), `Bool` is `0|1`, `Uuid` is raw bytes, enum
+values are their `u8` discriminants, and nested fixed-width tuple/nullable
+members recurse: a present nullable member's payload is itself a tuple member,
+and a null one is flag `0` plus a zero-filled payload width. Decoding and
+structural validation use exactly this member grammar, so a tuple's structural
+validation admits precisely the bytes that decode and re-encode unchanged
+(`INV-STORAGE-9`).
 
 A record decoder MUST consume exactly the descriptor-defined record span: a
 truncated fixed field, offset table, or variable payload; an out-of-range or
@@ -832,6 +989,17 @@ or a non-canonical nested record is invalid, not an alternate representation.
 infinity are valid, while every NaN bit pattern is invalid on encode, decode, and
 structural validation before a caller-supplied raw `VariantRecord` can enter durable
 storage. Ordered-index `F64` uses the separately specified order transform in §2.8.
+
+**`U48`** (`INV-STORAGE-37`) is a constant-width unsigned 48-bit integer
+carried as a widened `u64` in memory. Its record payload is the low 6 bytes of
+the value, little-endian, in the fixed-width region (so a `U48` field never adds
+an offset-table entry); as a fixed tuple member it is the same 6 bytes
+big-endian. `Nullable<U48>` is 7 bytes: flag plus a 6-byte payload that is zero
+when null. Encoders reject values above `2^48 - 1` (`Error::U48OutOfRange`);
+every 6-byte payload decodes to an in-range value, so there is one byte
+representation per value. `U48` is its own type: a `U64` value does not encode
+into a `U48` field or vice versa. Typed wrappers use `records::U48` or
+`impl_record_field_u48!` for a `u64` newtype.
 
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.
@@ -862,7 +1030,10 @@ nested records), and nullable values are not valid key parts.
 
 The epoch-1 tags are frozen: `U8=00`, `U16=01`, `U32=02`, `U64=03`,
 `I64=0d`, `I32=0e`, `Bool=05`, `String=06`, `Bytes=07`, `Uuid=0a`, and
-fixed-width `Tuple=0b`. Signed integer payloads flip their sign bit before
+fixed-width `Tuple=0b`. `U48=10` (followed by exactly 6 big-endian payload
+bytes, `INV-STORAGE-37`) was added after epoch 1 and is likewise permanent;
+tags `0c` and `0f` are used by non-durable runtime identity keys and are not
+key-part tags. Signed integer payloads flip their sign bit before
 big-endian emission. A direct record-store key may use only the supported
 declared key types and fixed tuples thereof; a tuple payload recursively uses
 the same tagged encoding for each member in declaration order. Every key decoder is type-directed

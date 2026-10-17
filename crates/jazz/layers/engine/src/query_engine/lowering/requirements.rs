@@ -25,10 +25,10 @@ pub(super) fn source_requirements(
     for path in &request.input.shape.closure_paths {
         for segment in closure_path_segments(path) {
             let source_requirements = requirements.get_mut(&segment.parent).ok_or_else(|| {
-                single_gap_report(UnsupportedReason::Runtime(format!(
+                CapabilityReport::runtime(format!(
                     "closure parent source {:?} was not initialized",
                     segment.parent
-                )))
+                ))
             })?;
             add_required_app_field(source_requirements, segment.source_field.clone());
         }
@@ -52,16 +52,13 @@ pub(super) fn source_requirements(
                 | AnalyzedQueryPlan::Union(_)
                 | AnalyzedQueryPlan::CorrelatedPath(_)
         ) {
-            return Err(Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Operator(
+            return Err(CapabilityReport::explained(
+                UnsupportedReason::Operator(
                     "app row materialization for recursive relation projections is not lowered yet"
                         .to_owned(),
-                )],
-                explain: ExplainPlan {
-                    capabilities: vec!["recursive relation app rows are not lowered".to_owned()],
-                    ..ExplainPlan::default()
-                },
-            }));
+                ),
+                "recursive relation app rows are not lowered",
+            ));
         }
         let root_requirements = requirements
             .get_mut(plan.root_source())
@@ -149,9 +146,9 @@ pub(super) fn source_requirements(
                     source_requirements
                         .metadata
                         .insert(SourceMetadataRequirement::VersionPayloads);
-                    source_requirements
-                        .metadata
-                        .insert(SourceMetadataRequirement::DeletionMarkers);
+                    // A deletion is an ordinary row delta: the deleted row
+                    // leaves the result like any other change, so programs
+                    // need no separate deleted-rows source.
                 }
             }
             ProgramFactKey::ProgramSourceCoverage(scope) => match scope {
@@ -187,13 +184,10 @@ pub(super) fn source_requirements(
                 }
             }
             _ => {
-                return Err(Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Output(Box::new(fact.clone()))],
-                    explain: ExplainPlan {
-                        capabilities: vec!["requested fact is not lowered yet".to_owned()],
-                        ..ExplainPlan::default()
-                    },
-                }));
+                return Err(CapabilityReport::explained(
+                    UnsupportedReason::Output(Box::new(fact.clone())),
+                    "requested fact is not lowered yet",
+                ));
             }
         }
     }
@@ -223,10 +217,10 @@ fn collect_app_path_projection_requirements(
 ) -> CapabilityResult<()> {
     for path in paths {
         let source_requirements = requirements.get_mut(&path.path.child).ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Runtime(format!(
+            CapabilityReport::runtime(format!(
                 "app projection path child source {:?} was not initialized",
                 path.path.child
-            )))
+            ))
         })?;
         merge_field_requirement(
             &mut source_requirements.app_fields,
@@ -295,13 +289,7 @@ fn collect_predicate_requirements_for_all_sources(
 ) -> CapabilityResult<()> {
     for (source, source_requirements) in requirements.iter_mut() {
         collect_predicate_requirements(predicate, source, source_requirements).map_err(|gap| {
-            Box::new(CapabilityReport {
-                gaps: vec![gap],
-                explain: ExplainPlan {
-                    capabilities: vec!["path correlation requirements are not lowered".to_owned()],
-                    ..ExplainPlan::default()
-                },
-            })
+            CapabilityReport::explained(gap, "path correlation requirements are not lowered")
         })?;
     }
     Ok(())
@@ -313,13 +301,7 @@ fn collect_value_requirements_for_all_sources(
 ) -> CapabilityResult<()> {
     for (source, source_requirements) in requirements.iter_mut() {
         collect_value_requirements(value, source, source_requirements).map_err(|gap| {
-            Box::new(CapabilityReport {
-                gaps: vec![gap],
-                explain: ExplainPlan {
-                    capabilities: vec!["relation key requirements are not lowered".to_owned()],
-                    ..ExplainPlan::default()
-                },
-            })
+            CapabilityReport::explained(gap, "relation key requirements are not lowered")
         })?;
     }
     Ok(())
@@ -383,13 +365,7 @@ fn collect_step_requirements(
     };
 
     result.map_err(|gap| {
-        Box::new(CapabilityReport {
-            gaps: vec![gap],
-            explain: ExplainPlan {
-                capabilities: vec!["operator source requirements are not lowered".to_owned()],
-                ..ExplainPlan::default()
-            },
-        })
+        CapabilityReport::explained(gap, "operator source requirements are not lowered")
     })
 }
 

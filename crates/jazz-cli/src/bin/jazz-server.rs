@@ -38,94 +38,74 @@ fn start_loopback_server(
 fn main() -> ExitCode {
     let mut args = env::args();
     let program = args.next().unwrap_or_else(|| "jazz-server".to_owned());
+    let is_help = |arg: &str| arg == "-h" || arg == "--help";
 
     match args.next().as_deref() {
         Some("dry-run") => run_dry_run(args.collect(), &program),
         Some("server") => match args.next() {
-            Some(flag) if flag == "-h" || flag == "--help" => {
-                print_server_usage(&program);
+            Some(flag) if is_help(&flag) => {
+                println!("{}", server_usage(&program));
                 ExitCode::SUCCESS
             }
             Some(app_id) => run_server_app(&app_id, args.collect(), &program),
-            None => {
-                eprintln!("error=missing_app_id");
-                print_server_usage_stderr(&program);
-                ExitCode::from(2)
-            }
+            None => usage_error("missing_app_id", server_usage(&program)),
         },
         Some(command @ ("serve" | "dev-server" | "serve-loopback-websocket-schema")) => {
             match args.next() {
-                Some(flag) if flag == "-h" || flag == "--help" => {
-                    print_serve_usage(&program, command);
+                Some(flag) if is_help(&flag) => {
+                    println!("{}", serve_usage(&program, command));
                     ExitCode::SUCCESS
                 }
-                Some(schema_hex) => {
-                    run_loopback_websocket_schema(command, &schema_hex, args.collect(), &program)
-                }
-                None => {
-                    eprintln!("error=missing_schema");
-                    print_serve_usage_stderr(&program, command);
-                    ExitCode::from(2)
-                }
+                Some(schema_hex) => run_loopback_websocket_schema(
+                    &schema_hex,
+                    args.collect(),
+                    serve_usage(&program, command),
+                    &program,
+                ),
+                None => usage_error("missing_schema", serve_usage(&program, command)),
             }
         }
         Some("serve-loopback-websocket-schema-data-dir") => match (args.next(), args.next()) {
-            (Some(flag), None) if flag == "-h" || flag == "--help" => {
-                print_serve_data_dir_usage(&program);
+            (Some(flag), None) if is_help(&flag) => {
+                println!("{}", serve_data_dir_usage(&program));
                 ExitCode::SUCCESS
             }
             (Some(schema_hex), Some(data_dir)) => {
                 let mut rest: Vec<String> = args.collect();
                 rest.splice(0..0, ["--data-dir".to_owned(), data_dir]);
                 run_loopback_websocket_schema(
-                    "serve-loopback-websocket-schema-data-dir",
                     &schema_hex,
                     rest,
+                    serve_data_dir_usage(&program),
                     &program,
                 )
             }
-            (None, _) => {
-                eprintln!("error=missing_schema");
-                print_serve_data_dir_usage_stderr(&program);
-                ExitCode::from(2)
-            }
-            _ => {
-                eprintln!("error=missing_data_dir");
-                print_serve_data_dir_usage_stderr(&program);
-                ExitCode::from(2)
-            }
+            (None, _) => usage_error("missing_schema", serve_data_dir_usage(&program)),
+            _ => usage_error("missing_data_dir", serve_data_dir_usage(&program)),
         },
         Some("-h" | "--help") | None => {
-            print_usage(&program);
+            println!("{}", usage(&program));
             ExitCode::SUCCESS
         }
-        _ => {
-            eprintln!("error=unsupported_command");
-            print_usage_stderr(&program);
-            ExitCode::from(2)
-        }
+        _ => usage_error("unsupported_command", usage(&program)),
     }
+}
+
+/// Report a command-line error and the relevant usage on stderr; exit 2.
+fn usage_error(error: impl std::fmt::Display, usage: String) -> ExitCode {
+    eprintln!("error={error}");
+    eprintln!("{usage}");
+    ExitCode::from(2)
 }
 
 fn run_dry_run(args: Vec<String>, program: &str) -> ExitCode {
     let options = match CliOptions::parse(args, program) {
         Ok(options) => options,
-        Err(error) => {
-            eprintln!("error={error}");
-            print_usage_stderr(program);
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error, usage(program)),
     };
     let mut config = jazz::serving::ServerConfig::local("dev-core");
     apply_shell_options(&mut config, &options);
-    let shell = match ServerShell::new(config) {
-        Ok(shell) => shell,
-        Err(error) => {
-            eprintln!("error={error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let report = match shell.start_dry_run() {
+    let report = match ServerShell::new(config).and_then(|shell| shell.start_dry_run()) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("error={error}");
@@ -141,92 +121,38 @@ fn run_dry_run(args: Vec<String>, program: &str) -> ExitCode {
 fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     let options = match CliOptions::parse_for_server_app(args, program, app_id) {
         Ok(options) => options,
-        Err(error) => {
-            eprintln!("error={error}");
-            print_server_usage_stderr(program);
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error, server_usage(program)),
     };
     if let Err(error) = options.reject_legacy_implicit_storage() {
         eprintln!("error={error}");
         return ExitCode::FAILURE;
     }
-    let schema = empty_runtime_schema();
-    let identity = DbIdentity {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorSubject::SYSTEM,
-    };
     let storage = options.storage.clone();
     let auth_admission = options.auth_admission.clone();
-    let mut config = match options.storage {
-        StorageConfig::InMemory => LoopbackWebSocketServerConfig::in_memory(schema, identity),
-        StorageConfig::RocksDb { path } => {
-            LoopbackWebSocketServerConfig::persistent_data_dir(schema, identity, path)
-        }
-        StorageConfig::SQLite { .. } => unreachable!("CLI does not expose sqlite storage"),
-    }
-    .with_row_id_seed(0x5e)
-    .with_auth_admission(options.auth_admission);
-    if let Some(account) = options.admitted_account {
-        config = config.with_admitted_account(account);
-    }
-    config.listener.bind_addr = options.listen;
-    config.listener.websocket_path = options.websocket_path;
-
-    let websocket_path = config.listener.websocket_path.clone();
-    let server = match start_loopback_server(config) {
-        Ok(server) => server,
-        Err(error) => {
-            eprintln!("error={error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    println!("command=server");
-    println!("app_id={app_id}");
-    println!("websocket_path={websocket_path}");
-    print_storage_report(&storage);
-    print_auth_report(&auth_admission);
-    println!("schema_catalogue=empty");
-    println!("runtime_schema_loading=static_empty_schema");
-    println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
-    let _ = io::stdout().flush();
-
-    let mut stdin = String::new();
-    let _ = io::stdin().read_to_string(&mut stdin);
-    server.shutdown();
-    ExitCode::SUCCESS
+    serve_loopback_until_stdin_closes(empty_runtime_schema(), options, |websocket_path| {
+        println!("command=server");
+        println!("app_id={app_id}");
+        println!("websocket_path={websocket_path}");
+        print_storage_report(&storage);
+        print_auth_report(&auth_admission);
+        println!("schema_catalogue=empty");
+        println!("runtime_schema_loading=static_empty_schema");
+    })
 }
 
 fn run_loopback_websocket_schema(
-    command: &str,
     schema_hex: &str,
     args: Vec<String>,
+    usage: String,
     program: &str,
 ) -> ExitCode {
     let options = match CliOptions::parse(args, program) {
         Ok(options) => options,
-        Err(error) => {
-            eprintln!("error={error}");
-            if command == "serve-loopback-websocket-schema-data-dir" {
-                print_serve_data_dir_usage_stderr(program);
-            } else {
-                print_serve_usage_stderr(program, command);
-            }
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error, usage),
     };
     let schema_bytes = match decode_hex(schema_hex) {
         Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("error={error}");
-            if command == "serve-loopback-websocket-schema-data-dir" {
-                print_serve_data_dir_usage_stderr(program);
-            } else {
-                print_serve_usage_stderr(program, command);
-            }
-            return ExitCode::from(2);
-        }
+        Err(error) => return usage_error(error, usage),
     };
     let schema = match jazz::tools::public_schema_convert::decode_public_schema_json(&schema_bytes)
     {
@@ -236,7 +162,17 @@ fn run_loopback_websocket_schema(
             return ExitCode::from(2);
         }
     };
+    serve_loopback_until_stdin_closes(schema, options, |_| {})
+}
 
+/// Start a loopback WebSocket server from the CLI options, print `report`
+/// (given the WebSocket path) and the `ws_url` line, then serve until stdin
+/// closes.
+fn serve_loopback_until_stdin_closes(
+    schema: JazzSchema,
+    options: CliOptions,
+    report: impl FnOnce(&str),
+) -> ExitCode {
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
         author: AuthorSubject::SYSTEM,
@@ -265,6 +201,7 @@ fn run_loopback_websocket_schema(
         }
     };
 
+    report(&websocket_path);
     println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
     let _ = io::stdout().flush();
 
@@ -274,156 +211,131 @@ fn run_loopback_websocket_schema(
     ExitCode::SUCCESS
 }
 
-fn print_usage(program: &str) {
-    println!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-    print_server_usage(program);
-    print_serve_usage(program, "serve");
-    println!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
-    print_serve_usage(program, "serve-loopback-websocket-schema");
-    print_serve_data_dir_usage(program);
-    println!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
-    );
+fn usage(program: &str) -> String {
+    let env = ENV
+        .iter()
+        .filter(|(_, setting)| !matches!(setting, Setting::UpstreamUrl | Setting::AdminSecret))
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "usage={program} dry-run {}\n{}\n{}\nalias={program} dev-server <schema-source-json-hex> [same options as serve]\n{}\n{}\nenv={env}",
+        options_usage(true, true),
+        server_usage(program),
+        serve_usage(program, "serve"),
+        serve_usage(program, "serve-loopback-websocket-schema"),
+        serve_data_dir_usage(program),
+    )
 }
 
-fn print_usage_stderr(program: &str) {
-    eprintln!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-    print_server_usage_stderr(program);
-    print_serve_usage_stderr(program, "serve");
-    eprintln!("alias={program} dev-server <schema-source-json-hex> [same options as serve]");
-    print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
-    print_serve_data_dir_usage_stderr(program);
-    eprintln!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT"
-    );
+/// The option list shown in usage lines; `server` takes no `--jwt-audience`
+/// (the app id is the audience) and the data-dir command takes no storage flag.
+fn options_usage(storage: bool, audience: bool) -> String {
+    format!(
+        "[--listen <addr>|--bind <addr>] [--port <port>]{} [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>]{} [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]",
+        if storage {
+            " [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory]"
+        } else {
+            ""
+        },
+        if audience {
+            " [--jwt-audience <audience>]"
+        } else {
+            ""
+        },
+    )
 }
 
 const SERVER_STORAGE_HELP: &str = "storage_default=./data/apps/<canonical-app-uuid> (UUID APP_ID spellings are canonicalised; other names use a deterministic UUID). Explicit storage paths are unchanged. If ./data/CURRENT exists, the implicit default refuses to start: deliberately use --data-dir ./data or JAZZ_SERVER_DATA_DIR=./data to reopen that store, or migrate it manually. No legacy data is moved or adopted automatically.";
 
-fn print_server_usage(program: &str) {
-    println!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-    println!("{SERVER_STORAGE_HELP}");
+fn server_usage(program: &str) -> String {
+    format!(
+        "usage={program} server <APP_ID> {}\n{SERVER_STORAGE_HELP}",
+        options_usage(true, false)
+    )
 }
 
-fn print_server_usage_stderr(program: &str) {
-    eprintln!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-    eprintln!("{SERVER_STORAGE_HELP}");
+fn serve_usage(program: &str, command: &str) -> String {
+    format!(
+        "usage={program} {command} <schema-source-json-hex> {}",
+        options_usage(true, true)
+    )
 }
 
-fn print_serve_usage(program: &str, command: &str) {
-    println!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-}
-
-fn print_serve_usage_stderr(program: &str, command: &str) {
-    eprintln!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-}
-
-fn print_serve_data_dir_usage(program: &str) {
-    println!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
-}
-
-fn print_serve_data_dir_usage_stderr(program: &str) {
-    eprintln!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>]"
-    );
+fn serve_data_dir_usage(program: &str) -> String {
+    format!(
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> {}",
+        options_usage(false, true)
+    )
 }
 
 fn print_report(report: &DryRunReport) {
-    println!("command=dry-run");
-    println!("role={}", role_name(report.role));
-    println!("profile={}", profile_name(report.profile));
-    println!("listener={}", report.listener);
-    println!("storage={}", storage_name(&report.storage));
-    println!(
-        "runtime_plan.core_role={}",
-        role_name(report.runtime_plan.core_role)
-    );
-    println!(
-        "runtime_plan.profile={}",
-        profile_name(report.runtime_plan.profile)
-    );
-    println!(
-        "runtime_plan.storage_kind={}",
-        storage_kind_name(report.runtime_plan.storage_kind)
-    );
-    println!(
-        "runtime_plan.schema_column_family_count={}",
-        report.runtime_plan.schema_column_family_count
-    );
-    println!("health.status={}", health_status_name(report.health.status));
-    println!("health.role={}", role_name(report.health.role));
-    println!("health.profile={}", profile_name(report.health.profile));
-    println!(
-        "health.drain_state={}",
-        drain_state_name(report.health.drain_state)
-    );
-    println!("health.message={}", report.health.message);
-    println!("metrics.active_sessions={}", report.metrics.active_sessions);
-    println!("metrics.total_sessions={}", report.metrics.total_sessions);
-    println!(
-        "metrics.rejected_sessions={}",
-        report.metrics.rejected_sessions
-    );
-    println!("metrics.frames_received={}", report.metrics.frames_received);
-    println!("metrics.frames_sent={}", report.metrics.frames_sent);
-    println!("metrics.bytes_received={}", report.metrics.bytes_received);
-    println!("metrics.bytes_sent={}", report.metrics.bytes_sent);
-    println!("metrics.ticks={}", report.metrics.ticks);
-    println!("metrics.tick_inbound={}", report.metrics.tick_inbound);
-    println!("metrics.tick_outbound={}", report.metrics.tick_outbound);
-    println!(
-        "metrics.tick_subscription_wakes={}",
-        report.metrics.tick_subscription_wakes
-    );
-    println!(
-        "metrics.tick_write_wakes={}",
-        report.metrics.tick_write_wakes
-    );
-    println!(
-        "metrics.last_tick_inbound={}",
-        report.metrics.last_tick_inbound
-    );
-    println!(
-        "metrics.last_tick_outbound={}",
-        report.metrics.last_tick_outbound
-    );
-    println!(
-        "metrics.last_tick_subscription_wakes={}",
-        report.metrics.last_tick_subscription_wakes
-    );
-    println!(
-        "metrics.last_tick_write_wakes={}",
-        report.metrics.last_tick_write_wakes
-    );
-    println!(
-        "metrics.protocol_version_mismatches={}",
-        report.metrics.protocol_version_mismatches
-    );
-    println!(
-        "metrics.subscription_full_diff_fallbacks={}",
-        report.metrics.subscription_full_diff_fallbacks
-    );
-    println!(
-        "metrics.storage_migrations_applied={}",
-        report.metrics.storage_migrations_applied
-    );
-    println!("sockets_bound=false");
-    println!("storage_opened=false");
-    println!("runtime_started=false");
+    let (plan, health, metrics) = (&report.runtime_plan, &report.health, &report.metrics);
+    let rows: &[(&str, &dyn std::fmt::Display)] = &[
+        ("command", &"dry-run"),
+        ("role", &role_name(report.role)),
+        ("profile", &profile_name(report.profile)),
+        ("listener", &report.listener),
+        ("storage", &storage_name(&report.storage)),
+        ("runtime_plan.core_role", &role_name(plan.core_role)),
+        ("runtime_plan.profile", &profile_name(plan.profile)),
+        (
+            "runtime_plan.storage_kind",
+            &storage_kind_name(plan.storage_kind),
+        ),
+        (
+            "runtime_plan.schema_column_family_count",
+            &plan.schema_column_family_count,
+        ),
+        ("health.status", &health_status_name(health.status)),
+        ("health.role", &role_name(health.role)),
+        ("health.profile", &profile_name(health.profile)),
+        ("health.drain_state", &drain_state_name(health.drain_state)),
+        ("health.message", &health.message),
+        ("metrics.active_sessions", &metrics.active_sessions),
+        ("metrics.total_sessions", &metrics.total_sessions),
+        ("metrics.rejected_sessions", &metrics.rejected_sessions),
+        ("metrics.frames_received", &metrics.frames_received),
+        ("metrics.frames_sent", &metrics.frames_sent),
+        ("metrics.bytes_received", &metrics.bytes_received),
+        ("metrics.bytes_sent", &metrics.bytes_sent),
+        ("metrics.ticks", &metrics.ticks),
+        ("metrics.tick_inbound", &metrics.tick_inbound),
+        ("metrics.tick_outbound", &metrics.tick_outbound),
+        (
+            "metrics.tick_subscription_wakes",
+            &metrics.tick_subscription_wakes,
+        ),
+        ("metrics.tick_write_wakes", &metrics.tick_write_wakes),
+        ("metrics.last_tick_inbound", &metrics.last_tick_inbound),
+        ("metrics.last_tick_outbound", &metrics.last_tick_outbound),
+        (
+            "metrics.last_tick_subscription_wakes",
+            &metrics.last_tick_subscription_wakes,
+        ),
+        (
+            "metrics.last_tick_write_wakes",
+            &metrics.last_tick_write_wakes,
+        ),
+        (
+            "metrics.protocol_version_mismatches",
+            &metrics.protocol_version_mismatches,
+        ),
+        (
+            "metrics.subscription_full_diff_fallbacks",
+            &metrics.subscription_full_diff_fallbacks,
+        ),
+        (
+            "metrics.storage_migrations_applied",
+            &metrics.storage_migrations_applied,
+        ),
+        ("sockets_bound", &false),
+        ("storage_opened", &false),
+        ("runtime_started", &false),
+    ];
+    for (key, value) in rows {
+        println!("{key}={value}");
+    }
 }
 
 fn print_auth_report(auth_admission: &AuthAdmissionConfig) {
@@ -507,22 +419,15 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
     if !text.len().is_multiple_of(2) {
         return Err("hex input has odd length".to_owned());
     }
-    let mut bytes = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks_exact(2) {
-        let high = hex_value(pair[0]).ok_or("hex input contains non-hex digit")?;
-        let low = hex_value(pair[1]).ok_or("hex input contains non-hex digit")?;
-        bytes.push(high << 4 | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    let digit = |byte: u8| {
+        (byte as char)
+            .to_digit(16)
+            .ok_or("hex input contains non-hex digit")
+    };
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Ok((digit(pair[0])? << 4 | digit(pair[1])?) as u8))
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -536,11 +441,80 @@ struct CliOptions {
     upstream_url: Option<String>,
 }
 
+/// One configurable setting, reachable from a flag (`--x v` or `--x=v`) and,
+/// for most settings, an environment variable.
+#[derive(Clone, Copy)]
+enum Setting {
+    Listen,
+    Port,
+    DataDir,
+    /// Flag-only form takes no value; the environment form is gated on a truthy value.
+    InMemory,
+    WebSocketPath,
+    StaticBearer,
+    AdmittedAccount,
+    /// Always rejected: privileged secrets are not jazz-server bearer credentials.
+    AdminSecret,
+    JwtPublicKeyPem,
+    JwtIssuer,
+    JwtAudience,
+    AllowLocalFirstAuth,
+    AnonymousSubject,
+    /// Accepted only to be rejected with a pointer at the removed edge mode.
+    UpstreamUrl,
+    Help,
+}
+
+/// Flags and their aliases; a later flag overrides an earlier one.
+const FLAGS: &[(&str, Setting)] = &[
+    ("--listen", Setting::Listen),
+    ("--bind", Setting::Listen),
+    ("--port", Setting::Port),
+    ("--data-dir", Setting::DataDir),
+    ("--dataDir", Setting::DataDir),
+    ("--in-memory", Setting::InMemory),
+    ("--memory", Setting::InMemory),
+    ("--websocket-path", Setting::WebSocketPath),
+    ("--ws-path", Setting::WebSocketPath),
+    ("--auth-static-bearer", Setting::StaticBearer),
+    ("--static-bearer", Setting::StaticBearer),
+    ("--loopback-admitted-account", Setting::AdmittedAccount),
+    ("--admin-secret", Setting::AdminSecret),
+    ("--auth-jwt-ed-public-key-pem", Setting::JwtPublicKeyPem),
+    ("--jwt-issuer", Setting::JwtIssuer),
+    ("--jwt-audience", Setting::JwtAudience),
+    ("--allow-local-first-auth", Setting::AllowLocalFirstAuth),
+    ("--anonymous-subject", Setting::AnonymousSubject),
+    ("--upstream-url", Setting::UpstreamUrl),
+    ("--help", Setting::Help),
+    ("-h", Setting::Help),
+];
+
+/// Environment variables, applied in this order before any flag.
+const ENV: &[(&str, Setting)] = &[
+    ("JAZZ_UPSTREAM_URL", Setting::UpstreamUrl),
+    ("JAZZ_SERVER_LISTEN", Setting::Listen),
+    ("JAZZ_SERVER_PORT", Setting::Port),
+    ("JAZZ_SERVER_DATA_DIR", Setting::DataDir),
+    ("JAZZ_SERVER_IN_MEMORY", Setting::InMemory),
+    ("JAZZ_SERVER_WEBSOCKET_PATH", Setting::WebSocketPath),
+    ("JAZZ_ADMIN_SECRET", Setting::AdminSecret),
+    ("JAZZ_BACKEND_SECRET", Setting::AdminSecret),
+    ("JAZZ_SERVER_AUTH_STATIC_BEARER", Setting::StaticBearer),
+    (
+        "JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM",
+        Setting::JwtPublicKeyPem,
+    ),
+    ("JAZZ_JWT_ISSUER", Setting::JwtIssuer),
+    ("JAZZ_JWT_AUDIENCE", Setting::JwtAudience),
+    ("JAZZ_ALLOW_LOCAL_FIRST_AUTH", Setting::AllowLocalFirstAuth),
+    ("JAZZ_SERVER_ANONYMOUS_SUBJECT", Setting::AnonymousSubject),
+];
+
 impl CliOptions {
     fn parse(args: Vec<String>, program: &str) -> Result<Self, String> {
         let mut options = Self::defaults(StorageConfig::InMemory, "/sync".to_owned());
-        Self::apply_env(&mut options)?;
-        Self::parse_into(&mut options, args, program)?;
+        options.apply_env_and_args(args, program)?;
         options.reject_unsupported_upstream_url()?;
         Ok(options)
     }
@@ -560,134 +534,100 @@ impl CliOptions {
             format!("/apps/{app_id}/ws"),
         );
         options.implicit_app_storage = true;
-        Self::apply_env(&mut options)?;
-        Self::parse_into(&mut options, args, program)?;
+        options.apply_env_and_args(args, program)?;
         options.auth_admission.expected_audience = Some(app_id.to_owned());
         options.reject_unsupported_upstream_url()?;
         Ok(options)
     }
 
-    fn parse_into(options: &mut Self, args: Vec<String>, program: &str) -> Result<(), String> {
+    /// Apply the environment, then the flags in order, over the defaults.
+    fn apply_env_and_args(&mut self, args: Vec<String>, program: &str) -> Result<(), String> {
+        for &(name, setting) in ENV {
+            let Some(value) = env::var_os(name) else {
+                continue;
+            };
+            // A non-UTF-8 value counts as unset, except that a secret is refused either way.
+            match value.into_string() {
+                Ok(value) => self.set(setting, value, name)?,
+                Err(_) if matches!(setting, Setting::AdminSecret) => {
+                    self.set(setting, String::new(), name)?;
+                }
+                Err(_) => {}
+            }
+        }
+
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--listen" | "--bind" => {
-                    options.listen = parse_socket_addr(&next_value(&mut args, &arg)?)?;
+            let (flag, inline) = match arg.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+                _ => (arg.as_str(), None),
+            };
+            let Some(&(_, setting)) = FLAGS.iter().find(|(name, _)| *name == flag) else {
+                return Err(format!("unsupported_option={arg}"));
+            };
+            let value = match (setting, inline) {
+                (Setting::AdminSecret, _) => String::new(),
+                (Setting::Help | Setting::InMemory, Some(_)) => {
+                    return Err(format!("unsupported_option={arg}"));
                 }
-                "--port" => {
-                    let port = next_value(&mut args, &arg)?
-                        .parse::<u16>()
-                        .map_err(|error| format!("invalid --port: {error}"))?;
-                    options.listen.set_port(port);
+                (Setting::Help, None) => return Err(format!("help_requested usage={program}")),
+                (Setting::InMemory, None) => "true".to_owned(),
+                (_, Some("")) => return Err(format!("missing_value_for={arg}")),
+                (_, Some(value)) => value.to_owned(),
+                (_, None) => args
+                    .next()
+                    .ok_or_else(|| format!("missing_value_for={arg}"))?,
+            };
+            self.set(setting, value, flag)?;
+        }
+        Ok(())
+    }
+
+    /// Apply one setting; `source` is the flag or environment variable name.
+    fn set(&mut self, setting: Setting, value: String, source: &str) -> Result<(), String> {
+        let auth = &mut self.auth_admission;
+        match setting {
+            Setting::Listen => self.listen = parse_socket_addr(&value)?,
+            Setting::Port => self.listen.set_port(
+                value
+                    .parse::<u16>()
+                    .map_err(|error| format!("invalid {source}: {error}"))?,
+            ),
+            Setting::DataDir => self.select_storage(StorageConfig::data_dir(value)),
+            Setting::InMemory => {
+                if parse_bool(&value, source) == Ok(true) {
+                    self.select_storage(StorageConfig::InMemory);
                 }
-                "--data-dir" | "--dataDir" => {
-                    options.select_storage(StorageConfig::data_dir(next_value(&mut args, &arg)?));
-                }
-                "--in-memory" | "--memory" => {
-                    options.select_storage(StorageConfig::InMemory);
-                }
-                "--websocket-path" | "--ws-path" => {
-                    options.websocket_path = next_value(&mut args, &arg)?;
-                }
-                "--auth-static-bearer" | "--static-bearer" => {
-                    options.auth_admission =
-                        AuthAdmissionConfig::static_bearer(next_value(&mut args, &arg)?);
-                }
-                "--loopback-admitted-account" => {
-                    options.admitted_account =
-                        Some(parse_admitted_account(&next_value(&mut args, &arg)?, &arg)?);
-                }
-                "--admin-secret" => {
-                    return Err(
-                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
-                            .to_owned(),
-                    );
-                }
-                "--auth-jwt-ed-public-key-pem" => {
-                    options.auth_admission.static_bearer_token = None;
-                    options.auth_admission.jwt_verifier = Some(
-                        JwtVerifierConfig::ed_public_key_pem(next_value(&mut args, &arg)?),
-                    );
-                }
-                "--jwt-issuer" => {
-                    options.auth_admission.expected_issuer = Some(next_value(&mut args, &arg)?);
-                }
-                "--jwt-audience" => {
-                    options.auth_admission.expected_audience = Some(next_value(&mut args, &arg)?);
-                }
-                "--allow-local-first-auth" => {
-                    options.auth_admission.allow_local_first_auth =
-                        parse_bool(&next_value(&mut args, &arg)?, &arg)?;
-                }
-                "--anonymous-subject" => {
-                    options.auth_admission.anonymous_subject = next_value(&mut args, &arg)?;
-                }
-                "--upstream-url" => {
-                    options.upstream_url = Some(next_value(&mut args, &arg)?);
-                }
-                "--help" | "-h" => return Err(format!("help_requested usage={program}")),
-                _ if arg.starts_with("--listen=") => {
-                    options.listen = parse_socket_addr(value_after_equals(&arg)?)?;
-                }
-                _ if arg.starts_with("--bind=") => {
-                    options.listen = parse_socket_addr(value_after_equals(&arg)?)?;
-                }
-                _ if arg.starts_with("--port=") => {
-                    let port = value_after_equals(&arg)?
-                        .parse::<u16>()
-                        .map_err(|error| format!("invalid --port: {error}"))?;
-                    options.listen.set_port(port);
-                }
-                _ if arg.starts_with("--data-dir=") || arg.starts_with("--dataDir=") => {
-                    options.select_storage(StorageConfig::data_dir(value_after_equals(&arg)?));
-                }
-                _ if arg.starts_with("--websocket-path=") || arg.starts_with("--ws-path=") => {
-                    options.websocket_path = value_after_equals(&arg)?.to_owned();
-                }
-                _ if arg.starts_with("--auth-static-bearer=")
-                    || arg.starts_with("--static-bearer=") =>
-                {
-                    options.auth_admission =
-                        AuthAdmissionConfig::static_bearer(value_after_equals(&arg)?);
-                }
-                _ if arg.starts_with("--loopback-admitted-account=") => {
-                    options.admitted_account = Some(parse_admitted_account(
-                        value_after_equals(&arg)?,
-                        "--loopback-admitted-account",
-                    )?);
-                }
-                _ if arg.starts_with("--admin-secret=") => {
-                    return Err(
-                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
-                            .to_owned(),
-                    );
-                }
-                _ if arg.starts_with("--auth-jwt-ed-public-key-pem=") => {
-                    options.auth_admission.static_bearer_token = None;
-                    options.auth_admission.jwt_verifier = Some(
-                        JwtVerifierConfig::ed_public_key_pem(value_after_equals(&arg)?),
-                    );
-                }
-                _ if arg.starts_with("--jwt-issuer=") => {
-                    options.auth_admission.expected_issuer =
-                        Some(value_after_equals(&arg)?.to_owned());
-                }
-                _ if arg.starts_with("--jwt-audience=") => {
-                    options.auth_admission.expected_audience =
-                        Some(value_after_equals(&arg)?.to_owned());
-                }
-                _ if arg.starts_with("--allow-local-first-auth=") => {
-                    options.auth_admission.allow_local_first_auth =
-                        parse_bool(value_after_equals(&arg)?, "--allow-local-first-auth")?;
-                }
-                _ if arg.starts_with("--anonymous-subject=") => {
-                    options.auth_admission.anonymous_subject = value_after_equals(&arg)?.to_owned();
-                }
-                _ if arg.starts_with("--upstream-url=") => {
-                    options.upstream_url = Some(value_after_equals(&arg)?.to_owned());
-                }
-                _ => return Err(format!("unsupported_option={arg}")),
             }
+            Setting::WebSocketPath => self.websocket_path = value,
+            // Deliberately resets every earlier auth setting.
+            Setting::StaticBearer => *auth = AuthAdmissionConfig::static_bearer(value),
+            Setting::AdmittedAccount => {
+                self.admitted_account = Some(parse_admitted_account(&value, source)?);
+            }
+            Setting::AdminSecret if source.starts_with("--") => {
+                return Err(
+                    "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
+                        .to_owned(),
+                );
+            }
+            Setting::AdminSecret => {
+                return Err(format!(
+                    "{source} is not a jazz-server bearer credential; use JAZZ_SERVER_AUTH_STATIC_BEARER for explicit client bearer admission or jazz-tools server for privileged admin/backend access"
+                ));
+            }
+            Setting::JwtPublicKeyPem => {
+                auth.static_bearer_token = None;
+                auth.jwt_verifier = Some(JwtVerifierConfig::ed_public_key_pem(value));
+            }
+            Setting::JwtIssuer => auth.expected_issuer = Some(value),
+            Setting::JwtAudience => auth.expected_audience = Some(value),
+            Setting::AllowLocalFirstAuth => {
+                auth.allow_local_first_auth = parse_bool(&value, source)?;
+            }
+            Setting::AnonymousSubject => auth.anonymous_subject = value,
+            Setting::UpstreamUrl => self.upstream_url = Some(value),
+            Setting::Help => unreachable!("--help is handled before a value is read"),
         }
         Ok(())
     }
@@ -726,58 +666,6 @@ impl CliOptions {
         }
     }
 
-    fn apply_env(options: &mut Self) -> Result<(), String> {
-        options.upstream_url = env::var("JAZZ_UPSTREAM_URL").ok();
-        if let Ok(value) = env::var("JAZZ_SERVER_LISTEN") {
-            options.listen = parse_socket_addr(&value)?;
-        }
-        if let Ok(value) = env::var("JAZZ_SERVER_PORT") {
-            let port = value
-                .parse::<u16>()
-                .map_err(|error| format!("invalid JAZZ_SERVER_PORT: {error}"))?;
-            options.listen.set_port(port);
-        }
-        if env_truthy("JAZZ_SERVER_IN_MEMORY") {
-            options.select_storage(StorageConfig::InMemory);
-        } else if let Ok(value) = env::var("JAZZ_SERVER_DATA_DIR") {
-            options.select_storage(StorageConfig::data_dir(value));
-        }
-        if let Ok(value) = env::var("JAZZ_SERVER_WEBSOCKET_PATH") {
-            options.websocket_path = value;
-        }
-        for (name, replacement) in [
-            ("JAZZ_ADMIN_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
-            ("JAZZ_BACKEND_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
-        ] {
-            if env::var_os(name).is_some() {
-                return Err(format!(
-                    "{name} is not a jazz-server bearer credential; use {replacement} for explicit client bearer admission or jazz-tools server for privileged admin/backend access"
-                ));
-            }
-        }
-        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_STATIC_BEARER") {
-            options.auth_admission = AuthAdmissionConfig::static_bearer(value);
-        }
-        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM") {
-            options.auth_admission.static_bearer_token = None;
-            options.auth_admission.jwt_verifier = Some(JwtVerifierConfig::ed_public_key_pem(value));
-        }
-        if let Ok(value) = env::var("JAZZ_JWT_ISSUER") {
-            options.auth_admission.expected_issuer = Some(value);
-        }
-        if let Ok(value) = env::var("JAZZ_JWT_AUDIENCE") {
-            options.auth_admission.expected_audience = Some(value);
-        }
-        if let Ok(value) = env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH") {
-            options.auth_admission.allow_local_first_auth =
-                parse_bool(&value, "JAZZ_ALLOW_LOCAL_FIRST_AUTH")?;
-        }
-        if let Ok(value) = env::var("JAZZ_SERVER_ANONYMOUS_SUBJECT") {
-            options.auth_admission.anonymous_subject = value;
-        }
-        Ok(())
-    }
-
     fn reject_unsupported_upstream_url(&self) -> Result<(), String> {
         if self.upstream_url.is_some() {
             return Err(
@@ -804,33 +692,10 @@ fn apply_shell_options(config: &mut jazz::serving::ServerConfig, options: &CliOp
     config.storage = options.storage.clone();
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next()
-        .ok_or_else(|| format!("missing_value_for={flag}"))
-}
-
-fn value_after_equals(arg: &str) -> Result<&str, String> {
-    arg.split_once('=')
-        .map(|(_, value)| value)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("missing_value_for={arg}"))
-}
-
 fn parse_socket_addr(value: &str) -> Result<SocketAddr, String> {
     value
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid listen address {value:?}: {error}"))
-}
-
-fn env_truthy(name: &str) -> bool {
-    env::var(name)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn parse_bool(value: &str, name: &str) -> Result<bool, String> {

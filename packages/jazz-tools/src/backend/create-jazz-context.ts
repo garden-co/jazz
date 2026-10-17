@@ -30,6 +30,7 @@ import {
   verifiedLocalFirstRequestProof,
   type BackendRequestOptions,
 } from "./request-auth.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -58,11 +59,9 @@ type BackendContextSchemaConfig =
       permissions?: undefined;
     };
 
-export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional node durability tier identity. */
-  tier?: "local" | "global";
   /**
    * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
    * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
@@ -192,7 +191,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "global";
     const env = this.config.env ?? "dev";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
@@ -230,9 +228,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         backendSecret: this.config.backendSecret,
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
-        tier: nodeTier,
-        defaultDurabilityTier:
-          this.config.defaultDurabilityTier ?? (config.serverUrl ? nodeTier : undefined),
       },
       { onAuthFailure },
     );
@@ -545,20 +540,6 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     if (this.mutationErrorSinkRef)
       this.coreSource.detachMutationErrorSink(this.mutationErrorSinkRef);
   }
-}
-
-export function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
