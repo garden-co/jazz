@@ -30,6 +30,7 @@ import { prepareEqualityQuery } from "../e2ee/equality-query.js";
 import { queryKeyDependencies, decryptedQuerySpaces } from "../e2ee/query-dependencies.js";
 import { E2eeDataError } from "../e2ee/data-error.js";
 import { equalityIndexColumn } from "../e2ee/encrypted-schema.js";
+import { permissionSpaceColumn } from "../e2ee/current-membership-names.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
@@ -96,7 +97,11 @@ import {
   transformRows,
 } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
-import { encryptedSchemas, encryptedRowSpaces } from "../e2ee/encrypted-schema.js";
+import {
+  encryptedSchemas,
+  encryptedRowSpaces,
+  usesEncryptionSpacePolicy,
+} from "../e2ee/encrypted-schema.js";
 import {
   encryptCell,
   encryptStreamingCell,
@@ -1433,6 +1438,7 @@ type EncryptedUpdateBatch = {
 
 type EncryptedInsertBatch = {
   schema: WasmSchema;
+  requireAccepted: boolean;
   scope: string;
   identifier: string;
   branch: string;
@@ -1710,6 +1716,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const metadata = encryptedSchemas.get(table._schema)!;
     const declaration = metadata.tables.get(table._table)!;
     const logicalTable = metadata.logical[table._table]!;
+    const requireAccepted = usesEncryptionSpacePolicy(table._schema, table._table);
     const values =
       preparedValues ?? structuredClone(toWriteRecord(data, metadata.logical, table._table));
     const physical = { ...values };
@@ -1725,6 +1732,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     const identifier = values[declaration.space];
     if (identifier?.type !== "Uuid") throw new Error("Encrypted writes require a space identifier");
+    if (
+      table._schema[table._table]!.columns.some((column) => column.name === permissionSpaceColumn)
+    )
+      physical[permissionSpaceColumn] = identifier;
     const optionsSnapshot = options ? structuredClone(options) : undefined;
     const binding = this.requireBinding(operation);
     const { ownerClient, openTransactionId, session, attribution } = binding;
@@ -1824,8 +1835,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           identifier.value,
         );
       };
-      if (initial) await stage(initial.secret, initial.root);
-      else {
+      if (initial) {
+        if (
+          requireAccepted &&
+          this.initialSpaceKeys.has(`${initial.root.scopeId}:${initial.root.identifier}`)
+        )
+          throw new E2eeDataError("space-not-initialised");
+        await stage(initial.secret, initial.root);
+      } else {
         await this.withWriteSpaceKeys(
           scope,
           identifier.value,
@@ -1833,6 +1850,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           binding,
           io,
           operation === "insert",
+          requireAccepted,
         );
       }
     };
@@ -1844,6 +1862,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         previousBatch?.pending &&
         previousBatch.schema === table._schema &&
         previousBatch.scope === declaration.scope &&
+        previousBatch.requireAccepted === requireAccepted &&
         previousBatch.identifier === identifier.value &&
         previousBatch.branch === branch
       ) {
@@ -1852,6 +1871,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       } else {
         const batch: EncryptedInsertBatch = {
           schema: table._schema,
+          requireAccepted,
           scope: declaration.scope,
           identifier: identifier.value,
           branch,
@@ -1880,7 +1900,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           } else {
             // Borrow a key only while this bounded batch runs. Reobserve accepted
             // authority after encryption, before preparation can permit commit.
-            await this.withWriteSpaceKeys(scope, identifier.value, stage, binding, io, true);
+            await this.withWriteSpaceKeys(
+              scope,
+              identifier.value,
+              stage,
+              binding,
+              io,
+              true,
+              requireAccepted,
+            );
             // A newly staged root remains owned by this transaction's initial
             // acceptance boundary; it is not yet eligible for a global recheck.
             if (initialisedHere) return;
@@ -1894,6 +1922,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
               binding,
               io,
               false,
+              requireAccepted,
             );
           }
         });
@@ -1918,9 +1947,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     binding: DbTransactionHandleBinding,
     io: TransactionPreparationIO,
     mayCreate: boolean,
+    requireAccepted: boolean,
   ): Promise<void> {
     const db = this.e2ee!.db;
-    await assertSpaceWriteTransaction(db, scope, identifier, this.kind);
+    await assertSpaceWriteTransaction(db, scope, identifier, this.kind, requireAccepted);
     let entered = false;
     try {
       await withSpaceKeys(
@@ -1947,6 +1977,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     } catch (error) {
       if (
         entered ||
+        requireAccepted ||
         !mayCreate ||
         !(error instanceof E2eeDataError) ||
         error.code !== "key-unavailable"
@@ -2296,6 +2327,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const identifier = creating && requested?.type === "Uuid" ? requested.value : storedScope;
       if (typeof identifier !== "string")
         throw new Error("Encrypted mutation cannot resolve the stored space");
+      if (
+        table._schema[table._table]!.columns.some((column) => column.name === permissionSpaceColumn)
+      )
+        updates[permissionSpaceColumn] = { type: "Uuid", value: identifier };
       if (creating) {
         for (const name of declaration.columns) {
           if (Object.hasOwn(updates, name)) continue;
@@ -2374,6 +2409,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             `${(await db.authenticatedTableIdentity(scope)) ?? (await db.tableIdentity(scope))}:${identifier}`,
           )
         : undefined;
+      if (initial && usesEncryptionSpacePolicy(table._schema, table._table))
+        throw new E2eeDataError("space-not-initialised");
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of changed) {
           if (declaration.indexes?.[name])
@@ -2401,7 +2438,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         withKey: (use) =>
           initial
             ? use(initial.secret, initial.root)
-            : this.withWriteSpaceKeys(scope, identifier, use, binding, io, creating),
+            : this.withWriteSpaceKeys(
+                scope,
+                identifier,
+                use,
+                binding,
+                io,
+                creating,
+                usesEncryptionSpacePolicy(table._schema, table._table),
+              ),
       };
     };
     // Explicit branch writes retain their independent preparation path.
@@ -3821,6 +3866,14 @@ export class Db {
           table._table,
         );
       const physical = { ...values };
+      if (
+        encryption &&
+        table._schema[table._table]!.columns.some(
+          (column) => column.name === permissionSpaceColumn,
+        ) &&
+        values[encryption.space]
+      )
+        physical[permissionSpaceColumn] = values[encryption.space]!;
       if (split) {
         const kind = table._schema[table._table]!.columns.find(
           (column) => column.name === split.column,
@@ -4031,6 +4084,9 @@ export class Db {
           {
             newScope: !!group.initial,
             initialRecipients: group.initial?.options.initialRecipients,
+            requireAccepted: group.entries.some((entry) =>
+              usesEncryptionSpacePolicy(entry.table._schema, entry.table._table),
+            ),
           },
           async (secret, root) => {
             for (const entry of group.entries) {
@@ -4038,6 +4094,12 @@ export class Db {
                 .get(entry.table._schema)!
                 .tables.get(entry.table._table)!;
               const physical = { ...entry.values };
+              if (
+                entry.table._schema[entry.table._table]!.columns.some(
+                  (column) => column.name === permissionSpaceColumn,
+                )
+              )
+                physical[permissionSpaceColumn] = { type: "Uuid", value: group.identifier };
               for (const name of encryption.columns) {
                 if (name === entry.stream!.column || !entry.values[name]) continue;
                 if (encryption.indexes?.[name])

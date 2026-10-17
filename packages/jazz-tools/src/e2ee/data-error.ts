@@ -1,4 +1,6 @@
 const messages = {
+  "space-not-initialised":
+    "The encryption space must exist and be globally accepted before writing protected data",
   "key-unavailable": "The encryption key is currently unavailable",
   "key-not-shared": "The encryption key has not been shared with this device",
   "maintenance-required": "Encryption key maintenance is required",

@@ -27,6 +27,74 @@ prove that the current account owns the specific chat. The managed space's
 with a creator-only root policy, which would let other accounts insert conflicting
 roots for an existing chat.
 
+## Derive row permissions from space membership
+
+Use `fromEncryptionSpace()` when every recipient of a space should have ordinary
+read, insert, update and delete permission on its encrypted rows. Opt the scope
+into current membership tables, then choose the helper on each protected table:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { encryptionSpacePolicySchema } from "jazz-tools/e2ee";
+
+export const app = s.defineApp({
+  ...encryptionSpacePolicySchema("chats"),
+  chats: s.table({ ownerId: s.uuid() }, {}),
+  messages: s
+    .table({ chatId: s.uuid(), text: s.string() }, { chat: s.rel("chats", "chatId") })
+    .encrypted({ space: "chatId", columns: ["text"] }),
+});
+```
+
+```ts title="permissions.ts (excerpt)"
+import { definePermissions } from "jazz-tools";
+import { app } from "./schema.js";
+
+export const permissions = definePermissions(app, ({ policy: p, session }) => {
+  p.messages.fromEncryptionSpace();
+  p.__e2ee_v1_space_members_chats.allowInsert.where((member) =>
+    p.chats.existsIncludingCreated.where({
+      id: member.scopeId,
+      ownerId: session.user.account,
+    }),
+  );
+  p.__e2ee_v1_space_members_chats.allowUpdate.where((member) =>
+    p.chats.exists.where({
+      id: member.scopeId,
+      ownerId: session.user.account,
+    }),
+  );
+  // Also define chat and E2EE administration policies, as above.
+});
+```
+
+For groups, also authorise inserts and updates on `__e2ee_v1_group_members`
+using your group-administration rules. The helper grants data access; it does
+not grant administration authority. Current membership writes are denied by
+default. The SDK maintains direct account and nested group edges in the same
+exclusive transaction as signed membership history. A denied edge change rejects
+the history change too. Group changes use the existing recursive policy support;
+the SDK does not copy all effective members into each space.
+
+Import `./permissions.js` in the client before creating the Db, using the same
+`app` instance, or define the permissions alongside your schema. A successful
+`definePermissions` call records which tables use the helper in memory. This
+lets write preparation distinguish helper tables from explicit-policy tables.
+Missing registration produces a configuration error. Registration contains no
+secrets and does not replace the deployed policies enforced by the server.
+
+Wait for the scope creation handle's `wait({ tier: "global" })` before writing
+helper-protected rows. A missing or unaccepted space throws
+`E2eeDataError("space-not-initialised")`, including before an upload consumes its
+source. Creating the scope and its first helper-protected row in one transaction
+is not supported. Tables using explicit policies retain their atomic first-write
+behaviour, even when they reference the same scope.
+
+Choose either the helper or explicit policies for a table; they cannot be
+combined. Initial membership matches the explicit recipient list, which can
+exclude the creator. Revocation retracts ordinary row access but cannot erase
+keys or plaintext that a former recipient already retained.
+
 ## Keep account and key storage separate
 
 Configure `e2ee: { app, store }` when creating the authenticated Db. The store implements `AccountStore`, but must use a different value from account-selection storage. Its `update(transform)` operation must be atomic across concurrent callers; the synchronous transform can run more than once. The browser example uses IndexedDB read/write transactions and scopes the record by registry, environment and account.
@@ -85,7 +153,8 @@ Creating a scope row prepares its initial space and creator grant automatically.
 
 Initial recipient delivery follows in a later accepted transaction. Local completion does not wait for it. An explicit Global wait includes the permitted handoff, but failure cannot roll back data that the server has already accepted. The SDK retries rejected maintenance conflicts at most twice, revalidating accepted eligibility each time, without replaying your original write. Report other failures and inspect the state with `db.e2ee.explain({ scope: app.chats, identifier: chatId })`; do not describe accepted data as rolled back.
 
-For a pre-existing scope without an encryption space, the first encrypted write
+For a pre-existing scope without an encryption space and a table using explicit
+policies, the first encrypted write
 initialises the space for that writer, not automatically for the original scope
 row's creator. Explicitly grant other intended recipients.
 

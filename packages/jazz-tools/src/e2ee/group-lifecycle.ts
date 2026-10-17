@@ -1,4 +1,5 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { maintainGroupMember } from "./current-membership.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
 import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
@@ -523,6 +524,14 @@ export class Groups {
         this.assertOpen();
         const { id: rowId, ...values } = record;
         tx.insert(this.tables.__e2ee_group_membership, { ...values, signature }, { id: rowId });
+        maintainGroupMember(
+          tx,
+          this.tables.__e2ee_groups._schema,
+          record.groupId,
+          memberKind,
+          memberId,
+          operation,
+        );
       });
       // Ordinary Jazz policy decides whether this administrator may make the
       // change. Neither group membership nor a group key grants that permission.
@@ -578,7 +587,20 @@ export class Groups {
         );
         this.assertOpen();
         const { id: rowId, ...values } = root;
-        return tx.insert(this.tables.__e2ee_groups, { ...values, signature }, { id: rowId });
+        const created = tx.insert(
+          this.tables.__e2ee_groups,
+          { ...values, signature },
+          { id: rowId },
+        );
+        maintainGroupMember(
+          tx,
+          this.tables.__e2ee_groups._schema,
+          rowId,
+          "account",
+          this.accountId,
+          "add",
+        );
+        return created;
       });
       const root = await proposal.wait({ tier: "global" });
       this.assertOpen();
