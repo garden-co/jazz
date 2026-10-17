@@ -270,19 +270,12 @@ mod tests {
         assert_eq!(
             profile.codec_ids().collect::<Vec<_>>(),
             vec![
-                "groove.large-value.v1",
-                "groove.ordered-chunk-storage.v1",
+                "groove.dictionary.v1",
+                "groove.durable-index.v2",
+                "groove.large-value.v2",
+                "groove.ordered-chunk-storage.v2",
                 "groove.ordered-kv.v1",
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.subscription-program-fact-key.v1",
-                "jazz.transaction-durability.v2",
+                "jazz.node-storage.v2",
             ]
         );
     }
@@ -323,7 +316,7 @@ mod tests {
             &epoch_1_storage_codec_profile().expect("valid fixed profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x02\0\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v3\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().expect("canonical manifest"), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected)

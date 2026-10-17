@@ -404,6 +404,18 @@ impl RocksDbStorage {
                     "incompatible RocksDB value format".into(),
                 ));
             }
+            // Compare the raw inventory before decoding it as a supported
+            // profile, so retired codecs retain the typed refusal contract.
+            let raw_manifest = storage
+                .db
+                .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                .storage()?
+                .ok_or_else(|| {
+                    Error::InvalidStorageLayout("missing RocksDB epoch manifest".into())
+                })?;
+            if raw_manifest != target.encode()? {
+                source.admit_existing(&raw_manifest)?;
+            }
             let StorageAdmission::Durable(admission) = storage.admission()? else {
                 unreachable!()
             };

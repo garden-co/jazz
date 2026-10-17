@@ -336,6 +336,22 @@ impl SqliteStorage {
             connection: RefCell::new(Some(connection)),
             write_flush_cadence: RefCell::new(None),
         };
+        // Refuse retired codec inventories with their structured error before
+        // the admission decoder requires this build's mandatory codecs.
+        let raw_manifest: Vec<u8> = storage
+            .connection
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [EPOCH_MANIFEST_KEY],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        if raw_manifest != target.encode()? {
+            source.admit_existing(&raw_manifest)?;
+        }
         let StorageAdmission::Durable(admission) = storage.admission()? else {
             unreachable!()
         };
