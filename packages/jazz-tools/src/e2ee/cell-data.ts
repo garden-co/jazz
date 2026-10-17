@@ -1,10 +1,7 @@
 import type { ColumnDescriptor, Value } from "../drivers/types.js";
 import type { Db, TableProxy } from "../runtime/db.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
-import {
-  encodeNativeRowValues,
-  decodeNativeRowValues,
-} from "../runtime/native-runtime/native-row-codec.js";
+import { encodeE2eeValueV1, decodeE2eeValueV1 } from "./value-codec-v1.js";
 import { unwrapValue } from "../runtime/row-transformer.js";
 import { encodeCellType } from "./cell-type.js";
 import { E2eeDataError } from "./data-error.js";
@@ -107,7 +104,7 @@ export async function encryptCell(
   if (!column) throw new Error("Encrypted column declaration is unavailable");
   const { cipher, application } = await cellCryptoForDb(db);
   const aad = await dataContext(db, table, rowId, column, root, application);
-  const plaintext = encodeNativeRowValues([{ ...column, name: "value" }], [value]);
+  const plaintext = encodeE2eeValueV1([{ ...column, name: "value" }], [value]);
   try {
     const ciphertext = await cipher.encrypt(secret, aad, plaintext);
     decodeEnvelope(cipher.mechanism, ciphertext);
@@ -239,7 +236,7 @@ export async function decryptCellRows(
             plaintext = await cipher.decrypt(secret, aad, cell.ciphertext);
             // Buffer.slice() aliases its input. Use a plain view so the codec's
             // byte-value slices own their memory before temporary plaintext is wiped.
-            const value = decodeNativeRowValues(
+            const value = decodeE2eeValueV1(
               [{ ...column, name: "value" }],
               new Uint8Array(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength),
             )[0]!;
