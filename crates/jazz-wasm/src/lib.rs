@@ -1154,17 +1154,13 @@ impl WasmDbInner {
         let owner = Rc::clone(&self.db);
         let release_db = Rc::clone(&self.db);
         let pending = self.db.enqueue_transaction_read(open_tx, async move {
-            if opts.tier == jazz::db::ReadTier::LocalOnly {
-                owner
-                    .restrict_e2ee_observation_snapshot_for_binding(open_tx)
-                    .await?;
-            }
             let coverage_deadline_ms = js_sys::Date::now() + coverage_budget_ms;
             owner
-                .all_settled_serialized_query_for_binding(
+                .all_e2ee_settled_serialized_query_for_binding(
                     &query,
                     opts,
                     open_tx,
+                    e2ee_snapshot_at_begin,
                     request_scope,
                     author,
                     require_coverage,

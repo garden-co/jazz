@@ -3239,18 +3239,14 @@ impl NapiDb {
         let release_db = Rc::clone(&db.core);
         let owner = Rc::clone(&db.core);
         let read = db.core.enqueue_transaction_read(open_tx, async move {
-            if opts.tier == jazz::db::ReadTier::LocalOnly {
-                owner
-                    .restrict_e2ee_observation_snapshot_for_binding(open_tx)
-                    .await?;
-            }
             let requires_coverage = non_durable_client || opts.tier == jazz::db::ReadTier::Remote;
             let deadline = Instant::now() + Duration::from_secs(15);
             owner
-                .all_settled_serialized_query_for_binding(
+                .all_e2ee_settled_serialized_query_for_binding(
                     &query,
                     opts,
                     open_tx,
+                    e2ee_snapshot_at_begin,
                     admission,
                     author,
                     requires_coverage,
