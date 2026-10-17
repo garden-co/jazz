@@ -1678,7 +1678,7 @@ impl WasmDb {
     pub async fn preflight_browser_epoch_one(page_store: JsValue) -> Result<(), JsValue> {
         let schema = JazzSchema::empty();
         let logical = schema.column_families();
-        let physical = jazz::groove::storage::StorageLayout::jazz_class_v1()
+        let physical = jazz::groove::storage::StorageLayout::jazz_class_v3()
             .physical_column_families(logical.iter().map(String::as_str));
         let refs = physical.iter().map(String::as_str).collect::<Vec<_>>();
         let storage =

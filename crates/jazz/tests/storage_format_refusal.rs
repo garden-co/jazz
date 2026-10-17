@@ -396,7 +396,7 @@ async fn native_client_reports_an_old_store_as_a_typed_unsupported_storage_codec
     context.data_dir = data_dir;
     context.storage = ClientStorage::Persistent;
     context.storage_factory = Some(std::sync::Arc::new(
-        jazz_storage_rocksdb::RocksDbStorageFactory,
+        jazz_storage_rocksdb::RocksDbStorageFactory::default(),
     ));
 
     for attempt in ["first connect", "second connect"] {

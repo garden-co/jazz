@@ -313,11 +313,6 @@ fn physical_composite_index_entry_keys_are_pinned() {
     let storage = open_admitted_storage(directory.path(), &schema);
     let storage = block_on(LayoutStorage::new_boxed(
         storage,
-        StorageLayout::jazz_class_v1(),
-    ))
-    .unwrap();
-    let storage = block_on(LayoutStorage::new_boxed(
-        storage,
         StorageLayout::jazz_class_v3(),
     ))
     .unwrap();
@@ -351,11 +346,6 @@ fn physical_composite_index_entry_keys_are_pinned() {
 /// the row's primary key, whose 16-byte row uuid is `[n; 16]` in these tests.
 fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec<u8> {
     let storage = open_admitted_storage(path, schema);
-    let storage = block_on(LayoutStorage::new_boxed(
-        storage,
-        StorageLayout::jazz_class_v1(),
-    ))
-    .unwrap();
     let storage = block_on(LayoutStorage::new_boxed(
         storage,
         StorageLayout::jazz_class_v3(),
@@ -629,11 +619,6 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
         block_on(db.close()).unwrap();
     }
     let storage = open_admitted_storage(directory.path(), &schema);
-    let storage = block_on(LayoutStorage::new_boxed(
-        storage,
-        StorageLayout::jazz_class_v1(),
-    ))
-    .unwrap();
     let storage = block_on(LayoutStorage::new_boxed(
         storage,
         StorageLayout::jazz_class_v3(),
