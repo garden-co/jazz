@@ -1972,7 +1972,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         id!,
         (secret, root) => this.retainInitialSpaceKey(secret, root),
         recipients,
-        streamingInitialSeed(this, table, row.id),
+        streamingInitialSeed(this, table, id!),
       );
       // The transaction's pending preparation and wait handle own this failure.
       preparation.catch(() => {});
