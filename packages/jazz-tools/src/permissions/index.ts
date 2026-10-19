@@ -46,6 +46,12 @@ import {
   type SpaceAdministrationRules,
   type SpaceAdministrationAction,
 } from "./space-administration.js";
+import {
+  compileGroupAdministration,
+  groupAdministrationPredicate,
+  type GroupAdministrationAction,
+  type GroupAdministrationRules,
+} from "./group-administration.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -923,6 +929,18 @@ export interface EncryptionSpacePolicyBuilder {
   >;
 }
 
+type EncryptionGroupRow = {
+  id: string;
+  /** Immutable account that created the group, independent of current membership. */
+  creatorAccountId: string;
+};
+
+/** Group roots are immutable; allowUpdate authorises membership and key maintenance. */
+export interface EncryptionGroupPolicyBuilder {
+  allowInsert: ActionBuilder<EncryptionGroupRow, Pick<EncryptionGroupRow, "id">>;
+  allowUpdate: ActionBuilder<EncryptionGroupRow, Pick<EncryptionGroupRow, "id">>;
+}
+
 export type PolicyContext<TApp extends AppLike> = {
   policy: {
     [K in TableKey<TApp>]: TablePolicyBuilder<
@@ -933,6 +951,8 @@ export type PolicyContext<TApp extends AppLike> = {
     exists(relation: PermissionRelation): PermissionExpressionInput;
     union(relations: readonly PermissionRelation[]): PermissionRelation;
   };
+  /** SDK-managed encryption administration, separate from application table names. */
+  e2ee: { groups: EncryptionGroupPolicyBuilder };
   anyOf: typeof anyOf;
   allOf: typeof allOf;
   /** Explicit escape hatch for manually-authored policy IR. */
@@ -1085,6 +1105,25 @@ export function definePermissions<TApp extends AppLike>(
   const encryptionPolicyTables = new Set<string>();
   const encryptionPolicyConditions = new Map<string, EncryptionSpaceConditions>();
   const spaceRules: SpaceAdministrationRules = new Map();
+  let groupRules: GroupAdministrationRules | undefined;
+  const groupAction = (
+    operation: GroupAdministrationAction,
+  ): ActionBuilder<EncryptionGroupRow, Pick<EncryptionGroupRow, "id">> => {
+    const builder: ActionBuilder<EncryptionGroupRow, Pick<EncryptionGroupRow, "id">> = {
+      where: (input: unknown) => {
+        const source = resolveWhereInput(input, false);
+        const condition = groupAdministrationPredicate(
+          compileCondition(source, "__e2ee_groups", fkReferencesByTable, relationsByTable)!,
+        );
+        groupRules ??= { insert: [], update: [] };
+        groupRules[operation].push(condition);
+        return { table: "__e2ee_groups", action: operation, withCheck: source };
+      },
+      always: () => builder.where(alwaysCondition()),
+      never: () => builder.where(neverCondition()),
+    };
+    return builder;
+  };
   const spaceBuilder = (table: string): EncryptionSpacePolicyBuilder => {
     const declaration = encryptedSchemas.get(appSchema as WasmSchema)?.tables.get(table);
     if (!declaration) throw new Error(`policy.${table}.space requires an encrypted table`);
@@ -1126,6 +1165,7 @@ export function definePermissions<TApp extends AppLike>(
     rules.push(ruleLike);
   };
   const ctx = {
+    e2ee: { groups: { allowInsert: groupAction("insert"), allowUpdate: groupAction("update") } },
     policy: buildPolicyContext(
       tableNames,
       relationsByTable,
@@ -1184,6 +1224,16 @@ export function definePermissions<TApp extends AppLike>(
   }
   factory(ctx);
   const application = compileRules(rules, fkReferencesByTable, relationsByTable);
+  if (groupRules) {
+    const groups = compileGroupAdministration(groupRules, new Set(Object.keys(appSchema ?? {})));
+    for (const [table, policy] of Object.entries(groups)) {
+      if (application[table])
+        throw new Error(
+          `Cannot combine group administration helpers with explicit policies for "${table}"`,
+        );
+      application[table] = policy;
+    }
+  }
   const spaceAdministration = compileSpaceAdministration(
     spaceRules,
     new Set(Object.keys(appSchema ?? {})),

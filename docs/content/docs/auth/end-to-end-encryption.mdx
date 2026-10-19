@@ -98,11 +98,11 @@ helper on each protected table:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { encryptionSpacePolicySchema } from "jazz-tools/e2ee";
+import { e2eeAccountRelation, encryptionSpacePolicySchema } from "jazz-tools/e2ee";
 
 export const app = s.defineApp({
   ...encryptionSpacePolicySchema("chats"),
-  chats: s.table({ ownerId: s.uuid() }, {}),
+  chats: s.table({ ownerId: s.uuid() }, { owner: e2eeAccountRelation("ownerId") }),
   messages: s
     .table({ chatId: s.uuid(), text: s.string() }, { chat: s.rel("chats", "chatId") })
     .encrypted({ space: "chatId", columns: ["text"] }),
@@ -115,26 +115,27 @@ import { app } from "./schema.js";
 
 export const permissions = definePermissions(app, ({ policy: p, session }) => {
   p.messages.fromEncryptionSpace();
-  p.__e2ee_v1_space_members_chats.allowInsert.where((member) =>
+  p.messages.space.allowRead.always();
+  p.messages.space.allowInsert.where((space) =>
     p.chats.existsIncludingCreated.where({
-      id: member.scopeId,
-      ownerId: session.user.account,
+      id: space.identifier,
+      ownerId: space.creatorAccountId,
     }),
   );
-  p.__e2ee_v1_space_members_chats.allowUpdate.where((member) =>
+  p.messages.space.allowUpdate.where((space) =>
     p.chats.exists.where({
-      id: member.scopeId,
+      id: space.identifier,
       ownerId: session.user.account,
     }),
   );
-  // Also define chat and E2EE administration policies, as above.
+  // Also define chat permissions, as above.
 });
 ```
 
-For groups, also authorise inserts and updates on `__e2ee_v1_group_members`
-using your group-administration rules. The helper grants data access; it does
-not grant administration authority. Current membership writes are denied by
-default. The SDK maintains direct account and nested group edges in the same
+The space administration rules also authorise current space membership writes.
+For groups, use the group administration helper described below. Data access
+does not grant administration authority. Current membership writes are denied
+without administration rules. The SDK maintains direct account and nested group edges in the same
 exclusive transaction as signed membership history. A denied edge change rejects
 the history change too. Group changes use the existing recursive policy support;
 the SDK does not copy all effective members into each space.
@@ -296,7 +297,66 @@ Ordinary queries materialise the entire image in memory. Bounded upload memory i
 
 `db.e2ee.devices.list()` distinguishes verified membership (`state`) from this caller's key-delivery readiness (`keyReadiness`). Approve a pending device from an already authorised device with `devices.approve(deviceId).wait()`; revoke through `devices.revoke(deviceId).wait()`. Do not infer remote key possession merely from an active ledger entry.
 
-Groups contain accounts or other groups. To use them, add the exported `groupSchema` from `jazz-tools/e2ee` to the application schema and define its administration permissions. The chat example does not include groups. `db.e2ee.groups.create()`, `groups.add(groupId, recipientId)` and `groups.remove(groupId, recipientId)` have wait handles. A bare recipient ID is resolved against accepted account and group history in the transaction authorising the change; unknown and ambiguous IDs reject without a membership write. Explicit `{ kind: "account" | "group", id }` selectors remain supported. A space grant can target a group ID. Accepted topology and epoch history, not a client-supplied member list, determine effective membership.
+Groups contain accounts or other groups. Encrypted table declarations add the
+managed group schema automatically; `encryptionSpacePolicySchema()` also adds
+the current membership tables used by membership-derived permissions. A
+group-only application can declare the exported `deviceRequestSchema` and
+`groupSchema` explicitly and include `deviceRequestPermissions` in its deployed
+policy bundle. The chat example does not include groups.
+
+Declare who may create and administer groups through `e2ee.groups` in the
+permissions callback. For groups administered by their creators:
+
+```ts title="permissions.ts (group rules)"
+export const permissions = definePermissions(app, ({ policy: p, session, e2ee }) => {
+  e2ee.groups.allowInsert.where({ creatorAccountId: session.user.account });
+  e2ee.groups.allowUpdate.where({ creatorAccountId: session.user.account });
+  // Include your application-data and space-administration rules here too.
+});
+```
+
+Direct predicates expose the group's `id` and immutable `creatorAccountId`.
+Callbacks expose `group.id` for application ownership checks; declare the
+corresponding group reference on the application table. `allowInsert` controls root
+creation. `allowUpdate` controls membership changes, key rotation, device and
+recovery key delivery, and current membership writes. Both rules are needed to
+complete group creation under this owner-managed configuration, including the
+creator's initial membership and key delivery. Signed roots and history remain
+immutable. Omitted rules deny the corresponding operations. Group membership
+or possession of a key does not grant administration authority.
+
+Jazz generates the underlying authenticated author checks and policies. Repair
+requests may be authored by the requesting account; they grant no membership
+or key access. Topology and encrypted maintenance records are readable by
+authenticated accounts. The helper cannot be mixed with explicit policies on
+the managed group tables, including current group membership. Existing raw
+policy configurations remain supported when the helper is unused. The helper
+adds no stored fields, tables or signed formats; `creatorAccountId` is the
+public policy name for the existing group creator account.
+
+With those permissions deployed, create and share a group:
+
+```ts
+const engineering = await db.e2ee.groups.create().wait();
+await db.e2ee.groups.add(engineering.id, aliceAccountId).wait();
+await db.e2ee.groups.add(engineering.id, bobAccountId).wait();
+await db.e2ee.spaces.grant(app.chats, chatId, engineering.id).wait();
+```
+
+Group administrators control who gains access through the group to every space
+shared with it. Group administration does not itself authorise sharing a space.
+To remove one membership path, call
+`groups.remove(engineering.id, aliceAccountId).wait()`; to stop sharing just one
+chat, call `spaces.revoke(app.chats, chatId, engineering.id).wait()`. Other direct
+and group membership paths still apply.
+
+E2EE lifecycle waits have no tier option: they wait for accepted completion. A
+bare recipient ID is resolved against accepted account and group history in the
+transaction authorising the change; unknown and ambiguous IDs reject without a
+membership write. Explicit `{ kind: "account" | "group", id }` selectors remain
+supported. Accepted topology and epoch history determine effective membership.
+Keep nesting shallow, because evaluating it requires following the dependent
+groups and membership records.
 
 `recovery.create().wait()` returns recovery material. Treat it as a credential: do not put it in logs, normal UI state or ordinary rows. `recovery.status(material?)` reports coverage and validation; `recovery.use(material?).wait()` performs recovery. Account recovery and complete coverage of every group/space are different outcomes. The chat example does not provide a device/recovery administration UI; retain browser storage or implement that flow before depending on another device.
 
