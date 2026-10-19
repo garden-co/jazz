@@ -17,6 +17,11 @@ import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
 import { spaceAdministrationPrefix } from "../e2ee/space-administration-schema.js";
+import {
+  currentGroupMembersTable,
+  currentSpaceMembersPrefix,
+  permissionSpacesPrefix,
+} from "../e2ee/current-membership-names.js";
 import { managedEncryptionSchema } from "../typed-app.js";
 import {
   encodePublishedMigrationValue,
@@ -166,7 +171,10 @@ export function resolveCanonicalMigrationForward(
     Object.keys(canonical.toSchema).filter(
       (table) =>
         (Object.hasOwn(managedEncryptionSchema, table) ||
-          table.startsWith(spaceAdministrationPrefix)) &&
+          table.startsWith(spaceAdministrationPrefix) ||
+          table === currentGroupMembersTable ||
+          table.startsWith(currentSpaceMembersPrefix) ||
+          table.startsWith(permissionSpacesPrefix)) &&
         !Object.hasOwn(canonical.fromSchema, table),
     ),
   );
