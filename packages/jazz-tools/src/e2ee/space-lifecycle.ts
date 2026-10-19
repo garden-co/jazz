@@ -727,7 +727,12 @@ export class Spaces {
         throw new E2eeDataError("key-unavailable");
       secret = await this.keys.open(
         device,
-        spaceContext(this.accountContext(state.root.creatorAccountId), state.root, "author", device.id),
+        spaceContext(
+          this.accountContext(state.root.creatorAccountId),
+          state.root,
+          "author",
+          device.id,
+        ),
         state.root.authorEnvelope,
       );
       // deliver revalidates the exact epoch and eligibility in its own authority transaction.
