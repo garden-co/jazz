@@ -953,7 +953,7 @@ where
         }
         let policy_replacement_lease = std::rc::Rc::new(());
         let compilation = QueryProgramCompilation::analyze(request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+            .map_err(|report| query_capability_error(&report))?;
         let request = compilation.request();
         // The transaction overlay reaches only this program's own sources.
         // Nested policy-filtered dependency graphs neither overlay nor record
@@ -1028,7 +1028,7 @@ where
                 result.as_ref().map_err(|report| report.as_ref()),
             );
         }
-        result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
+        result.map_err(|report| query_capability_error(&report))
     }
 
     async fn prepare_query_program_policy_dependencies(

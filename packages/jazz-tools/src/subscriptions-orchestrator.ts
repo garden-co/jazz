@@ -553,7 +553,7 @@ function serializeQueryOptions(options?: QueryOptions): string {
 
 function isFrozenBranchBase(
   base: NonNullable<QueryOptions["base"]>,
-): base is readonly [NonNullable<QueryOptions["branch"]>, unknown] {
+): base is Extract<NonNullable<QueryOptions["base"]>, readonly unknown[]> {
   return Array.isArray(base);
 }
 

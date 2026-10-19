@@ -935,7 +935,17 @@ where
                         frozen_snapshot,
                     )
                     .await
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    .map_err(|error| {
+                        source_resolution_error(
+                            request,
+                            match error {
+                                Error::SnapshotHistoryUnavailable => {
+                                    SourceGap::SnapshotHistoryUnavailable
+                                }
+                                _ => SourceGap::Coverage,
+                            },
+                        )
+                    })?;
                 let schema_version_alias = self
                     .node
                     .ensure_schema_version_alias(self.read_view.read_schema)
