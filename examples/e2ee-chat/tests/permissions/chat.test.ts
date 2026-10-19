@@ -208,7 +208,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
           app.__e2ee_spaces,
           {
             ...rootValues,
-            accountId: configs[2]!.account.id,
+            creatorAccountId: configs[2]!.account.id,
           },
           { id: duplicateRootId },
         )

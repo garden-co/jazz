@@ -51,6 +51,15 @@ it.each(["$createdBy.account", "$updatedBy.account", "$createdBy", "$createdAt"]
   (column) => expect(() => e2eeAccountRelation(column)).toThrow(/not supported.*stored UUID/),
 );
 
+it("also rejects provenance relationships declared with the generic relationship builder", () => {
+  expect(() =>
+    s.defineApp({
+      __e2ee_account_identities: s.table({}, {}),
+      projects: s.table({}, { creator: s.rel("__e2ee_account_identities", "$createdBy.account") }),
+    }),
+  ).toThrow(/not supported.*stored UUID/);
+});
+
 it.each([false, true])(
   "compiles creator-owned space policies with derived permissions %s",
   async (derived) => {

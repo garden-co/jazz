@@ -2569,7 +2569,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const values = writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     this.prepareMutation(

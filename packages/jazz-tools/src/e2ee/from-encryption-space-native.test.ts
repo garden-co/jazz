@@ -605,6 +605,8 @@ it("applies and revokes application-defined group administration without grantin
     const group = await owner.db.e2ee.groups.create().wait();
     await owner.db.e2ee.groups.add(group.id, reader.id).wait();
     await owner.db.e2ee.spaces.grant(app.projects, project.id, group.id).wait();
+    // This case exercises group-only access; the founder's direct grant is independent.
+    await owner.db.e2ee.spaces.revoke(app.projects, project.id, owner.id).wait();
     await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
     // Group members cannot appoint themselves as administrators.
     await expect(
@@ -618,6 +620,10 @@ it("applies and revokes application-defined group administration without grantin
     await reader.db.e2ee.groups.remove(group.id, owner.id).wait();
     expect(await owner.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
     await reader.db.e2ee.groups.add(group.id, owner.id).wait();
+    // Settle group key changes while the scope administrator is available.
+    expect(await owner.db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+      state: "ready",
+    });
     expect(await owner.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject({
       body: "Shared with the group",
     });

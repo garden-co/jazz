@@ -76,6 +76,7 @@ export function initialisePermissionSpace(
   scope: string,
   identifier: string,
 ): void {
+  if (!usesCurrentMembership(schema, scope)) return;
   const table = permissionSpacesTable(scope);
   if (schema[table])
     tx.upsert(new TypedTableQueryBuilder(table, schema), identifier, { scopeId: identifier });

@@ -32,7 +32,9 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
       ownerId: session.user.account,
       "$createdBy.account": session.user.account,
     });
-    p.projects.allowUpdate.always();
+    p.projects.allowUpdate.where((project) =>
+      p.projects.exists.where({ id: project.id, ownerId: project.ownerId }),
+    );
     p.notes.fromEncryptionSpace();
     p.notes.space.allowRead.always();
     p.notes.space.allowInsert.where((space) =>
@@ -42,7 +44,7 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
       }),
     );
     p.notes.space.allowUpdate.where((space) =>
-      p.projects.exists.where({
+      p.projects.existsIncludingCreated.where({
         id: space.identifier,
         ownerId: session.user.account,
       }),
@@ -101,14 +103,32 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
     const note = await alice.db
       .insert(app.notes, { projectId: project.id, body: "Private" })
       .wait({ tier: "global" });
+    expect(
+      await bob.db.one(app.projects.where({ id: project.id }), { tier: "remote" }),
+    ).toMatchObject({ ownerId: alice.id });
     await bob.db
       .update(app.projects, project.id, { name: "Edited by Bob", editorId: bob.id })
       .wait({ tier: "global" });
+    await expect(
+      bob.db.update(app.projects, project.id, { ownerId: bob.id }).wait({ tier: "global" }),
+    ).rejects.toThrow();
     const row = await alice.db.one(
       app.projects.where({ id: project.id }).include({ creator: true, updater: true }),
       { tier: "remote" },
     );
-    expect(row).toMatchObject({ creator: { id: alice.id }, updater: { id: bob.id } });
+    // Relationships obey the private identity-envelope read policy.
+    expect(row).toMatchObject({
+      ownerId: alice.id,
+      editorId: bob.id,
+      creator: { id: alice.id },
+      updater: null,
+    });
+    expect(
+      await bob.db.one(
+        app.projects.where({ id: project.id }).include({ creator: true, updater: true }),
+        { tier: "remote" },
+      ),
+    ).toMatchObject({ creator: null, updater: { id: bob.id } });
     await expect(
       bob.db.e2ee.spaces.grant(app.projects, project.id, bob.id).wait(),
     ).rejects.toThrow();
