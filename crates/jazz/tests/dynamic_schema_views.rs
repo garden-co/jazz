@@ -77,6 +77,7 @@ fn metadata_schema(
     let mut source = Schema::from([(
         TableName::new("items"),
         TableSchema {
+            synthetic_references_v1: Default::default(),
             columns: RowDescriptor::new(vec![column]),
             indexed_columns: indexed_columns
                 .map(|columns| columns.into_iter().map(Into::into).collect()),

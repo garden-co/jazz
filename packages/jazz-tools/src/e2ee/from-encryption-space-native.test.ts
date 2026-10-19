@@ -14,7 +14,7 @@ async function fixture(
   denyMemberUpdates = false,
   spaceHelpers = false,
   ownNotesOnly = false,
-  groupHelpers = false,
+  groupHelpers: boolean | "create-only" | "admin-only" | "delegated" = false,
 ) {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
@@ -28,6 +28,10 @@ async function fixture(
         project: s.rel("projects", "projectId"),
         account: e2eeAccountRelation(),
       },
+    ),
+    groupOwners: s.table(
+      { groupId: s.uuid(), accountId: s.uuid() },
+      { group: s.rel("__e2ee_groups", "groupId"), account: e2eeAccountRelation() },
     ),
     notes: s
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
@@ -45,7 +49,7 @@ async function fixture(
       )
       .encrypted({ space: "projectId", columns: ["payload"] }),
   });
-  const permissions = definePermissions(app, ({ policy: p, session, allOf, e2ee }) => {
+  const permissions = definePermissions(app, ({ policy: p, session, allOf, anyOf, e2ee }) => {
     p.projects.allowRead.always();
     p.projects.allowInsert.where({
       ownerId: session.user.account,
@@ -119,8 +123,33 @@ async function fixture(
       );
     }
     if (groupHelpers) {
-      e2ee.groups.allowInsert.where({ creatorAccountId: session.user.account });
-      e2ee.groups.allowUpdate.where({ creatorAccountId: session.user.account });
+      if (groupHelpers !== "admin-only") e2ee.groups.allowInsert.always();
+      if (groupHelpers === "delegated") {
+        p.groupOwners.allowRead.always();
+        p.groupOwners.allowInsert.where((binding) =>
+          p.__e2ee_groups.exists.where({
+            id: binding.groupId,
+            accountId: session.user.account,
+          }),
+        );
+        p.groupOwners.allowDelete.where((binding) =>
+          p.__e2ee_groups.exists.where({
+            id: binding.groupId,
+            accountId: session.user.account,
+          }),
+        );
+        e2ee.groups.allowUpdate.where((group) =>
+          anyOf([
+            { creatorAccountId: session.user.account },
+            p.groupOwners.existsIncludingCreated.where({
+              groupId: group.id,
+              accountId: session.user.account,
+            }),
+          ]),
+        );
+      } else if (groupHelpers !== "create-only") {
+        e2ee.groups.allowUpdate.where({ creatorAccountId: session.user.account });
+      }
     } else {
       p.__e2ee_groups.allowInsert.where({
         accountId: session.user.account,
@@ -500,6 +529,114 @@ it("uses exact initial recipients and rejects missing spaces before consuming a 
 async function* bytes() {
   yield new Uint8Array([1, 2, 3]);
 }
+
+it.each([true, "delegated"] as const)(
+  "enforces current group administration independently of space creation (%s)",
+  async (mode) => {
+    const { app, owner, reader, close } = await fixture(false, true, false, mode);
+    try {
+      const group = await owner.db.e2ee.groups.create().wait();
+      await expect(reader.db.e2ee.groups.add(group.id, reader.id).wait()).rejects.toThrow();
+      await owner.db.e2ee.groups.add(group.id, reader.id).wait();
+      expect(
+        await reader.db.all(
+          app.__e2ee_v1_group_members.where({ groupId: group.id, accountId: reader.id }),
+          { tier: "remote" },
+        ),
+      ).toHaveLength(1);
+      await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+      if (mode === "delegated") {
+        await expect(
+          reader.db
+            .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+            .wait({ tier: "global" }),
+        ).rejects.toThrow();
+        const delegation = await owner.db
+          .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+          .wait({ tier: "global" });
+        await reader.db.e2ee.groups.remove(group.id, owner.id).wait();
+        await reader.db.e2ee.groups.add(group.id, owner.id).wait();
+        await owner.db.delete(app.groupOwners, delegation.id).wait({ tier: "global" });
+        await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+      }
+      await owner.db.e2ee.groups.remove(group.id, reader.id).wait();
+      expect(
+        await reader.db.all(
+          app.__e2ee_v1_group_members.where({ groupId: group.id, accountId: reader.id }),
+          { tier: "remote" },
+        ),
+      ).toEqual([]);
+    } finally {
+      await close();
+    }
+  },
+  120_000,
+);
+
+it.each(["create-only", "admin-only"] as const)(
+  "refuses group creation when only %s is configured",
+  async (mode) => {
+    const { app, owner, close } = await fixture(false, true, false, mode);
+    try {
+      const group = owner.db.e2ee.groups.create();
+      await expect(group.wait()).rejects.toThrow();
+      expect(
+        await owner.db.all(app.__e2ee_v1_group_members.where({ groupId: group.id }), {
+          tier: "remote",
+        }),
+      ).toEqual([]);
+    } finally {
+      await close();
+    }
+  },
+  120_000,
+);
+
+it("applies and revokes application-defined group administration without granting it through key possession", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(
+    false,
+    true,
+    false,
+    "delegated",
+  );
+  try {
+    const project = await createProject("Delegated group administration");
+    const note = await owner.db
+      .insert(app.notes, { projectId: project.id, body: "Shared with the group" })
+      .wait({ tier: "global" });
+    const group = await owner.db.e2ee.groups.create().wait();
+    await owner.db.e2ee.groups.add(group.id, reader.id).wait();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, group.id).wait();
+    await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+    // Group members cannot appoint themselves as administrators.
+    await expect(
+      reader.db
+        .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const delegation = await owner.db
+      .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+      .wait({ tier: "global" });
+    await reader.db.e2ee.groups.remove(group.id, owner.id).wait();
+    expect(await owner.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+    await reader.db.e2ee.groups.add(group.id, owner.id).wait();
+    expect(await owner.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject({
+      body: "Shared with the group",
+    });
+    await owner.db.delete(app.groupOwners, delegation.id).wait({ tier: "global" });
+    // Removing administration preserves membership and its decryption key.
+    expect(await reader.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject(
+      {
+        body: "Shared with the group",
+      },
+    );
+    await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+    await owner.db.e2ee.groups.remove(group.id, reader.id).wait();
+    expect(await reader.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+  } finally {
+    await close();
+  }
+}, 120_000);
 
 it("enforces owner-managed group administration across nested sharing, recovery and revocation", async () => {
   const { app, owner, reader, createProject, close } = await fixture(false, true, false, true);

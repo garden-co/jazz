@@ -33,22 +33,21 @@ column when needed, for example `e2eeAccountRelation("ownerId")`. The applicatio
 table name is arbitrary: administration policies explicitly connect its account
 and scope references to the space creator and `identifier`.
 
-For creator-owned records, use the system-provided account UUID instead of
-storing a duplicate owner column:
+For creator-owned records, declare an explicit ownership column:
 
 ```ts
 projects: s.table(
-  { name: s.string() },
-  { creator: e2eeAccountRelation("$createdBy.account") },
+  { name: s.string(), ownerId: s.uuid() },
+  { owner: e2eeAccountRelation("ownerId") },
 ),
 ```
 
-Jazz records `$createdBy.account` automatically; it remains the original creator
-when somebody edits the row. `$updatedBy.account` is also supported and refers
-to the latest writer, so use the creator field for stable ownership. The whole
-`$createdBy` value is a structured author, not a UUID. Neither relationship adds
-a stored column or changes how `spaces.grant()` resolves a recipient's public keys.
-Use `$createdBy.account` in the ownership predicates below for this schema.
+Populate `ownerId` with the creating account's ID and constrain inserts to that
+account, as in the permissions below. Jazz also records `$createdBy.account`
+automatically, and it remains the original creator when somebody edits the row.
+You can use that metadata in ordinary permission predicates. Declaring an account
+relationship through `$createdBy.account` or `$updatedBy.account` is not supported
+by the current catalogue encoding; use a stored UUID column for the relationship.
 
 ## Authorise space administration
 

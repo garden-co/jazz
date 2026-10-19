@@ -1899,17 +1899,20 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         : ownerClient.commitTransaction(openTransactionId).txId;
     let txId: Promise<TxId>;
     if (preparation.pending || preparation.failed || this.pendingReads.size > 0) {
-      txId = Promise.all([preparation.drain(), ...this.pendingReads]).then(commit, async (error) => {
-        this.failedRead = true;
-        try {
-          await ownerClient.rollbackTransaction(openTransactionId);
-          this.failedReadCleanupComplete = true;
-        } catch {
-          // Preserve the original pending read error.
-        }
-        this.clearInitialSpaceKeys();
-        throw error;
-      });
+      txId = Promise.all([preparation.drain(), ...this.pendingReads]).then(
+        commit,
+        async (error) => {
+          this.failedRead = true;
+          try {
+            await ownerClient.rollbackTransaction(openTransactionId);
+            this.failedReadCleanupComplete = true;
+          } catch {
+            // Preserve the original pending read error.
+          }
+          this.clearInitialSpaceKeys();
+          throw error;
+        },
+      );
     } else {
       txId = commit();
     }
@@ -3351,9 +3354,11 @@ async function readTransactionRows<T>(
   const equality = !settlementMetadata && prepare ? await prepare(builderJson) : undefined;
   try {
     const queryJson = equality?.json ?? builderJson;
-    const translated = equality
-      ? queryJson
-      : translateQuery(builderJson, planningSchema, prepared.physical);
+    const translated = translateQuery(
+      queryJson,
+      planningSchema,
+      equality ? undefined : prepared.physical,
+    );
     const result = await queryClient.call(
       client,
       translated,
@@ -5360,9 +5365,11 @@ export class Db {
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;
     try {
-      const wasmQuery = equality?.json
-        ? equality.json
-        : translateQuery(builderJson, planningSchema, prepared.physical);
+      const wasmQuery = translateQuery(
+        equality?.json ?? builderJson,
+        planningSchema,
+        equality ? undefined : prepared.physical,
+      );
       const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
       const context = this.getAccessContext();
       const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;

@@ -252,6 +252,7 @@ impl Wire<TableSchema> for TableWire {
         let branch_by = BRANCH_BINDINGS.get(data, offset)?;
         let composite_indexes = decode_composite_indexes(data, offset, &columns)?;
         Ok(TableSchema {
+            synthetic_references_v1: Default::default(),
             columns,
             indexed_columns,
             composite_indexes,
