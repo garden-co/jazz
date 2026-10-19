@@ -334,6 +334,8 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
   }
 
   const receipt = parseJsonFile(join(destination, "receipt.json"), "stored receipt");
+  if (receipt.fingerprint !== fingerprint)
+    throw new Error("correctness artifacts: snapshot fingerprint mismatch");
   validateStoredSnapshot(root, receipt); // Fail closed on collision or stale reuse.
   const pointer = correctnessArtifactPointer(root);
   const temporary = `${pointer}.${process.pid}.${Date.now()}.tmp`;

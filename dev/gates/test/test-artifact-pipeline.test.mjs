@@ -40,7 +40,7 @@ function childWithLock(lockPath, body) {
 }
 
 async function waitFor(condition, message) {
-  for (let attempts = 0; attempts < 100; attempts++) {
+  for (let attempts = 0; attempts < 1000; attempts++) {
     if (condition()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -190,33 +190,50 @@ test("signal keeps the lock until its delayed child has exited", async () => {
   const lockPath = join(fixture, "lock");
   const received = join(fixture, "received");
   const ready = join(fixture, "ready");
+  const release = join(fixture, "release");
+  const contenderReady = join(fixture, "contender-ready");
+  const contend = join(fixture, "contend");
   const delayedChild = `
     const fs = require('node:fs');
-    fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
     process.on('SIGTERM', () => {
       fs.writeFileSync(${JSON.stringify(received)}, 'received');
-      setTimeout(() => process.exit(0), 180);
     });
-    setInterval(() => {}, 1000);
+    fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
+    setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(fixture)}) ||
+          fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+    }, 10);
   `;
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock(async (scope) => scope.track(command(process.execPath, ['-e', ${JSON.stringify(delayedChild)}], 'delayed child', { signal: scope.signal })));`,
   );
+  const contender = childWithLock(
+    lockPath,
+    `
+    fs.writeFileSync(${JSON.stringify(contenderReady)}, 'ready');
+    while (!fs.existsSync(${JSON.stringify(contend)})) await new Promise(resolve => setTimeout(resolve, 10));
+    await withArtifactBuildLock(async () => {});
+  `,
+  );
   try {
     await waitFor(() => existsSync(lockPath), "holder did not acquire lock");
     await waitFor(() => existsSync(ready), "delayed child did not start");
+    await waitFor(() => existsSync(contenderReady), "contender did not start");
     holder.child.kill("SIGTERM");
     await waitFor(() => existsSync(received), "child did not receive SIGTERM");
     assert.equal(existsSync(lockPath), true, "lock released before child exit");
-    const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
+    writeFileSync(contend, "contend");
     assert.equal((await contender.closed).code, 1);
     assert.match(contender.output(), /active artifact lock/);
+    writeFileSync(release, "release");
     assert.equal((await holder.closed).signal, "SIGTERM");
     assert.equal(existsSync(lockPath), false);
   } finally {
+    writeFileSync(release, "release");
+    contender.child.kill("SIGKILL");
     holder.child.kill("SIGKILL");
-    await holder.closed;
+    await Promise.all([holder.closed, contender.closed]);
     rmSync(fixture, { recursive: true, force: true });
   }
 });
@@ -227,24 +244,33 @@ test("signal during NAPI repair drains the parent scope before unlock", async ()
   const repairing = join(fixture, "repairing");
   const received = join(fixture, "received");
   const stopped = join(fixture, "stopped");
+  const release = join(fixture, "release");
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
       if (label === 'preflight release NAPI') return Promise.reject(new Error('load failed'));
       if (label === 'repair release NAPI') return new Promise((resolve) => {
-        fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
         const timer = setInterval(() => {}, 1000);
-        signal.addEventListener('abort', () => { fs.writeFileSync(${JSON.stringify(received)}, 'received'); setTimeout(() => { clearInterval(timer); fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve(); }, 150); }, { once: true });
+        signal.addEventListener('abort', () => {
+          fs.writeFileSync(${JSON.stringify(received)}, 'received');
+          const draining = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(release)})) {
+              clearInterval(draining); clearInterval(timer);
+              fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve();
+            }
+          }, 10);
+        }, { once: true });
+        fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
       });
       return Promise.resolve();
     }, scope));`,
   );
   try {
     await waitFor(() => existsSync(repairing), "repair did not start");
-    await new Promise((resolve) => setTimeout(resolve, 20));
     holder.child.kill("SIGTERM");
     await waitFor(() => existsSync(received), "repair did not receive shutdown");
     assert.equal(existsSync(lockPath), true, "lock released during repair shutdown");
+    writeFileSync(release, "release");
     assert.equal((await holder.closed).signal, "SIGTERM");
     assert.equal(existsSync(stopped), true);
     assert.equal(existsSync(lockPath), false);
@@ -523,6 +549,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
       `${task} must remain uncached: correctness artifacts are not Turbo outputs`,
     );
   assert.deepEqual(turbo.tasks.test.passThroughEnv, [
+    "TMPDIR",
     ...turbo.tasks["jazz-tools#build"].passThroughEnv,
     "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
     "JAZZ_CORRECTNESS_CONSUMER_TOKEN",

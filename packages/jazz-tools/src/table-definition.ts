@@ -1,9 +1,62 @@
 import { assertRelationshipDeclaration } from "./relationships.js";
 import type { Relationships, ForwardRelationship } from "./relationships.js";
-import type { AnyTypedColumnBuilder, ColumnBuilderSqlType } from "./dsl.js";
-import { type NoExplicitIdColumn, assertUserTableColumnNameAllowed } from "./magic-columns.js";
+import type {
+  AnyTypedColumnBuilder,
+  ColumnBuilderInitValue,
+  ColumnBuilderOptional,
+  ColumnBuilderSqlType,
+} from "./dsl.js";
+import { assertUserTableColumnNameAllowed, type NoExplicitIdColumn } from "./magic-columns.js";
+import { validateTransformDependencies } from "./runtime/column-transforms.js";
+import type { TSTypeFromSqlType } from "./schema.js";
 import type { EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
 export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
+
+type StoredDependencyValue<C extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<C> extends true
+    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
+    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
+type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
+  readonly [K in D]: K extends "id"
+    ? string
+    : K extends keyof C
+      ? Stored extends true
+        ? StoredDependencyValue<C[K]>
+        : ColumnBuilderOptional<C[K]> extends true
+          ? ColumnBuilderInitValue<C[K]> | null
+          : ColumnBuilderInitValue<C[K]>
+      : never;
+};
+type ValidDependencyContext<
+  C extends TableDefinition,
+  D extends string,
+  Context,
+  Stored extends boolean,
+> =
+  Exclude<keyof Context, D> extends never
+    ? DependencyValues<C, D, Stored> extends Context
+      ? true
+      : false
+    : false;
+export type ValidateTransformContexts<C extends TableDefinition> = {
+  [K in keyof C]: C[K] extends {
+    readonly __jazzDependencies: readonly (infer D extends string)[];
+    readonly __jazzStoredDependencies: infer S;
+    readonly __jazzInputDependencies: infer I;
+  }
+    ? string extends D
+      ? C[K]
+      : Exclude<D, keyof C | "id"> extends never
+        ? K extends D
+          ? never
+          : ValidDependencyContext<C, D, S, true> extends true
+            ? ValidDependencyContext<C, D, I, false> extends true
+              ? C[K]
+              : never
+            : never
+        : never
+    : C[K];
+};
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
@@ -72,6 +125,7 @@ export class DefinedTable<
     public readonly compositeIndexes?: readonly (readonly Extract<keyof TColumns, string>[])[],
     public readonly encryption?: TEncryption,
   ) {
+    validateTransformDependencies(columns);
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
   }
 
@@ -217,7 +271,7 @@ export function defineTable<
   const TColumns extends TableDefinition,
   const TRelations extends Relationships,
 >(
-  columns: TColumns,
+  columns: TColumns & ValidateTransformContexts<TColumns>,
   relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
 ): DefinedTable<TColumns, TRelations, undefined> {
   if (!relations || typeof relations !== "object" || Array.isArray(relations))
@@ -246,6 +300,15 @@ export function defineTable<
       if (!column)
         throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
       if (
+        typeof column.sqlType === "object" &&
+        column.sqlType.kind === "ARRAY" &&
+        typeof column.sqlType.element === "object" &&
+        column.sqlType.element.kind === "ARRAY"
+      )
+        throw new Error(
+          `Relationship "${name}" cannot use a nested reference array column; "${relation.column}" must be a UUID or UUID[] column.`,
+        );
+      if (
         column.sqlType !== "UUID" &&
         !(
           typeof column.sqlType === "object" &&
@@ -258,5 +321,5 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable(columns, relations);
+  return new DefinedTable<TColumns, TRelations, undefined>(columns, relations);
 }
