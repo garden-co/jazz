@@ -1,3 +1,4 @@
+import "../permissions.js";
 import {
   createAccountManager,
   accountRegistryUrl,

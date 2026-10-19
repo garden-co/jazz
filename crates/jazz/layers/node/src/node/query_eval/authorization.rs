@@ -408,9 +408,10 @@ where
         // boundary. Keep the target coordinate in the policy AST as well so
         // inline transaction overlays cannot authorize one row from another
         // visible row returned by the same source graph.
-        let policy = policy
+        let mut policy = policy
             .clone()
             .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
+        self.bind_policy_table_identities(&mut policy, policy_schema_version)?;
         let policy_shape =
             policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
         let (policy_shape, binding, input) =
@@ -900,6 +901,37 @@ where
 
     /// Share the canonical occurrence order with commit dependency discovery.
     /// Binding and normalization may reorder OR arms and same-table aliases.
+    /// Resolve only catalogue identities named by this policy. Provider values
+    /// cannot supply this intrinsic; missing catalogue coverage fails closed.
+    fn bind_policy_table_identities(
+        &self,
+        query: &mut JazzQuery,
+        schema_version: SchemaVersionId,
+    ) -> Result<(), Error> {
+        let mut failure = None;
+        query.for_each_condition_mut(&mut |predicate| {
+            predicate.for_each_operand_mut(&mut |operand| {
+                let Operand::Claim(name) = operand else {
+                    return;
+                };
+                let Some(table) = name.strip_prefix(crate::query::TABLE_IDENTITY_OPERAND_PREFIX)
+                else {
+                    return;
+                };
+                match self.catalogue_table_identity(schema_version, table) {
+                    Ok(Some(identity)) => *operand = Operand::Literal(Value::Uuid(identity.0)),
+                    Ok(None) => {
+                        failure = Some(Error::InvalidStoredValue(
+                            "policy catalogue table identity is unavailable",
+                        ))
+                    }
+                    Err(error) => failure = Some(error),
+                }
+            });
+        });
+        failure.map_or(Ok(()), Err)
+    }
+
     fn candidate_policy_shape_for_schema(
         &self,
         policy_schema_version: SchemaVersionId,
@@ -907,6 +939,7 @@ where
         insert_candidate: bool,
     ) -> Result<ValidatedQuery, Error> {
         let mut policy = policy.clone();
+        self.bind_policy_table_identities(&mut policy, policy_schema_version)?;
         if insert_candidate {
             for inherits in policy.inherits.iter_mut().chain(
                 policy
@@ -1366,6 +1399,7 @@ where
             mut input_shape,
             claim_params,
         } = self.normalized_read_policy_input(
+            policy_schema_version,
             policy_schema,
             table,
             &policy,
@@ -1480,6 +1514,7 @@ where
             mut input_shape,
             claim_params,
         } = self.normalized_read_policy_input(
+            policy_schema_version,
             policy_schema,
             table,
             &policy,
@@ -1534,6 +1569,7 @@ where
     /// use the same construction to discover the complete shared descriptor.
     pub(super) fn normalized_read_policy_input(
         &self,
+        policy_schema_version: SchemaVersionId,
         policy_schema: &RuntimeSchema,
         table: &TableSchema,
         policy: &PolicyContext,
@@ -1548,6 +1584,7 @@ where
         } else {
             authorization_query_from_read_policy(table)
         };
+        self.bind_policy_table_identities(&mut query, policy_schema_version)?;
         let mut policy_binding_values = BTreeMap::new();
         if matches!(param_binding_mode, ParamBindingMode::RetainAllParams)
             && let PolicyContext::AuthorizationSubplan { claims, .. } = policy
@@ -1756,12 +1793,9 @@ where
         let subscriptions = policies
             .iter()
             .map(|policy| {
-                compile_permission_scope_policy(
-                    policy.clone(),
-                    claims,
-                    &claim_values,
-                    policy_schema,
-                )
+                let mut policy = policy.clone();
+                self.bind_policy_table_identities(&mut policy, policy_schema_version)?;
+                compile_permission_scope_policy(policy, claims, &claim_values, policy_schema)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let policy_bytes = postcard::to_allocvec(&(operation, &policies))

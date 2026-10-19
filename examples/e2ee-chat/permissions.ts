@@ -73,39 +73,17 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
 
   // Device identity/approval policies are package-owned; do not replace them.
   // Authenticated nonmembers can see control metadata, but not chat content.
-  policy.__e2ee_spaces.allowRead.where(authenticated);
-  policy.__e2ee_spaces.allowInsert.where((space) =>
-    allOf([
-      { accountId: session.user.account, "$createdBy.account": session.user.account },
-      // Account correlation comes first: it is the shared declared-reference join.
-      policy.chatOwners.existsIncludingCreated.where({
-        accountId: space.accountId,
-        chatId: space.identifier,
-      }),
-    ]),
+  policy.messages.space.allowRead.where(authenticated);
+  policy.messages.space.allowInsert.where((space) =>
+    policy.chatOwners.existsIncludingCreated.where({
+      accountId: space.accountId,
+      chatId: space.identifier,
+    }),
   );
-  policy.__e2ee_space_grants.allowRead.where(authenticated);
-  policy.__e2ee_space_grants.allowInsert.where((grant) =>
-    allOf([
-      { authorAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.existsIncludingCreated.where({
-        id: grant.spaceId,
-        accountId: session.user.account,
-      }),
-    ]),
-  );
-  policy.__e2ee_space_successors.allowRead.where(authenticated);
-  policy.__e2ee_space_successors.allowInsert.where((successor) =>
-    allOf([
-      { authorAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.exists.where({ id: successor.spaceId, accountId: session.user.account }),
-    ]),
-  );
-  policy.__e2ee_space_deliveries.allowRead.where(authenticated);
-  policy.__e2ee_space_deliveries.allowInsert.where((delivery) =>
-    allOf([
-      { senderAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.exists.where({ id: delivery.spaceId, accountId: session.user.account }),
-    ]),
+  policy.messages.space.allowUpdate.where((space) =>
+    policy.chatOwners.existsIncludingCreated.where({
+      chatId: space.identifier,
+      accountId: session.user.account,
+    }),
   );
 });

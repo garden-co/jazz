@@ -20,6 +20,15 @@ export const encryptedSchemas = new WeakMap<WasmSchema, EncryptedSchema>();
 
 // SDK preparation metadata only; deployed policies remain the authority.
 const encryptionPolicyTables = new WeakMap<WasmSchema, Set<string>>();
+const spaceAdministrationScopes = new WeakMap<WasmSchema, Set<string>>();
+export function registerSpaceAdministrationScopes(schema: WasmSchema, scopes: ReadonlySet<string>) {
+  const registered = spaceAdministrationScopes.get(schema) ?? new Set<string>();
+  for (const scope of scopes) registered.add(scope);
+  spaceAdministrationScopes.set(schema, registered);
+}
+export function usesSpaceAdministration(schema: WasmSchema, scope: string): boolean {
+  return spaceAdministrationScopes.get(schema)?.has(scope) ?? false;
+}
 export function registerEncryptionPolicyTables(
   schema: WasmSchema,
   tables: ReadonlySet<string>,

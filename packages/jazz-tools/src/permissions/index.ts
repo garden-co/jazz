@@ -20,7 +20,11 @@ import type {
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
-import { encryptedSchemas, registerEncryptionPolicyTables } from "../e2ee/encrypted-schema.js";
+import {
+  encryptedSchemas,
+  registerEncryptionPolicyTables,
+  registerSpaceAdministrationScopes,
+} from "../e2ee/encrypted-schema.js";
 import {
   currentGroupMembersTable,
   currentSpaceMembersPrefix,
@@ -32,7 +36,16 @@ import {
 import { applyDeviceRequestPermissions } from "../e2ee/device-policy.js";
 import { applyGroupTopologyPermissions, groupTopologyTables } from "../e2ee/group-policy.js";
 import { groupSchema, spaceSchema } from "../e2ee/managed-schema.js";
+import {
+  spaceAdministrationTable,
+  spaceAdministrationPrefix,
+} from "../e2ee/space-administration-schema.js";
 import { permissionDefaults } from "../schema-permissions.js";
+import {
+  compileSpaceAdministration,
+  type SpaceAdministrationRules,
+  type SpaceAdministrationAction,
+} from "./space-administration.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -868,10 +881,29 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowDeletes: ActionBuilder<WhereInput, Row>;
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
+  /** Apply one explicit condition to insert, update and delete. */
+  allowWrite(): {
+    where(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): void;
+    always(): void;
+    never(): void;
+  };
   managedByCreator(): void;
   fromEncryptionSpace(): void;
+  /** Administration of the encryption space declared for this table. */
+  readonly space: EncryptionSpacePolicyBuilder;
   exists: ExistsBuilder<WhereInput>;
   existsIncludingCreated: ExistsBuilder<WhereInput>;
+}
+
+type EncryptionSpaceRow = { id: string; identifier: string; accountId: string };
+/** Space roots are immutable; allowUpdate authorises membership and key maintenance. */
+export interface EncryptionSpacePolicyBuilder {
+  allowRead: ActionBuilder<EncryptionSpaceRow, EncryptionSpaceRow>;
+  allowInsert: ActionBuilder<EncryptionSpaceRow, EncryptionSpaceRow>;
+  allowUpdate: ActionBuilder<
+    Pick<EncryptionSpaceRow, "identifier">,
+    Pick<EncryptionSpaceRow, "identifier">
+  >;
 }
 
 export type PolicyContext<TApp extends AppLike> = {
@@ -1034,6 +1066,39 @@ export function definePermissions<TApp extends AppLike>(
   const relationsByTable = collectRelationsByTable(app);
   const rules: RuleLike[] = [];
   const encryptionPolicyTables = new Set<string>();
+  const spaceRules: SpaceAdministrationRules = new Map();
+  const spaceBuilder = (table: string): EncryptionSpacePolicyBuilder => {
+    const declaration = encryptedSchemas.get(appSchema as WasmSchema)?.tables.get(table);
+    if (!declaration) throw new Error(`policy.${table}.space requires an encrypted table`);
+    const actions = spaceRules.get(declaration.scope) ?? { read: [], insert: [], update: [] };
+    spaceRules.set(declaration.scope, actions);
+    const action = <Row>(operation: SpaceAdministrationAction): ActionBuilder<Row, Row> => {
+      const builder: ActionBuilder<Row, Row> = {
+        where: (input: unknown) => {
+          const condition = resolveWhereInput(input, false);
+          actions[operation].push(
+            compileCondition(
+              condition,
+              operation === "update"
+                ? spaceAdministrationTable(declaration.scope)
+                : "__e2ee_spaces",
+              fkReferencesByTable,
+              relationsByTable,
+            )!,
+          );
+          return { table: "__e2ee_spaces", action: operation, withCheck: condition };
+        },
+        always: () => builder.where(alwaysCondition()),
+        never: () => builder.where(neverCondition()),
+      };
+      return builder;
+    };
+    return {
+      allowRead: action<EncryptionSpaceRow>("read"),
+      allowInsert: action<EncryptionSpaceRow>("insert"),
+      allowUpdate: action<Pick<EncryptionSpaceRow, "identifier">>("update"),
+    };
+  };
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
     if (seenRules.has(ruleLike)) {
@@ -1065,6 +1130,7 @@ export function definePermissions<TApp extends AppLike>(
           );
         encryptionPolicyTables.add(table);
       },
+      spaceBuilder,
     ),
     anyOf,
     allOf,
@@ -1085,6 +1151,17 @@ export function definePermissions<TApp extends AppLike>(
   }
   factory(ctx);
   const application = compileRules(rules, fkReferencesByTable, relationsByTable);
+  const spaceAdministration = compileSpaceAdministration(
+    spaceRules,
+    new Set(Object.keys(appSchema ?? {})),
+  );
+  for (const [table, policy] of Object.entries(spaceAdministration)) {
+    if (application[table])
+      throw new Error(
+        `Cannot combine space administration helpers with explicit policies for "${table}"`,
+      );
+    application[table] = policy;
+  }
   const authenticatedFor = (table: string) =>
     compileCondition(
       resolveWhereInput(
@@ -1194,7 +1271,11 @@ export function definePermissions<TApp extends AppLike>(
   if (encrypted) {
     // Keep fallbacks out of the explicit table map: partial policy objects are
     // composed with spread, which must not erase another object's write rules.
-    for (const table of [...Object.keys(groupSchema), ...Object.keys(spaceSchema)]) {
+    for (const table of [
+      ...Object.keys(groupSchema),
+      ...Object.keys(spaceSchema),
+      ...Object.keys(appSchema ?? {}).filter((name) => name.startsWith(spaceAdministrationPrefix)),
+    ]) {
       const denied = compileCondition(
         resolveWhereInput(neverCondition(), tablesWithTypeColumn.has(table)),
         table,
@@ -1262,6 +1343,7 @@ export function definePermissions<TApp extends AppLike>(
       }
     }
     registerEncryptionPolicyTables(appSchema as WasmSchema, encryptionPolicyTables);
+    registerSpaceAdministrationScopes(appSchema as WasmSchema, new Set(spaceRules.keys()));
   }
   return encrypted ? { [permissionDefaults]: defaults, ...managed, ...application } : application;
 }
@@ -1350,6 +1432,7 @@ function buildPolicyContext(
   tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
   fromEncryptionSpace?: (table: string) => void,
+  spaceBuilder?: (table: string) => EncryptionSpacePolicyBuilder,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
@@ -1359,6 +1442,7 @@ function buildPolicyContext(
       tablesWithTypeColumn.has(table),
       collectRule,
       fromEncryptionSpace,
+      spaceBuilder,
     );
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition =>
@@ -1377,6 +1461,7 @@ function buildTablePolicyBuilder(
   hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
   fromEncryptionSpace?: (table: string) => void,
+  spaceBuilder?: (table: string) => EncryptionSpacePolicyBuilder,
 ): Record<string, unknown> {
   const registerRule = (rule: Rule): Rule => {
     collectRule(rule);
@@ -1444,11 +1529,29 @@ function buildTablePolicyBuilder(
     get allowUpdates() {
       return updateFactory();
     },
+    allowWrite: () => {
+      const where = (input: unknown) => {
+        const condition = resolveWhereInput(input, hasTypeColumn);
+        registerRule({ table, action: "insert", withCheck: condition });
+        registerRule({ table, action: "update", using: condition, withCheck: condition });
+        registerRule({ table, action: "delete", using: condition });
+      };
+      return {
+        where,
+        always: () => where(alwaysCondition()),
+        never: () => where(neverCondition()),
+      };
+    },
     managedByCreator,
     fromEncryptionSpace: () => {
       if (!fromEncryptionSpace)
         throw new Error("fromEncryptionSpace() requires definePermissions(app, ...)");
       fromEncryptionSpace(table);
+    },
+    get space() {
+      if (!spaceBuilder)
+        throw new Error("Space administration requires definePermissions(app, ...)");
+      return spaceBuilder(table);
     },
     exists,
     existsIncludingCreated,

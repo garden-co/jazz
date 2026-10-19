@@ -3087,6 +3087,7 @@ where
                 authorization::read_policy_authorization_context(policy.clone(), table_name);
             let dependency = self
                 .normalized_read_policy_input(
+                    read_view.policy_schema,
                     schema,
                     table,
                     &dependency_policy,

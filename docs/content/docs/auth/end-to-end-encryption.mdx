@@ -33,6 +33,42 @@ column when needed, for example `accountRelation("ownerId")`. The application
 table name is arbitrary: administration policies explicitly connect its account
 and scope references to the space creator and `identifier`.
 
+## Authorise space administration
+
+Use `p.messages.space` to authorise the space declared by `.encrypted(...)`.
+`allowInsert` controls creation; `allowUpdate` controls membership changes and
+key maintenance. These rules are separate from ordinary message permissions.
+For example, with a declared account relationship on `chats.ownerId`:
+
+```ts
+p.messages.space.allowRead.always();
+p.messages.space.allowInsert.where((space) =>
+  p.chats.existsIncludingCreated.where({
+    ownerId: space.accountId,
+    id: space.identifier,
+  }),
+);
+p.messages.space.allowUpdate.where((space) =>
+  p.chats.existsIncludingCreated.where({
+    id: space.identifier,
+    ownerId: session.user.account,
+  }),
+);
+```
+
+The creation callback exposes the space creator's `accountId`; membership
+callbacks expose `identifier` and check the acting `session.user.account`.
+Jazz binds each rule to the declared scope's accepted catalogue identity and
+maintains a private typed administration binding with the signed root. Signed
+roots and the binding remain immutable. The SDK generates the history, delivery
+and current-membership policies; keep group administration rules separate.
+Sibling encrypted tables sharing a scope share its administration rules.
+Mixing these helpers with explicit policies on the managed space tables rejects.
+Initialise helper-managed spaces for the creator, then add other recipients
+with `spaces.grant()`. Explicit initial-recipient lists are unsupported with
+this administration helper. Existing applications using explicit managed-table
+policies retain that functionality.
+
 ## Derive row permissions from space membership
 
 Use `fromEncryptionSpace()` when every recipient of a space should have ordinary

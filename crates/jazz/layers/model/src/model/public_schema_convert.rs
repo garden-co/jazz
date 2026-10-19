@@ -1574,9 +1574,34 @@ fn append_exists_policy_clause(
         ));
         query
     } else {
+        // A row-id equality is not necessarily a declared reference (for
+        // example an E2EE root's polymorphic identifier). Prefer a correlation
+        // whose two endpoints declare the same entity; retain every remaining
+        // scalar equality as a checked correlation on that bounded lookup.
+        let reference = |name: &TableName, column: &str| {
+            if column == "id" {
+                return Some(*name);
+            }
+            schema
+                .get(name)?
+                .columns
+                .columns
+                .iter()
+                .find(|candidate| candidate.name.as_str() == column)?
+                .references
+        };
         let primary_index = outer_correlations
             .iter()
-            .position(|correlation| correlation.join_column == "id")
+            .position(|correlation| {
+                let source = reference(table, &correlation.source_column);
+                source.is_some()
+                    && source == reference(&exists_table_name, &correlation.join_column)
+            })
+            .or_else(|| {
+                outer_correlations
+                    .iter()
+                    .position(|correlation| correlation.join_column == "id")
+            })
             .unwrap_or(0);
         let primary = outer_correlations.remove(primary_index);
         let join_column = primary.join_column;
@@ -3118,6 +3143,15 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let [namespace, name] = path_segments
+        && namespace == "__jazz_table_identity_v1"
+        && !name.is_empty()
+    {
+        return Ok(Operand::Claim(format!(
+            "{}{name}",
+            crate::query::TABLE_IDENTITY_OPERAND_PREFIX,
+        )));
+    }
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -6117,5 +6151,17 @@ mod tests {
         assert_eq!(seed.user_column.as_deref(), Some("user_id"));
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "team");
+    }
+
+    /// Pins the versioned SDK intrinsic at the public wire boundary. This
+    /// lower-level fixture is necessary because row effects do not pin bytes.
+    #[test]
+    fn catalogue_table_identity_v1_wire_fixture() {
+        let expr = PolicyExpr::eq_session(
+            "scopeId",
+            vec!["__jazz_table_identity_v1".to_owned(), "projects".to_owned()],
+        );
+        assert_eq!(serde_json::to_vec(&expr).unwrap(),
+            br#"{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"SessionRef","path":["__jazz_table_identity_v1","projects"]}}"#);
     }
 }

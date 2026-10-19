@@ -25,6 +25,10 @@ import { schemaToWasm } from "./codegen/schema-reader.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
 import { permissionSpacesTable } from "./e2ee/current-membership-names.js";
 import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./e2ee/space-administration-schema.js";
+import {
   encryptedSchemas,
   encryptedTableToPhysical,
   type EncryptionDeclaration,
@@ -127,11 +131,13 @@ type InvalidRelationshipEntries<S extends SchemaDefinition> = {
   }[keyof SourceRelations<S[T]> & string];
 }[keyof S & string];
 type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
-  InvalidRelationshipEntries<TSchema>,
+  InvalidRelationshipEntries<TSchema & AutomaticEncryptionSchema<TSchema>>,
 ] extends [never]
   ? unknown
   : {
-      readonly __relationshipValidationError__: InvalidRelationshipEntries<TSchema>;
+      readonly __relationshipValidationError__: InvalidRelationshipEntries<
+        TSchema & AutomaticEncryptionSchema<TSchema>
+      >;
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
@@ -1695,6 +1701,19 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
       }
     }
     definition = { ...managedEncryptionSchema, ...definition };
+    for (const source of Object.values(definition)) {
+      if (!(source instanceof DefinedTable) || !source.encryption) continue;
+      const reference = Object.values(source.relations as Relationships).find(
+        (relation) => relation.kind === "forward" && relation.column === source.encryption!.space,
+      );
+      if (!reference) continue;
+      const scope = reference.table;
+      const name = spaceAdministrationTable(scope);
+      if (Object.hasOwn(definition, name)) {
+        if (definition[name] !== spaceAdministrationSchema(scope))
+          throw new Error(`Cannot replace managed E2EE table "${name}"`);
+      } else definition[name] = spaceAdministrationSchema(scope);
+    }
   }
   return definition;
 }

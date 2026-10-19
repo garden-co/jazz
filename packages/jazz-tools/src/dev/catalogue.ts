@@ -16,6 +16,7 @@ import {
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
+import { spaceAdministrationPrefix } from "../e2ee/space-administration-schema.js";
 import { managedEncryptionSchema } from "../typed-app.js";
 import {
   encodePublishedMigrationValue,
@@ -162,9 +163,11 @@ export function resolveCanonicalMigrationForward(
 
   const forward = serializeForwardLenses(requested);
   const managedAdditions = new Set(
-    Object.keys(managedEncryptionSchema).filter(
+    Object.keys(canonical.toSchema).filter(
       (table) =>
-        !Object.hasOwn(canonical.fromSchema, table) && Object.hasOwn(canonical.toSchema, table),
+        (Object.hasOwn(managedEncryptionSchema, table) ||
+          table.startsWith(spaceAdministrationPrefix)) &&
+        !Object.hasOwn(canonical.fromSchema, table),
     ),
   );
   // Implicit administration tables cannot stand in for a missing user migration.

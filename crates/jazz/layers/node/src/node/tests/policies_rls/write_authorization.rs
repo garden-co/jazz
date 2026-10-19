@@ -3,9 +3,8 @@
 use crate::query::{Include, JoinMode, OrderDirection};
 use crate::query::{
     RelationCmpOp as PublicRelPredicateCmpOp, RelationColumnRef as PublicRelColumnRef,
-    RelationJoinCondition as PublicRelJoinCondition,
-    RelationJoinKind as PublicRelJoinKind, RelationPredicate as PublicRelPredicateExpr,
-    RelationValueRef as PublicRelValueRef,
+    RelationJoinCondition as PublicRelJoinCondition, RelationJoinKind as PublicRelJoinKind,
+    RelationPredicate as PublicRelPredicateExpr, RelationValueRef as PublicRelValueRef,
 };
 use std::cell::Cell;
 use std::rc::Rc;
@@ -222,7 +221,8 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         coalesced_row,
         owner_cells(author, "coalesced insert"),
         None,
-        Some(25),))
+        Some(25),
+    ))
     .unwrap();
     crate::local_executor::block_on(core.tx_patch_mergeable(
         open_tx,
@@ -344,8 +344,10 @@ fn authority_read_for_write_check_is_mergeable_only() {
     };
     tx.kind = TxKind::Exclusive;
     assert!(
-        crate::local_executor::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
-            .unwrap(),
+        crate::local_executor::block_on(
+            core.commit_unit_satisfies_write_policies(&tx, &versions, None)
+        )
+        .unwrap(),
         "exclusive admission keeps its pre-existing write-policy-only helper semantics"
     );
 }
@@ -2328,5 +2330,88 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_chat])
+    );
+}
+
+/// Alice can author rows bound to the projects catalogue identity. Mallory's
+/// provider claim cannot substitute a different table identity, even though
+/// both tables use the same UUID column type.
+#[test]
+fn catalogue_table_identity_policy_refuses_cross_scope_and_claim_spoofing() {
+    let scope = PublicPolicyExpr::eq_session(
+        "scope_id",
+        vec!["__jazz_table_identity_v1".to_owned(), "projects".to_owned()],
+    );
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("other")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("bindings")
+                    .column("scope_id", PublicColumnType::Uuid)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(scope.clone())
+                            .with_insert(scope),
+                    ),
+            ),
+    );
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let schema_id = core.catalogue.active_schema.schema;
+    let projects = core
+        .catalogue_table_identity(schema_id, "projects")
+        .unwrap()
+        .unwrap();
+    let other = core
+        .catalogue_table_identity(schema_id, "other")
+        .unwrap()
+        .unwrap();
+    let alice = user(0xa1);
+    let mallory = user(0xb2);
+    for (index, (author, value, accepted)) in [(alice, projects.0, true), (mallory, other.0, false)]
+        .into_iter()
+        .enumerate()
+    {
+        let spoof = BTreeMap::from([(
+            format!("{}projects", crate::query::TABLE_IDENTITY_OPERAND_PREFIX),
+            Value::Uuid(other.0),
+        )]);
+        writer.set_test_provider_claims(author, spoof.clone());
+        core.set_test_provider_claims(author, spoof);
+        let (tx_id, unit) = writer
+            .commit_mergeable_unit_settled(
+                MergeableCommit::new("bindings", row(0x71 + index as u8), 20 + index as u64)
+                    .made_by(author)
+                    .cells(BTreeMap::from([(
+                        "scope_id".to_owned(),
+                        Value::Uuid(value),
+                    )])),
+            )
+            .unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(
+            matches!(fate, SyncMessage::FateUpdate { tx_id: id, fate: Fate::Accepted, .. } if id == tx_id)
+                == accepted
+        );
+        writer.apply_sync_message_settled(fate).unwrap();
+    }
+    assert_eq!(
+        core.current_rows("bindings", DurabilityTier::Global)
+            .unwrap()
+            .len(),
+        1
     );
 }

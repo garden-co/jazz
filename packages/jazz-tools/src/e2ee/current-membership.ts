@@ -2,6 +2,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { E2eeTransactionScope } from "../runtime/db.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
+import { usesSpaceAdministration } from "./encrypted-schema.js";
+import { spaceAdministrationTable } from "./space-administration-schema.js";
 import {
   currentGroupMembersTable,
   currentSpaceMembersTable,
@@ -77,4 +79,22 @@ export function initialisePermissionSpace(
   const table = permissionSpacesTable(scope);
   if (schema[table])
     tx.upsert(new TypedTableQueryBuilder(table, schema), identifier, { scopeId: identifier });
+}
+
+export function initialiseSpaceAdministration(
+  tx: E2eeTransactionScope,
+  schema: WasmSchema,
+  scope: string,
+  rootId: string,
+  identifier: string,
+  accountId: string,
+): void {
+  if (!usesSpaceAdministration(schema, scope)) return;
+  const table = spaceAdministrationTable(scope);
+  if (!schema[table]) throw new Error("Missing E2EE space administration schema");
+  tx.insert(
+    new TypedTableQueryBuilder(table, schema),
+    { rootId, identifier, accountId },
+    { id: rootId },
+  );
 }

@@ -10,7 +10,7 @@ import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
 import { accountRelation } from "./account-relation.js";
 
-async function fixture(denyMemberUpdates = false) {
+async function fixture(denyMemberUpdates = false, spaceHelpers = false) {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
@@ -61,40 +61,56 @@ async function fixture(denyMemberUpdates = false) {
         }),
       ]),
     );
-    p.__e2ee_spaces.allowRead.always();
-    p.__e2ee_spaces.allowInsert.where((space) =>
-      allOf([
-        { accountId: session.user.account, "$createdBy.account": session.user.account },
+    if (spaceHelpers) {
+      p.notes.space.allowRead.always();
+      p.notes.space.allowInsert.where((space) =>
         p.projectOwners.existsIncludingCreated.where({
           accountId: space.accountId,
           projectId: space.identifier,
         }),
-      ]),
-    );
-    p.__e2ee_space_grants.allowRead.always();
-    p.__e2ee_space_grants.allowInsert.where((grant) =>
-      allOf([
-        { authorAccountId: session.user.account },
+      );
+      p.notes.space.allowUpdate.where((space) =>
+        p.projectOwners.existsIncludingCreated.where({
+          accountId: session.user.account,
+          projectId: space.identifier,
+        }),
+      );
+    } else {
+      p.__e2ee_spaces.allowRead.always();
+      p.__e2ee_spaces.allowInsert.where((space) =>
+        allOf([
+          { accountId: session.user.account, "$createdBy.account": session.user.account },
+          p.projectOwners.existsIncludingCreated.where({
+            accountId: space.accountId,
+            projectId: space.identifier,
+          }),
+        ]),
+      );
+      p.__e2ee_space_grants.allowRead.always();
+      p.__e2ee_space_grants.allowInsert.where((grant) =>
+        allOf([
+          { authorAccountId: session.user.account },
+          p.__e2ee_spaces.existsIncludingCreated.where({
+            id: grant.spaceId,
+            accountId: session.user.account,
+          }),
+        ]),
+      );
+      p.__e2ee_space_successors.allowRead.always();
+      p.__e2ee_space_successors.allowInsert.where((row) =>
         p.__e2ee_spaces.existsIncludingCreated.where({
-          id: grant.spaceId,
+          id: row.spaceId,
           accountId: session.user.account,
         }),
-      ]),
-    );
-    p.__e2ee_space_successors.allowRead.always();
-    p.__e2ee_space_successors.allowInsert.where((row) =>
-      p.__e2ee_spaces.existsIncludingCreated.where({
-        id: row.spaceId,
-        accountId: session.user.account,
-      }),
-    );
-    p.__e2ee_space_deliveries.allowRead.always();
-    p.__e2ee_space_deliveries.allowInsert.where((row) =>
-      p.__e2ee_spaces.existsIncludingCreated.where({
-        id: row.spaceId,
-        accountId: session.user.account,
-      }),
-    );
+      );
+      p.__e2ee_space_deliveries.allowRead.always();
+      p.__e2ee_space_deliveries.allowInsert.where((row) =>
+        p.__e2ee_spaces.existsIncludingCreated.where({
+          id: row.spaceId,
+          accountId: session.user.account,
+        }),
+      );
+    }
     p.__e2ee_groups.allowInsert.where({
       accountId: session.user.account,
       "$createdBy.account": session.user.account,
@@ -111,16 +127,18 @@ async function fixture(denyMemberUpdates = false) {
     );
     p.__e2ee_group_repairs.allowRead.always();
     p.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
-    p.__e2ee_v1_space_members_projects.allowInsert.where((member) =>
-      p.projects.existsIncludingCreated.where({
-        id: member.scopeId,
-        ownerId: session.user.account,
-      }),
-    );
-    if (!denyMemberUpdates)
-      p.__e2ee_v1_space_members_projects.allowUpdate.where((member) =>
-        p.projects.exists.where({ id: member.scopeId, ownerId: session.user.account }),
+    if (!spaceHelpers) {
+      p.__e2ee_v1_space_members_projects.allowInsert.where((member) =>
+        p.projects.existsIncludingCreated.where({
+          id: member.scopeId,
+          ownerId: session.user.account,
+        }),
       );
+      if (!denyMemberUpdates)
+        p.__e2ee_v1_space_members_projects.allowUpdate.where((member) =>
+          p.projects.exists.where({ id: member.scopeId, ownerId: session.user.account }),
+        );
+    }
     p.__e2ee_v1_group_members.allowInsert.where((member) =>
       p.__e2ee_groups.existsIncludingCreated.where({
         id: member.groupId,
@@ -422,3 +440,42 @@ it("uses exact initial recipients and rejects missing spaces before consuming a 
 async function* bytes() {
   yield new Uint8Array([1, 2, 3]);
 }
+
+it("authorises space administration through the scoped helper while keeping roots immutable", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(false, true);
+  try {
+    const project = await createProject("Helper administration");
+    const note = await owner.db
+      .insert(app.notes, { projectId: project.id, body: "Private" })
+      .wait({ tier: "global" });
+    await expect(
+      reader.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait(),
+    ).rejects.toThrow();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait();
+    expect(await reader.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject(
+      { body: "Private" },
+    );
+    await expect(
+      reader.db.e2ee.spaces.revoke(app.projects, project.id, owner.id).wait(),
+    ).rejects.toThrow();
+    const root = await owner.db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "remote",
+    });
+    expect(root).not.toBeNull();
+    await expect(
+      owner.db
+        .update(app.__e2ee_spaces, root!.id, { epochId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const { id: _id, ...values } = root!;
+    await expect(
+      owner.db
+        .insert(app.__e2ee_spaces, { ...values, scopeId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await owner.db.e2ee.spaces.revoke(app.projects, project.id, reader.id).wait();
+    expect(await reader.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+  } finally {
+    await close();
+  }
+}, 120_000);
