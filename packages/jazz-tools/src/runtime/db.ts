@@ -28,6 +28,7 @@ import {
   withTransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
+  createOpenTransactionId,
   setWriteWaitReadiness,
   type TransactionKind,
   type ReadTierOptions,
@@ -56,8 +57,23 @@ import {
   applyColumnTransforms,
   createRowTransformer,
   transformRow,
-  transformRows,
+  unwrapValue,
 } from "./row-transformer.js";
+import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import { writeRow } from "./write-row.js";
+import {
+  columnTransformDependencies,
+  dependencyContext,
+  storedDependencyValues,
+  type ColumnTransform,
+  type ColumnTransformMap,
+  type ColumnTransformRegistry,
+} from "./column-transforms.js";
+export type {
+  ColumnTransform,
+  ColumnTransformMap,
+  ColumnTransformRegistry,
+} from "./column-transforms.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -89,6 +105,7 @@ import {
   normalizeBuiltQuery,
   type BuiltRelation,
   type NormalizedBuiltQuery,
+  type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
 import {
   BrowserConnectionManager,
@@ -615,9 +632,22 @@ function writeRecord(
   table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ) {
-  const transformed = transformInputColumns(table, data);
+  return toWriteRecordForOperation(
+    operation,
+    transformInputColumns(table, data),
+    table._schema,
+    table._table,
+  );
+}
+
+function toWriteRecordForOperation(
+  operation: WriteOperationName,
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  tableName: string,
+) {
   try {
-    return toWriteRecord(transformed, table._schema, table._table);
+    return toWriteRecord(data, schema, tableName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${operation} failed: WriteError("${escapeWriteErrorReason(message)}")`);
@@ -936,14 +966,6 @@ export interface TableProxy<
   readonly _largeValueUpdateType?: LargeValueUpdate;
 }
 
-export interface ColumnTransform {
-  from(value: unknown): unknown;
-  to(value: unknown): unknown;
-}
-
-export type ColumnTransformMap = Record<string, ColumnTransform>;
-export type ColumnTransformRegistry = Record<string, ColumnTransformMap | undefined>;
-
 function resolveOutputColumnTransforms<T>(
   query: QueryBuilder<T>,
   inputTable: string,
@@ -954,11 +976,150 @@ function resolveOutputColumnTransforms<T>(
     (inputTable === outputTable ? query._columnTransforms : undefined)
   );
 }
+
+function prepareTransformRead<T>(
+  query: QueryBuilder<T>,
+  built: NormalizedBuiltQuery,
+  outputTable: string,
+) {
+  const outputTransforms = resolveOutputColumnTransforms(query, built.table, outputTable);
+  const outputIncludes =
+    outputTable === built.table || !Object.keys(built.includes).length ? built.includes : {};
+  const hasIncludes = Object.keys(outputIncludes).length > 0;
+  if (!outputTransforms && (!query._columnTransformsByTable || !hasIncludes)) {
+    const decode = createRowTransformer<T>(
+      query._schema,
+      outputTable,
+      outputIncludes,
+      built.select,
+    );
+    return {
+      physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
+      transform: Object.keys(built.partialSelect).length
+        ? (row: WasmRow) => applyPartialValueSelections(decode(row), built.partialSelect)
+        : decode,
+    };
+  }
+  const relations = hasIncludes ? analyzeRelations(query._schema) : undefined;
+  const prepare = (
+    table: string,
+    select: string[],
+    includes: NormalizedIncludeSpec,
+    partialSelect: NormalizedBuiltQuery["partialSelect"],
+  ) => {
+    const transforms =
+      query._columnTransformsByTable?.[table] ??
+      (table === outputTable ? outputTransforms : undefined);
+    let physical = select;
+    let partial = partialSelect;
+    const selectAll = !select.length || select.includes("*");
+    let visibleTransforms: ColumnTransformMap | undefined;
+    let dependencies: Set<string> | undefined;
+    let hidden: string[] | undefined;
+    if (transforms)
+      for (const column of selectAll ? Object.keys(transforms) : select) {
+        if (!Object.hasOwn(transforms, column)) continue;
+        (visibleTransforms ??= {})[column] = transforms[column]!;
+        for (const dependency of transforms[column]!.dependsOn ?? []) {
+          (dependencies ??= new Set()).add(dependency);
+          if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
+            if (physical === select) physical = [...select];
+            physical.push(dependency);
+            (hidden ??= []).push(dependency);
+          }
+          if (Object.hasOwn(partial, dependency)) {
+            if (partial === partialSelect) partial = { ...partialSelect };
+            delete partial[dependency];
+          }
+        }
+      }
+    let preparedIncludes = includes;
+    const finishIncludes: Array<
+      [string, (row: Record<string, unknown>) => Record<string, unknown>]
+    > = [];
+    for (const [name, include] of Object.entries(includes)) {
+      const target = relations?.get(table)?.find((relation) => relation.name === name)?.toTable;
+      if (!target) continue;
+      const prepared = prepare(target, include.select, include.includes, include.partialSelect);
+      if (
+        prepared.select !== include.select ||
+        prepared.includes !== include.includes ||
+        prepared.partialSelect !== include.partialSelect
+      ) {
+        if (preparedIncludes === includes) preparedIncludes = { ...includes };
+        preparedIncludes[name] = {
+          ...include,
+          select: prepared.select,
+          includes: prepared.includes,
+          partialSelect: prepared.partialSelect,
+        };
+      }
+      if (prepared.finish) finishIncludes.push([name, prepared.finish]);
+    }
+    const dependencyColumns = dependencies ? [...dependencies] : noWriteDependencies;
+    const hasPartial = Object.keys(partialSelect).length > 0;
+    const excluded = Object.keys(includes);
+    return {
+      select: physical,
+      includes: preparedIncludes,
+      partialSelect: partial,
+      finish:
+        visibleTransforms || hasPartial || finishIncludes.length
+          ? (row: Record<string, unknown>): Record<string, unknown> => {
+              const stored = visibleTransforms
+                ? storedDependencyValues(dependencyColumns, row)
+                : undefined;
+              const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
+              if (visibleTransforms)
+                applyColumnTransforms(result, visibleTransforms, excluded, stored);
+              for (const [name, finish] of finishIncludes) {
+                const value = result[name];
+                if (Array.isArray(value))
+                  for (let i = 0; i < value.length; i++) value[i] = finish(value[i]);
+                else if (value && typeof value === "object")
+                  result[name] = finish(value as Record<string, unknown>);
+              }
+              if (hidden) for (const column of hidden) delete result[column];
+              return result;
+            }
+          : undefined,
+    };
+  };
+  const prepared = prepare(outputTable, built.select, outputIncludes, built.partialSelect);
+  const decode = createRowTransformer<Record<string, unknown>>(
+    query._schema,
+    outputTable,
+    prepared.includes,
+    prepared.select,
+    undefined,
+    false,
+    relations,
+  );
+  return {
+    physical:
+      prepared.select === built.select &&
+      prepared.partialSelect === built.partialSelect &&
+      prepared.includes === built.includes
+        ? built
+        : {
+            ...built,
+            select: prepared.select,
+            partialSelect: prepared.partialSelect,
+            includes: prepared.includes,
+          },
+    transform: prepared.finish
+      ? (row: WasmRow) => prepared.finish!(decode(row)) as T
+      : (decode as (row: WasmRow) => T),
+  };
+}
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
   openTransactionId: OpenTransactionId;
   session?: Session;
   attribution?: string;
+  preparation: WritePreparation;
+  committing?: boolean;
+  begun: boolean;
 };
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
@@ -986,31 +1147,196 @@ function transformOutputColumns(
     return row;
   }
 
-  const transformed = { ...(row as Record<string, unknown>) };
-  for (const [column, transform] of Object.entries(source._columnTransforms)) {
-    if (column in transformed) {
-      transformed[column] = transform.from(transformed[column]);
-    }
-  }
-  return transformed;
+  return applyColumnTransforms(row as Record<string, unknown>, source._columnTransforms);
 }
 
 function transformInputColumns(
   table: TableProxy<any, any, any, any, any>,
   data: unknown,
+  storedValues?: Record<string, unknown>,
+  creation = false,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
   if (!table._columnTransforms) {
     return record;
   }
 
-  const transformed = { ...record };
-  for (const [column, transform] of Object.entries(table._columnTransforms)) {
-    if (column in transformed) {
-      transformed[column] = transform.to(transformed[column]);
+  const transforms = table._columnTransforms;
+  let hasTransform = false;
+  let hasDependencies = false;
+  for (const column in record) {
+    if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
+    const transform = transforms[column];
+    if (transform) {
+      hasTransform = true;
+      if (transform.dependsOn?.length) hasDependencies = true;
     }
   }
-  return transformed;
+  if (!hasTransform) return record;
+  if (!hasDependencies) {
+    const result = { ...record };
+    for (const column in record) {
+      if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
+      const transform = transforms[column];
+      if (transform)
+        result[column] = transform.to(record[column], dependencyContext(transform, record));
+    }
+    return result;
+  }
+  const stored = { ...storedValues };
+  const app: Record<string, unknown> = {};
+  const resolved = new Set<string>();
+  const resolve = (column: string) => {
+    if (resolved.has(column)) return;
+    const transform = table._columnTransforms?.[column];
+    for (const dependency of transform?.dependsOn ?? []) resolve(dependency);
+    if (Object.hasOwn(record, column) && record[column] !== undefined) {
+      app[column] = record[column];
+      stored[column] = transform
+        ? transform.to(record[column], dependencyContext(transform, app))
+        : record[column];
+    } else {
+      if (creation && !Object.hasOwn(stored, column)) {
+        const descriptor = table._schema[table._table]!.columns.find(
+          (item) => item.name === column,
+        );
+        if (descriptor?.default !== undefined)
+          stored[column] = unwrapValue(descriptor.default, descriptor.column_type);
+        else if (descriptor?.nullable) stored[column] = null;
+      }
+      if (!Object.hasOwn(stored, column))
+        throw new Error(`Transform dependency "${column}" is unavailable.`);
+      app[column] = transform
+        ? transform.from(stored[column], dependencyContext(transform, stored))
+        : stored[column];
+    }
+    resolved.add(column);
+  };
+  const result = { ...record };
+  for (const column of Object.keys(record)) {
+    if (record[column] === undefined) continue;
+    resolve(column);
+    result[column] = stored[column];
+  }
+  return result;
+}
+
+const noWriteDependencies: readonly string[] = [];
+
+function missingWriteDependencies(
+  table: TableProxy<any, any>,
+  data: Record<string, unknown>,
+  id?: string,
+): readonly string[] {
+  if (!table._columnTransforms) return noWriteDependencies;
+  const { byColumn } = columnTransformDependencies(table._columnTransforms);
+  let missing: Set<string> | undefined;
+  for (const column of Object.keys(data)) {
+    if (data[column] === undefined) continue;
+    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
+      if (dependency !== "id" || id === undefined) {
+        if (!Object.hasOwn(data, dependency) || data[dependency] === undefined)
+          (missing ??= new Set()).add(dependency);
+      }
+    }
+  }
+  return missing ? [...missing] : noWriteDependencies;
+}
+
+function prepareInputColumns(
+  table: TableProxy<any, any>,
+  data: Record<string, unknown>,
+  operation: WriteOperationName,
+  id: string | undefined,
+  client: JazzClient,
+  session?: Session,
+  openTransactionId?: OpenTransactionId,
+  options?: Pick<NonNullable<ReturnType<typeof normalizeViewOptions>>, "branch">,
+  missing?: readonly string[],
+): Record<string, unknown> | Promise<Record<string, unknown>> {
+  if (!table._columnTransforms) return data;
+  missing ??= missingWriteDependencies(table, data, id);
+  const stored = id === undefined ? {} : { id };
+  if (operation === "Insert" || operation === "Restore" || missing.length === 0)
+    return transformInputColumns(
+      table,
+      data,
+      stored,
+      operation === "Insert" || operation === "Restore",
+    );
+  const built = JSON.stringify({
+    table: table._table,
+    conditions: [{ column: "id", op: "eq", value: id }],
+    select: missing.filter((column) => column !== "id"),
+    limit: 1,
+    includeDeleted: operation === "Upsert",
+  });
+  return client
+    .queryInternal(
+      translateQuery(built, table._schema),
+      {
+        ...(options?.branch ? { branch: options.branch } : {}),
+        ...(openTransactionId ? { openTransactionId, localUpdates: "deferred" as const } : {}),
+      },
+      session,
+    )
+    .then((rows) => {
+      const row = rows[0];
+      if (!row && operation !== "Upsert")
+        throw new Error("Transform dependency row is unavailable.");
+      if (!row && !client.readCanEstablishAbsence(session, openTransactionId))
+        throw new Error(
+          "Transform dependencies are unavailable: a scoped read cannot establish that the upsert row is absent.",
+        );
+      const existing = row
+        ? transformRow<Record<string, unknown>>(row, table._schema, table._table, {}, missing)
+        : stored;
+      return transformInputColumns(table, data, existing, !row && operation === "Upsert");
+    });
+}
+
+function rejectIncompleteDependencies(
+  table: TableProxy<any, any>,
+  data: Record<string, unknown>,
+  incomplete: readonly string[],
+) {
+  if (!table._columnTransforms || !incomplete.length) return;
+  const { byColumn } = columnTransformDependencies(table._columnTransforms);
+  for (const column of Object.keys(data)) {
+    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
+      if (incomplete.includes(dependency))
+        throw new Error(
+          `Transform dependency "${dependency}" requires a whole-value replacement in this write.`,
+        );
+    }
+  }
+}
+
+function reserveRowId(): string {
+  const hex = createOpenTransactionId();
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function hasDependentTransforms(table: TableProxy<any, any>): boolean {
+  return (
+    !!table._columnTransforms &&
+    columnTransformDependencies(table._columnTransforms).columns.length > 0
+  );
+}
+
+function immediateWriteRow<T>(
+  table: TableProxy<T, unknown>,
+  id: string,
+  values: ReturnType<typeof toWriteRecord>,
+): T {
+  return transformOutputRow(
+    table,
+    transformRow(
+      writeRow(table._table, id, table._schema[table._table]!.columns, values),
+      table._schema,
+      table._table,
+    ),
+  );
 }
 
 function splitStreamingMutation(
@@ -1203,6 +1529,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   ): DbTransactionHandleBinding {
     const client = this.resolveClient(table._schema);
     if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
+    if (this.requireBinding("table operation").committing)
+      throw new Error("Transaction commit has already been requested.");
     return this.requireBinding("table operation");
   }
 
@@ -1219,12 +1547,32 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private bindOwnerClient(ownerClient: JazzClient): void {
     const { writeSession: session, attribution } = this.context ?? {};
-    dbTxHandleBindings.set(this, {
+    const preparation = new WritePreparation(true);
+    const owner = getOwnerPreparation(ownerClient);
+    const openTransactionId = owner?.pending
+      ? createOpenTransactionId()
+      : ownerClient.beginTransaction(this.kind, session, attribution);
+    const binding: DbTransactionHandleBinding = {
       ownerClient,
-      openTransactionId: ownerClient.beginTransaction(this.kind, session, attribution),
-      session,
-      attribution,
-    });
+      openTransactionId,
+      session: session,
+      attribution: attribution,
+      preparation,
+      begun: !owner?.pending,
+    };
+    dbTxHandleBindings.set(this, binding);
+    if (!binding.begun)
+      preparation.run(() =>
+        owner!.run(() => {
+          if (preparation.cancelled) return;
+          const begin = () =>
+            ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
+          const prerequisite = transactionAdmission.get(this);
+          if (prerequisite) withTransactionAdmission(ownerClient, prerequisite, begin);
+          else begin();
+          binding.begun = true;
+        }),
+      );
   }
 
   openTransactionId(): OpenTransactionId {
@@ -1235,21 +1583,21 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Commit this transaction.
    */
   commit(): TransactionCommitHandle<TKind> {
-    const { ownerClient, openTransactionId } = this.requireBinding("commit");
-    let txId: Promise<TxId>;
-    if (this.pendingReads.size > 0) {
-      txId = Promise.all(this.pendingReads).then(
-        () => ownerClient.commitTransaction(openTransactionId).txId,
-      );
-    } else {
-      txId = ownerClient.commitTransaction(openTransactionId).txId;
-    }
+    const binding = this.requireBinding("commit");
+    const { ownerClient, openTransactionId, preparation } = binding;
+    if (binding.committing) throw new Error("Transaction commit has already been requested.");
+    if (preparation.pending || preparation.failed) binding.committing = true;
+    const txId =
+      preparation.pending || preparation.failed || this.pendingReads.size > 0
+        ? Promise.all([preparation.drain(), ...this.pendingReads]).then(
+            () => ownerClient.commitTransaction(openTransactionId).txId,
+          )
+        : ownerClient.commitTransaction(openTransactionId).txId;
     this.committing = true;
     const finishCommit = () => {
       this.committing = false;
     };
-    // Observe completion without delaying application waits on the transaction ID.
-    void txId.then(finishCommit, finishCommit);
+    txId.then(finishCommit, finishCommit);
     if (this.kind === "exclusive") {
       return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
@@ -1265,8 +1613,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * When using {@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): Promise<boolean> {
-    const { ownerClient, openTransactionId } = this.requireBinding("rollback");
-    return ownerClient.rollbackTransaction(openTransactionId);
+    const { ownerClient, openTransactionId, preparation, begun } = this.requireBinding("rollback");
+    if (!begun) {
+      preparation.cancelled = true;
+      return Promise.resolve(true);
+    }
+    const result = ownerClient.rollbackTransaction(openTransactionId);
+    preparation.cancelled = true;
+    return result;
   }
 
   /**
@@ -1277,18 +1631,40 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     this.bindTable(table);
-    const values = writeRecord("Insert", table, data);
     const client = this.resolveClient(table._schema);
-    const { openTransactionId, session, attribution } = this.requireBinding("insert");
-    const row = client.insertInternal(
-      table._table,
-      values,
-      normalizeSelectorOptions(table._schema, table._table, options),
-      session,
-      attribution,
-      openTransactionId,
-    );
-    return transformOutputRow(table, transformRow(row, table._schema, table._table));
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
+    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    const { values, value } = this.prepareCreation(table, data, id, "Insert");
+    if (!id && (preparation.pending || getOwnerPreparation(client)?.pending)) id = reserveRowId();
+    let row: ReturnType<typeof client.insertInternal> | undefined;
+    const stage = () => {
+      row = client.insertInternal(
+        table._table,
+        values,
+        normalizeSelectorOptions(table._schema, table._table, id ? { ...options, id } : options),
+        session,
+        attribution,
+        openTransactionId,
+      );
+    };
+    if (preparation.cancelled) stage();
+    else
+      preparation.run(() =>
+        runAfterPreparation(client, () => {
+          if (!preparation.cancelled) stage();
+        }),
+      );
+    try {
+      return (
+        value ??
+        (row
+          ? transformOutputRow(table, transformRow(row, table._schema, table._table))
+          : immediateWriteRow(table, id!, values))
+      );
+    } catch (error) {
+      preparation.failure = error;
+      throw error;
+    }
   }
 
   /**
@@ -1304,19 +1680,52 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: RestoreOptions,
   ): T {
     this.bindTable(table);
-    const values = writeRecord("Restore", table, data);
+    const { values, value } = this.prepareCreation(table, data, id, "Restore");
     const client = this.resolveClient(table._schema);
-    const { openTransactionId, session, attribution } = this.requireBinding("restore");
-    const row = client.restoreInternal(
-      table._table,
-      id,
-      values,
-      normalizeSelectorOptions(table._schema, table._table, options),
-      session,
-      attribution,
-      openTransactionId,
-    );
-    return transformOutputRow(table, transformRow(row, table._schema, table._table));
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding("restore");
+    const stage = () => {
+      client.restoreInternal(
+        table._table,
+        id,
+        values,
+        normalizeSelectorOptions(table._schema, table._table, options),
+        session,
+        attribution,
+        openTransactionId,
+      );
+    };
+    if (preparation.cancelled) stage();
+    else
+      preparation.run(() =>
+        runAfterPreparation(client, () => {
+          if (!preparation.cancelled) stage();
+        }),
+      );
+    return value!;
+  }
+
+  private prepareCreation<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    id: string | undefined,
+    operation: "Insert" | "Restore",
+  ) {
+    let record: Record<string, unknown>;
+    try {
+      record = table._columnTransforms
+        ? transformInputColumns(table, data, id === undefined ? undefined : { id }, true)
+        : (data as Record<string, unknown>);
+    } catch (error) {
+      this.requireBinding(operation).preparation.failure = error;
+      throw error;
+    }
+    const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+    try {
+      return { values, value: id === undefined ? undefined : immediateWriteRow(table, id, values) };
+    } catch (error) {
+      this.requireBinding(operation).preparation.failure = error;
+      throw error;
+    }
   }
 
   /**
@@ -1332,19 +1741,25 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
-    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const values = writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(
-      table._table,
+    this.prepareMutation(
+      table,
       id,
-      values,
-      normalizeViewOptions(table._schema, table._table, options),
-      session,
-      attribution,
-      openTransactionId,
+      data as Record<string, unknown>,
+      "Upsert",
+      options,
+      (values) => {
+        client.upsertInternal(
+          table._table,
+          id,
+          values,
+          normalizeViewOptions(table._schema, table._table, options),
+          session,
+          attribution,
+          openTransactionId,
+        );
+      },
     );
   }
 
@@ -1382,36 +1797,92 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions & { applyDiffs?: object },
   ): void {
     this.bindTable(table);
-    // Diffs are staged against this transaction's own view of the row, so
-    // they compose with its earlier writes and commit atomically with them.
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const updates = writeRecord("Update", table, data);
+    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    if (descriptors.length > 0) {
-      client.updateLargeValuesInternal(
-        table._table,
-        id,
-        updates,
-        descriptors,
-        normalizedOptions?.updatedAt,
-        session,
-        attribution,
-        openTransactionId,
-        normalizedOptions?.branch,
-      );
+    this.prepareMutation(
+      table,
+      id,
+      data as Record<string, unknown>,
+      "Update",
+      options,
+      (updates) => {
+        if (descriptors.length > 0) {
+          client.updateLargeValuesInternal(
+            table._table,
+            id,
+            updates,
+            descriptors,
+            normalizedOptions?.updatedAt,
+            session,
+            attribution,
+            openTransactionId,
+            normalizedOptions?.branch,
+          );
+          return;
+        }
+        client.updateInternal(
+          table._table,
+          id,
+          updates,
+          normalizedOptions?.updatedAt,
+          session,
+          attribution,
+          openTransactionId,
+          normalizedOptions?.branch,
+        );
+      },
+    );
+  }
+
+  private prepareMutation(
+    table: TableProxy<any, any>,
+    id: string,
+    data: Record<string, unknown>,
+    operation: "Update" | "Upsert",
+    options: UpdateOptions | undefined,
+    stage: (values: ReturnType<typeof toWriteRecord>) => void,
+  ): void {
+    const { ownerClient, openTransactionId, preparation } = this.requireBinding(operation);
+    if (
+      preparation.pending ||
+      getOwnerPreparation(ownerClient)?.pending ||
+      missingWriteDependencies(table, data, id).length
+    )
+      data = { ...data };
+    if (preparation.cancelled) {
+      stage({});
       return;
     }
-    client.updateInternal(
-      table._table,
-      id,
-      updates,
-      normalizedOptions?.updatedAt,
-      session,
-      attribution,
-      openTransactionId,
-      normalizedOptions?.branch,
+    preparation.run(() =>
+      runAfterPreparation(ownerClient, () => {
+        if (preparation.cancelled) return;
+        let prepared: ReturnType<typeof prepareInputColumns>;
+        try {
+          prepared = prepareInputColumns(
+            table,
+            data,
+            operation,
+            id,
+            ownerClient,
+            this.context?.readSession,
+            openTransactionId,
+            normalizeViewOptions(table._schema, table._table, options),
+          );
+        } catch (error) {
+          preparation.failure = error;
+          throw error;
+        }
+        const finish = (record: Record<string, unknown>) => {
+          if (preparation.cancelled) return;
+          if (preparation.failed) throw preparation.failure;
+          const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+          stage(values);
+        };
+        return prepared instanceof Promise ? prepared.then(finish) : finish(prepared);
+      }),
     );
   }
 
@@ -1424,17 +1895,26 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
-    const { openTransactionId, session, attribution } = this.requireBinding("delete");
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding("delete");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    client.deleteInternal(
-      table._table,
-      id,
-      normalizedOptions?.updatedAt,
-      session,
-      attribution,
-      openTransactionId,
-      normalizedOptions?.branch,
-    );
+    const stage = () => {
+      client.deleteInternal(
+        table._table,
+        id,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+    };
+    if (preparation.cancelled) stage();
+    else
+      preparation.run(() =>
+        runAfterPreparation(client, () => {
+          if (!preparation.cancelled) stage();
+        }),
+      );
   }
 
   /**
@@ -1452,13 +1932,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.bindQuery(query);
+    const { preparation, openTransactionId } = this.requireBinding("query");
+    if (preparation.pending || preparation.failed) await preparation.drain();
     const client = this.resolveClient(query._schema);
-    const { openTransactionId } = this.requireBinding("query");
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const prepared = prepareTransformRead(query, builtQuery, outputTable);
     // Transactions accept the same public options surface as Db. Lower before
     // reaching native options so JavaScript callers cannot smuggle runtime
     // controls (for example `localUpdates` or `openTransactionId`) through this
@@ -1467,33 +1948,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       normalizeViewOptions(query._schema, builtQuery.table, lowerPublicDbQueryOptions(options)) ??
       {};
     const rows = await client.queryInternal(
-      translateQuery(builderJson, planningSchema),
+      translateQuery(builderJson, planningSchema, prepared.physical),
       {
         ...queryOptions,
         openTransactionId,
       },
       this.context?.readSession,
     );
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
-    const outputRelationNames = Object.keys(outputIncludes);
-    const transformedRows = transformRows<Record<string, unknown>>(
-      rows,
-      outputSchema,
-      outputTable,
-      outputIncludes,
-      builtQuery.select,
-      query._columnTransformsByTable,
-      false,
-    );
-    return transformedRows.map(
-      (row) =>
-        applyColumnTransforms(
-          applyPartialValueSelections(row, builtQuery.partialSelect),
-          outputTransforms,
-          outputRelationNames,
-        ) as T,
-    );
+    return rows.map(prepared.transform);
   }
 
   /**
@@ -1514,7 +1976,7 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
-const transactionAdmission = new WeakMap<Db, () => Promise<void>>();
+const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
 
 /** @internal The compiler opts in before staging any operations. */
 export function beginDbTransactionAfter(
@@ -2090,19 +2552,41 @@ export class Db {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
-    const values = writeRecord("Insert", table, data);
-    const context = this.getAccessContext();
-    const inserted = client.insert(
+    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    const transformedData = table._columnTransforms
+      ? transformInputColumns(table, data, id ? { id } : undefined, true)
+      : (data as Record<string, unknown>);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
       table._table,
-      values,
-      normalizeSelectorOptions(table._schema, table._table, options),
-      context?.writeSession,
-      context?.attribution,
+    );
+    const context = this.getAccessContext();
+    const deferred = !!getOwnerPreparation(client)?.pending;
+    if (deferred && !id) id = reserveRowId();
+    const value = deferred ? immediateWriteRow(table, id!, values) : undefined;
+    const inserted = runAfterPreparation(client, () =>
+      client.insert(
+        table._table,
+        values,
+        normalizeSelectorOptions(table._schema, table._table, id ? { ...options, id } : options),
+        context?.writeSession,
+        context?.attribution,
+      ),
     );
     return this.wrapWriteWait(
-      inserted.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
-      ),
+      inserted instanceof Promise
+        ? new WriteResult(
+            value as T,
+            inserted.then((result) => result.txId),
+            client,
+          )
+        : inserted.mapValue((row) =>
+            value !== undefined
+              ? (value as T)
+              : transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
+          ),
     );
   }
 
@@ -2121,23 +2605,39 @@ export class Db {
   ): Promise<WriteHandle<{ id: string }>> {
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    const values = writeRecord("Insert", table, ordinaryData);
-    const context = this.getAccessContext();
-    const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
     notifyLocalWrite(this);
-    return client.insertStreaming(
-      table._table,
-      values,
-      column,
-      source,
-      normalizeSelectorOptions(
+    const id =
+      options?.id ??
+      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    return runAfterPreparation(client, async () => {
+      const transformedData = transformInputColumns(table, ordinaryData, id ? { id } : {}, true);
+      const values = toWriteRecordForOperation(
+        "Insert",
+        transformedData,
         table._schema,
         table._table,
-        branch ? { ...options, branch } : options,
-      ),
-      context?.writeSession,
-      context?.attribution,
-    );
+      );
+      const context = this.getAccessContext();
+      const branch = deriveStreamingInsertBranch(table, ordinaryData);
+      return client.insertStreaming(
+        table._table,
+        values,
+        column,
+        source,
+        normalizeSelectorOptions(
+          table._schema,
+          table._table,
+          branch
+            ? { ...options, ...(id ? { id } : {}), branch }
+            : id
+              ? { ...options, id }
+              : options,
+        ),
+        context?.writeSession,
+        context?.attribution,
+      );
+    });
   }
 
   async updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
@@ -2148,19 +2648,37 @@ export class Db {
   ): Promise<WriteHandle<{ id: string }>> {
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    const values = writeRecord("Update", table, ordinaryData);
-    const context = this.getAccessContext();
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
     notifyLocalWrite(this);
-    return client.updateStreaming(
-      table._table,
-      id,
-      values,
-      column,
-      source,
-      normalizeViewOptions(table._schema, table._table, options),
-      context?.writeSession,
-      context?.attribution,
-    );
+    const context = this.getAccessContext();
+    return runAfterPreparation(client, async () => {
+      const transformedData = await prepareInputColumns(
+        table,
+        ordinaryData,
+        "Update",
+        id,
+        client,
+        context?.readSession,
+        undefined,
+        normalizeViewOptions(table._schema, table._table, options),
+      );
+      const values = toWriteRecordForOperation(
+        "Update",
+        transformedData,
+        table._schema,
+        table._table,
+      );
+      return client.updateStreaming(
+        table._table,
+        id,
+        values,
+        column,
+        source,
+        normalizeViewOptions(table._schema, table._table, options),
+        context?.writeSession,
+        context?.attribution,
+      );
+    });
   }
 
   async upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
@@ -2171,19 +2689,37 @@ export class Db {
   ): Promise<WriteHandle<{ id: string }>> {
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    const values = writeRecord("Upsert", table, ordinaryData);
-    const context = this.getAccessContext();
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
     notifyLocalWrite(this);
-    return client.upsertStreaming(
-      table._table,
-      id,
-      values,
-      column,
-      source,
-      normalizeViewOptions(table._schema, table._table, options),
-      context?.writeSession,
-      context?.attribution,
-    );
+    const context = this.getAccessContext();
+    return runAfterPreparation(client, async () => {
+      const transformedData = await prepareInputColumns(
+        table,
+        ordinaryData,
+        "Upsert",
+        id,
+        client,
+        context?.readSession,
+        undefined,
+        normalizeViewOptions(table._schema, table._table, options),
+      );
+      const values = toWriteRecordForOperation(
+        "Upsert",
+        transformedData,
+        table._schema,
+        table._table,
+      );
+      return client.upsertStreaming(
+        table._table,
+        id,
+        values,
+        column,
+        source,
+        normalizeViewOptions(table._schema, table._table, options),
+        context?.writeSession,
+        context?.attribution,
+      );
+    });
   }
 
   /**
@@ -2198,20 +2734,38 @@ export class Db {
     options?: RestoreOptions,
   ): WriteResult<T> {
     const client = this.getClient(table._schema);
-    const values = writeRecord("Restore", table, data);
-    const context = this.getAccessContext();
-    const restored = client.restore(
+    const transformedData = table._columnTransforms
+      ? transformInputColumns(table, data, { id }, true)
+      : (data as Record<string, unknown>);
+    const values = toWriteRecordForOperation(
+      "Restore",
+      transformedData,
+      table._schema,
       table._table,
-      id,
-      values,
-      normalizeSelectorOptions(table._schema, table._table, options),
-      context?.writeSession,
-      context?.attribution,
+    );
+    const context = this.getAccessContext();
+    const deferred = !!getOwnerPreparation(client)?.pending;
+    const value = deferred ? immediateWriteRow(table, id, values) : undefined;
+    const restored = runAfterPreparation(client, () =>
+      client.restore(
+        table._table,
+        id,
+        values,
+        normalizeSelectorOptions(table._schema, table._table, options),
+        context?.writeSession,
+        context?.attribution,
+      ),
     );
     return this.wrapWriteWait(
-      restored.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
-      ),
+      restored instanceof Promise
+        ? new WriteResult(
+            value as T,
+            restored.then((result) => result.txId),
+            client,
+          )
+        : restored.mapValue((row) =>
+            transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
+          ),
     );
   }
 
@@ -2226,20 +2780,110 @@ export class Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
+    return this.prepareMutation(table, id, data as Record<string, unknown>, "Upsert", options);
+  }
+
+  private prepareMutation(
+    table: TableProxy<any, any>,
+    id: string,
+    data: Record<string, unknown>,
+    operation: "Update" | "Upsert",
+    options?: UpdateOptions,
+    stage?: (values: ReturnType<typeof toWriteRecord>) => WriteHandle,
+  ): WriteHandle {
     const client = this.getClient(table._schema);
-    // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
-    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const values = writeRecord("Upsert", table, data);
+    const missing = missingWriteDependencies(table, data, id);
+    if (getOwnerPreparation(client)?.pending || missing.length) data = { ...data };
     const context = this.getAccessContext();
-    return this.wrapWriteWait(
-      client.upsert(
-        table._table,
-        id,
-        values,
-        normalizeViewOptions(table._schema, table._table, options),
+    const normalized = normalizeViewOptions(table._schema, table._table, options);
+    const result = runAfterPreparation(client, () => {
+      const submit = (record: Record<string, unknown>, transaction?: OpenTransactionId) => {
+        const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+        if (stage) return stage(values);
+        if (transaction) {
+          if (operation === "Upsert")
+            client.upsertInternal(
+              table._table,
+              id,
+              values,
+              normalized,
+              context?.writeSession,
+              context?.attribution,
+              transaction,
+            );
+          else
+            client.updateInternal(
+              table._table,
+              id,
+              values,
+              normalized?.updatedAt,
+              context?.writeSession,
+              context?.attribution,
+              transaction,
+              normalized?.branch,
+            );
+          return client.commitTransaction(transaction);
+        }
+        return operation === "Upsert"
+          ? client.upsert(
+              table._table,
+              id,
+              values,
+              normalized,
+              context?.writeSession,
+              context?.attribution,
+            )
+          : client.update(
+              table._table,
+              id,
+              values,
+              normalized,
+              context?.writeSession,
+              context?.attribution,
+            );
+      };
+      if (missing.length === 0)
+        return submit(table._columnTransforms ? transformInputColumns(table, data, { id }) : data);
+      const transaction = client.beginTransaction(
+        "mergeable",
         context?.writeSession,
         context?.attribution,
-      ),
+      );
+      // An empty mergeable transaction has no staged overlay or read set. Native branch reads
+      // currently require the ordinary scoped path; explicit transactions still fail closed.
+      return Promise.resolve(
+        prepareInputColumns(
+          table,
+          data,
+          operation,
+          id,
+          client,
+          context?.readSession,
+          normalized?.branch ? undefined : transaction,
+          normalized,
+          missing,
+        ),
+      )
+        .then(async (record) => {
+          // Partial edits already own their native transaction; mergeable reads add no read precondition.
+          if (stage) {
+            await client.rollbackTransaction(transaction);
+            return submit(record);
+          }
+          return submit(record, transaction);
+        })
+        .catch(async (error) => {
+          await client.rollbackTransaction(transaction).catch(() => {});
+          throw error;
+        });
+    });
+    return this.wrapWriteWait(
+      result instanceof Promise
+        ? new WriteHandle(
+            result.then((handle) => handle.txId),
+            client,
+          )
+        : result,
     );
   }
 
@@ -2277,10 +2921,10 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const updates = writeRecord("Update", table, data);
+    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
-      return this.wrapWriteWait(
+      return this.prepareMutation(table, id, data, "Update", options, (updates) =>
         client.updateLargeValues(
           table._table,
           id,
@@ -2292,16 +2936,7 @@ export class Db {
         ),
       );
     }
-    return this.wrapWriteWait(
-      client.update(
-        table._table,
-        id,
-        updates,
-        normalizeViewOptions(table._schema, table._table, options),
-        context?.writeSession,
-        context?.attribution,
-      ),
-    );
+    return this.prepareMutation(table, id, data, "Update", options);
   }
 
   /**
@@ -2312,7 +2947,7 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getAccessContext();
-    return this.wrapWriteWait(
+    const result = runAfterPreparation(client, () =>
       client.delete(
         table._table,
         id,
@@ -2320,6 +2955,14 @@ export class Db {
         context?.writeSession,
         context?.attribution,
       ),
+    );
+    return this.wrapWriteWait(
+      result instanceof Promise
+        ? new WriteHandle(
+            result.then((handle) => handle.txId),
+            client,
+          )
+        : result,
     );
   }
 
@@ -2368,12 +3011,16 @@ export class Db {
       );
     }
     const prerequisite = transactionAdmission.get(this);
-    if (prerequisite && ownerClient)
-      return withTransactionAdmission(
+    if (prerequisite && ownerClient) {
+      const transaction = withTransactionAdmission(
         ownerClient,
         prerequisite,
         () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
       );
+      // Owner preparation can postpone opening beyond the synchronous admission scope.
+      transactionAdmission.set(transaction, prerequisite);
+      return transaction;
+    }
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
@@ -2473,6 +3120,8 @@ export class Db {
     options?: InternalDbQueryOptions,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
+    const preparation = getOwnerPreparation(client);
+    if (preparation?.pending) await preparation.drain();
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
     // that state before it decides whether the first load may wait.
@@ -2485,9 +3134,9 @@ export class Db {
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const prepared = prepareTransformRead(query, builtQuery, outputTable);
     const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
-    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
     const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
@@ -2496,26 +3145,7 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
-    const outputRelationNames = Object.keys(outputIncludes);
-    const transformedRows = transformRows<Record<string, unknown>>(
-      rows,
-      outputSchema,
-      outputTable,
-      outputIncludes,
-      builtQuery.select,
-      query._columnTransformsByTable,
-      false,
-    );
-    return transformedRows.map(
-      (row) =>
-        applyColumnTransforms(
-          applyPartialValueSelections(row, builtQuery.partialSelect),
-          outputTransforms,
-          outputRelationNames,
-        ) as T,
-    );
+    return rows.map(prepared.transform);
   }
 
   /**
@@ -2612,26 +3242,9 @@ export class Db {
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
-    const outputRelationNames = Object.keys(outputIncludes);
-    const wasmQuery = translateQuery(builderJson, planningSchema);
-
-    const transformSubscriptionRow = createRowTransformer<Record<string, unknown>>(
-      outputSchema,
-      outputTable,
-      outputIncludes,
-      builtQuery.select,
-      query._columnTransformsByTable,
-      false,
-    );
-    const transform = (row: WasmRow): T =>
-      applyColumnTransforms(
-        applyPartialValueSelections(transformSubscriptionRow(row), builtQuery.partialSelect),
-        outputTransforms,
-        outputRelationNames,
-      ) as T;
+    const prepared = prepareTransformRead(query, builtQuery, outputTable);
+    const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+    const transform = prepared.transform;
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
