@@ -1,4 +1,5 @@
 import { assertRelationshipDeclaration } from "../relationships.js";
+import { isProvenanceAccountColumn } from "../magic-columns.js";
 /**
  * Analyze schema to derive forward and reverse relations.
  */
@@ -43,6 +44,14 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
       columns.add(column.name);
     }
     result.set(tableName, []);
+    for (const [column, target] of Object.entries(table.synthetic_references_v1 ?? {})) {
+      if (!isProvenanceAccountColumn(column))
+        throw new Error(`Unsupported synthetic reference "${tableName}.${column}".`);
+      if (!Object.hasOwn(schema, target))
+        throw new Error(
+          `Synthetic reference "${tableName}.${column}" references unknown table "${target}".`,
+        );
+    }
     for (const name of Object.keys(table.relations ?? {})) {
       if (
         !name ||
@@ -76,7 +85,22 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           `Reverse relationship "${tableName}.${name}" references a forward relation targeting "${forward.table}", not "${tableName}".`,
         );
       const source = declaration.kind === "forward" ? table : schema[declaration.table]!;
-      const column = source.columns.find((c) => c.name === forward.column);
+      if (
+        isProvenanceAccountColumn(forward.column) &&
+        source.synthetic_references_v1?.[forward.column] !== forward.table
+      )
+        throw new Error(
+          `Synthetic relationship "${tableName}.${name}" requires matching synthetic_references_v1 metadata.`,
+        );
+      const column =
+        source.columns.find((c) => c.name === forward.column) ??
+        (isProvenanceAccountColumn(forward.column)
+          ? {
+              column_type: { type: "Uuid" as const },
+              nullable: false,
+              references: source.synthetic_references_v1?.[forward.column],
+            }
+          : undefined);
       if (!column)
         throw new Error(
           `Relationship "${tableName}.${name}" references unknown column "${forward.column}".`,

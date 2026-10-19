@@ -1382,6 +1382,8 @@ function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, strin
       continue;
     }
     const fkColumns = new Map<string, string>();
+    for (const [column, target] of Object.entries(table.synthetic_references_v1 ?? {}))
+      fkColumns.set(column, target);
     for (const column of table.columns) {
       if (column.references) {
         fkColumns.set(column.name, column.references);

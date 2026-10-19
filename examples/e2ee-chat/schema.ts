@@ -1,12 +1,12 @@
 // #region e2ee-chat-schema
 import { schema as s } from "jazz-tools";
-import { accountRelation } from "jazz-tools/e2ee";
+import { e2eeAccountRelation } from "jazz-tools/e2ee";
 
 export const app = s.defineApp({
   chats: s.table({ ownerId: s.uuid() }, {}),
   chatOwners: s.table(
     { chatId: s.uuid(), accountId: s.uuid() },
-    { chat: s.rel("chats", "chatId"), account: accountRelation() },
+    { chat: s.rel("chats", "chatId"), account: e2eeAccountRelation() },
   ),
   chatMembers: s.table(
     { chatId: s.uuid(), accountId: s.uuid() },

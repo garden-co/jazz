@@ -49,6 +49,11 @@ export const PROVENANCE_MAGIC_COLUMNS = [
   "$updatedBy.identity.subject",
 ] as const;
 export const PROVENANCE_MAGIC_TIMESTAMP_COLUMNS = ["$createdAt", "$updatedAt"] as const;
+export const PROVENANCE_ACCOUNT_COLUMNS = ["$createdBy.account", "$updatedBy.account"] as const;
+export type ProvenanceAccountColumn = (typeof PROVENANCE_ACCOUNT_COLUMNS)[number];
+export function isProvenanceAccountColumn(column: string): column is ProvenanceAccountColumn {
+  return PROVENANCE_ACCOUNT_COLUMNS.includes(column as ProvenanceAccountColumn);
+}
 
 type RejectedPermissionIntrospectionColumn =
   (typeof REJECTED_PERMISSION_INTROSPECTION_COLUMNS)[number];

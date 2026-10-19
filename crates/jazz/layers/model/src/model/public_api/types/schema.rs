@@ -355,6 +355,9 @@ impl RowDescriptor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
+    /// Version 1 references from system-provided account UUID fields, without stored cells.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub synthetic_references_v1: BTreeMap<String, TableName>,
     /// Row structure definition.
     pub columns: RowDescriptor,
     /// User columns that should have secondary indexes.
@@ -391,6 +394,7 @@ pub struct TableSchema {
 impl PartialEq for TableSchema {
     fn eq(&self, other: &Self) -> bool {
         self.columns == other.columns
+            && self.synthetic_references_v1 == other.synthetic_references_v1
             && self.indexed_columns == other.indexed_columns
             && canonical_composite_index_order(&self.composite_indexes)
                 == canonical_composite_index_order(&other.composite_indexes)
@@ -457,6 +461,7 @@ impl TableSchema {
     /// Optimistic local staging does not imply authority acceptance.
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
+            synthetic_references_v1: Default::default(),
             columns,
             indexed_columns: None,
             composite_indexes: Vec::new(),
@@ -468,6 +473,7 @@ impl TableSchema {
     /// Create a table schema with policies.
     pub fn with_policies(columns: RowDescriptor, policies: TablePolicies) -> Self {
         Self {
+            synthetic_references_v1: Default::default(),
             columns,
             indexed_columns: None,
             composite_indexes: Vec::new(),
@@ -513,6 +519,7 @@ impl From<RowDescriptor> for TableSchema {
 /// Builder for creating TableSchema with a fluent API.
 #[derive(Debug, Clone)]
 pub struct TableSchemaBuilder {
+    synthetic_references_v1: BTreeMap<String, TableName>,
     name: String,
     columns: Vec<ColumnDescriptor>,
     indexed_columns: Option<Vec<ColumnName>>,
@@ -525,6 +532,7 @@ impl TableSchemaBuilder {
     /// Create a new builder for a table with the given name.
     pub fn new(name: &str) -> Self {
         Self {
+            synthetic_references_v1: Default::default(),
             name: name.to_string(),
             columns: Vec::new(),
             indexed_columns: None,
@@ -625,6 +633,13 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Declare a version 1 reference from a system-provided account UUID field.
+    pub fn synthetic_reference_v1(mut self, column: &str, target: &str) -> Self {
+        self.synthetic_references_v1
+            .insert(column.to_owned(), TableName::new(target));
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -633,6 +648,7 @@ impl TableSchemaBuilder {
     /// Build the TableSchema (returns just the schema, not the name).
     pub fn build(self) -> TableSchema {
         TableSchema {
+            synthetic_references_v1: self.synthetic_references_v1,
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
@@ -645,6 +661,7 @@ impl TableSchemaBuilder {
     pub fn build_named(self) -> (TableName, TableSchema) {
         let name = TableName::new(&self.name);
         let schema = TableSchema {
+            synthetic_references_v1: self.synthetic_references_v1,
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
             composite_indexes: canonicalize_composite_indexes(self.composite_indexes),

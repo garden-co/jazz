@@ -8,20 +8,20 @@ import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
-import { accountRelation } from "./account-relation.js";
+import { e2eeAccountRelation } from "./account-relation.js";
 
 async function fixture(denyMemberUpdates = false, spaceHelpers = false) {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
       { ownerId: s.uuid(), title: s.string() },
-      { owner: accountRelation("ownerId") },
+      { owner: e2eeAccountRelation("ownerId") },
     ),
     projectOwners: s.table(
       { projectId: s.uuid(), accountId: s.uuid() },
       {
         project: s.rel("projects", "projectId"),
-        account: accountRelation(),
+        account: e2eeAccountRelation(),
       },
     ),
     notes: s

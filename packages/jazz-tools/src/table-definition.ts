@@ -6,7 +6,12 @@ import type {
   ColumnBuilderOptional,
   ColumnBuilderSqlType,
 } from "./dsl.js";
-import { assertUserTableColumnNameAllowed, type NoExplicitIdColumn } from "./magic-columns.js";
+import {
+  assertUserTableColumnNameAllowed,
+  isProvenanceAccountColumn,
+  type NoExplicitIdColumn,
+  type ProvenanceAccountColumn,
+} from "./magic-columns.js";
 import { validateTransformDependencies } from "./runtime/column-transforms.js";
 import type { TSTypeFromSqlType } from "./schema.js";
 import { equalityIndexColumn, type EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
@@ -261,7 +266,7 @@ type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> 
     | `$${string}`
     ? never
     : R[K] extends ForwardRelationship<infer Target, infer Col>
-      ? Col extends RelationColumns<C>
+      ? Col extends RelationColumns<C> | ProvenanceAccountColumn
         ? [ConflictingTargets<R, Col, Target>] extends [never]
           ? R[K]
           : never
@@ -310,6 +315,7 @@ export function defineTable<
       if (previous && previous !== relation.table)
         throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
       targets.set(relation.column, relation.table);
+      if (isProvenanceAccountColumn(relation.column)) continue;
       const column = Object.hasOwn(columns, relation.column)
         ? columns[relation.column]?._build(relation.column)
         : undefined;

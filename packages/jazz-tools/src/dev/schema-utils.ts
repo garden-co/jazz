@@ -64,6 +64,17 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     writer.stringBytes(tableName);
     writer.byte(0);
     hashColumns(writer, table.columns);
+    if (Object.keys(table.synthetic_references_v1 ?? {}).length) {
+      writer.stringBytes("synthetic_references_v1\0");
+      writer.stringBytes(
+        JSON.stringify(
+          Object.entries(table.synthetic_references_v1!).sort(([a], [b]) =>
+            compareCodePoints(a, b),
+          ),
+        ),
+      );
+      writer.byte(0);
+    }
 
     if (table.indexed_columns) {
       writer.byte(1);
@@ -375,6 +386,11 @@ export function tableSchemasEqual(
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {
     return false;
   }
+  if (
+    canonicalJsonSchema(left.synthetic_references_v1 ?? {}) !==
+    canonicalJsonSchema(right.synthetic_references_v1 ?? {})
+  )
+    return false;
 
   const leftColumns = [...left.columns].sort((a, b) => a.name.localeCompare(b.name));
   const rightColumns = [...right.columns].sort((a, b) => a.name.localeCompare(b.name));

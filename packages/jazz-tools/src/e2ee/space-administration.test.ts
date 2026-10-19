@@ -3,7 +3,7 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
-import { accountRelation } from "./account-relation.js";
+import { e2eeAccountRelation } from "./account-relation.js";
 import { spaceAdministrationTable } from "./space-administration-schema.js";
 import { usesSpaceAdministration } from "./encrypted-schema.js";
 
@@ -15,7 +15,7 @@ function application(currentMembership = true) {
       { projectId: s.uuid(), accountId: s.uuid() },
       {
         project: s.rel("projects", "projectId"),
-        account: accountRelation(),
+        account: e2eeAccountRelation(),
       },
     ),
     notes: s
@@ -136,6 +136,6 @@ it("automatically validates account identity relationships while retaining unkno
   ).toBe("__e2ee_account_identities");
   expect(() => {
     // @ts-expect-error Ordinary apps still cannot reference an absent table.
-    s.defineApp({ records: s.table({ accountId: s.uuid() }, { account: accountRelation() }) });
+    s.defineApp({ records: s.table({ accountId: s.uuid() }, { account: e2eeAccountRelation() }) });
   }).toThrow(/unknown table/);
 });

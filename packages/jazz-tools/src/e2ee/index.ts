@@ -13,7 +13,7 @@ export type { CryptoContext } from "./context.js";
 export { encodeEnvelope, decodeEnvelope } from "./envelope.js";
 export type { CryptoMechanism } from "./envelope.js";
 export { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
-export { accountRelation } from "./account-relation.js";
+export { e2eeAccountRelation } from "./account-relation.js";
 export { groupSchema } from "./groups.js";
 export type { GroupMember, GroupRecipient } from "./groups.js";
 export { spaceSchema } from "./spaces.js";

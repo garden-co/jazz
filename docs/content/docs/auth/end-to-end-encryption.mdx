@@ -27,11 +27,28 @@ prove that the current account owns the specific chat. The managed space's
 with a creator-only root policy, which would let other accounts insert conflicting
 roots for an existing chat.
 
-`accountRelation()` from `jazz-tools/e2ee` declares the binding's `accountId`
+`e2eeAccountRelation()` from `jazz-tools/e2ee` declares the binding's `accountId`
 relationship to the SDK-managed account identity table. Pass a different local
-column when needed, for example `accountRelation("ownerId")`. The application
+column when needed, for example `e2eeAccountRelation("ownerId")`. The application
 table name is arbitrary: administration policies explicitly connect its account
 and scope references to the space creator and `identifier`.
+
+For creator-owned records, use the system-provided account UUID instead of
+storing a duplicate owner column:
+
+```ts
+projects: s.table(
+  { name: s.string() },
+  { creator: e2eeAccountRelation("$createdBy.account") },
+),
+```
+
+Jazz records `$createdBy.account` automatically; it remains the original creator
+when somebody edits the row. `$updatedBy.account` is also supported and refers
+to the latest writer, so use the creator field for stable ownership. The whole
+`$createdBy` value is a structured author, not a UUID. Neither relationship adds
+a stored column or changes how `spaces.grant()` resolves a recipient's public keys.
+Use `$createdBy.account` in the ownership predicates below for this schema.
 
 ## Authorise space administration
 

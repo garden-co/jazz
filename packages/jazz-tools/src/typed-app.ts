@@ -41,6 +41,7 @@ import {
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
 import { assertSchemaNameAllowed } from "./schema-name.js";
+import { isProvenanceAccountColumn, type ProvenanceAccountColumn } from "./magic-columns.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
@@ -396,14 +397,16 @@ type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName
     TTable
   >[N] extends ForwardRelationship<infer Target, infer Col>
     ? Target extends TableName<TSchema>
-      ? Col extends ColumnName<TSchema, TTable>
-        ? {
-            name: N;
-            toTable: Target;
-            isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
-            nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
-          }
-        : never
+      ? Col extends ProvenanceAccountColumn
+        ? { name: N; toTable: Target; isArray: false; nullable: false }
+        : Col extends ColumnName<TSchema, TTable>
+          ? {
+              name: N;
+              toTable: Target;
+              isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
+              nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
+            }
+          : never
       : never
     : never;
 }[keyof DeclaredRelations<TSchema, TTable> & string];
@@ -1602,6 +1605,7 @@ function definitionToColumns(
   }
   for (const [name, relation] of Object.entries(tableRelationships(definition))) {
     if (relation.kind !== "forward") continue;
+    if (isProvenanceAccountColumn(relation.column)) continue;
     const column = columns.find((candidate) => candidate.name === relation.column);
     if (!column)
       throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
