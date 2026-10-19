@@ -154,10 +154,37 @@ export type TypedColumnBuilder<
    *
    * @experimental This API may change before the stable release.
    */
-  transform<TransformedValue>(transform: {
-    from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
-    to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue, TransformedValue>;
+  transform<
+    TransformedValue,
+    const Dependencies extends readonly string[] = readonly [],
+    StoredContext extends Record<Dependencies[number], unknown> = Record<
+      Dependencies[number],
+      unknown
+    >,
+    InputContext extends Record<Dependencies[number], unknown> = Record<
+      Dependencies[number],
+      unknown
+    >,
+  >(transform: {
+    dependsOn?: Dependencies;
+    from(
+      value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
+      dependencies: Readonly<StoredContext>,
+    ): TransformedValue;
+    to(
+      value: TransformedValue,
+      dependencies: Readonly<InputContext>,
+    ): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
+  }): DependentColumn<
+    Sql,
+    Optional,
+    Ref,
+    HasDefault,
+    TransformedValue,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
   /**
    * Make the column nullable
    */
@@ -209,9 +236,53 @@ export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzInitValue"];
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {
-  from(value: Stored): View;
-  to(value: View): Stored;
+  readonly dependsOn?: readonly string[];
+  from(value: Stored, dependencies: Readonly<Record<string, unknown>>): View;
+  to(value: View, dependencies: Readonly<Record<string, unknown>>): Stored;
 }
+
+type DependentColumn<
+  Sql extends SqlType,
+  Optional extends boolean,
+  Ref extends string | undefined,
+  HasDefault extends boolean,
+  Value,
+  Dependencies extends readonly string[],
+  StoredContext,
+  InputContext,
+> = Omit<
+  ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Value>,
+  "default" | "optional" | "merge"
+> & {
+  readonly __jazzDependencies: Dependencies;
+  readonly __jazzStoredDependencies: StoredContext;
+  readonly __jazzInputDependencies: InputContext;
+  default(
+    value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
+  ): DependentColumn<Sql, Optional, Ref, true, Value, Dependencies, StoredContext, InputContext>;
+  optional(): DependentColumn<
+    Sql,
+    true,
+    Ref,
+    HasDefault,
+    Value,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
+  merge(
+    strategy: AllowedColumnMergeStrategy<Sql, Optional>,
+  ): DependentColumn<
+    Sql,
+    Optional,
+    Ref,
+    HasDefault,
+    Value,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
+};
 
 export type StringColumn<
   Optional extends boolean = false,
