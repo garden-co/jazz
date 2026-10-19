@@ -72,11 +72,11 @@ export class DefinedTable<
 > {
   public readonly __jazzTableDefinition = true as const;
 
-  encrypted(options: {
-    space: Extract<keyof TColumns, string>;
+  encrypted<const Space extends Extract<keyof TColumns, string>>(options: {
+    space: Space;
     columns?: readonly Extract<keyof TColumns, string>[];
     indexes?: Partial<Record<Extract<keyof TColumns, string>, "equality">>;
-  }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
+  }): DefinedTable<TColumns, TRelations, EncryptionDeclaration & { space: Space }> {
     const referenceColumns = new Set<string>();
     for (const relation of Object.values(this.relations)) {
       if (relation.kind === "forward") referenceColumns.add(relation.column);

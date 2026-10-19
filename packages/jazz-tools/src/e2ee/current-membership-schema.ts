@@ -42,21 +42,31 @@ function spaceMembers<const Scope extends string>(scope: Scope) {
 function permissionSpaces<const Scope extends string>(scope: Scope) {
   return new DefinedTable({ scopeId: s.uuid() }, { scope: rel(scope, "scopeId") });
 }
-/** Opt in to current membership maintenance. Applications authorise membership administration separately. */
-export function encryptionSpacePolicySchema<const Scope extends string>(scope: Scope) {
+type EncryptionSpacePolicySchema<Scope extends string> = typeof deviceRequestSchema &
+  typeof groupSchema &
+  typeof spaceSchema & { __e2ee_v1_group_members: typeof groupMembers } & {
+    [Key in `__e2ee_v1_space_members_${Scope}`]: ReturnType<typeof spaceMembers<Scope>>;
+  } & {
+    [Key in `__e2ee_v1_permission_spaces_${Scope}`]: ReturnType<typeof permissionSpaces<Scope>>;
+  };
+
+const policySchemas = new Map<string, EncryptionSpacePolicySchema<string>>();
+
+/** @deprecated Encrypted declarations add these tables automatically. */
+export function encryptionSpacePolicySchema<const Scope extends string>(
+  scope: Scope,
+): EncryptionSpacePolicySchema<Scope> {
   assertSchemaNameAllowed(scope);
-  return {
+  const existing = policySchemas.get(scope);
+  if (existing) return existing as EncryptionSpacePolicySchema<Scope>;
+  const schema = {
     ...deviceRequestSchema,
     ...groupSchema,
     ...spaceSchema,
     [currentGroupMembersTable]: groupMembers,
     [currentSpaceMembersTable(scope)]: spaceMembers(scope),
     [permissionSpacesTable(scope)]: permissionSpaces(scope),
-  } as typeof deviceRequestSchema &
-    typeof groupSchema &
-    typeof spaceSchema & { __e2ee_v1_group_members: typeof groupMembers } & {
-      [Key in `__e2ee_v1_space_members_${Scope}`]: ReturnType<typeof spaceMembers<Scope>>;
-    } & {
-      [Key in `__e2ee_v1_permission_spaces_${Scope}`]: ReturnType<typeof permissionSpaces<Scope>>;
-    };
+  } as EncryptionSpacePolicySchema<Scope>;
+  policySchemas.set(scope, schema);
+  return schema;
 }

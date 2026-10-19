@@ -1184,7 +1184,7 @@ export function definePermissions<TApp extends AppLike>(
           !schema[permissionSpacesTable(declaration.scope)]
         )
           throw new Error(
-            `fromEncryptionSpace() requires encryptionSpacePolicySchema("${declaration.scope}") in the application schema`,
+            `Missing managed encryption membership schema for "${declaration.scope}"`,
           );
         const conditions: EncryptionSpaceConditions = {};
         if (options !== undefined) {

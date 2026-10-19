@@ -1,9 +1,7 @@
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
-import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 
 const app = s.defineApp({
-  ...encryptionSpacePolicySchema("projects"),
   projects: s.table({ title: s.string() }, {}),
   notes: s
     .table(
