@@ -29,7 +29,7 @@ it("reopens accepted encrypted data from IndexedDB and updates it offline in Chr
     policy.notes.allowInsert.always();
     policy.notes.allowUpdate.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();

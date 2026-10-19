@@ -38,7 +38,7 @@ it("converts encrypted data to a new table and space with an equality index", as
     policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
     policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();
@@ -168,7 +168,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
     policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();

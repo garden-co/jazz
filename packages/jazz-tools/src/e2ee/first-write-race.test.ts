@@ -34,7 +34,7 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     // The absence precondition, not a denied update policy, must stop the loser.
     policy.__e2ee_spaces.allowUpdate.always();
     policy.__e2ee_space_grants.allowRead.always();
