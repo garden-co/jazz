@@ -7,14 +7,14 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { e2eeAccountRelation } from "./account-relation.js";
 import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 
-it("keeps Alice's creator ownership when Bob edits a project and resolves both synthetic account relations", async () => {
+it("keeps Alice's creator ownership when Bob edits a project and resolves stored account relations", async () => {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
-      { name: s.string() },
+      { name: s.string(), creatorAccountId: s.uuid(), updaterAccountId: s.uuid() },
       {
-        creator: e2eeAccountRelation("$createdBy.account"),
-        updater: e2eeAccountRelation("$updatedBy.account"),
+        creator: e2eeAccountRelation("creatorAccountId"),
+        updater: e2eeAccountRelation("updaterAccountId"),
       },
     ),
     notes: s
@@ -28,19 +28,23 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves both s
   });
   const permissions = definePermissions(app, ({ policy: p, session }) => {
     p.projects.allowRead.always();
-    p.projects.allowWrite().always();
+    p.projects.allowInsert.where({
+      creatorAccountId: session.user.account,
+      "$createdBy.account": session.user.account,
+    });
+    p.projects.allowUpdate.always();
     p.notes.fromEncryptionSpace();
     p.notes.space.allowRead.always();
     p.notes.space.allowInsert.where((space) =>
       p.projects.existsIncludingCreated.where({
+        creatorAccountId: space.creatorAccountId,
         id: space.identifier,
-        "$createdBy.account": space.creatorAccountId,
       }),
     );
     p.notes.space.allowUpdate.where((space) =>
-      p.projects.existsIncludingCreated.where({
+      p.projects.exists.where({
         id: space.identifier,
-        "$createdBy.account": session.user.account,
+        creatorAccountId: session.user.account,
       }),
     );
   });
@@ -88,13 +92,17 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves both s
     const alice = await open();
     const bob = await open();
     const project = await alice.db
-      .insert(app.projects, { name: "Creator-owned" })
+      .insert(app.projects, {
+        name: "Creator-owned",
+        creatorAccountId: alice.id,
+        updaterAccountId: alice.id,
+      })
       .wait({ tier: "global" });
     const note = await alice.db
       .insert(app.notes, { projectId: project.id, body: "Private" })
       .wait({ tier: "global" });
     await bob.db
-      .update(app.projects, project.id, { name: "Edited by Bob" })
+      .update(app.projects, project.id, { name: "Edited by Bob", updaterAccountId: bob.id })
       .wait({ tier: "global" });
     const row = await alice.db.one(
       app.projects.where({ id: project.id }).include({ creator: true, updater: true }),

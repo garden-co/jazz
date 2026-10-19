@@ -2629,17 +2629,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
     const encrypted = encryptedSchemas.get(table._schema)?.tables.get(table._table);
     if (
       encrypted &&
-      (Object.hasOwn(transformedData, encrypted.space) ||
-        encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
+      (Object.hasOwn(data, encrypted.space) ||
+        encrypted.columns.some((name) => Object.hasOwn(data, name)))
     ) {
       return this.updateEncrypted(
         table,
         id,
-        transformedData,
+        transformInputColumns(table, data),
         options,
         "update",
         undefined,

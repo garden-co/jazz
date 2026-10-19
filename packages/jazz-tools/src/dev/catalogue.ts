@@ -162,12 +162,27 @@ export function resolveCanonicalMigrationForward(
   }
 
   const forward = serializeForwardLenses(requested);
+  // Scope administration bindings carry the scope's identity through renames.
+  // Treating the destination binding as a new table loses accepted roots and
+  // leaves the source binding outside the migration's table partition.
+  for (const lens of requested) {
+    if (!lens.renamedFrom) continue;
+    const source = `${spaceAdministrationPrefix}${lens.renamedFrom}`;
+    const target = `${spaceAdministrationPrefix}${lens.table}`;
+    if (
+      Object.hasOwn(canonical.fromSchema, source) &&
+      Object.hasOwn(canonical.toSchema, target) &&
+      !forward.some((entry) => entry.table === target)
+    )
+      forward.push({ table: target, renamedFrom: source, operations: [] });
+  }
   const managedAdditions = new Set(
     Object.keys(canonical.toSchema).filter(
       (table) =>
         (Object.hasOwn(managedEncryptionSchema, table) ||
           table.startsWith(spaceAdministrationPrefix)) &&
-        !Object.hasOwn(canonical.fromSchema, table),
+        !Object.hasOwn(canonical.fromSchema, table) &&
+        !forward.some((lens) => lens.table === table && lens.renamedFrom),
     ),
   );
   // Implicit administration tables cannot stand in for a missing user migration.

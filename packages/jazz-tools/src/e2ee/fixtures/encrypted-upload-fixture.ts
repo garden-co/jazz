@@ -1,3 +1,7 @@
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "../space-administration-schema.js";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
 import { createDb } from "../../runtime/default-create-db.js";
@@ -24,6 +28,7 @@ export const legacyUploadApp = s.defineApp({
   ...deviceRequestSchema,
   ...groupSchema,
   ...spaceSchema,
+  [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
   projects: s.table({ title: s.string() }, {}),
   files: s.table(
     { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },

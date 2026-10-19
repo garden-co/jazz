@@ -2,43 +2,25 @@ import { expect, it } from "vitest";
 import {
   createAccountManager,
   createDb,
-  schema as s,
+  TypedTableQueryBuilder,
   type AccountStore,
   type Db,
 } from "jazz-tools";
-import { deviceRequestSchema, groupSchema, spaceSchema } from "jazz-tools/e2ee";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { createChat, shareChat, membershipId } from "../../src/chat.js";
 
 // Same physical schema, intentionally without automatic content decryption.
-const physical = s.defineApp({
-  ...deviceRequestSchema,
-  ...groupSchema,
-  ...spaceSchema,
-  chats: s.table({ ownerId: s.uuid() }, {}),
-  chatOwners: s.table(
-    { chatId: s.uuid(), accountId: s.uuid() },
-    { chat: s.rel("chats", "chatId"), account: s.rel("__e2ee_account_identities", "accountId") },
-  ),
-  chatMembers: s.table(
-    { chatId: s.uuid(), accountId: s.uuid() },
-    { chat: s.rel("chats", "chatId") },
-  ),
-  messages: s.table(
-    {
-      chatId: s.uuid(),
-      senderId: s.uuid(),
-      text: s.bytes(),
-      // Logical nulls are authenticated ciphertext, not physical SQL NULL.
-      filename: s.bytes(),
-      mimeType: s.bytes(),
-      payload: s.bytes(),
-    },
-    { chat: s.rel("chats", "chatId") },
-  ),
-});
+const physicalMessages = new TypedTableQueryBuilder<{
+  id: string;
+  chatId: string;
+  senderId: string;
+  text: Uint8Array;
+  filename: Uint8Array;
+  mimeType: Uint8Array;
+  payload: Uint8Array;
+}>("messages", { ...app.wasmSchema });
 
 function store(): AccountStore {
   let value: string | null = null;
@@ -284,7 +266,7 @@ it("keeps image ciphertext separate from ordinary membership and decryption auth
       driver: { type: "memory" },
     });
     clients.push(observer);
-    const stored = await observer.one(physical.messages.where({ id: image.value.id }), {
+    const stored = await observer.one(physicalMessages.where({ id: image.value.id }), {
       tier: "remote",
     });
     expect(stored).not.toBeNull();

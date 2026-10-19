@@ -1,3 +1,7 @@
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./space-administration-schema.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -42,6 +46,7 @@ it.each(["wasm", "native"])(
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...spaceSchema,
+      [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
       projects: s.table({ title: s.string() }, {}),
       notes: s
         .table(
@@ -56,6 +61,7 @@ it.each(["wasm", "native"])(
       ...deviceRequestSchema,
       ...groupSchema,
       ...spaceSchema,
+      [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
       projects: s.table({ title: s.string() }, {}),
       notes: s.table(
         { projectId: s.uuid(), title: s.bytes(), payload: s.bytes() },

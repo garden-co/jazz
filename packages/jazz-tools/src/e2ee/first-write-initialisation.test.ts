@@ -179,7 +179,7 @@ it.each([
           tier: "remote",
         });
         expect(roots).toHaveLength(1);
-        expect(roots[0]).toMatchObject({ accountId: account.account.id });
+        expect(roots[0]).toMatchObject({ creatorAccountId: account.account.id });
         const grants = await writer.all(app.__e2ee_space_grants.where({ spaceId: roots[0]!.id }), {
           tier: "remote",
         });

@@ -1,3 +1,7 @@
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./space-administration-schema.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -27,6 +31,7 @@ it("publishes an encrypted file and metadata that a granted recipient can read",
     ...deviceRequestSchema,
     ...groupSchema,
     ...spaceSchema,
+    [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
     projects: s.table({ title: s.string() }, {}),
     files: s.table(
       { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },

@@ -1,3 +1,7 @@
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./space-administration-schema.js";
 import { expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +23,7 @@ it("streams a plaintext-only update without loading encryption keys", async () =
     ...deviceRequestSchema,
     ...groupSchema,
     ...spaceSchema,
+    [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
     projects: s.table({ title: s.string() }, {}),
     files: s.table(
       { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
@@ -312,7 +317,7 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
     const acceptedRoot = await before.one(app.__e2ee_spaces.where({ identifier: project.id }), {
       tier: "remote",
     });
-    expect(acceptedRoot).toMatchObject({ accountId });
+    expect(acceptedRoot).toMatchObject({ creatorAccountId: accountId });
     const historyFailure = new Error("Accepted-history storage unavailable");
     const observeHistory = vi
       .spyOn(before, "observeE2eeHistory")

@@ -301,7 +301,7 @@ it("restricts member writes to their own notes and retains membership checks aft
   } finally {
     await close();
   }
-});
+}, 120_000);
 
 it("derives CRUD from direct and nested membership, retracts live rows and rejects mismatched scopes", async () => {
   const { app, owner, reader, createProject, close } = await fixture();

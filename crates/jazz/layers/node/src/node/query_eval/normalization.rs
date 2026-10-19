@@ -3700,11 +3700,71 @@ where
             reachable_contributions,
             nodes,
         };
+        // Inherited policies are expanded during normalization, after the
+        // outer policy's catalogue operands have been bound. Resolve their
+        // intrinsics too, before treating the remaining claims as session data.
+        self.bind_normalized_table_identities(shape.schema_version(), &mut normalized)?;
         let claim_params = binding_claim_params_for_shape(&normalized, param_types);
         let binding_source_shape =
             query_binding_source_shape_for_parts(shape.params(), &claim_params);
         retarget_binding_value_sources(&mut normalized, &binding_source_shape);
         Ok(normalized)
+    }
+
+    fn bind_normalized_table_identities(
+        &self,
+        schema_version: SchemaVersionId,
+        shape: &mut NormalizedRowSetShape,
+    ) -> Result<(), Error> {
+        let mut bind = |value: &mut NormalizedValueRef| -> Result<(), Error> {
+            let NormalizedValueRef::Claim(path) = value else {
+                return Ok(());
+            };
+            let [name] = path.0.as_slice() else {
+                return Ok(());
+            };
+            let Some(table) = name.strip_prefix(crate::query::TABLE_IDENTITY_OPERAND_PREFIX) else {
+                return Ok(());
+            };
+            let identity = self
+                .catalogue_table_identity(schema_version, table)?
+                .ok_or(Error::InvalidStoredValue(
+                    "policy catalogue table identity is unavailable",
+                ))?;
+            *value = NormalizedValueRef::Literal(
+                postcard::to_allocvec(&Value::Uuid(identity.0)).map_err(|error| {
+                    Error::QueryLowering(format!("catalogue identity encoding failed: {error}"))
+                })?,
+            );
+            Ok(())
+        };
+        // Only walk this query's expanded policy graph, never unrelated tables.
+        for node in shape.nodes.values_mut() {
+            match node {
+                RowSetExpr::Filter { predicate, .. }
+                | RowSetExpr::Join { on: predicate, .. }
+                | RowSetExpr::CorrelatedPathProjection {
+                    correlation: predicate,
+                    ..
+                } => {
+                    predicate.try_for_each_value_mut(&mut bind)?;
+                }
+                RowSetExpr::ValueSource { columns, .. }
+                | RowSetExpr::FrontierSource { columns, .. } => {
+                    for column in columns {
+                        bind(&mut column.value)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for contribution in &mut shape.join_contributions {
+            contribution.membership.try_for_each_value_mut(&mut bind)?;
+        }
+        for contribution in &mut shape.inherited_contributions {
+            contribution.membership.try_for_each_value_mut(&mut bind)?;
+        }
+        Ok(())
     }
 
     /// Normalize a retained public `UNION ALL` by reusing the established

@@ -247,13 +247,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     for (const [name, relation] of Object.entries(table.relations ?? {})) {
       if (relation.kind !== "forward") continue;
       if (isProvenanceAccountColumn(relation.column)) {
-        const references = (table.synthetic_references_v1 ??= {});
-        if (references[relation.column] && references[relation.column] !== relation.table)
-          throw new Error(
-            `Conflicting relationship targets for "${tableName}.${relation.column}".`,
-          );
-        references[relation.column] = relation.table;
-        continue;
+        throw new Error(
+          `Relationships through "${tableName}.${relation.column}" are not supported yet. Use a stored UUID owner column.`,
+        );
       }
       const column = table.columns.find((c) => c.name === relation.column);
       if (!column)

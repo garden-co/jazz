@@ -184,7 +184,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     const roots = await db.all(app.__e2ee_spaces, { tier: "local-first" });
     const grants = await db.all(app.__e2ee_space_grants, { tier: "local-first" });
     expect(roots).toEqual([
-      expect.objectContaining({ accountId: founder.id, identifier: project.id }),
+      expect.objectContaining({ creatorAccountId: founder.id, identifier: project.id }),
     ]);
     expect(grants).toEqual([expect.objectContaining({ recipientId: founder.id })]);
     expect({ planCalls, sourceReads }).toEqual({ planCalls: 1, sourceReads: 1 });
