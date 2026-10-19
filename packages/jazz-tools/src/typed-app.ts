@@ -1725,6 +1725,9 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
           .filter((name) => name.startsWith(currentSpaceMembersPrefix))
           .map((name) => name.slice(currentSpaceMembersPrefix.length)),
       );
+    // Keep generated entries out of reusable application definitions. Otherwise
+    // spreading a previously compiled definition looks like a legacy opt-in.
+    definition = { ...definition };
     for (const [name, table] of Object.entries(managedEncryptionSchema)) {
       if (Object.hasOwn(definition, name) && definition[name] !== table) {
         throw new Error(`Cannot replace managed E2EE table "${name}"`);
