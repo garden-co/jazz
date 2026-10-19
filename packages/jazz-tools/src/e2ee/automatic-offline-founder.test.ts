@@ -261,7 +261,7 @@ it("resumes the exact pending founder journal after importing into the same dura
     const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
       tier: "local-first",
     });
-    expect(root?.accountId).toBe(account!.id);
+    expect(root?.creatorAccountId).toBe(account!.id);
     const journal = JSON.parse((await store.read())!).initializationJournalV1;
     expect(
       journal.find((entry: { proposal: string }) => JSON.parse(entry.proposal).kind === "founder"),
@@ -311,7 +311,7 @@ it("never turns a provisional author's sealed envelope into recipient membership
       policy.uploads.allowRead.always();
       policy.uploads.allowInsert.always();
       policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+      policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
       policy.__e2ee_space_grants.allowRead.always();
       policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
       policy.__e2ee_space_deliveries.allowRead.always();

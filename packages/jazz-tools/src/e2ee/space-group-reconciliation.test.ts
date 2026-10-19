@@ -29,7 +29,7 @@ it("keeps denied group repair in maintenance and reconciles after permission is 
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();

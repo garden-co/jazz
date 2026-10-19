@@ -19,7 +19,7 @@ it("initialises and shares a scoped space, then seals it against signed creator 
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_successors.allowRead.always();
@@ -98,7 +98,7 @@ it("initialises and shares a scoped space, then seals it against signed creator 
         id: "11111111-1111-8111-8111-111111111111",
         scopeId: accepted!.scopeId,
         identifier: other.id,
-        accountId: account.account.id,
+        creatorAccountId: account.account.id,
         deviceId: accepted!.deviceId,
         accountEpochId: accepted!.accountEpochId,
         epochId: globalThis.crypto.randomUUID(),
@@ -123,12 +123,12 @@ it("initialises and shares a scoped space, then seals it against signed creator 
         id: root.initialGrantId,
         spaceId: root.id,
         epochId: root.epochId,
-        authorAccountId: root.accountId,
+        authorAccountId: root.creatorAccountId,
         authorDeviceId: root.deviceId,
         authorEpochId: root.accountEpochId,
         operation: "add",
         recipientKind: "account",
-        recipientId: root.accountId,
+        recipientId: root.creatorAccountId,
         recipientEpochId: root.accountEpochId,
       };
       const rootSignature = await crypto.deviceSigner.sign(
