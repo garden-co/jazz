@@ -1606,6 +1606,7 @@ export interface HistoryQuery<
   ): HistoryQuery<TRow, TWhere, TSelection>;
   limit(count: number): HistoryQuery<TRow, TWhere, TSelection>;
   offset(count: number): HistoryQuery<TRow, TWhere, TSelection>;
+  includeDeleted(): HistoryQuery<TRow, TWhere, TSelection>;
 }
 
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<

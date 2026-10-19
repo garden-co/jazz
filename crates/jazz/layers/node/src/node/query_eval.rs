@@ -2040,11 +2040,6 @@ where
         authorization_mode: QueryAuthorizationMode,
         mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if shape.query().uses_history() {
-            if include_deleted {
-                return Err(history::unsupported("deleted-row history"));
-            }
-        }
         let phase_started = profile.as_ref().map(|_| Instant::now());
         if include_deleted {
             let mut rows = self
@@ -2802,8 +2797,7 @@ where
         let table = if query.aggregate.is_some() {
             self.query_output_table(query, lowered_shape.schema_version())?
         } else {
-            self.table_in_schema_ref(&query.table, lowered_shape.schema_version())?
-                .clone()
+            self.table_in_schema(&query.table, lowered_shape.schema_version())?
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
         let program = self
@@ -2822,7 +2816,16 @@ where
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .await
             .map_err(Error::Groove)?;
-        if query.aggregate.is_some() {
+        if query.uses_history() {
+            self.materialize_and_finalize_query_rows(
+                query,
+                lowered_shape.schema_version(),
+                &table,
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+                None,
+            )
+        } else if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(
                 query,
                 &materialization_app_row_schema(None, Some(&program))?,

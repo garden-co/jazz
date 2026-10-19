@@ -71,7 +71,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         // Compile the ordinary authorized point read into the source graph. No
         // query is executed while preparing history, and permission changes
         // remain dependencies of the resulting graph.
-        let visibility_request = self
+        let mut visibility_request = self
             .node
             .current_query_program_request_with_inline_binding_source(
                 &visibility,
@@ -82,6 +82,13 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 &ReadViewSpec::default(),
                 QueryAuthorizationMode::TrustedServing,
             )?;
+        // Reuse ordinary deleted-row visibility and policy evaluation for the
+        // current-row gate; historical content eligibility remains unchanged.
+        if request.visibility == RowVisibility::IncludeDeleted {
+            visibility_request.input.shape = self
+                .node
+                .normalized_include_deleted_row_set_shape(&visibility, &binding)?;
+        }
         let visibility_program =
             Box::pin(self.node.compile_query_program_request_with_access_paths(
                 visibility_request,

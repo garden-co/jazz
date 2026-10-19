@@ -1150,3 +1150,82 @@ async fn history_join_rejects_unbounded_history_reads() {
         alice.shutdown().await.unwrap();
     }).await;
 }
+
+/// Alice reads Bob's deleted task history only while its retained current image
+/// satisfies the ordinary read policy; an older visible version grants no access.
+#[tokio::test]
+async fn history_include_deleted_uses_current_row_permissions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("visible", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Cmp {
+                                    column: "visible".into(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(Value::Boolean(true)),
+                                })
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob
+                .insert("tasks", row_input!("title" => "first", "visible" => true))
+                .unwrap();
+            settled(&bob, tx).await;
+            let opts = jazz::db::ReadOpts {
+                tier: ReadTier::LocalOnly,
+                include_deleted: true,
+                ..Default::default()
+            };
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            assert!(
+                alice
+                    .query(history(row), ReadTier::LocalOnly)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let retained = alice
+                .query_with_opts(history(row), opts.clone())
+                .await
+                .unwrap();
+            assert_eq!(retained.len(), 1);
+            settled(
+                &bob,
+                bob.restore(
+                    "tasks",
+                    row,
+                    Some(vec![
+                        ("title".into(), Value::Text("hidden".into())),
+                        ("visible".into(), Value::Boolean(false)),
+                    ]),
+                )
+                .unwrap(),
+            )
+            .await;
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            assert!(
+                alice
+                    .query_with_opts(history(row), opts.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                bob.query_with_opts(history(row), opts).await.unwrap().len(),
+                2
+            );
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}

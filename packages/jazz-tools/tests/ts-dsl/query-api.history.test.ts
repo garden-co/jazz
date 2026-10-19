@@ -254,6 +254,45 @@ describe("TS Query API history (connected client)", () => {
     expect((await db.all(query)).map((row) => row.done)).toEqual([false, true]);
   });
 
+  it("includeDeleted returns content versions of a deleted row", async () => {
+    const note = await insertNote("first");
+    await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
+    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+    const versions = await db.all(query);
+    await db.delete(app.notes, note.id).wait({ tier: "global" });
+
+    expect(await db.all(query)).toEqual([]);
+    const retained = await db.all(query.includeDeleted());
+    expectTypeOf(retained).toEqualTypeOf<typeof versions>();
+    expect(retained).toEqual(versions);
+  });
+
+  it("includeDeleted supports filtering and projecting deleted history", async () => {
+    const note = await insertNote("first");
+    await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
+    await db.delete(app.notes, note.id).wait({ tier: "global" });
+
+    const rows = await db.all(
+      app.notes.history.includeDeleted().where({ id: note.id, title: "first" }).select("title"),
+    );
+    expectTypeOf(rows).toEqualTypeOf<{ id: string; title: string }[]>();
+    expect(rows).toEqual([{ id: note.id, title: "first" }]);
+  });
+
+  it("includeDeleted retains old versions after content restoration", async () => {
+    const note = await insertNote();
+    const query = app.notes.history.where({ id: note.id }).includeDeleted().orderBy("$acceptedAt");
+    const versions = await db.all(query);
+    await db.delete(app.notes, note.id).wait({ tier: "global" });
+    await db
+      .restore(app.notes, note.id, { title: "restored", done: false })
+      .wait({ tier: "global" });
+    const restored = await db.all(query);
+    expect(restored).toHaveLength(2);
+    expect(restored[0]).toEqual(versions[0]);
+    expect(restored[1]).toMatchObject({ id: note.id, title: "restored" });
+  });
+
   it("rejects remote history reads", async () => {
     const note = await insertNote();
     await expect(
