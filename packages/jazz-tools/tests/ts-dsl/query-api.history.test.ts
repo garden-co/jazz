@@ -1,7 +1,8 @@
 import { PROVENANCE_MAGIC_COLUMNS, type RowAuthor } from "../../src/magic-columns.js";
 import type { TxId } from "../../src/runtime/client.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { schema as s } from "../../src/index.js";
+import { schema as s, migration as m } from "../../src/index.js";
+import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
@@ -15,7 +16,7 @@ const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowDelete.always();
 });
 
-describe("TS Query API history (connected client)", () => {
+describe("TS Query API history", () => {
   let db: Db;
   let subscriptions: (() => void)[];
   let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
@@ -574,5 +575,160 @@ describe("TS Query API history (connected client)", () => {
     await expect(db.all(query)).rejects.toThrow(
       new Error('Unknown relation "owner" on table "history.notes"'),
     );
+  });
+});
+
+describe("TS Query API history schema migrations", () => {
+  const schemaV1 = {
+    notes: s.table({ title: s.string(), legacy: s.string() }, {}),
+  };
+  const schemaV2 = {
+    notes: s.table({ heading: s.string(), category: s.string() }, {}),
+  };
+  const v1 = s.defineApp(schemaV1);
+  const v2 = s.defineApp(schemaV2);
+  const permissionsV1 = s.definePermissions(v1, ({ policy }) => {
+    policy.notes.allowRead.always();
+    policy.notes.allowInsert.always();
+    policy.notes.allowUpdate.always();
+  });
+  const permissionsV2 = s.definePermissions(v2, ({ policy }) => {
+    policy.notes.allowRead.always();
+    policy.notes.allowInsert.always();
+    policy.notes.allowUpdate.always();
+  });
+  let db: Db;
+  let writer: Db;
+  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let id: string;
+  let stop: (() => void) | undefined;
+
+  beforeEach(async () => {
+    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const deployment = {
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+    };
+    const deployed = await deploy({ ...deployment, schema: v1, permissions: permissionsV1 });
+    await deploy({
+      ...deployment,
+      schema: v2,
+      permissions: permissionsV2,
+      migration: m.defineMigration({
+        fromHash: deployed.schema.hash,
+        toHash: await computeSchemaHash(v2.wasmSchema),
+        from: schemaV1,
+        to: schemaV2,
+        migrate: {
+          notes: {
+            heading: m.renameFrom("title"),
+            category: m.add.string({ default: "uncategorized" }),
+            legacy: m.drop.string({ backwardsDefault: "" }),
+          },
+        },
+      }),
+    });
+    writer = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    db = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    // Keep ordinary current-row coverage open so this partial reader retains
+    // both old-schema versions through normal sync before history is queried.
+    let current: { id: string; heading: string; category: string }[] | undefined;
+    let failure: Error | undefined;
+    stop = db.subscribe(v2.notes, {
+      onUpdate: (rows) => {
+        current = rows;
+      },
+      onError: (error) => {
+        failure = error;
+      },
+    });
+    const observed = () => {
+      if (failure) throw failure;
+      return current;
+    };
+    await expect.poll(observed).toEqual([]);
+    const note = await writer
+      .insert(v1.notes, { title: "first", legacy: "old" })
+      .wait({ tier: "global" });
+    id = note.id;
+    await expect.poll(observed).toEqual([{ id, heading: "first", category: "uncategorized" }]);
+    await writer.update(v1.notes, id, { title: "second" }).wait({ tier: "global" });
+    await expect.poll(observed).toEqual([{ id, heading: "second", category: "uncategorized" }]);
+    stop();
+    stop = undefined;
+  });
+
+  afterEach(async () => {
+    stop?.();
+    stop = undefined;
+    try {
+      await db?.shutdown();
+      await writer?.shutdown();
+    } finally {
+      await server?.stop();
+    }
+  });
+
+  it("reads and filters older versions under a renamed column", async () => {
+    const query = v2.notes.history.where({ id }).orderBy("$acceptedAt").select("heading");
+    const rows = await db.all(query);
+    expectTypeOf(rows).toEqualTypeOf<{ id: string; heading: string }[]>();
+    expect(rows).toEqual([
+      { id, heading: "first" },
+      { id, heading: "second" },
+    ]);
+    expect(await db.all(query.where({ heading: "first" }))).toEqual([{ id, heading: "first" }]);
+  });
+
+  it("uses the added column's lens default in older versions", async () => {
+    expect(await db.all(v2.notes.history.where({ id }).select("category"))).toEqual([
+      { id, category: "uncategorized" },
+      { id, category: "uncategorized" },
+    ]);
+  });
+
+  it("omits dropped columns from historical wildcard results", async () => {
+    const rows = await db.all(v2.notes.history.where({ id }).orderBy("$acceptedAt").select("*"));
+    expect(rows).toHaveLength(2);
+    expect(rows.map(({ $transactionId, $acceptedAt, ...content }) => content)).toEqual([
+      { id, heading: "first", category: "uncategorized" },
+      { id, heading: "second", category: "uncategorized" },
+    ]);
+  });
+
+  it("subscribes to old and new versions using the reader's schema", async () => {
+    const query = v2.notes.history
+      .where({ id })
+      .orderBy("$acceptedAt")
+      .select("heading", "category");
+    let latest: { id: string; heading: string; category: string }[] | undefined;
+    let failure: Error | undefined;
+    stop = db.subscribe(query, {
+      onUpdate: (rows) => {
+        latest = rows;
+      },
+      onError: (error) => {
+        failure = error;
+      },
+    });
+    const observed = () => {
+      if (failure) throw failure;
+      return latest;
+    };
+    const old = [
+      { id, heading: "first", category: "uncategorized" },
+      { id, heading: "second", category: "uncategorized" },
+    ];
+    await expect.poll(observed).toEqual(old);
+    await db.update(v2.notes, id, { heading: "third", category: "new" }).wait({ tier: "global" });
+    await expect.poll(observed).toEqual([...old, { id, heading: "third", category: "new" }]);
+    expect(await db.all(query)).toEqual(latest);
   });
 });
