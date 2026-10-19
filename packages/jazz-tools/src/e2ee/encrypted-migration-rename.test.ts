@@ -38,7 +38,7 @@ it("reads and searches existing ciphertext after renaming its column", async () 
       policy.notes.allowRead.always();
       policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+      policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
       policy.__e2ee_space_grants.allowRead.always();
       policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
       policy.__e2ee_space_deliveries.allowRead.always();
@@ -147,7 +147,7 @@ it.each(["partial", "full"] as const)(
         policy.messages.allowRead.always();
         policy.messages.allowInsert.where({ "$createdBy.account": session.user.account });
         policy.__e2ee_spaces.allowRead.always();
-        policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+        policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
         policy.__e2ee_space_grants.allowRead.always();
         policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
         policy.__e2ee_space_deliveries.allowRead.always();
@@ -279,7 +279,7 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     policy.notes.allowRead.always();
     policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();
@@ -293,7 +293,7 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     policy.records.allowRead.always();
     policy.records.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.always();
