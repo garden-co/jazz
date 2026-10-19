@@ -348,7 +348,10 @@ fn coerce_predicate_typed_literals(
                 *predicate = Predicate::Any(Vec::new());
             }
         }
-        Predicate::IsNull(_) => {}
+        Predicate::IsNull(_)
+        | Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. } => {}
         Predicate::EnumMatch { payload, .. } => {
             coerce_predicate_typed_literals(table, payload, column_types);
         }
@@ -583,7 +586,17 @@ fn convert_table(
                 .map(|column| column.as_str().to_owned())
                 .collect()
         })
-        .unwrap_or_default();
+        // Point columns get their dedicated derived S2 index by default.
+        // An explicit indexOnly selection remains authoritative.
+        .unwrap_or_else(|| {
+            table
+                .columns
+                .columns
+                .iter()
+                .filter(|column| matches!(column.column_type, ColumnType::Point))
+                .map(|column| column.name.as_str().to_owned())
+                .collect()
+        });
     for (index, group) in table.composite_indexes.iter().enumerate() {
         if group.len() < 2 {
             return Err(err(
@@ -605,6 +618,7 @@ fn convert_table(
                     descriptor.column_type,
                     ColumnType::Bytea
                         | ColumnType::Array { .. }
+                        | ColumnType::Point
                         | ColumnType::Row { .. }
                         | ColumnType::EnumPayload { .. }
                         | ColumnType::CatalogueEnumPayload { .. }
@@ -678,6 +692,22 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
+    if !matches!(column.column_type, ColumnType::Point)
+        && contains_point_semantic(&column.column_type)
+    {
+        return Err(column_err(
+            table,
+            column.name.as_str(),
+            "point columns are only supported as top-level table fields",
+        ));
+    }
+    if matches!(column.column_type, ColumnType::Point) && column.merge_strategy.is_some() {
+        return Err(column_err(
+            table,
+            column.name.as_str(),
+            "point columns support last-write-wins updates only",
+        ));
+    }
     crate::model::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
         .map_err(|message| column_err(table, column.name.as_str(), message))?;
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
@@ -685,6 +715,9 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if matches!(column.column_type, ColumnType::Point) {
+        converted = converted.as_geo_point();
+    }
     if matches!(column.column_type, ColumnType::Json { .. }) {
         // JSON is logically represented as Groove's canonical string value,
         // but its physical large-scalar interpretation is schema-derived and
@@ -695,6 +728,25 @@ fn convert_column(
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+fn contains_point_semantic(column_type: &ColumnType) -> bool {
+    match column_type {
+        ColumnType::Point => true,
+        ColumnType::Array { element } => contains_point_semantic(element),
+        ColumnType::Row { columns } => columns
+            .columns
+            .iter()
+            .any(|column| contains_point_semantic(&column.column_type)),
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
+            cases.iter().any(|case| {
+                case.fields
+                    .iter()
+                    .any(|field| contains_point_semantic(&field.column_type))
+            })
+        }
+        _ => false,
+    }
 }
 
 fn convert_column_default(
@@ -831,6 +883,20 @@ fn convert_default_for_column_type(
             .map(|value| convert_default_for_column_type(table, column, element.as_ref(), value))
             .collect::<Result<Vec<_>, _>>()
             .map(GrooveValue::Array),
+        (ColumnType::Point, Value::Array(values)) if values.len() == 2 => {
+            let mut point = Vec::with_capacity(2);
+            for coordinate in values {
+                let Value::Double(value) = coordinate else {
+                    return Err(column_err(
+                        table,
+                        column,
+                        "point defaults require two numeric coordinates",
+                    ));
+                };
+                point.push(GrooveValue::F64(*value));
+            }
+            Ok(GrooveValue::Array(point))
+        }
         _ => Err(column_err(
             table,
             column,
@@ -889,6 +955,7 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
+        ColumnType::Point => Ok(GrooveColumnType::F64.array_of()),
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
         ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
@@ -927,6 +994,12 @@ fn validate_payload_enum_field(
         return Err(err(
             path,
             "enum payload field name \"type\" is reserved for the discriminant",
+        ));
+    }
+    if matches!(field.column_type, ColumnType::Point) {
+        return Err(err(
+            path,
+            "point columns are only supported as top-level table fields",
         ));
     }
     if field.name.as_str().starts_with('$') {
@@ -3505,6 +3578,72 @@ mod tests {
                 column.merge_strategy(ColumnMergeStrategy::Counter),
             ])),
         )])
+    }
+
+    /// Pin Alice's public Point schema JSON so Bob can distinguish the logical
+    /// point tag from an ordinary array with the same `Array<F64>` storage.
+    #[test]
+    fn point_has_a_distinct_public_schema_json_representation() {
+        assert_eq!(
+            serde_json::to_value(ColumnType::Point).expect("Point schema serializes"),
+            serde_json::json!({ "type": "Point" })
+        );
+        assert_ne!(
+            serde_json::to_value(ColumnType::Point).expect("Point schema serializes"),
+            serde_json::to_value(ColumnType::Array {
+                element: Box::new(ColumnType::Double),
+            })
+            .expect("ordinary array schema serializes")
+        );
+    }
+
+    /// Alice's compiled schema must retain Point semantics even though Groove
+    /// sees the established fixed `[F64; 2]` array shape. This lower-level
+    /// assertion is needed because the marker is absent from row values and
+    /// cannot be observed through ordinary schema reads.
+    #[test]
+    fn compiles_point_as_a_semantically_marked_f64_pair() {
+        let schema = Schema::from([(
+            TableName::new("places"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("location", ColumnType::Point).default(Value::Array(vec![
+                    Value::Double(-69.9312),
+                    Value::Double(18.4861),
+                ])),
+            ])),
+        )]);
+
+        let converted = convert_public_schema(&schema).expect("valid Point schema converts");
+        let location = &converted.tables[0].columns[0];
+        assert!(location.geo_point);
+        assert_eq!(location.column_type, GrooveColumnType::F64.array_of());
+        assert_eq!(
+            location.default,
+            Some(GrooveValue::Array(vec![
+                GrooveValue::F64(-69.9312),
+                GrooveValue::F64(18.4861),
+            ]))
+        );
+    }
+
+    /// Alice's invalid default coordinates must fail at schema admission
+    /// before the default can enter a replicated write path to Bob.
+    #[test]
+    fn rejects_point_defaults_outside_wgs84_bounds() {
+        let schema = Schema::from([(
+            TableName::new("places"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("location", ColumnType::Point)
+                    .default(Value::Array(vec![Value::Double(181.0), Value::Double(0.0)])),
+            ])),
+        )]);
+
+        let error = convert_public_schema(&schema).expect_err("out-of-range point is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("finite WGS84 longitude/latitude")
+        );
     }
 
     #[test]

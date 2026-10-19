@@ -3228,6 +3228,17 @@ pub enum Error {
     /// Query could not be represented by the unified query engine.
     #[error("query lowering failed: {0}")]
     QueryLowering(String),
+    /// The spatial predicate could not be planned as a bounded indexed read.
+    #[error("spatial query is not supported for this shape: {0}")]
+    UnsupportedSpatialQuery(String),
+    /// The schema's derived spatial index has not been admitted or selected.
+    #[error("spatial index is unavailable for '{table}.{column}'")]
+    SpatialIndexUnavailable {
+        /// Table containing the point column.
+        table: String,
+        /// Point column requiring the derived S2 index.
+        column: String,
+    },
     /// Query-engine capability report for a currently unsupported program.
     #[error("query capability unsupported: {0}")]
     QueryCapability(String),

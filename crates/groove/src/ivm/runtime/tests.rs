@@ -255,6 +255,7 @@ fn touched_unbounded_membership_matches_full_window_diff_for_signed_bags() {
             field: "rank".into(),
             direction: TopByDirection::Desc,
         }],
+        spatial_order: None,
         tie_fields: vec!["id".into()],
         sort_field_indices: vec![1, 0],
         sort_directions: vec![TopByDirection::Desc, TopByDirection::Asc],
@@ -693,6 +694,164 @@ fn indexed_edges_schema() -> DatabaseSchema {
     .with_index(IndexSchema::new("by_src", ["src"]))])
 }
 
+/// This storage-level integration test verifies index writes on insert, move,
+/// and NULL transition. Direct byte assertions are necessary because the S2
+/// cell is a durable derived key, while public point-query integration will
+/// exercise candidate access once the Jazz planner is connected.
+#[futures_test::test]
+async fn s2_point_index_tracks_current_writes_and_omits_null_rows() {
+    let index = IndexSchema::s2_point_v1("by_location", ["location"], "location");
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "places",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("location", ColumnType::F64.array_of().nullable()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(index.clone())]);
+    let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["places", "indices"]).unwrap());
+    let descriptor = schema.table("places").unwrap().record_schema();
+    let index_prefix = crate::ivm::runtime::index_ids::durable_index_key_prefix(
+        runtime.index_storage_id("places", &index),
+    );
+
+    let origin = descriptor
+        .create(&[
+            Value::U64(7),
+            Value::Nullable(Some(Box::new(Value::Array(vec![
+                Value::F64(0.0),
+                Value::F64(0.0),
+            ])))),
+        ])
+        .unwrap();
+    runtime
+        .tick(
+            vec![TableDelta {
+                table: "places".to_owned(),
+                variant_tag: 0,
+                descriptor: descriptor.clone(),
+                deltas: vec![RecordDelta {
+                    record: origin.clone().into(),
+                    weight: 1,
+                }],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+
+    let index_entries = || async {
+        crate::storage::collect_scan(
+            storage
+                .scan(crate::storage::ScanRequest::prefix(
+                    "indices".to_owned(),
+                    index_prefix.clone(),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    let origin_cell = crate::spatial::GeoPoint::new(0.0, 0.0)
+        .unwrap()
+        .leaf_cell_id();
+    let expected_origin_key = [
+        index_prefix.clone(),
+        vec![3],
+        origin_cell.to_be_bytes().to_vec(),
+        vec![0xff, 3],
+        7_u64.to_be_bytes().to_vec(),
+    ]
+    .concat();
+    assert_eq!(
+        index_entries()
+            .await
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect::<Vec<_>>(),
+        vec![expected_origin_key]
+    );
+
+    let moved = descriptor
+        .create(&[
+            Value::U64(7),
+            Value::Nullable(Some(Box::new(Value::Array(vec![
+                Value::F64(10.0),
+                Value::F64(0.0),
+            ])))),
+        ])
+        .unwrap();
+    runtime
+        .tick(
+            vec![TableDelta {
+                table: "places".to_owned(),
+                variant_tag: 0,
+                descriptor: descriptor.clone(),
+                deltas: vec![
+                    RecordDelta {
+                        record: origin.into(),
+                        weight: -1,
+                    },
+                    RecordDelta {
+                        record: moved.clone().into(),
+                        weight: 1,
+                    },
+                ],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    let moved_cell = crate::spatial::GeoPoint::new(10.0, 0.0)
+        .unwrap()
+        .leaf_cell_id();
+    let expected_moved_key = [
+        index_prefix.clone(),
+        vec![3],
+        moved_cell.to_be_bytes().to_vec(),
+        vec![0xff, 3],
+        7_u64.to_be_bytes().to_vec(),
+    ]
+    .concat();
+    assert_eq!(
+        index_entries()
+            .await
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect::<Vec<_>>(),
+        vec![expected_moved_key]
+    );
+
+    let null = descriptor
+        .create(&[Value::U64(7), Value::Nullable(None)])
+        .unwrap();
+    runtime
+        .tick(
+            vec![TableDelta {
+                table: "places".to_owned(),
+                variant_tag: 0,
+                descriptor: descriptor.clone(),
+                deltas: vec![
+                    RecordDelta {
+                        record: moved.into(),
+                        weight: -1,
+                    },
+                    RecordDelta {
+                        record: null.into(),
+                        weight: 1,
+                    },
+                ],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    assert!(index_entries().await.is_empty());
+}
+
 fn reach_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
         ("src", ColumnType::U64.clone()),
@@ -723,6 +882,7 @@ async fn top_by_distinguishes_finite_max_from_unbounded_limit() {
             field: "id".to_owned(),
             direction: TopByDirection::Asc,
         }],
+        spatial_order: None,
         tie_fields: Vec::new(),
         sort_field_indices: vec![0],
         sort_directions: vec![TopByDirection::Asc],

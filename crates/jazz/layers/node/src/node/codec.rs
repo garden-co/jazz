@@ -4462,6 +4462,27 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
     records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))])
         .create(std::slice::from_ref(value))?;
+    if column.geo_point {
+        let point = match value {
+            Value::Nullable(None) => None,
+            Value::Nullable(Some(value)) => Some(value.as_ref()),
+            value => Some(value),
+        };
+        if let Some(Value::Array(values)) = point {
+            let [Value::F64(longitude), Value::F64(latitude)] = values.as_slice() else {
+                return Err(Error::InvalidStoredValue("invalid point coordinate pair"));
+            };
+            if !longitude.is_finite()
+                || !latitude.is_finite()
+                || !(-180.0..=180.0).contains(longitude)
+                || !(-90.0..=90.0).contains(latitude)
+            {
+                return Err(Error::InvalidStoredValue("point outside WGS84 bounds"));
+            }
+        } else if point.is_some() {
+            return Err(Error::InvalidStoredValue("invalid point coordinate pair"));
+        }
+    }
     Ok(())
 }
 
@@ -4564,6 +4585,46 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    /// Alice's replicated point cells must pass the node's authoritative
+    /// admission check only as bounded WGS84 pairs; this lower-level test is
+    /// necessary because that codec helper is shared by storage ingress paths.
+    #[test]
+    fn point_cell_admission_checks_shape_bounds_and_nullable_null() {
+        let point = ColumnSchema::new("location", groove::schema::ColumnType::F64.array_of())
+            .as_geo_point();
+        let valid = Value::Array(vec![Value::F64(-180.0), Value::F64(90.0)]);
+
+        assert!(validate_cell_value(&point, &valid).is_ok());
+        assert!(
+            validate_cell_value(
+                &point,
+                &Value::Array(vec![Value::F64(0.0), Value::F64(0.0), Value::F64(1.0)])
+            )
+            .is_err()
+        );
+        assert!(
+            validate_cell_value(
+                &point,
+                &Value::Array(vec![Value::F64(181.0), Value::F64(0.0)])
+            )
+            .is_err()
+        );
+        assert!(
+            validate_cell_value(
+                &point,
+                &Value::Array(vec![Value::F64(f64::NAN), Value::F64(0.0)])
+            )
+            .is_err()
+        );
+
+        let optional_point = ColumnSchema::new(
+            "location",
+            groove::schema::ColumnType::F64.array_of().nullable(),
+        )
+        .as_geo_point();
+        assert!(validate_cell_value(&optional_point, &Value::Nullable(None)).is_ok());
+    }
 
     /// Alice's stored merge metadata may contain null bases, but never missing
     /// columns. This internal test builds truncated descriptors because public

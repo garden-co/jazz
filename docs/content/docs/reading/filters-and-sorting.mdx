@@ -8,7 +8,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ## Filters
 
-Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;—&hairsp;all conditions are combined with `AND`. OR filters are not supported in queries; use multiple queries if you need disjoint result sets.
+Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;—&hairsp;all conditions are combined with `AND`. General scalar OR filters are not supported; positive spatial OR branches are supported when every branch has an indexed spatial predicate.
 
 <WhereOperatorsTable />
 
@@ -39,6 +39,78 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;�
     </include>
   </Tab>
 </Tabs>
+
+## Spatial filters
+
+Point columns use WGS84 coordinates in `[longitude, latitude]` order. Spatial
+filters use the Point column's derived S2 index to find candidates, then check
+the exact spherical predicate. Point columns receive this index by default;
+when a table uses `.indexOnly(...)`, include the Point column there to keep its
+spatial index available.
+
+Use `near` to find points inside an inclusive distance range. Results are
+ordered by distance from the center, then by stable row identity. A finite
+`maxDistanceMeters` is required; `minDistanceMeters` defaults to zero.
+
+```ts
+const nearby = await db.all(
+  app.places
+    .where({
+      location: {
+        near: {
+          center: [-69.9312, 18.4861],
+          maxDistanceMeters: 5_000,
+        },
+      },
+    })
+    .limit(20),
+);
+```
+
+Use `within` and `intersects` with a GeoJSON `Polygon` or `MultiPolygon`:
+
+```ts
+const area = {
+  type: "Polygon" as const,
+  coordinates: [
+    [
+      [-70, 18],
+      [-69, 18],
+      [-69, 19],
+      [-70, 19],
+      [-70, 18],
+    ],
+  ],
+};
+
+const strictlyInside = await db.all(app.places.where({ location: { within: area } }));
+const insideOrOnEdge = await db.all(app.places.where({ location: { intersects: area } }));
+```
+
+`within` excludes polygon and hole boundaries. `intersects` includes those
+boundaries; points in hole interiors match neither operator. Polygon rings
+must be closed and valid. Jazz calculates great-circle distances and polygon
+edges on a sphere with a mean radius of 6,371,008.8 meters. These queries
+support current Global and Local reads; historical snapshots are not
+supported. Spatial reads fail with a typed error if the Point index is
+unavailable or the query shape cannot be bounded by the index. Spatial
+predicates can be combined through a relationship join when every stored
+source in that join has its own admitted index restriction; the outer root may
+also be restricted by an exact primary-key lookup. A related-only spatial
+filter over unbounded outer rows still needs a lookup from matching
+relationship keys back to those rows, which Jazz does not support yet; it
+fails before a source scan. Positive area OR branches can use different Point
+columns on the same source; Jazz unions their indexed candidate ranges and
+checks the original OR exactly. Public relation-union arms keep their
+occurrence semantics when each arm independently has a positive spatial bound
+for every stored source. An unbounded arm is rejected before source access;
+`near` inside a relation-union arm is also rejected because the arms would
+compete to define nearest-first ordering. Spatial NOT is supported as a
+residual under a positive spatial anchor, but it cannot provide the anchor
+itself. A result limit bounds returned rows, but
+does not cap the number of indexed candidates checked for a broad radius or
+area. Spatial sync remains gated on peer capability negotiation until the
+feature acceptance checks are complete.
 
 ## Sorting
 

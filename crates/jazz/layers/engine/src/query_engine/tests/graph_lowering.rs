@@ -236,6 +236,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
                 field: groove::ivm::FieldRef::StoredName(field),
                 direction: groove::ivm::TopByDirection::Asc,
+                spatial_center: None,
             }] if field == "_app_title")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
@@ -362,6 +363,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
                 field: groove::ivm::FieldRef::Name(field),
                 direction: groove::ivm::TopByDirection::Asc,
+                spatial_center: None,
             }] if field == "row_uuid")
             && tie_cols.is_empty()
     )));
@@ -386,6 +388,7 @@ fn source_order_flushes_before_relation_output_projection_without_slice() {
                     field: "title".to_owned(),
                 },
                 direction: SortDirection::Desc,
+                spatial_distance_center: None,
             }],
         },
     );

@@ -680,6 +680,18 @@ pub struct IndexSchema {
     /// after record layout canonicalization.
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Narrow, versioned derivation used for keys that are indexed by a
+    /// schema-defined projection rather than by their source value. `None`
+    /// preserves the established ordinary-index contract and encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_derivation: Option<IndexKeyDerivation>,
+}
+
+/// Supported derived-key contracts for durable schema indexes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum IndexKeyDerivation {
+    /// Replace the named WGS84 Point value with its level-30 S2 leaf cell ID.
+    S2PointV1 { point_column: String },
 }
 
 impl IndexSchema {
@@ -691,6 +703,23 @@ impl IndexSchema {
             name: name.into(),
             columns: columns.into_iter().map(Into::into).collect(),
             unique: false,
+            key_derivation: None,
+        }
+    }
+
+    /// Define a versioned S2 leaf-cell key derived from one source Point
+    /// column. The column remains in `columns` for descriptor resolution and
+    /// identity, but its stored ordered key part is a `U64` cell ID.
+    pub fn s2_point_v1(
+        name: impl Into<String>,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+        point_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            key_derivation: Some(IndexKeyDerivation::S2PointV1 {
+                point_column: point_column.into(),
+            }),
+            ..Self::new(name, columns)
         }
     }
 

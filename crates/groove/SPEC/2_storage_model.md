@@ -945,6 +945,37 @@ _Further invariant._ `INV-STORAGE-26` -- Record-store persistence is row-only: e
 
 The former hybrid columnar-base proposal is rejected and is not part of Groove's normative trajectory or implementation plan. Its 2026-08-04/05 measurements remain archival benchmark evidence only: batch coalescing can reduce broad rewrite work, but interactive single-row updates and reconstruction introduced a second authoritative representation and compaction/reconciliation boundary. The canonical row baseline above is simpler and is the adopted design. Reconsideration requires a new proposal, fresh evidence, and explicit invariants; no current code or compatibility path reserves this design.
 
+### 2.11 Versioned S2 point index
+
+Jazz's point index is a narrow derived-key contract named
+`groove.s2-point-key.v1`; it does not add expression indexes to Groove. Each
+non-null point row contributes one level-30 S2 leaf-cell ID as an unsigned
+64-bit logical key, followed by the row primary-key suffix. The physical key
+is partitioned by the existing branch key before the cell ID. Cell IDs remain
+`u64` in Rust and use the existing order-preserving unsigned integer key
+encoding; they MUST NOT cross a JavaScript number boundary.
+
+The derived index identity and definition bytes include the exact contract
+version, while ordinary index definitions retain their existing bytes and the
+durable index outer layout. The derivation is applied consistently during
+schema admission/backfill, recovery, inserts, point moves, null transitions,
+deletes, and current-row winner changes. Only the selected current point is
+indexed; historical versions are not spatially indexed. Compatible schema
+projection MUST either preserve explicit point semantics or reject the query
+before scanning.
+
+Queries produce conservative S2 coverings, convert them into sorted merged
+half-open leaf-ID intervals, and scan the index by those intervals. Inclusive
+S2 cell-range endpoints MUST be translated without excluding any key or row
+suffix at the final cell. Every candidate is checked against the exact original
+spherical predicate. A missing or not-yet-ready derived index returns a typed
+error; it never becomes a table scan.
+
+Ordinary `indexed_columns` configuration controls whether a point's S2 index is
+available: default indexing includes it, while `.indexOnly(...)` excluding
+the point makes spatial queries unavailable. This derived-key definition does
+not alter the source point's `Array<F64>` row encoding.
+
 ## Open Questions
 
 - 🔶 [#1775](https://github.com/garden-co/jazz/issues/1775) — Current-base selection, compaction handoff, scan exclusion, and compaction-quality receipts.

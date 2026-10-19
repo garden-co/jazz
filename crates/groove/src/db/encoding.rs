@@ -345,7 +345,15 @@ fn decode_index_columns(
                 .iter()
                 .find(|column| column.name == *column_name)
                 .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-            decode_index_key_part(remaining, &column.column_type, index_name)
+            if matches!(
+                &index.key_derivation,
+                Some(IndexKeyDerivation::S2PointV1 { point_column })
+                    if point_column == column_name
+            ) {
+                decode_index_key_part(remaining, &ColumnType::U64, index_name)
+            } else {
+                decode_index_key_part(remaining, &column.column_type, index_name)
+            }
         })
         .collect()
 }
@@ -367,8 +375,17 @@ pub(crate) fn persisted_index_column_value(
             .iter()
             .find(|column| column.name == *indexed_column)
             .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
-        let value = decode_index_key_part(&mut remaining, &column.column_type, index_name)?;
-        if indexed_column == column_name {
+        let derived = matches!(
+            &index.key_derivation,
+            Some(IndexKeyDerivation::S2PointV1 { point_column })
+                if point_column == indexed_column
+        );
+        let value = if derived {
+            decode_index_key_part(&mut remaining, &ColumnType::U64, index_name)?
+        } else {
+            decode_index_key_part(&mut remaining, &column.column_type, index_name)?
+        };
+        if indexed_column == column_name && !derived {
             return Ok(value);
         }
     }

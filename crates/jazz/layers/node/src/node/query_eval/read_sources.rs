@@ -309,6 +309,13 @@ pub(super) enum CurrentAccessPath {
         reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        /// Conservative S2 leaf-cell intervals for a derived Point index.
+        /// When present, the source index key uses a U64 cell id rather than
+        /// the source Point's Array<F64> representation.
+        spatial_ranges: Option<Vec<groove::spatial::S2CellRange>>,
+        /// Additional Point indexes whose candidate streams form one bounded
+        /// positive spatial OR. Streams are deduplicated by row identity.
+        spatial_alternates: Vec<(String, Vec<groove::spatial::S2CellRange>)>,
         /// Snapshot-only cross-table covered-key filter before row hydration.
         /// Only a Global first-result source attaches one; every other
         /// source resolution ignores it and keeps the unfiltered prefix.
@@ -322,6 +329,14 @@ pub(super) enum CurrentAccessPath {
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NormalizedSpatialAccess {
+    column: String,
+    ranges: Vec<groove::spatial::S2CellRange>,
+    alternates: Vec<(String, Vec<groove::spatial::S2CellRange>)>,
+    near: bool,
 }
 
 fn primary_key_page_scan(cap: usize) -> StaticScanSpec {
@@ -2767,6 +2782,8 @@ where
                 reverse,
                 prefix,
                 intersections,
+                spatial_ranges,
+                spatial_alternates,
                 source_limit,
                 ..
             } => {
@@ -2777,10 +2794,21 @@ where
                     || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
+                let has_spatial_ranges = spatial_ranges.is_some();
                 let projection_target = self.current_projection_target(request, table)?;
-                let rows = self
-                    .node
-                    .physical_global_current_source_for_index_scan(
+                let rows = if let Some(ranges) = spatial_ranges {
+                    self.node.physical_current_spatial_candidate_scan_in(
+                        PhysicalCurrentClass::Global,
+                        table,
+                        self.read_view.read_schema,
+                        &BranchKey::default(),
+                        &column,
+                        &ranges,
+                        &spatial_alternates,
+                        &projection_target,
+                    )
+                } else {
+                    self.node.physical_global_current_source_for_index_scan(
                         table,
                         self.read_view.read_schema,
                         &column,
@@ -2793,9 +2821,11 @@ where
                         None,
                         &projection_target,
                     )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                self.node.query_engine_read_metrics.source_index_probes +=
-                    1 + intersections.len() as u64;
+                }
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                self.node.query_engine_read_metrics.source_index_probes += 1
+                    + intersections.len() as u64
+                    + u64::from(has_spatial_ranges) * spatial_alternates.len() as u64;
                 Ok(Some(rows))
             }
         }
@@ -2995,6 +3025,10 @@ where
                 BranchLayerAccess::PrimaryKey(prefix.clone())
             }
             Some(CurrentAccessPath::Index {
+                spatial_ranges: Some(_),
+                ..
+            }) => BranchLayerAccess::Full,
+            Some(CurrentAccessPath::Index {
                 column,
                 order_column,
                 prefix,
@@ -3006,6 +3040,8 @@ where
                 reverse: _,
                 source_limit: _,
                 candidate_filter: _,
+                spatial_ranges: _,
+                spatial_alternates: _,
             }) => BranchLayerAccess::Index {
                 column: column.clone(),
                 order_column: order_column.clone(),
@@ -3573,6 +3609,8 @@ where
                         reverse,
                         prefix,
                         intersections,
+                        spatial_ranges,
+                        spatial_alternates,
                         source_limit,
                         maintained,
                         candidate_filter,
@@ -3582,10 +3620,23 @@ where
                         let source_limit = (order_column.is_some() || !exclude_deleted)
                             .then_some(source_limit)
                             .flatten();
-                        self.node.query_engine_read_metrics.source_index_probes +=
-                            1 + intersections.len() as u64 + u64::from(candidate_filter.is_some());
-                        self.node
-                            .physical_global_current_source_for_index_scan(
+                        self.node.query_engine_read_metrics.source_index_probes += 1
+                            + intersections.len() as u64
+                            + u64::from(candidate_filter.is_some())
+                            + u64::from(spatial_ranges.is_some()) * spatial_alternates.len() as u64;
+                        let rows = if let Some(ranges) = &spatial_ranges {
+                            self.node.physical_current_spatial_candidate_scan_in(
+                                PhysicalCurrentClass::Global,
+                                read_table,
+                                self.read_view.read_schema,
+                                &BranchKey::default(),
+                                &column,
+                                ranges,
+                                &spatial_alternates,
+                                &projection_target,
+                            )
+                        } else {
+                            self.node.physical_global_current_source_for_index_scan(
                                 read_table,
                                 self.read_view.read_schema,
                                 &column,
@@ -3598,7 +3649,8 @@ where
                                 candidate_filter.as_ref(),
                                 &projection_target,
                             )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        };
+                        rows.map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                     }
                     None => {
                         self.node.query_engine_read_metrics.source_full_scans += 1;
@@ -3682,6 +3734,8 @@ where
                     reverse,
                     prefix,
                     intersections,
+                    spatial_ranges,
+                    spatial_alternates,
                     source_limit,
                     maintained,
                     // A Local winner combines these settled candidates with
@@ -3693,24 +3747,38 @@ where
                     // Select settled candidates before combining them with the
                     // corresponding Local ahead candidates below.
                     let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
-                    self.node.query_engine_read_metrics.source_index_probes +=
-                        1 + intersections.len() as u64;
-                    self.node
-                        .physical_global_current_source_for_index_scan_with_output(
+                    self.node.query_engine_read_metrics.source_index_probes += 1
+                        + intersections.len() as u64
+                        + u64::from(spatial_ranges.is_some()) * spatial_alternates.len() as u64;
+                    let rows = if let Some(ranges) = spatial_ranges {
+                        self.node.physical_current_spatial_candidate_scan_in(
+                            PhysicalCurrentClass::Global,
                             read_table,
                             self.read_view.read_schema,
+                            &BranchKey::default(),
                             column,
-                            order_column.as_deref(),
-                            *reverse,
-                            prefix,
-                            intersections,
-                            *maintained,
-                            source_limit,
-                            None,
+                            ranges,
+                            spatial_alternates,
                             &projection_target,
-                            raw_global_output.clone(),
                         )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                    } else {
+                        self.node
+                            .physical_global_current_source_for_index_scan_with_output(
+                                read_table,
+                                self.read_view.read_schema,
+                                column,
+                                order_column.as_deref(),
+                                *reverse,
+                                prefix,
+                                intersections,
+                                *maintained,
+                                source_limit,
+                                None,
+                                &projection_target,
+                                raw_global_output.clone(),
+                            )
+                    };
+                    rows.map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                 }
                 _ => {
                     self.node.query_engine_read_metrics.source_full_scans += 1;
@@ -3747,6 +3815,8 @@ where
                     intersections,
                     source_limit,
                     maintained,
+                    spatial_ranges,
+                    spatial_alternates,
                     candidate_filter: _,
                 }) = &access_path
                     && (!exclude_deleted)
@@ -3755,30 +3825,46 @@ where
                         .is_none()
                 {
                     let scan = |this: &Self, class| {
-                        this.node.physical_current_source_for_index_scan_in(
-                            class,
-                            read_table,
-                            this.read_view.read_schema,
-                            &BranchKey::default(),
-                            column,
-                            order_column.as_deref(),
-                            *reverse,
-                            prefix,
-                            intersections,
-                            *maintained,
-                            None,
-                            None,
-                            &projection_target,
-                        )
+                        if let Some(ranges) = spatial_ranges {
+                            this.node.physical_current_spatial_candidate_scan_in(
+                                class,
+                                read_table,
+                                this.read_view.read_schema,
+                                &BranchKey::default(),
+                                column,
+                                ranges,
+                                spatial_alternates,
+                                &projection_target,
+                            )
+                        } else {
+                            this.node.physical_current_source_for_index_scan_in(
+                                class,
+                                read_table,
+                                this.read_view.read_schema,
+                                &BranchKey::default(),
+                                column,
+                                order_column.as_deref(),
+                                *reverse,
+                                prefix,
+                                intersections,
+                                *maintained,
+                                None,
+                                None,
+                                &projection_target,
+                            )
+                        }
                     };
-                    self.node.query_engine_read_metrics.source_index_probes +=
-                        1 + intersections.len() as u64;
+                    self.node.query_engine_read_metrics.source_index_probes += 1
+                        + intersections.len() as u64
+                        + u64::from(spatial_ranges.is_some()) * spatial_alternates.len() as u64;
                     let ahead = scan(self, PhysicalCurrentClass::Ahead).map_err(|_| {
                         source_resolution_error(request, SourceGap::SchemaProjection)
                     })?;
                     let stored_keys = BTreeSet::from([BranchKey::default()]);
-                    let among = self
-                        .local_mask_read(
+                    let among = if spatial_ranges.is_some() {
+                        PresenceRead::Lookup(global.clone().project(["row_uuid"]))
+                    } else {
+                        self.local_mask_read(
                             request,
                             read_table,
                             &stored_keys,
@@ -3787,7 +3873,8 @@ where
                             prefix,
                             &global,
                         )
-                        .await;
+                        .await
+                    };
                     let presence = self.presence(request, &[Ref::Local], &stored_keys, among)?;
                     let ahead = self.exclude_settled_arm(request, ahead, true).await?;
                     let ahead = ahead.project(physical_fields.clone());
@@ -3819,14 +3906,33 @@ where
                         // full before arg-max so that every possible dominating
                         // row participates.  The settled side remains safely
                         // index-bounded through this same access-path mechanism.
-                        self.node.query_engine_read_metrics.source_full_scans += 1;
-                        self.node
-                            .physical_current_source_graph_with_projection_target(
-                                self.read_view.read_schema,
-                                &request.source.table,
+                        if let Some(CurrentAccessPath::Index {
+                            column,
+                            spatial_ranges: Some(ranges),
+                            spatial_alternates,
+                            ..
+                        }) = &access_path
+                        {
+                            self.node.physical_current_spatial_candidate_scan_in(
                                 PhysicalCurrentClass::Ahead,
-                                projection_target,
+                                read_table,
+                                self.read_view.read_schema,
+                                &BranchKey::default(),
+                                column,
+                                ranges,
+                                spatial_alternates,
+                                &projection_target,
                             )
+                        } else {
+                            self.node.query_engine_read_metrics.source_full_scans += 1;
+                            self.node
+                                .physical_current_source_graph_with_projection_target(
+                                    self.read_view.read_schema,
+                                    &request.source.table,
+                                    PhysicalCurrentClass::Ahead,
+                                    projection_target,
+                                )
+                        }
                     }
                     _ => self
                         .node
@@ -4890,30 +4996,163 @@ where
         request: &QueryProgramRequest,
         allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let has_spatial = normalized_shape_has_spatial(&request.input.shape);
+        let (spatial_vertices, spatial_ranges) =
+            normalized_shape_spatial_budget(&request.input.shape);
+        if spatial_vertices > groove::spatial::MAX_AREA_VERTICES {
+            return Err(Error::UnsupportedSpatialQuery(format!(
+                "bound query exceeds the {} supplied-vertex budget",
+                groove::spatial::MAX_AREA_VERTICES
+            )));
+        }
+        if spatial_ranges > groove::spatial::MAX_SCAN_RANGES {
+            return Err(Error::UnsupportedSpatialQuery(format!(
+                "bound query exceeds the {} normalized scan-range budget",
+                groove::spatial::MAX_SCAN_RANGES
+            )));
+        }
         // A policy proof may contain both an owner arm and a correlated
         // membership arm for the same protected source. Walking its nested
         // nodes independently would see the owner's claim equality and apply
         // that index path to the entire union, incorrectly excluding rows
         // that only the membership arm authorizes. The small planner does not
-        // prove per-arm coverage, so any alternative or relational proof
-        // retains full source scans.
-        if request.input.shape.nodes.values().any(|node| {
-            matches!(
-                node,
-                RowSetExpr::Union { .. }
-                    | RowSetExpr::Join { .. }
-                    | RowSetExpr::RecursiveRelation { .. }
-            )
-        }) {
+        // prove per-arm coverage for unions or recursive alternatives. Joins
+        // are handled below by requiring an independently bounded path for
+        // every stored source.
+        let has_recursive = request
+            .input
+            .shape
+            .nodes
+            .values()
+            .any(|node| matches!(node, RowSetExpr::RecursiveRelation { .. }));
+        let has_union = request
+            .input
+            .shape
+            .nodes
+            .values()
+            .any(|node| matches!(node, RowSetExpr::Union { .. }));
+        let has_join = request
+            .input
+            .shape
+            .nodes
+            .values()
+            .any(|node| matches!(node, RowSetExpr::Join { .. }));
+        let has_relationship_sources = has_join
+            || request
+                .input
+                .shape
+                .nodes
+                .values()
+                .any(|node| matches!(node, RowSetExpr::CorrelatedPathProjection { .. }))
+            || !request.input.shape.closure_paths.is_empty()
+            || !request.input.shape.join_contributions.is_empty()
+            || !request.input.shape.inherited_contributions.is_empty()
+            || !request.input.shape.reachable_contributions.is_empty();
+        if has_recursive || (!has_spatial && has_join) {
+            if has_spatial && has_recursive {
+                return Err(Error::UnsupportedSpatialQuery(
+                    "spatial filters through recursive relations are not supported yet".to_owned(),
+                ));
+            }
             return Ok(BTreeMap::new());
         }
-        self.normalized_program_access_paths(
+        let paths = self.normalized_program_access_paths(
             &request.input,
             &request.reads.primary,
             &request.policy,
             false,
             allow_secondary_indexes,
-        )
+        )?;
+        if has_spatial && has_union {
+            // Public relation unions retain their occurrence semantics, so
+            // each arm must establish its own index bound. SourceIds are
+            // intentionally shared across relation-union arms, so checking
+            // only the merged source map can accidentally let one bounded arm
+            // lend its index path to an unbounded sibling. Validate each arm
+            // locally before accepting the shared physical candidate source.
+            for (node_id, node) in &request.input.shape.nodes {
+                let RowSetExpr::Union { inputs } = node else {
+                    continue;
+                };
+                for arm in inputs {
+                    if normalized_node_has_near_spatial(&request.input.shape, &arm.node)? {
+                        return Err(Error::UnsupportedSpatialQuery(format!(
+                            "near inside spatial row-set union arm '{}' is not supported because each arm would define a competing nearest-first order",
+                            arm.label
+                        )));
+                    }
+                    let sources = normalized_node_sources(&request.input.shape, &arm.node)?;
+                    let bounded = normalized_node_spatial_sources(&request.input.shape, &arm.node)?;
+                    for source in sources {
+                        if !bounded.contains(&source) {
+                            return Err(Error::UnsupportedSpatialQuery(format!(
+                                "each spatial row-set union arm must have an indexed spatial bound; arm '{}' in '{}' leaves '{}' at {:?} unbounded",
+                                arm.label, node_id.0, source.table, source.path.components
+                            )));
+                        }
+                        if !matches!(
+                            paths.get(&source),
+                            Some(CurrentAccessPath::Index {
+                                spatial_ranges: Some(_),
+                                ..
+                            })
+                        ) {
+                            return Err(Error::UnsupportedSpatialQuery(format!(
+                                "each spatial row-set union arm must have an indexed spatial bound; '{}' at {:?} has no available spatial index",
+                                source.table, source.path.components
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        if has_spatial && has_relationship_sources {
+            // Joins are safe only when every participating stored source has
+            // its own admitted index path. This permits bounded spatial
+            // relationship queries (for example, both the root and related
+            // rows have spatial or scalar index predicates) while refusing
+            // the common related-only case that would otherwise scan all
+            // owners before applying the related spatial filter. Dynamic
+            // relationship-key lookups are a separate execution primitive.
+            for source in normalized_shape_sources(&request.input.shape) {
+                let bounded = match paths.get(&source) {
+                    Some(CurrentAccessPath::Index { .. }) => true,
+                    // The public root's direct id equality is carried by the
+                    // existing primary-key hydration path. Related-source
+                    // primary-key paths are not currently threaded through
+                    // the resolver, so they are not accepted here.
+                    Some(CurrentAccessPath::PrimaryKey(_))
+                        if source.path.components.last() == Some(&SourceRole::Root) =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if !bounded {
+                    return Err(Error::UnsupportedSpatialQuery(format!(
+                        "spatial filters through row-set joins require an indexed restriction on every source; '{}' at {:?} has no bounded index or keyed lookup",
+                        source.table, source.path.components
+                    )));
+                }
+            }
+        }
+        if has_spatial
+            && !paths.values().any(|path| {
+                matches!(
+                    path,
+                    CurrentAccessPath::Index {
+                        spatial_ranges: Some(_),
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(Error::UnsupportedSpatialQuery(
+                "no positive spatial predicate can bound every result branch; spatial OR and NOT require an indexed anchor"
+                    .to_owned(),
+            ));
+        }
+        Ok(paths)
     }
 
     fn normalized_program_access_paths(
@@ -4925,6 +5164,7 @@ where
         allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         let mut equalities_by_source = BTreeMap::new();
+        let mut spatials_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
         // source's own Filter -> Source pipeline.  Inspecting every normalized
         // node lets independent recursive seed/step pipelines participate,
@@ -4942,14 +5182,73 @@ where
                     .or_insert_with(BTreeMap::new)
                     .extend(equalities);
             }
+            let Some(spatials) = normalized_program_spatials(&input.shape, node_id)? else {
+                continue;
+            };
+            for (source, spatial) in spatials {
+                match spatials_by_source.entry(source) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(spatial);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry)
+                        if spatial.near && !entry.get().near =>
+                    {
+                        entry.insert(spatial);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry)
+                        if !spatial.near && !entry.get().near =>
+                    {
+                        // Several normalized arms can refer to the same
+                        // logical source occurrence (notably public relation
+                        // unions). Their candidate sets must be unioned before
+                        // the shared source is read; the original graph keeps
+                        // each exact predicate and occurrence label.
+                        let existing = entry.get_mut();
+                        let mut by_column =
+                            BTreeMap::<String, Vec<groove::spatial::S2CellRange>>::new();
+                        by_column
+                            .entry(existing.column.clone())
+                            .or_default()
+                            .append(&mut existing.ranges);
+                        for (column, ranges) in std::mem::take(&mut existing.alternates) {
+                            by_column.entry(column).or_default().extend(ranges);
+                        }
+                        by_column
+                            .entry(spatial.column)
+                            .or_default()
+                            .extend(spatial.ranges);
+                        for (column, ranges) in spatial.alternates {
+                            by_column.entry(column).or_default().extend(ranges);
+                        }
+                        let mut accesses = by_column
+                            .into_iter()
+                            .map(|(column, ranges)| Ok((column, merge_spatial_ranges(ranges)?)))
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        accesses.sort_by(|left, right| left.0.cmp(&right.0));
+                        let (column, ranges) = accesses
+                            .first()
+                            .cloned()
+                            .expect("a merged spatial access has at least one column");
+                        *existing = NormalizedSpatialAccess {
+                            column,
+                            ranges,
+                            alternates: accesses.into_iter().skip(1).collect(),
+                            near: false,
+                        };
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                }
+            }
         }
 
         let mut paths = BTreeMap::new();
         for (source, equalities) in equalities_by_source {
+            let spatial = spatials_by_source.remove(&source);
             if let Some(path) = self.guarded_current_access_path(
                 read_view,
                 &source,
                 &equalities,
+                spatial.as_ref(),
                 allow_local,
                 allow_secondary_indexes,
                 AccessPathSelector::Ordinary,
@@ -4974,12 +5273,19 @@ where
         read_view: &ReadView<RequestedSourceStage>,
         source: &SourceId,
         equalities: &BTreeMap<String, Value>,
+        spatial: Option<&NormalizedSpatialAccess>,
         allow_local: bool,
         allow_secondary_indexes: bool,
         selector: AccessPathSelector,
         covered_column: Option<&str>,
     ) -> Result<Option<CurrentAccessPath>, Error> {
         let Some(tier) = read_view.source_current_tier(source) else {
+            if let Some(spatial) = spatial {
+                return Err(Error::UnsupportedSpatialQuery(format!(
+                    "spatial reads of '{}.{}' require a current Global or Local view",
+                    source.table, spatial.column
+                )));
+            }
             return Ok(None);
         };
         // Local sources still combine the selected settled candidates
@@ -4987,22 +5293,56 @@ where
         // newer row which leaves an equality prefix cannot leave behind a
         // stale settled match. Any other tier keeps its full source.
         if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
+            if let Some(spatial) = spatial {
+                return Err(Error::UnsupportedSpatialQuery(format!(
+                    "spatial reads of '{}.{}' are not supported at {tier:?} durability",
+                    source.table, spatial.column
+                )));
+            }
             return Ok(None);
         }
         let table = self.table_in_schema_ref(&source.table, read_view.read_schema)?;
         let selected = match selector {
             AccessPathSelector::Ordinary => {
-                select_current_access_path(table, equalities).or_else(|| {
-                    covered_column.and_then(|covered| {
-                        select_composite_leading_equality_access_path(table, equalities, covered)
+                if let Some(spatial) = spatial {
+                    let mut path =
+                        select_spatial_ranges_access_path(table, &spatial.column, &spatial.ranges);
+                    for (column, ranges) in &spatial.alternates {
+                        if select_spatial_ranges_access_path(table, column, ranges).is_none() {
+                            return Err(Error::SpatialIndexUnavailable {
+                                table: source.table.clone(),
+                                column: column.clone(),
+                            });
+                        }
+                    }
+                    if let Some(CurrentAccessPath::Index {
+                        spatial_alternates, ..
+                    }) = &mut path
+                    {
+                        *spatial_alternates = spatial.alternates.clone();
+                    }
+                    path
+                } else {
+                    select_current_access_path(table, equalities).or_else(|| {
+                        covered_column.and_then(|covered| {
+                            select_composite_leading_equality_access_path(
+                                table, equalities, covered,
+                            )
+                        })
                     })
-                })
+                }
             }
             AccessPathSelector::CompositeEquality => {
                 select_composite_equality_access_path(table, equalities)
             }
         };
         let Some(mut path) = selected else {
+            if let Some(spatial) = spatial {
+                return Err(Error::SpatialIndexUnavailable {
+                    table: source.table.clone(),
+                    column: spatial.column.clone(),
+                });
+            }
             return Ok(None);
         };
         // Authorization dependencies are cached by policy shape and claim
@@ -5012,6 +5352,12 @@ where
         // graphs identity-neutral; maintained root views are compiled for
         // this concrete request and may safely select their own index.
         if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+            if let Some(spatial) = spatial {
+                return Err(Error::SpatialIndexUnavailable {
+                    table: source.table.clone(),
+                    column: spatial.column.clone(),
+                });
+            }
             return Ok(None);
         }
         if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
@@ -5158,6 +5504,7 @@ where
                             &request.reads.primary,
                             &root,
                             &equalities,
+                            None,
                             true,
                             true,
                             AccessPathSelector::Ordinary,
@@ -5192,6 +5539,8 @@ where
                         reverse,
                         prefix,
                         intersections,
+                        spatial_ranges: None,
+                        spatial_alternates: _,
                         maintained,
                         source_limit,
                         candidate_filter,
@@ -5199,6 +5548,7 @@ where
                         &request.reads.primary,
                         &root,
                         &equalities,
+                        None,
                         true,
                         true,
                         AccessPathSelector::CompositeEquality,
@@ -5218,6 +5568,8 @@ where
                                 reverse,
                                 prefix,
                                 intersections,
+                                spatial_ranges: None,
+                                spatial_alternates: Vec::new(),
                                 maintained,
                                 source_limit,
                                 candidate_filter,
@@ -5307,6 +5659,7 @@ where
                                 &request.reads.primary,
                                 join_source,
                                 &equalities,
+                                None,
                                 true,
                                 true,
                                 AccessPathSelector::Ordinary,
@@ -5530,6 +5883,105 @@ where
             .database
             .index_prefix_entries_up_to(&storage_table, &index, &scan_prefix, max_items)
             .await?)
+    }
+
+    /// Read rows through the versioned S2-derived U64 point key. Each S2
+    /// covering interval is a half-open range over the complete encoded
+    /// `(branch_key, cell_id)` prefix, so all row-identity suffixes belonging
+    /// to the last included cell are retained.
+    fn physical_current_spatial_index_scan_in(
+        &self,
+        class: PhysicalCurrentClass,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        branch_key: &BranchKey,
+        column: &str,
+        ranges: &[groove::spatial::S2CellRange],
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table.name))
+            .ok_or(Error::InvalidStoredValue(
+                "physical spatial index table mapping missing",
+            ))?;
+        let column_id = mapping
+            .columns
+            .get(column)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical spatial index column mapping missing",
+            ))?;
+        let storage_table =
+            self.physical_current_table_for_schema(schema_version, &table.name, class)?;
+        let index = physical_current_index_name(column_id);
+        let branch = LiteralValue::Bytes(branch_key.canonical_bytes());
+        let scans = ranges
+            .iter()
+            .map(|range| {
+                GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    index.clone(),
+                    projection_target,
+                    StaticScanSpec::Range {
+                        start: vec![branch.clone(), LiteralValue::U64(range.start)],
+                        end: vec![branch.clone(), LiteralValue::U64(range.end_exclusive)],
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(GraphBuilder::union(scans))
+    }
+
+    /// Combine bounded candidate streams for a positive area OR over several
+    /// Point columns. One row can occur in more than one stream, so reduce the
+    /// candidate multiset to one current row per physical identity before the
+    /// original boolean predicate and relationship operators run.
+    #[allow(clippy::too_many_arguments)]
+    fn physical_current_spatial_candidate_scan_in(
+        &self,
+        class: PhysicalCurrentClass,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        branch_key: &BranchKey,
+        column: &str,
+        ranges: &[groove::spatial::S2CellRange],
+        alternates: &[(String, Vec<groove::spatial::S2CellRange>)],
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
+        let mut candidates = vec![self.physical_current_spatial_index_scan_in(
+            class,
+            table,
+            schema_version,
+            branch_key,
+            column,
+            ranges,
+            projection_target,
+        )?];
+        for (alternate_column, alternate_ranges) in alternates {
+            candidates.push(self.physical_current_spatial_index_scan_in(
+                class,
+                table,
+                schema_version,
+                branch_key,
+                alternate_column,
+                alternate_ranges,
+                projection_target,
+            )?);
+        }
+        if candidates.len() == 1 {
+            return Ok(candidates.pop().expect("one spatial candidate stream"));
+        }
+        Ok(GraphBuilder::top_by(
+            GraphBuilder::union(candidates),
+            ["row_uuid"],
+            [],
+            ["row_uuid"],
+            0,
+            groove::ivm::TopByLimit::Finite(1),
+        ))
     }
 
     /// Read one physical current class under an index prefix of one branch
@@ -5768,6 +6220,502 @@ fn normalized_program_equalities(
     }
 }
 
+fn normalized_program_spatials(
+    shape: &NormalizedRowSetShape,
+    node_id: &RowSetNodeId,
+) -> Result<Option<BTreeMap<SourceId, NormalizedSpatialAccess>>, Error> {
+    let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+        "normalized spatial access-path node missing",
+    ))?;
+    match node {
+        RowSetExpr::Filter { input, predicate } => {
+            let Some(mut spatials) = normalized_program_spatials(shape, input)? else {
+                return Ok(None);
+            };
+            if let Some((source, spatial)) = normalized_spatial_anchor(predicate)? {
+                match spatials.entry(source) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(spatial);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry)
+                        if spatial.near && !entry.get().near =>
+                    {
+                        entry.insert(spatial);
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                }
+            }
+            Ok(Some(spatials))
+        }
+        RowSetExpr::Distinct { input, .. }
+        | RowSetExpr::OrderBy { input, .. }
+        | RowSetExpr::Project { input, .. }
+        | RowSetExpr::Slice { input, .. } => normalized_program_spatials(shape, input),
+        RowSetExpr::Source { .. } => Ok(Some(BTreeMap::new())),
+        RowSetExpr::Aggregate { .. }
+        | RowSetExpr::CorrelatedPathProjection { .. }
+        | RowSetExpr::FrontierSource { .. }
+        | RowSetExpr::Join { .. }
+        | RowSetExpr::RecursiveRelation { .. }
+        | RowSetExpr::Union { .. }
+        | RowSetExpr::ValueSource { .. } => Ok(None),
+    }
+}
+
+fn normalized_shape_has_spatial(shape: &NormalizedRowSetShape) -> bool {
+    fn predicate_has_spatial(predicate: &NormalizedPredicateExpr) -> bool {
+        match predicate {
+            NormalizedPredicateExpr::Spatial { .. } => true,
+            NormalizedPredicateExpr::And(predicates) | NormalizedPredicateExpr::Or(predicates) => {
+                predicates.iter().any(predicate_has_spatial)
+            }
+            NormalizedPredicateExpr::Not(predicate) => predicate_has_spatial(predicate),
+            NormalizedPredicateExpr::EnumMatch { payload, .. } => predicate_has_spatial(payload),
+            NormalizedPredicateExpr::True
+            | NormalizedPredicateExpr::False
+            | NormalizedPredicateExpr::Compare { .. }
+            | NormalizedPredicateExpr::In { .. }
+            | NormalizedPredicateExpr::ArrayContains { .. }
+            | NormalizedPredicateExpr::TextContains { .. }
+            | NormalizedPredicateExpr::IsNull(_)
+            | NormalizedPredicateExpr::IsNotNull(_) => false,
+        }
+    }
+    shape.nodes.values().any(|node| match node {
+        RowSetExpr::Filter { predicate, .. } => predicate_has_spatial(predicate),
+        RowSetExpr::Join { on, .. } => predicate_has_spatial(on),
+        RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
+            predicate_has_spatial(correlation)
+        }
+        _ => false,
+    })
+}
+
+/// Sum the geometry and normalized-range costs of every spatial predicate in
+/// the complete normalized program, including nested relation scopes and OR
+/// branches. This admission check runs before the query source graphs are
+/// prepared or any storage candidate scan is built.
+fn normalized_shape_spatial_budget(shape: &NormalizedRowSetShape) -> (usize, usize) {
+    fn predicate_budget(predicate: &NormalizedPredicateExpr) -> (usize, usize) {
+        match predicate {
+            NormalizedPredicateExpr::Spatial { predicate, .. } => {
+                (predicate.vertex_count(), predicate.ranges().len())
+            }
+            NormalizedPredicateExpr::And(predicates) | NormalizedPredicateExpr::Or(predicates) => {
+                predicates
+                    .iter()
+                    .fold((0usize, 0usize), |(vertices, ranges), predicate| {
+                        let (predicate_vertices, predicate_ranges) = predicate_budget(predicate);
+                        (
+                            vertices.saturating_add(predicate_vertices),
+                            ranges.saturating_add(predicate_ranges),
+                        )
+                    })
+            }
+            NormalizedPredicateExpr::Not(predicate) => predicate_budget(predicate),
+            NormalizedPredicateExpr::EnumMatch { payload, .. } => predicate_budget(payload),
+            NormalizedPredicateExpr::True
+            | NormalizedPredicateExpr::False
+            | NormalizedPredicateExpr::Compare { .. }
+            | NormalizedPredicateExpr::In { .. }
+            | NormalizedPredicateExpr::ArrayContains { .. }
+            | NormalizedPredicateExpr::TextContains { .. }
+            | NormalizedPredicateExpr::IsNull(_)
+            | NormalizedPredicateExpr::IsNotNull(_) => (0, 0),
+        }
+    }
+
+    shape
+        .nodes
+        .values()
+        .fold((0usize, 0usize), |(vertices, ranges), node| {
+            let predicate = match node {
+                RowSetExpr::Filter { predicate, .. } => Some(predicate),
+                RowSetExpr::Join { on, .. } => Some(on),
+                RowSetExpr::CorrelatedPathProjection { correlation, .. } => Some(correlation),
+                _ => None,
+            };
+            let (node_vertices, node_ranges) = predicate.map(predicate_budget).unwrap_or((0, 0));
+            (
+                vertices.saturating_add(node_vertices),
+                ranges.saturating_add(node_ranges),
+            )
+        })
+}
+
+fn normalized_shape_sources(shape: &NormalizedRowSetShape) -> BTreeSet<SourceId> {
+    let mut sources = shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .chain(shape.auxiliary_sources.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    for path in &shape.closure_paths {
+        match path {
+            ClosurePath::ImplicitRootReference { segment, .. } => {
+                sources.insert(segment.parent.clone());
+                sources.insert(segment.target.clone());
+            }
+            ClosurePath::ExplicitInclude { segments, .. } => {
+                for segment in segments {
+                    sources.insert(segment.parent.clone());
+                    sources.insert(segment.target.clone());
+                }
+            }
+        }
+    }
+    for contribution in &shape.join_contributions {
+        if let Some(parent) = &contribution.parent {
+            sources.insert(parent.clone());
+        }
+        sources.insert(contribution.source.clone());
+    }
+    for contribution in &shape.inherited_contributions {
+        sources.insert(contribution.source.clone());
+    }
+    for contribution in &shape.reachable_contributions {
+        sources.insert(contribution.access_source.clone());
+        sources.insert(contribution.edge_source.clone());
+    }
+    sources
+}
+
+/// Collect the stored sources reachable from one row-set node. Union arms
+/// share logical SourceIds, so this helper is deliberately rooted at each arm
+/// when checking whether every arm has its own spatial bound.
+fn normalized_node_sources(
+    shape: &NormalizedRowSetShape,
+    root: &RowSetNodeId,
+) -> Result<BTreeSet<SourceId>, Error> {
+    fn visit(
+        shape: &NormalizedRowSetShape,
+        node_id: &RowSetNodeId,
+        visited: &mut BTreeSet<RowSetNodeId>,
+        sources: &mut BTreeSet<SourceId>,
+    ) -> Result<(), Error> {
+        if !visited.insert(node_id.clone()) {
+            return Ok(());
+        }
+        let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+            "normalized union access-path node missing",
+        ))?;
+        match node {
+            RowSetExpr::Source { source, .. } => {
+                sources.insert(source.clone());
+            }
+            RowSetExpr::Filter { input, .. }
+            | RowSetExpr::Distinct { input, .. }
+            | RowSetExpr::OrderBy { input, .. }
+            | RowSetExpr::Project { input, .. }
+            | RowSetExpr::Slice { input, .. }
+            | RowSetExpr::Aggregate { input, .. } => {
+                visit(shape, input, visited, sources)?;
+            }
+            RowSetExpr::Join { left, right, .. } => {
+                visit(shape, left, visited, sources)?;
+                visit(shape, right, visited, sources)?;
+            }
+            RowSetExpr::RecursiveRelation { seed, step, .. } => {
+                visit(shape, seed, visited, sources)?;
+                visit(shape, step, visited, sources)?;
+            }
+            RowSetExpr::Union { inputs } => {
+                for input in inputs {
+                    visit(shape, &input.node, visited, sources)?;
+                }
+            }
+            RowSetExpr::CorrelatedPathProjection {
+                input, child_input, ..
+            } => {
+                visit(shape, input, visited, sources)?;
+                visit(shape, child_input, visited, sources)?;
+            }
+            RowSetExpr::FrontierSource { .. } | RowSetExpr::ValueSource { .. } => {}
+        }
+        Ok(())
+    }
+
+    let mut sources = BTreeSet::new();
+    visit(shape, root, &mut BTreeSet::new(), &mut sources)?;
+    Ok(sources)
+}
+
+/// Return source identities with a positive spatial predicate on the path to
+/// `root`. A `NOT` predicate never creates a bound; an OR contributes only
+/// when every branch has an indexable positive spatial anchor.
+fn normalized_node_spatial_sources(
+    shape: &NormalizedRowSetShape,
+    root: &RowSetNodeId,
+) -> Result<BTreeSet<SourceId>, Error> {
+    fn visit(
+        shape: &NormalizedRowSetShape,
+        node_id: &RowSetNodeId,
+        visited: &mut BTreeSet<RowSetNodeId>,
+        sources: &mut BTreeSet<SourceId>,
+    ) -> Result<(), Error> {
+        if !visited.insert(node_id.clone()) {
+            return Ok(());
+        }
+        let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+            "normalized union spatial-bound node missing",
+        ))?;
+        match node {
+            RowSetExpr::Filter { input, predicate } => {
+                visit(shape, input, visited, sources)?;
+                if let Some((source, _)) = normalized_spatial_anchor(predicate)? {
+                    sources.insert(source);
+                }
+            }
+            RowSetExpr::Join {
+                left, right, on, ..
+            } => {
+                visit(shape, left, visited, sources)?;
+                visit(shape, right, visited, sources)?;
+                if let Some((source, _)) = normalized_spatial_anchor(on)? {
+                    sources.insert(source);
+                }
+            }
+            RowSetExpr::CorrelatedPathProjection {
+                input,
+                child_input,
+                correlation,
+                ..
+            } => {
+                visit(shape, input, visited, sources)?;
+                visit(shape, child_input, visited, sources)?;
+                if let Some((source, _)) = normalized_spatial_anchor(correlation)? {
+                    sources.insert(source);
+                }
+            }
+            RowSetExpr::RecursiveRelation { seed, step, .. } => {
+                visit(shape, seed, visited, sources)?;
+                visit(shape, step, visited, sources)?;
+            }
+            RowSetExpr::Union { inputs } => {
+                for input in inputs {
+                    visit(shape, &input.node, visited, sources)?;
+                }
+            }
+            RowSetExpr::Distinct { input, .. }
+            | RowSetExpr::OrderBy { input, .. }
+            | RowSetExpr::Project { input, .. }
+            | RowSetExpr::Slice { input, .. }
+            | RowSetExpr::Aggregate { input, .. } => {
+                visit(shape, input, visited, sources)?;
+            }
+            RowSetExpr::Source { .. }
+            | RowSetExpr::FrontierSource { .. }
+            | RowSetExpr::ValueSource { .. } => {}
+        }
+        Ok(())
+    }
+
+    let mut sources = BTreeSet::new();
+    visit(shape, root, &mut BTreeSet::new(), &mut sources)?;
+    Ok(sources)
+}
+
+fn normalized_node_has_near_spatial(
+    shape: &NormalizedRowSetShape,
+    root: &RowSetNodeId,
+) -> Result<bool, Error> {
+    fn predicate_has_near(predicate: &NormalizedPredicateExpr) -> bool {
+        match predicate {
+            NormalizedPredicateExpr::Spatial { predicate, .. } => predicate.is_near(),
+            NormalizedPredicateExpr::And(predicates) | NormalizedPredicateExpr::Or(predicates) => {
+                predicates.iter().any(predicate_has_near)
+            }
+            NormalizedPredicateExpr::Not(predicate) => predicate_has_near(predicate),
+            NormalizedPredicateExpr::EnumMatch { payload, .. } => predicate_has_near(payload),
+            NormalizedPredicateExpr::True
+            | NormalizedPredicateExpr::False
+            | NormalizedPredicateExpr::Compare { .. }
+            | NormalizedPredicateExpr::In { .. }
+            | NormalizedPredicateExpr::ArrayContains { .. }
+            | NormalizedPredicateExpr::TextContains { .. }
+            | NormalizedPredicateExpr::IsNull(_)
+            | NormalizedPredicateExpr::IsNotNull(_) => false,
+        }
+    }
+
+    fn visit(
+        shape: &NormalizedRowSetShape,
+        node_id: &RowSetNodeId,
+        visited: &mut BTreeSet<RowSetNodeId>,
+    ) -> Result<bool, Error> {
+        if !visited.insert(node_id.clone()) {
+            return Ok(false);
+        }
+        let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+            "normalized union near-bound node missing",
+        ))?;
+        let (children, local_near): (Vec<&RowSetNodeId>, bool) = match node {
+            RowSetExpr::Source { .. }
+            | RowSetExpr::FrontierSource { .. }
+            | RowSetExpr::ValueSource { .. } => (Vec::new(), false),
+            RowSetExpr::Filter { input, predicate } => (vec![input], predicate_has_near(predicate)),
+            RowSetExpr::Join {
+                left, right, on, ..
+            } => (vec![left, right], predicate_has_near(on)),
+            RowSetExpr::CorrelatedPathProjection {
+                input,
+                child_input,
+                correlation,
+                ..
+            } => (vec![input, child_input], predicate_has_near(correlation)),
+            RowSetExpr::RecursiveRelation { seed, step, .. } => (vec![seed, step], false),
+            RowSetExpr::Union { inputs } => {
+                let mut found = false;
+                for input in inputs {
+                    found |= visit(shape, &input.node, visited)?;
+                }
+                (Vec::new(), found)
+            }
+            RowSetExpr::Distinct { input, .. }
+            | RowSetExpr::OrderBy { input, .. }
+            | RowSetExpr::Project { input, .. }
+            | RowSetExpr::Slice { input, .. }
+            | RowSetExpr::Aggregate { input, .. } => (vec![input], false),
+        };
+        if local_near {
+            return Ok(true);
+        }
+        for child in children {
+            if visit(shape, child, visited)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    visit(shape, root, &mut BTreeSet::new())
+}
+
+fn normalized_spatial_anchor(
+    predicate: &NormalizedPredicateExpr,
+) -> Result<Option<(SourceId, NormalizedSpatialAccess)>, Error> {
+    match predicate {
+        NormalizedPredicateExpr::Spatial { value, predicate } => {
+            let Some((source, column)) = normalized_program_source_field(value) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                source,
+                NormalizedSpatialAccess {
+                    column,
+                    ranges: predicate.ranges().to_vec(),
+                    alternates: Vec::new(),
+                    near: predicate.is_near(),
+                },
+            )))
+        }
+        NormalizedPredicateExpr::And(predicates) => {
+            let anchors = predicates
+                .iter()
+                .map(normalized_spatial_anchor)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            if let Some(anchor) = anchors.iter().find(|(_, spatial)| spatial.near) {
+                return Ok(Some(anchor.clone()));
+            }
+            Ok(anchors.into_iter().next())
+        }
+        NormalizedPredicateExpr::Or(predicates) => {
+            let mut anchors = Vec::with_capacity(predicates.len());
+            for predicate in predicates {
+                let Some(anchor) = normalized_spatial_anchor(predicate)? else {
+                    // Every branch must have a positive indexed anchor; a
+                    // partially anchored OR cannot safely avoid a full scan.
+                    return Ok(None);
+                };
+                anchors.push(anchor);
+            }
+            let Some((source, first)) = anchors.first().cloned() else {
+                return Ok(None);
+            };
+            if first.near
+                || anchors
+                    .iter()
+                    .any(|(branch_source, spatial)| spatial.near || *branch_source != source)
+            {
+                // Near has one query-scope ranking order and cannot be
+                // combined with branch-local alternatives. Area predicates
+                // may use different Point columns; each index contributes a
+                // candidate stream and the exact original OR remains in the
+                // query graph.
+                return Ok(None);
+            }
+            let mut by_column = BTreeMap::<String, Vec<groove::spatial::S2CellRange>>::new();
+            for (_, spatial) in anchors {
+                by_column
+                    .entry(spatial.column)
+                    .or_default()
+                    .extend(spatial.ranges);
+                for (column, ranges) in spatial.alternates {
+                    by_column.entry(column).or_default().extend(ranges);
+                }
+            }
+            let mut accesses = by_column
+                .into_iter()
+                .map(|(column, ranges)| Ok((column, merge_spatial_ranges(ranges)?)))
+                .collect::<Result<Vec<_>, Error>>()?;
+            accesses.sort_by(|left, right| left.0.cmp(&right.0));
+            let (column, ranges) = accesses
+                .first()
+                .cloned()
+                .expect("non-empty spatial OR anchors have a column");
+            Ok(Some((
+                source,
+                NormalizedSpatialAccess {
+                    column,
+                    ranges,
+                    alternates: accesses.into_iter().skip(1).collect(),
+                    near: false,
+                },
+            )))
+        }
+        NormalizedPredicateExpr::Not(_) => Ok(None),
+        NormalizedPredicateExpr::True
+        | NormalizedPredicateExpr::False
+        | NormalizedPredicateExpr::Compare { .. }
+        | NormalizedPredicateExpr::In { .. }
+        | NormalizedPredicateExpr::ArrayContains { .. }
+        | NormalizedPredicateExpr::TextContains { .. }
+        | NormalizedPredicateExpr::IsNull(_)
+        | NormalizedPredicateExpr::IsNotNull(_)
+        | NormalizedPredicateExpr::EnumMatch { .. } => Ok(None),
+    }
+}
+
+fn merge_spatial_ranges(
+    ranges: impl IntoIterator<Item = groove::spatial::S2CellRange>,
+) -> Result<Vec<groove::spatial::S2CellRange>, Error> {
+    let mut ranges = ranges.into_iter().collect::<Vec<_>>();
+    ranges.sort_unstable();
+    let mut merged: Vec<groove::spatial::S2CellRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end_exclusive
+        {
+            previous.end_exclusive = previous.end_exclusive.max(range.end_exclusive);
+        } else {
+            merged.push(range);
+        }
+        if merged.len() > groove::spatial::MAX_SCAN_RANGES {
+            return Err(Error::UnsupportedSpatialQuery(format!(
+                "spatial OR range union exceeds the {} scan range budget",
+                groove::spatial::MAX_SCAN_RANGES
+            )));
+        }
+    }
+    Ok(merged)
+}
+
 fn collect_normalized_program_equalities(
     predicate: &NormalizedPredicateExpr,
     binding: &ProgramBinding,
@@ -5811,6 +6759,7 @@ fn collect_normalized_program_equalities(
         | NormalizedPredicateExpr::IsNotNull(_)
         | NormalizedPredicateExpr::IsNull(_)
         | NormalizedPredicateExpr::Not(_)
+        | NormalizedPredicateExpr::Spatial { .. }
         | NormalizedPredicateExpr::TextContains { .. } => {}
         // Do not descend into a disjunction: an equality within only one
         // branch is not a restriction on the other branch. An enclosing AND
@@ -6578,6 +7527,8 @@ fn select_composite_equality_access_path(
                 physical_current_index_value(table, second, second_value),
             ],
             intersections,
+            spatial_ranges: None,
+            spatial_alternates: Vec::new(),
             maintained: false,
             candidate_filter: None,
             source_limit: None,
@@ -6762,6 +7713,8 @@ fn attach_covered_join_key_filter(
         reverse: false,
         prefix,
         intersections,
+        spatial_ranges: None,
+        spatial_alternates: _,
         candidate_filter,
         maintained: false,
         source_limit: None,

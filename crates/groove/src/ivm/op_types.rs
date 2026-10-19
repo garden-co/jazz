@@ -386,6 +386,9 @@ pub struct TopByOp {
     pub group_field_indices: Vec<usize>,
     /// Ordered fields, before tie fields.
     pub order_fields: Vec<TopByOrderField>,
+    /// Optional spherical distance ordering over the first order field. The
+    /// field carries a point value and is ranked by exact distance to center.
+    pub spatial_order: Option<TopBySpatialOrder>,
     /// Stable tie fields appended after `order_fields`.
     pub tie_fields: Vec<String>,
     /// Resolved logical field indices for `order_fields` plus `tie_fields`.
@@ -396,6 +399,16 @@ pub struct TopByOp {
     pub offset: u64,
     /// Finite retained length or an explicitly unbounded suffix.
     pub limit: TopByLimit,
+}
+
+/// Exact near-order descriptor for a point field already bounded by a spatial
+/// predicate in the same query scope.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TopBySpatialOrder {
+    /// Point field name in the TopBy input descriptor.
+    pub field: String,
+    /// Center as WGS84 `[longitude, latitude]` degrees.
+    pub center: [u64; 2],
 }
 
 /// Retained-length bound for a [`TopByOp`] window.
@@ -484,6 +497,10 @@ pub struct CollectByOp {
     pub occurrence_id_fields: Vec<String>,
     pub occurrence_id_field_indices: Vec<usize>,
     pub order_fields: Vec<TopByOrderField>,
+    /// Optional nearest-first ordering for a Point order field. This stays
+    /// internal to the maintained result collector; the point itself remains
+    /// the source value and no derived distance is persisted.
+    pub spatial_order: Option<TopBySpatialOrder>,
     pub tie_fields: Vec<String>,
     pub sort_field_indices: Vec<usize>,
     pub sort_directions: Vec<TopByDirection>,
@@ -652,6 +669,15 @@ pub enum PredicateExpr {
         field: String,
         case_tag: u32,
         payload: Box<PredicateExpr>,
+    },
+    /// Exact spherical point predicate, evaluated after an S2 candidate scan.
+    Spatial {
+        field: String,
+        predicate: crate::spatial::SpatialPredicate,
+        /// Negate after evaluating the exact predicate. NULL points are
+        /// non-matches and therefore follow Jazz's existing two-valued NOT
+        /// semantics here.
+        negated: bool,
     },
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),

@@ -861,11 +861,31 @@ pub(super) fn physical_version_storage_tables(
                     .filter_map(|column| mapping.columns.get(&column).copied())
             })
             .collect::<BTreeSet<_>>();
+        let spatial_columns = variants
+            .iter()
+            .flat_map(|(_, logical_table, mapping, _)| {
+                logical_table
+                    .columns
+                    .iter()
+                    .filter(|column| column.geo_point)
+                    .filter_map(|column| mapping.columns.get(&column.name).copied())
+            })
+            .collect::<BTreeSet<_>>();
         for &column_id in &indexed_columns {
-            physical_global = physical_global.with_index(GrooveIndexSchema::new(
-                physical_current_index_name(column_id),
-                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
-            ));
+            let physical_column = physical_user_column_field(column_id);
+            let index = if spatial_columns.contains(&column_id) {
+                GrooveIndexSchema::s2_point_v1(
+                    physical_current_index_name(column_id),
+                    vec!["branch_key".to_owned(), physical_column.clone()],
+                    physical_column,
+                )
+            } else {
+                GrooveIndexSchema::new(
+                    physical_current_index_name(column_id),
+                    vec!["branch_key".to_owned(), physical_column],
+                )
+            };
+            physical_global = physical_global.with_index(index);
         }
         let composite_indexes = variants
             .iter()
@@ -891,12 +911,21 @@ pub(super) fn physical_version_storage_tables(
             current_columns(),
         );
         physical_ahead.primary_key = logical_ahead.primary_key.clone();
-        physical_ahead.indices = logical_ahead.indices.clone();
         for column_id in indexed_columns {
-            physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
-                physical_current_index_name(column_id),
-                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
-            ));
+            let physical_column = physical_user_column_field(column_id);
+            let index = if spatial_columns.contains(&column_id) {
+                GrooveIndexSchema::s2_point_v1(
+                    physical_current_index_name(column_id),
+                    vec!["branch_key".to_owned(), physical_column.clone()],
+                    physical_column,
+                )
+            } else {
+                GrooveIndexSchema::new(
+                    physical_current_index_name(column_id),
+                    vec!["branch_key".to_owned(), physical_column],
+                )
+            };
+            physical_ahead = physical_ahead.with_index(index);
         }
         for column_ids in &composite_indexes {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(

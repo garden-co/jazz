@@ -2917,6 +2917,7 @@ pub(crate) fn query_uses_claims(query: &crate::query::Query) -> bool {
             In(a, list) => operand(a) || list.iter().any(operand),
             EnumMatch { payload, .. } => predicate(payload),
             IsNull(a) => operand(a),
+            SpatialNear { .. } | SpatialWithin { .. } | SpatialIntersects { .. } => false,
         }
     }
     query.filters.iter().any(predicate)

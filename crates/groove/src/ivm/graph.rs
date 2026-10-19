@@ -1648,6 +1648,9 @@ pub enum ProjectExpr {
 pub struct TopByOrder {
     pub field: FieldRef,
     pub direction: TopByDirection,
+    /// When set, order this point field by spherical distance to the supplied
+    /// WGS84 center instead of by its array value.
+    pub spatial_center: Option<[u64; 2]>,
 }
 
 /// Named source field in a `CollectBy` parent or child projection.
@@ -1696,6 +1699,7 @@ impl TopByOrder {
         Self {
             field: FieldRef::name(field),
             direction: TopByDirection::Asc,
+            spatial_center: None,
         }
     }
 
@@ -1703,6 +1707,16 @@ impl TopByOrder {
         Self {
             field: FieldRef::name(field),
             direction: TopByDirection::Desc,
+            spatial_center: None,
+        }
+    }
+
+    /// Order point values by ascending spherical distance from `center`.
+    pub fn spatial_distance(field: impl Into<String>, center: [f64; 2]) -> Self {
+        Self {
+            field: FieldRef::name(field),
+            direction: TopByDirection::Asc,
+            spatial_center: Some(center.map(f64::to_bits)),
         }
     }
 }
@@ -2279,9 +2293,31 @@ impl NodeDescriptor {
                         });
                     }
                 }
-                for &field_idx in &top_by.sort_field_indices {
-                    if !collect_by_ordered_scalar(&input_outputs[0].fields()[field_idx].value_type)
+                if let Some(spatial_order) = &top_by.spatial_order {
+                    let Some(order_field) = top_by.order_fields.first() else {
+                        return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
+                    };
+                    if order_field.field != spatial_order.field
+                        || top_by.sort_field_indices.is_empty()
+                        || crate::spatial::GeoPoint::new(
+                            f64::from_bits(spatial_order.center[0]),
+                            f64::from_bits(spatial_order.center[1]),
+                        )
+                        .is_err()
                     {
+                        return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
+                    }
+                }
+                for (position, &field_idx) in top_by.sort_field_indices.iter().enumerate() {
+                    let value_type = &input_outputs[0].fields()[field_idx].value_type;
+                    let spatial_point = position == 0
+                        && top_by.spatial_order.is_some()
+                        && matches!(
+                            value_type.non_nullable(),
+                            ValueType::Array(element)
+                                if matches!(element.as_ref(), ValueType::F64)
+                        );
+                    if !spatial_point && !collect_by_ordered_scalar(value_type) {
                         return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
                     }
                 }
@@ -2373,11 +2409,7 @@ impl NodeDescriptor {
                             return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
                         }
                     }
-                    for &field_idx in collect_by
-                        .group_field_indices
-                        .iter()
-                        .chain(&collect_by.sort_field_indices)
-                    {
+                    for &field_idx in &collect_by.group_field_indices {
                         let value_type = input_outputs[0]
                             .fields()
                             .get(field_idx)
@@ -2388,6 +2420,40 @@ impl NodeDescriptor {
                             .value_type
                             .clone();
                         if !collect_by_ordered_scalar(&value_type) || value_type.contains_record() {
+                            return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
+                        }
+                    }
+                    for (sort_index, &field_idx) in collect_by.sort_field_indices.iter().enumerate()
+                    {
+                        let value_type = input_outputs[0]
+                            .fields()
+                            .get(field_idx)
+                            .ok_or(GraphValidationError::FieldIndexOutOfBounds {
+                                index: field_idx,
+                                len: input_outputs[0].fields().len(),
+                            })?
+                            .value_type
+                            .clone();
+                        let is_spatial_point = sort_index == 0
+                            && collect_by.spatial_order.as_ref().is_some_and(|spatial| {
+                                collect_by.order_fields.first().is_some_and(|order| {
+                                    order.field == spatial.field
+                                        && order.field
+                                            == input_outputs[0].fields()[field_idx]
+                                                .name
+                                                .as_deref()
+                                                .unwrap_or_default()
+                                })
+                            })
+                            && matches!(
+                                value_type.non_nullable(),
+                                ValueType::Array(element)
+                                    if matches!(element.as_ref(), ValueType::F64)
+                            );
+                        if !is_spatial_point
+                            && (!collect_by_ordered_scalar(&value_type)
+                                || value_type.contains_record())
+                        {
                             return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
                         }
                     }
@@ -3114,6 +3180,7 @@ mod tests {
                     field: "rank".to_owned(),
                     direction: TopByDirection::Asc,
                 }],
+                spatial_order: None,
                 tie_fields: vec!["tie".to_owned()],
                 // `sort_field_indices` is deliberately the concatenation of
                 // order and tie fields. Validate every member, not only the
@@ -3296,6 +3363,7 @@ mod tests {
                         field: "f0".to_owned(),
                         direction: TopByDirection::Asc,
                     }],
+                    spatial_order: None,
                     tie_fields: vec!["f0".to_owned()],
                     sort_field_indices: vec![0, 0],
                     sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],

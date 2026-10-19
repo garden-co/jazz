@@ -306,6 +306,9 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(8);
       hashColumns(writer, columnType.columns);
       return;
+    case "Point":
+      writer.byte(17);
+      return;
   }
 
   const exhaustive: never = columnType;

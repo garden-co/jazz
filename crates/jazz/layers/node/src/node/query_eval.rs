@@ -836,6 +836,8 @@ where
             intersections,
             source_limit,
             maintained,
+            spatial_ranges: None,
+            spatial_alternates,
             // A covered-key filter is only attached to join paths; a root
             // path carrying one is not a plain ordered-page candidate.
             candidate_filter: None,
@@ -847,6 +849,7 @@ where
             || order_column.is_some()
             || prefix.len() != 1
             || !intersections.is_empty()
+            || !spatial_alternates.is_empty()
             || source_limit.is_some()
         {
             return Ok(None);
@@ -5180,6 +5183,9 @@ fn predicate_params(predicates: &[Predicate]) -> BTreeSet<String> {
             Predicate::EnumMatch { payload, .. } => {
                 params.extend(predicate_params(std::slice::from_ref(payload)));
             }
+            Predicate::SpatialNear { .. }
+            | Predicate::SpatialWithin { .. }
+            | Predicate::SpatialIntersects { .. } => {}
         }
     }
     params

@@ -132,6 +132,11 @@ pub enum ColumnType {
     /// Heterogeneous row/tuple of values with a known schema.
     /// Used for nested rows (e.g., array of rows from subquery).
     Row { columns: Box<RowDescriptor> },
+    /// A WGS84 geographic point stored as `[longitude, latitude]`.
+    ///
+    /// This remains semantically distinct from an ordinary two-element array
+    /// even though both currently share the same physical Groove value shape.
+    Point,
 }
 
 impl ColumnType {

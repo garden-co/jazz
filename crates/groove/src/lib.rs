@@ -21,6 +21,9 @@ pub mod large_values;
 pub mod queries;
 pub mod records;
 pub mod schema;
+/// Version-pinned spherical geometry adapter used by indexed point queries.
+/// Public types are Groove-owned; S2 implementation types stay private.
+pub mod spatial;
 pub mod storage;
 
 pub use internment::Intern;

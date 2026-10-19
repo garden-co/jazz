@@ -69,11 +69,13 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_HOME",
         "JAZZ_RN_TEST_BRIDGE",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
-        "JAZZ_TEST_SEALED_TOOLS_DIST"
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "RUSTUP_HOME"
       ],
       "outputs": [
         "native-binding.pointer.cjs",
@@ -103,10 +105,12 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_HOME",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
-        "JAZZ_TEST_SEALED_TOOLS_DIST"
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "RUSTUP_HOME"
       ],
       "cache": false,
       "outputs": []
@@ -133,10 +137,12 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_HOME",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
-        "JAZZ_TEST_SEALED_TOOLS_DIST"
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "RUSTUP_HOME"
       ],
       "cache": false,
       "outputs": []

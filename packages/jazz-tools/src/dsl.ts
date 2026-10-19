@@ -18,6 +18,8 @@ import type {
   DropOp,
   RenameOp,
   ScalarSqlType,
+  PointSqlType,
+  Point,
   TSTypeFromSqlType,
   TSInitFromSqlType,
 } from "./schema.js";
@@ -256,6 +258,12 @@ export type FloatColumn<
   Value = number,
   Init = Value,
 > = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value, Init>;
+export type PointColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = Point,
+  Init = Value,
+> = TypedColumnBuilder<PointSqlType, Optional, undefined, HasDefault, Value, Init>;
 export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
@@ -442,6 +450,10 @@ class ScalarBuilder extends BaseColumnBuilder {
   }
 }
 
+class PointBuilder extends BaseColumnBuilder {
+  readonly _sqlType: PointSqlType = { kind: "POINT" };
+}
+
 class EnumBuilder extends BaseColumnBuilder {
   public _sqlType: EnumSqlType;
 
@@ -591,6 +603,12 @@ class AddBuilder {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
+  point<const TDefault extends Point | null>(opts: {
+    default: TDefault;
+  }): AddOp<PointSqlType, TDefault> {
+    return { _type: "add", sqlType: { kind: "POINT" }, default: opts.default };
+  }
+
   bytes<const TDefault extends Uint8Array | null>(opts: {
     default: TDefault;
   }): AddOp<"BYTEA", TDefault> {
@@ -693,6 +711,16 @@ class DropBuilder {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
   }
 
+  point<const TBackwardsDefault extends Point | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<PointSqlType, TBackwardsDefault> {
+    return {
+      _type: "drop",
+      sqlType: { kind: "POINT" },
+      backwardsDefault: opts.backwardsDefault,
+    };
+  }
+
   bytes<const TBackwardsDefault extends Uint8Array | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"BYTEA", TBackwardsDefault> {
@@ -766,6 +794,7 @@ export const schemaColumns = {
   bigint: () => new ScalarBuilder("BIGINT") as unknown as BigIntColumn,
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
+  point: () => new PointBuilder() as unknown as PointColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
   json: jsonColumn as unknown as {
     (): JsonColumn;

@@ -211,6 +211,19 @@ describe("toValue", () => {
     expect(toValue(0, colType)).toEqual({ type: "Double", value: 0 });
   });
 
+  it("validates and converts WGS84 point coordinates", () => {
+    expect(toValue([-69.9312, 18.4861], { type: "Point" })).toEqual({
+      type: "Array",
+      value: [
+        { type: "Double", value: -69.9312 },
+        { type: "Double", value: 18.4861 },
+      ],
+    });
+    for (const value of [[1], [181, 0], [0, -91], [NaN, 0], [0, Infinity], ["1", 2]]) {
+      expect(() => toValue(value, { type: "Point" })).toThrow("Point values");
+    }
+  });
+
   it("throws for unsupported column type", () => {
     const colType = { type: "Unknown" } as unknown as ColumnType;
     expect(() => toValue("test", colType)).toThrow("Unsupported column type");

@@ -6222,6 +6222,16 @@ function decodeBytes(
           nestedRowCarrier,
         ),
       };
+    case "Point":
+      return {
+        type: "Array",
+        value: decodeArrayBytes(
+          { type: "Double" },
+          bytes,
+          arrayElementStorageType(storageType),
+          nestedRowCarrier,
+        ),
+      };
     case "Row": {
       const value: Value = {
         type: "Row",

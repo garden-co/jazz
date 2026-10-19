@@ -344,6 +344,9 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
         }
+        ColumnType::Point => {
+            hasher.update(&[17]);
+        }
     }
 }
 

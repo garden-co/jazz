@@ -1200,12 +1200,85 @@ fn collect_by_sort_key(
     record: &[u8],
     collect_by: &CollectByOp,
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    if let Some(spatial_order) = &collect_by.spatial_order {
+        let point_field_idx = *collect_by.sort_field_indices.first().ok_or_else(|| {
+            IvmRuntimeError::InvalidCollectBy(
+                "spatial ordering has no Point order field".to_owned(),
+            )
+        })?;
+        let direction = *collect_by.sort_directions.first().ok_or_else(|| {
+            IvmRuntimeError::InvalidCollectBy("spatial ordering has no sort direction".to_owned())
+        })?;
+        let mut parts = vec![spatial_point_sort_part(
+            &descriptor,
+            record,
+            point_field_idx,
+            spatial_order.center,
+            direction,
+        )?];
+        for (field_idx, direction) in collect_by
+            .sort_field_indices
+            .iter()
+            .copied()
+            .skip(1)
+            .zip(collect_by.sort_directions.iter().copied().skip(1))
+        {
+            let field = descriptor
+                .fields()
+                .get(field_idx)
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+            let value = BorrowedRecord::new(record, &descriptor).get_idx(field_idx)?;
+            parts.push(TopBySortPart {
+                key: top_by_sort_value(&field.value_type, value)?,
+                direction,
+            });
+        }
+        return Ok(parts);
+    }
     collect_by_sort_key_for_fields(
         descriptor,
         record,
         &collect_by.sort_field_indices,
         &collect_by.sort_directions,
     )
+}
+
+fn spatial_point_sort_part(
+    descriptor: &RecordDescriptor,
+    record: &[u8],
+    field_idx: usize,
+    center_bits: [u64; 2],
+    direction: TopByDirection,
+) -> Result<TopBySortPart, IvmRuntimeError> {
+    let center = crate::spatial::GeoPoint::new(
+        f64::from_bits(center_bits[0]),
+        f64::from_bits(center_bits[1]),
+    )?;
+    let input = BorrowedRecord::new(record, descriptor);
+    let value = input.get_idx(field_idx)?;
+    let value = match value {
+        Value::Nullable(Some(inner)) => *inner,
+        Value::Nullable(None) => Value::Nullable(None),
+        value => value,
+    };
+    let key = match value {
+        Value::Nullable(None) => TopBySortKey::Null,
+        Value::Array(values) => {
+            let [Value::F64(longitude), Value::F64(latitude)] = values.as_slice() else {
+                return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                    "spatial order field is not an Array<F64> point",
+                ));
+            };
+            let point = crate::spatial::GeoPoint::new(*longitude, *latitude)?;
+            TopBySortKey::F64(ordered_f64_bits(center.distance_meters(point)))
+        }
+        _ => {
+            return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                "spatial order field is not an Array<F64> point",
+            ));
+        }
+    };
+    Ok(TopBySortPart { key, direction })
 }
 
 fn collect_by_sort_key_for_fields(
@@ -1264,13 +1337,7 @@ fn top_by_sort_value(
         (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
         (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
             let value = if value == 0.0 { 0.0 } else { value };
-            let bits = value.to_bits();
-            let ordered = if bits & (1 << 63) == 0 {
-                bits ^ (1 << 63)
-            } else {
-                !bits
-            };
-            TopBySortKey::F64(ordered)
+            TopBySortKey::F64(ordered_f64_bits(value))
         }
         (ValueType::Bool, Value::Bool(value)) => TopBySortKey::Bool(value),
         (ValueType::String, Value::String(value)) => TopBySortKey::String(value),
@@ -1291,12 +1358,72 @@ pub(super) fn top_by_sort_key(
     record: &[u8],
     top_by: &TopByOp,
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    if let Some(spatial_order) = &top_by.spatial_order {
+        let point_field = *top_by.sort_field_indices.first().ok_or_else(|| {
+            IvmRuntimeError::InvalidTopBy("spatial ordering has no Point sort field".to_owned())
+        })?;
+        let center = crate::spatial::GeoPoint::new(
+            f64::from_bits(spatial_order.center[0]),
+            f64::from_bits(spatial_order.center[1]),
+        )?;
+        let input = BorrowedRecord::new(record, &descriptor);
+        let value = input.get_idx(point_field)?;
+        let value = match value {
+            Value::Nullable(Some(inner)) => *inner,
+            Value::Nullable(None) => Value::Nullable(None),
+            value => value,
+        };
+        let key = match value {
+            Value::Nullable(None) => TopBySortKey::Null,
+            Value::Array(values) => {
+                let [Value::F64(longitude), Value::F64(latitude)] = values.as_slice() else {
+                    return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                        "spatial order field is not an Array<F64> point",
+                    ));
+                };
+                let point = crate::spatial::GeoPoint::new(*longitude, *latitude)?;
+                TopBySortKey::F64(ordered_f64_bits(center.distance_meters(point)))
+            }
+            _ => {
+                return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                    "spatial order field is not an Array<F64> point",
+                ));
+            }
+        };
+        let mut parts = vec![TopBySortPart {
+            key,
+            direction: top_by.order_fields[0].direction,
+        }];
+        for index in 1..top_by.sort_field_indices.len() {
+            let field_idx = top_by.sort_field_indices[index];
+            let value_type = &descriptor
+                .fields()
+                .get(field_idx)
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?
+                .value_type;
+            parts.push(TopBySortPart {
+                key: top_by_sort_value(value_type, input.get_idx(field_idx)?)?,
+                direction: top_by.sort_directions[index],
+            });
+        }
+        return Ok(parts);
+    }
     collect_by_sort_key_for_fields(
         descriptor,
         record,
         &top_by.sort_field_indices,
         &top_by.sort_directions,
     )
+}
+
+fn ordered_f64_bits(value: f64) -> u64 {
+    let value = if value == 0.0 { 0.0 } else { value };
+    let bits = value.to_bits();
+    if bits & (1 << 63) == 0 {
+        bits ^ (1 << 63)
+    } else {
+        !bits
+    }
 }
 
 pub(super) fn diff_record_windows(
@@ -1582,6 +1709,7 @@ mod root_terminal_tests {
                 field: "rank".to_owned(),
                 direction: TopByDirection::Desc,
             }],
+            spatial_order: None,
             tie_fields: vec!["root".to_owned(), "joined".to_owned()],
             sort_field_indices: vec![2, 0, 1],
             sort_directions: vec![

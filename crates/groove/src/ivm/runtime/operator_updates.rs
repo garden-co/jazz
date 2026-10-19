@@ -493,10 +493,15 @@ impl NodeState {
         }
 
         if let Some(row_projection) = &input.row_projection {
+            let explicit_index = schema
+                .table(&input.table)
+                .and_then(|table| table.indices.iter().find(|index| index.name == input.index))
+                .cloned()
+                .ok_or_else(|| IvmRuntimeError::IndexNotFound(input.index.clone()))?;
             let index_by = IndexByOp {
                 key_expressions: Vec::new(),
                 value_expressions: Vec::new(),
-                explicit_index: None,
+                explicit_index: Some(explicit_index),
                 key_fields: input.key_fields.clone(),
                 value_fields: input.value_fields.clone(),
                 unique: input.unique,
@@ -554,10 +559,15 @@ impl NodeState {
             });
         }
 
+        let explicit_index = schema
+            .table(&input.table)
+            .and_then(|table| table.indices.iter().find(|index| index.name == input.index))
+            .cloned()
+            .ok_or_else(|| IvmRuntimeError::IndexNotFound(input.index.clone()))?;
         let index_by = IndexByOp {
             key_expressions: Vec::new(),
             value_expressions: Vec::new(),
-            explicit_index: None,
+            explicit_index: Some(explicit_index),
             key_fields: input.key_fields.clone(),
             value_fields: input.value_fields.clone(),
             unique: input.unique,

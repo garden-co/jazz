@@ -563,7 +563,8 @@ impl PredicateExpr {
             | Self::LtEq { field, .. }
             | Self::IsNull { field }
             | Self::IsNotNull { field }
-            | Self::EnumMatch { field, .. } => {
+            | Self::EnumMatch { field, .. }
+            | Self::Spatial { field, .. } => {
                 output.insert(field.clone());
             }
             Self::EqField { field, value_field }
@@ -646,6 +647,31 @@ impl PredicateExpr {
                     Value::Enum(_) | Value::Nullable(None) => Ok(false),
                     _ => Ok(false),
                 }
+            }
+            Self::Spatial {
+                field,
+                predicate,
+                negated,
+            } => {
+                let value = resolved_record_value(record, field)?;
+                let value = match value {
+                    Value::Nullable(Some(value)) => *value,
+                    Value::Nullable(None) => return Ok(*negated),
+                    value => value,
+                };
+                let Value::Array(coordinates) = value else {
+                    return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                        "spatial predicate source is not an Array<F64> point",
+                    ));
+                };
+                let [Value::F64(longitude), Value::F64(latitude)] = coordinates.as_slice() else {
+                    return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+                        "spatial predicate source does not contain two F64 coordinates",
+                    ));
+                };
+                let point = crate::spatial::GeoPoint::new(*longitude, *latitude)?;
+                let matches = predicate.matches(point);
+                Ok(if *negated { !matches } else { matches })
             }
             Self::And(predicates) => predicates
                 .iter()

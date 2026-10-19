@@ -80,8 +80,8 @@ function realDirectory(path, label, { published = false } = {}) {
   if (published) assertPublishedDirectory(stat, label);
 }
 
-function walkRealFiles(root, label, { published = false } = {}) {
-  realDirectory(root, label, { published });
+function walkRealFiles(root, label, { published = false, skipRootPublished = false } = {}) {
+  realDirectory(root, label, { published: published && !skipRootPublished });
   const files = [];
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -252,8 +252,18 @@ function sealSnapshot(destination) {
     }
   };
   visit(destination);
-  for (const directory of directories.reverse()) chmodSync(directory, 0o555);
-  walkRealFiles(destination, "sealed snapshot", { published: true });
+  // Keep the private stage root writable until its atomic rename. macOS
+  // rejects renaming a directory whose own mode is read-only, even when its
+  // parent is writable. Every child directory and file is already sealed;
+  // the destination is sealed immediately after the rename and before its
+  // pointer is published.
+  for (const directory of directories.slice(1).reverse()) chmodSync(directory, 0o555);
+  // The root remains writable only until the atomic rename; all entries below
+  // it are already sealed and checked here.
+  walkRealFiles(destination, "sealed snapshot", {
+    published: true,
+    skipRootPublished: true,
+  });
 }
 
 function removeOwnedStage(stage) {
@@ -320,6 +330,7 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
       beforePublish?.({ destination, stage });
       try {
         renameSync(stage, destination);
+        chmodSync(destination, 0o555);
       } catch (error) {
         // macOS reports EACCES when the competing destination is already sealed.
         // A winner must exist and still pass the full snapshot validation below.

@@ -442,6 +442,7 @@ wire_enum! {
                 "catalogue enum payload case",
             ),
         },
+        17 => Point,
     }
 }
 
@@ -2319,6 +2320,26 @@ mod tests {
         // Check table exists
         let users = decoded.get(&TableName::new("users")).unwrap();
         assert_eq!(users.columns.columns.len(), 1);
+    }
+
+    /// The catalogue's bespoke column-type codec needs a stable appended tag
+    /// for Point because its payload is durable and older tags cannot move.
+    #[test]
+    fn point_column_type_uses_an_appended_catalogue_tag() {
+        let mut encoded_type = Vec::new();
+        ColumnTypeWire.put(&mut encoded_type, &ColumnType::Point);
+        assert_eq!(encoded_type, [17]);
+        let mut offset = 0;
+        assert_eq!(
+            ColumnTypeWire.get(&encoded_type, &mut offset).unwrap(),
+            ColumnType::Point
+        );
+
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("places").column("location", ColumnType::Point))
+            .build();
+        let encoded_schema = encode_schema(&schema);
+        assert_eq!(decode_schema(&encoded_schema).unwrap(), schema);
     }
 
     #[test]

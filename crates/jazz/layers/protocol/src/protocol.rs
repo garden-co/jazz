@@ -20,7 +20,10 @@ use crate::ids::{
     SchemaVersionId,
 };
 use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
-use crate::query::{BindingId, Query, RelationQuery, ShapeId};
+use crate::query::{
+    ArraySubquery, BindingId, JoinVia, PolicyBranch, Predicate, Query, ReachableVia, RelationExpr,
+    RelationPredicate, RelationQuery, ShapeId,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalTime;
 use crate::time::TxTime;
@@ -705,7 +708,7 @@ impl SyncMessage {
     /// classification rather than accidentally sending a future enum variant
     /// to an older peer.
     pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
-        match self {
+        let base = match self {
             Self::AuthorizationScopeIntent { .. }
             | Self::AuthorizationScopeView { .. }
             | Self::AuthorizationScopeAggregateReceipt { .. }
@@ -719,6 +722,36 @@ impl SyncMessage {
             | Self::ChunkUploadNodes(_)
             | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
+        };
+        let has_spatial_query = match self {
+            Self::RegisterShape { ast, .. } => match &ast.body {
+                ShapeBody::Query(query) => query_has_spatial_predicates(query),
+                ShapeBody::Relation(query) => relation_expr_has_spatial(&query.rel),
+            },
+            _ => false,
+        };
+        let has_point_schema = match self {
+            Self::PublishSchema { schema, .. } => schema_version_has_point(schema),
+            Self::PublishSchemaWithLens { publication, .. } => {
+                schema_version_has_point(&publication.schema)
+            }
+            Self::CatalogueSnapshot(snapshot) => {
+                snapshot.schemas.iter().any(schema_version_has_point)
+                    || snapshot
+                        .lineages
+                        .iter()
+                        .any(|(_, publication)| schema_version_has_point(&publication.schema))
+            }
+            _ => false,
+        };
+        base | if has_point_schema {
+            crate::wire::FEATURE_SPATIAL_POINTS
+        } else {
+            crate::wire::FEATURE_NONE
+        } | if has_spatial_query {
+            crate::wire::FEATURE_SPATIAL_POINTS
+        } else {
+            crate::wire::FEATURE_NONE
         }
     }
 
@@ -788,6 +821,113 @@ impl SyncMessage {
             _ => None,
         }
     }
+}
+
+fn predicate_has_spatial(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(children) | Predicate::Any(children) => {
+            children.iter().any(predicate_has_spatial)
+        }
+        Predicate::Not(child) | Predicate::EnumMatch { payload: child, .. } => {
+            predicate_has_spatial(child)
+        }
+        Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. } => true,
+        _ => false,
+    }
+}
+
+fn relation_predicate_has_spatial(predicate: &RelationPredicate) -> bool {
+    match predicate {
+        RelationPredicate::And(children) | RelationPredicate::Or(children) => {
+            children.iter().any(relation_predicate_has_spatial)
+        }
+        RelationPredicate::Not(child) | RelationPredicate::EnumMatch { payload: child, .. } => {
+            relation_predicate_has_spatial(child)
+        }
+        RelationPredicate::SpatialNear { .. }
+        | RelationPredicate::SpatialWithin { .. }
+        | RelationPredicate::SpatialIntersects { .. } => true,
+        _ => false,
+    }
+}
+
+fn join_has_spatial(join: &JoinVia) -> bool {
+    join.filters.iter().any(predicate_has_spatial) || join.nested_joins.iter().any(join_has_spatial)
+}
+
+fn array_subquery_has_spatial(subquery: &ArraySubquery) -> bool {
+    subquery.filters.iter().any(predicate_has_spatial)
+        || subquery
+            .nested_arrays
+            .iter()
+            .any(array_subquery_has_spatial)
+}
+
+fn policy_branch_has_spatial(branch: &PolicyBranch) -> bool {
+    branch.filters.iter().any(predicate_has_spatial)
+        || branch.joins.iter().any(join_has_spatial)
+        || branch.reachable.iter().any(reachable_has_spatial)
+}
+
+fn reachable_has_spatial(reachable: &ReachableVia) -> bool {
+    reachable.access_filters.iter().any(predicate_has_spatial)
+        || reachable.edge_filters.iter().any(predicate_has_spatial)
+        || reachable
+            .seed
+            .as_ref()
+            .is_some_and(|seed| seed.filters.iter().any(predicate_has_spatial))
+}
+
+fn query_has_spatial_predicates(query: &Query) -> bool {
+    query.filters.iter().any(predicate_has_spatial)
+        || query.joins.iter().any(join_has_spatial)
+        || query.policy_branches.iter().any(policy_branch_has_spatial)
+        || query.reachable.iter().any(reachable_has_spatial)
+        || query
+            .array_subqueries
+            .iter()
+            .any(array_subquery_has_spatial)
+        || query
+            .relation
+            .as_ref()
+            .is_some_and(|relation| relation_expr_has_spatial(&relation.rel))
+}
+
+fn relation_expr_has_spatial(expression: &RelationExpr) -> bool {
+    match expression {
+        RelationExpr::Filter { input, predicate } => {
+            relation_predicate_has_spatial(predicate) || relation_expr_has_spatial(input)
+        }
+        RelationExpr::Union { inputs } => inputs
+            .iter()
+            .any(|arm| relation_expr_has_spatial(&arm.input)),
+        RelationExpr::Join { left, right, .. } => {
+            relation_expr_has_spatial(left) || relation_expr_has_spatial(right)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => relation_expr_has_spatial(input),
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_expr_has_spatial(seed) || relation_expr_has_spatial(step)
+        }
+        RelationExpr::TableScan { .. } => false,
+    }
+}
+
+fn schema_version_has_point(schema: &SchemaVersion) -> bool {
+    use crate::model::public_schema::ColumnType as PublicColumnType;
+
+    schema.schema.public_schema().values().any(|table| {
+        table
+            .columns
+            .columns
+            .iter()
+            .any(|column| matches!(&column.column_type, PublicColumnType::Point))
+    })
 }
 
 /// A semantic value violates the frozen peer-wire contract.
@@ -6865,6 +7005,123 @@ mod tests {
         let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
         assert_eq!(decoded.schema.public_schema(), &source);
         assert_eq!(decoded.schema.tables().len(), 1);
+    }
+
+    /// Alice must not publish a Point-bearing catalogue message to Bob when he
+    /// cannot decode the logical `Point` schema tag; negotiating the feature
+    /// makes the same publication encodable.
+    #[test]
+    fn point_schema_publication_requires_the_spatial_feature_bit() {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("places").column("location", PublicColumnType::Point))
+            .build();
+        let compiled = JazzSchema::new(&source).expect("Point schema compiles");
+        let message = SyncMessage::PublishSchema {
+            author: AuthorSubject::SYSTEM,
+            schema: Box::new(SchemaVersion::new(compiled)),
+        };
+
+        assert_eq!(
+            message.required_wire_features(),
+            crate::wire::FEATURE_SPATIAL_POINTS
+        );
+        let error =
+            crate::wire::encode_sync_message_for_features(&message, crate::wire::FEATURE_NONE)
+                .expect_err("old peer must not receive the Point schema tag");
+        assert_eq!(error.code, crate::wire::WireErrorCode::UnsupportedFeature);
+        assert!(
+            crate::wire::encode_sync_message_for_features(
+                &message,
+                crate::wire::FEATURE_SPATIAL_POINTS
+            )
+            .is_ok()
+        );
+
+        let nested_query = Query::from("owners").array_subquery(
+            crate::query::ArraySubquery::new("nearby", "places", "owner", "id").filter(
+                Predicate::SpatialNear {
+                    column: "location".to_owned(),
+                    center: [1.0, 2.0],
+                    min_distance_meters: 0.0,
+                    max_distance_meters: 1_000.0,
+                },
+            ),
+        );
+        let nested_message = SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([7; 16])),
+            ast: ShapeAst::new(nested_query, SchemaVersionId::from_bytes([8; 16])),
+            opts: RegisterShapeOptions::default(),
+        };
+        assert_eq!(
+            nested_message.required_wire_features(),
+            crate::wire::FEATURE_SPATIAL_POINTS,
+            "nested array filters must require the spatial feature"
+        );
+
+        let relation = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "places".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::SpatialIntersects {
+                    column: crate::query::RelationColumnRef {
+                        scope: None,
+                        column: "location".to_owned(),
+                    },
+                    area: groove::spatial::GeoArea::Polygon(vec![vec![
+                        [0.0, 0.0],
+                        [1.0, 0.0],
+                        [1.0, 1.0],
+                        [0.0, 1.0],
+                        [0.0, 0.0],
+                    ]]),
+                },
+            },
+        };
+        let relation_message = SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([6; 16])),
+            ast: ShapeAst::new_relation(relation, SchemaVersionId::from_bytes([8; 16])),
+            opts: RegisterShapeOptions::default(),
+        };
+        assert_eq!(
+            relation_message.required_wire_features(),
+            crate::wire::FEATURE_SPATIAL_POINTS,
+            "relation query predicates must require the spatial feature"
+        );
+    }
+
+    /// A spatial shape registration must negotiate the point-query capability
+    /// before its AST can reach a peer that does not know spatial predicates.
+    #[test]
+    fn spatial_shape_registration_requires_the_spatial_feature_bit() {
+        let query = Query::from("places").filter(Predicate::SpatialNear {
+            column: "location".to_owned(),
+            center: [1.0, 2.0],
+            min_distance_meters: 0.0,
+            max_distance_meters: 1_000.0,
+        });
+        let message = SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([9; 16])),
+            ast: ShapeAst::new(query, SchemaVersionId::from_bytes([8; 16])),
+            opts: RegisterShapeOptions::default(),
+        };
+
+        assert_eq!(
+            message.required_wire_features(),
+            crate::wire::FEATURE_SPATIAL_POINTS
+        );
+        let error =
+            crate::wire::encode_sync_message_for_features(&message, crate::wire::FEATURE_NONE)
+                .expect_err("old peers must reject a spatial query AST before emission");
+        assert_eq!(error.code, crate::wire::WireErrorCode::UnsupportedFeature);
+        assert!(
+            crate::wire::encode_sync_message_for_features(
+                &message,
+                crate::wire::FEATURE_SPATIAL_POINTS
+            )
+            .is_ok()
+        );
     }
 
     #[test]

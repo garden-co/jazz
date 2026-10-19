@@ -3473,6 +3473,7 @@ fn lower_order_key(
             SortDirection::Asc => groove::ivm::TopByDirection::Asc,
             SortDirection::Desc => groove::ivm::TopByDirection::Desc,
         },
+        spatial_center: key.spatial_distance_center,
     })
 }
 
@@ -3548,6 +3549,19 @@ fn lower_predicate_inner(
                 field,
                 case_tag: *case_tag,
                 payload: Box::new(lower_enum_payload_predicate(payload)?),
+            }
+        }
+        PredicateExpr::Spatial { value, predicate } => {
+            let LoweredValueRef::Field(field) = lower_value_ref(value, source_id, source, request)?
+            else {
+                return Err(UnsupportedReason::Operator(
+                    "spatial predicates require a source point field".to_owned(),
+                ));
+            };
+            GroovePredicateExpr::Spatial {
+                field,
+                predicate: predicate.clone(),
+                negated: false,
             }
         }
         PredicateExpr::And(predicates) => GroovePredicateExpr::And(
@@ -3702,6 +3716,19 @@ fn lower_not_predicate_inner(
             return Err(UnsupportedReason::Operator(
                 "negated enum match predicates are not lowered yet".to_owned(),
             ));
+        }
+        PredicateExpr::Spatial { value, predicate } => {
+            let LoweredValueRef::Field(field) = lower_value_ref(value, source_id, source, request)?
+            else {
+                return Err(UnsupportedReason::Operator(
+                    "spatial predicates require a source point field".to_owned(),
+                ));
+            };
+            GroovePredicateExpr::Spatial {
+                field,
+                predicate: predicate.clone(),
+                negated: true,
+            }
         }
     })
 }

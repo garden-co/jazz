@@ -54,6 +54,7 @@ pub fn validate_json_value(
                 validate_json_value(value, element, &format!("{path}[{index}]"))
             })
         }
+        (Value::Array(values), ColumnType::Point) => validate_point_value(values, path),
         (
             Value::Enum { case, values },
             ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
@@ -75,6 +76,29 @@ pub fn validate_json_value(
         }
         _ => Ok(()),
     }
+}
+
+fn validate_point_value(values: &[Value], path: &str) -> Result<(), String> {
+    if values.len() != 2 {
+        return Err(format!(
+            "point column `{path}` must contain exactly [longitude, latitude]"
+        ));
+    }
+    let (Value::Double(longitude), Value::Double(latitude)) = (&values[0], &values[1]) else {
+        return Err(format!(
+            "point column `{path}` coordinates must both be numbers"
+        ));
+    };
+    if !longitude.is_finite()
+        || !latitude.is_finite()
+        || !(-180.0..=180.0).contains(longitude)
+        || !(-90.0..=90.0).contains(latitude)
+    {
+        return Err(format!(
+            "point column `{path}` requires finite WGS84 longitude/latitude in [-180, 180] × [-90, 90]"
+        ));
+    }
+    Ok(())
 }
 
 /// Compile every declared JSON Schema while the public schema is admitted.

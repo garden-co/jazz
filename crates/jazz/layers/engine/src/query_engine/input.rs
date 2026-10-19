@@ -561,6 +561,13 @@ pub enum PredicateExpr {
         #[doc(hidden)]
         payload: Box<PredicateExpr>,
     },
+    /// Exact spatial predicate over one source point value.
+    Spatial {
+        /// Point value to classify.
+        value: NormalizedValueRef,
+        /// Validated predicate and conservative S2 covering.
+        predicate: groove::spatial::SpatialPredicate,
+    },
     /// Boolean conjunction.
     And(Vec<PredicateExpr>),
     /// Boolean disjunction.
@@ -598,6 +605,7 @@ macro_rules! predicate_value_walker {
                     f(value)?;
                     payload.$name(f)?;
                 }
+                Self::Spatial { value, .. } => f(value)?,
                 Self::And(children) | Self::Or(children) => {
                     for child in children {
                         child.$name(f)?;
@@ -763,6 +771,9 @@ pub struct OrderKey {
     pub value: NormalizedValueRef,
     /// Ascending or descending.
     pub direction: SortDirection,
+    /// Optional spherical point-distance ranking. Used internally for the
+    /// nearest-first ordering implied by a positive `near` predicate.
+    pub spatial_distance_center: Option<[u64; 2]>,
 }
 
 /// Sort direction.

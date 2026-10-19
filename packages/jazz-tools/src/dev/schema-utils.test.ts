@@ -51,6 +51,7 @@ const portableColumnTypeTags = [
   "Uuid",
   "Bytea",
   "Array",
+  "Point",
   "Row",
 ] as const;
 
@@ -84,6 +85,14 @@ describe("structuralSchemaHash", () => {
     );
 
     expect(new Set(hashes).size).toBe(hashes.length);
+  });
+
+  it("keeps logical Point schema identity distinct from an ordinary F64 array", () => {
+    const point = structuralSchemaHash(schemaWithColumnType({ type: "Point" }));
+    const coordinateArray = structuralSchemaHash(
+      schemaWithColumnType({ type: "Array", element: { type: "Double" } }),
+    );
+    expect(point).not.toBe(coordinateArray);
   });
 
   it("matches Rust for composite indexes, including its UTF-8 index order", () => {

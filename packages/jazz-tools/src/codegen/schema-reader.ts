@@ -71,6 +71,9 @@ export function sqlTypeToWasm(sqlType: SqlType): ColumnType {
         schema: sqlType.schema,
       };
     }
+    if (sqlType.kind === "POINT") {
+      return { type: "Point" };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];

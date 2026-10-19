@@ -119,6 +119,12 @@
       "hash": "3c59c880bb81fbff2695aa4a23b87f0f0135679da685825d53ed54411f8025cb"
     },
     {
+      "name": "point",
+      "columnType": { "type": "Point" },
+      "nullable": false,
+      "hash": "9b7995b27bee21f9cf9a45f35eba2c035a49813be39b7291df95d347f1c03db7"
+    },
+    {
       "name": "row",
       "columnType": {
         "type": "Row",

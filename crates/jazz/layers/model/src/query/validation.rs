@@ -334,6 +334,30 @@ pub enum QueryError {
         /// Author provenance column named as an ordering key.
         column: String,
     },
+    /// A spatial predicate was applied to a column without explicit Point semantics.
+    #[error("spatial operators require a Point column; {column} is not Point")]
+    SpatialOperatorRequiresPoint {
+        /// Column name.
+        column: String,
+    },
+    /// A point query's geometry or bounded covering was invalid.
+    #[error(transparent)]
+    Spatial(#[from] groove::spatial::SpatialError),
+    /// A query scope has more than one competing nearest-first center.
+    #[error("a query scope may contain only one positive near predicate")]
+    MultipleNearPredicates,
+    /// Near cannot be used as a spatial anchor inside OR or NOT.
+    #[error("near predicates inside OR or NOT are not supported")]
+    NearInBooleanBranch,
+    /// Explicit ordering conflicts with near's nearest-first contract.
+    #[error("near queries cannot also specify order_by")]
+    NearWithExplicitOrdering,
+    /// The supplied GeoJSON positions across a query exceed its admission budget.
+    #[error("spatial query exceeds the {max} supplied-vertex budget")]
+    SpatialVertexBudgetExceeded {
+        /// Maximum number of positions accepted across the complete query.
+        max: usize,
+    },
 }
 
 fn validate_query(query: &Query, schema: &RuntimeSchema) -> Result<ValidatedQuery, QueryError> {
@@ -405,6 +429,322 @@ fn validate_query_canonical_parts(
     schema: &RuntimeSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
     validate_query_canonical_parts_as(query, schema, RelationProjectionRole::Result)
+}
+
+fn validate_near_predicate_scope(
+    predicates: &[Predicate],
+    has_explicit_ordering: bool,
+) -> Result<bool, QueryError> {
+    fn visit(
+        predicate: &Predicate,
+        in_boolean_branch: bool,
+        count: &mut usize,
+    ) -> Result<(), QueryError> {
+        match predicate {
+            Predicate::SpatialNear { .. } => {
+                if in_boolean_branch {
+                    return Err(QueryError::NearInBooleanBranch);
+                }
+                *count += 1;
+                if *count > 1 {
+                    return Err(QueryError::MultipleNearPredicates);
+                }
+            }
+            Predicate::All(predicates) => {
+                for predicate in predicates {
+                    visit(predicate, in_boolean_branch, count)?;
+                }
+            }
+            Predicate::Any(predicates) => {
+                for predicate in predicates {
+                    visit(predicate, true, count)?;
+                }
+            }
+            Predicate::Not(predicate) => visit(predicate, true, count)?,
+            Predicate::SpatialWithin { .. }
+            | Predicate::SpatialIntersects { .. }
+            | Predicate::Eq(_, _)
+            | Predicate::Ne(_, _)
+            | Predicate::Gt(_, _)
+            | Predicate::Gte(_, _)
+            | Predicate::Lt(_, _)
+            | Predicate::Lte(_, _)
+            | Predicate::In(_, _)
+            | Predicate::Contains(_, _)
+            | Predicate::IsNull(_) => {}
+            Predicate::EnumMatch { payload, .. } => visit(payload, in_boolean_branch, count)?,
+        }
+        Ok(())
+    }
+    let mut count = 0;
+    for predicate in predicates {
+        visit(predicate, false, &mut count)?;
+    }
+    if count > 0 && has_explicit_ordering {
+        return Err(QueryError::NearWithExplicitOrdering);
+    }
+    Ok(count > 0)
+}
+
+fn validate_near_join_scope(join: &JoinVia) -> Result<(), QueryError> {
+    // A near predicate on a related row determines whether that relationship
+    // matches. It does not order the enclosing result.
+    validate_near_predicate_scope(&join.filters, false)?;
+    for nested in &join.nested_joins {
+        validate_near_join_scope(nested)?;
+    }
+    Ok(())
+}
+
+fn validate_near_reachable_scope(reachable: &ReachableVia) -> Result<(), QueryError> {
+    validate_near_predicate_scope(&reachable.access_filters, false)?;
+    validate_near_predicate_scope(&reachable.edge_filters, false)?;
+    if let Some(seed) = &reachable.seed {
+        validate_near_predicate_scope(&seed.filters, false)?;
+    }
+    Ok(())
+}
+
+fn validate_near_array_scope(subquery: &ArraySubquery) -> Result<(), QueryError> {
+    validate_near_predicate_scope(&subquery.filters, !subquery.order_by.is_empty())?;
+    for nested in &subquery.nested_arrays {
+        validate_near_array_scope(nested)?;
+    }
+    Ok(())
+}
+
+fn validate_near_relation_scope(
+    relation: &RelationQuery,
+    outer_has_ordering: bool,
+) -> Result<(), QueryError> {
+    if let Some(parts) = relation_union_parts(&relation.rel) {
+        let mut any_near = false;
+        for arm in parts.inputs {
+            let mut arm_query = relation_query_to_query(&RelationQuery { rel: arm.input })?;
+            // The generated query retains a facade for identity. Clear it
+            // while checking its already-lowered filters and relationship
+            // scopes, so validation cannot recurse through the same facade.
+            arm_query.relation = None;
+            validate_near_query_shape(&arm_query)?;
+            any_near |= arm_query_has_near(&arm_query)?;
+        }
+        if any_near && (parts.order_by.is_some() || outer_has_ordering) {
+            return Err(QueryError::NearWithExplicitOrdering);
+        }
+        return Ok(());
+    }
+
+    let mut lowered = relation_query_to_query(relation)?;
+    lowered.relation = None;
+    validate_near_query_shape(&lowered)
+}
+
+fn arm_query_has_near(query: &Query) -> Result<bool, QueryError> {
+    validate_near_predicate_scope(&query.filters, false)
+}
+
+fn validate_near_query_shape(query: &Query) -> Result<(), QueryError> {
+    if let Some(relation) = &query.relation {
+        // Relation facades are normalized again by the main validation path.
+        // Validate every relation source here as well, including union arms
+        // that are retained rather than represented in `query.filters`.
+        return validate_near_relation_scope(relation, !query.order_by.is_empty());
+    }
+
+    validate_near_predicate_scope(&query.filters, !query.order_by.is_empty())?;
+    for join in &query.joins {
+        validate_near_join_scope(join)?;
+    }
+    for branch in &query.policy_branches {
+        validate_near_predicate_scope(&branch.filters, false)?;
+        for join in &branch.joins {
+            validate_near_join_scope(join)?;
+        }
+        for reachable in &branch.reachable {
+            validate_near_reachable_scope(reachable)?;
+        }
+    }
+    for reachable in &query.reachable {
+        validate_near_reachable_scope(reachable)?;
+    }
+    for subquery in &query.array_subqueries {
+        validate_near_array_scope(subquery)?;
+    }
+    Ok(())
+}
+
+fn area_vertex_count(area: &groove::spatial::GeoArea) -> usize {
+    match area {
+        groove::spatial::GeoArea::Polygon(rings) => {
+            rings.iter().map(Vec::len).fold(0usize, usize::saturating_add)
+        }
+        groove::spatial::GeoArea::MultiPolygon(polygons) => polygons
+            .iter()
+            .flat_map(|rings| rings.iter())
+            .map(Vec::len)
+            .fold(0usize, usize::saturating_add),
+    }
+}
+
+fn predicate_vertex_count(predicate: &Predicate) -> usize {
+    match predicate {
+        Predicate::SpatialWithin { area, .. } | Predicate::SpatialIntersects { area, .. } => {
+            area_vertex_count(area)
+        }
+        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
+            .iter()
+            .map(predicate_vertex_count)
+            .fold(0usize, usize::saturating_add),
+        Predicate::Not(predicate) => predicate_vertex_count(predicate),
+        Predicate::EnumMatch { payload, .. } => predicate_vertex_count(payload),
+        Predicate::SpatialNear { .. }
+        | Predicate::Eq(_, _)
+        | Predicate::Ne(_, _)
+        | Predicate::Gt(_, _)
+        | Predicate::Gte(_, _)
+        | Predicate::Lt(_, _)
+        | Predicate::Lte(_, _)
+        | Predicate::In(_, _)
+        | Predicate::Contains(_, _)
+        | Predicate::IsNull(_) => 0,
+    }
+}
+
+fn predicates_vertex_count(predicates: &[Predicate]) -> usize {
+    predicates
+        .iter()
+        .map(predicate_vertex_count)
+        .fold(0usize, usize::saturating_add)
+}
+
+fn join_vertex_count(join: &JoinVia) -> usize {
+    predicates_vertex_count(&join.filters).saturating_add(
+        join.nested_joins
+            .iter()
+            .map(join_vertex_count)
+            .fold(0usize, usize::saturating_add),
+    )
+}
+
+fn reachable_vertex_count(reachable: &ReachableVia) -> usize {
+    predicates_vertex_count(&reachable.access_filters)
+        .saturating_add(predicates_vertex_count(&reachable.edge_filters))
+        .saturating_add(reachable.seed.as_ref().map_or(0, |seed| {
+            predicates_vertex_count(&seed.filters)
+        }))
+}
+
+fn relation_predicate_vertex_count(predicate: &RelationPredicate) -> usize {
+    match predicate {
+        RelationPredicate::SpatialWithin { area, .. }
+        | RelationPredicate::SpatialIntersects { area, .. } => area_vertex_count(area),
+        RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
+            relation_predicate_vertex_count(payload)
+        }
+        RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => predicates
+            .iter()
+            .map(relation_predicate_vertex_count)
+            .fold(0usize, usize::saturating_add),
+        RelationPredicate::Cmp { .. }
+        | RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::In { .. }
+        | RelationPredicate::Contains { .. }
+        | RelationPredicate::True
+        | RelationPredicate::False
+        | RelationPredicate::SpatialNear { .. } => 0,
+    }
+}
+
+fn relation_expr_vertex_count(expr: &RelationExpr) -> usize {
+    match expr {
+        RelationExpr::Filter { input, predicate } => relation_expr_vertex_count(input)
+            .saturating_add(relation_predicate_vertex_count(predicate)),
+        RelationExpr::Union { inputs } => inputs
+            .iter()
+            .map(|arm| relation_expr_vertex_count(&arm.input))
+            .fold(0usize, usize::saturating_add),
+        RelationExpr::Join { left, right, .. } => relation_expr_vertex_count(left)
+            .saturating_add(relation_expr_vertex_count(right)),
+        RelationExpr::Gather { seed, step, .. } => relation_expr_vertex_count(seed)
+            .saturating_add(relation_expr_vertex_count(step)),
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => relation_expr_vertex_count(input),
+        RelationExpr::TableScan { .. } => 0,
+    }
+}
+
+/// Count caller-supplied geometry before any S2 compilation. The query-level
+/// bound prevents a large OR or nested relation from multiplying otherwise
+/// individually valid coverings into unbounded binding work.
+fn validate_spatial_vertex_budget(query: &Query) -> Result<(), QueryError> {
+    let enclosing = if let Some(relation) = &query.relation {
+        relation_expr_vertex_count(&relation.rel)
+    } else {
+        predicates_vertex_count(&query.filters)
+            .saturating_add(
+                query
+                    .joins
+                    .iter()
+                    .map(join_vertex_count)
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                query
+                    .policy_branches
+                    .iter()
+                    .map(|branch| {
+                        predicates_vertex_count(&branch.filters)
+                            .saturating_add(
+                                branch
+                                    .joins
+                                    .iter()
+                                    .map(join_vertex_count)
+                                    .fold(0usize, usize::saturating_add),
+                            )
+                            .saturating_add(
+                                branch
+                                    .reachable
+                                    .iter()
+                                    .map(reachable_vertex_count)
+                                    .fold(0usize, usize::saturating_add),
+                            )
+                    })
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                query
+                    .reachable
+                    .iter()
+                    .map(reachable_vertex_count)
+                    .fold(0usize, usize::saturating_add),
+            )
+    };
+    let arrays = query
+        .array_subqueries
+        .iter()
+        .map(array_subquery_vertex_count)
+        .fold(0usize, usize::saturating_add);
+    let total = enclosing.saturating_add(arrays);
+    if total > groove::spatial::MAX_AREA_VERTICES {
+        return Err(QueryError::SpatialVertexBudgetExceeded {
+            max: groove::spatial::MAX_AREA_VERTICES,
+        });
+    }
+    Ok(())
+}
+
+fn array_subquery_vertex_count(subquery: &ArraySubquery) -> usize {
+    predicates_vertex_count(&subquery.filters).saturating_add(
+        subquery
+            .nested_arrays
+            .iter()
+            .map(array_subquery_vertex_count)
+            .fold(0usize, usize::saturating_add),
+    )
 }
 
 // Preparation and checking share the schema-aware traversal. Only preparation
@@ -1014,6 +1354,8 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    validate_spatial_vertex_budget(query)?;
+    validate_near_query_shape(query)?;
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -1475,6 +1817,12 @@ fn rewrite_flat_join_predicate_columns(
             options.iter_mut().try_for_each(rewrite_operand)
         }
         Predicate::EnumMatch { column, .. } => {
+            *column = rewrite(column)?;
+            Ok(())
+        }
+        Predicate::SpatialNear { column, .. }
+        | Predicate::SpatialWithin { column, .. }
+        | Predicate::SpatialIntersects { column, .. } => {
             *column = rewrite(column)?;
             Ok(())
         }
@@ -2231,6 +2579,9 @@ fn validate_predicate(
                 Ok(())
             }
             Predicate::IsNull(_) => Ok(()),
+            Predicate::SpatialNear { .. }
+            | Predicate::SpatialWithin { .. }
+            | Predicate::SpatialIntersects { .. } => Ok(()),
             _ => unreachable!("recursive predicates handled by the shared traversal"),
         };
     }
@@ -2240,6 +2591,46 @@ fn validate_predicate(
     match predicate {
         Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::EnumMatch { .. } => {
             unreachable!("recursive predicates handled by the shared traversal")
+        }
+        Predicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => {
+            let column_schema = column_schema(table, column)?;
+            if !column_schema.geo_point {
+                return Err(QueryError::SpatialOperatorRequiresPoint {
+                    column: column.clone(),
+                });
+            }
+            let center = groove::spatial::GeoPoint::new(center[0], center[1])?;
+            groove::spatial::SpatialPredicate::near(
+                center,
+                Some(*min_distance_meters),
+                *max_distance_meters,
+            )?;
+            Ok(())
+        }
+        Predicate::SpatialWithin { column, area } => {
+            let column_schema = column_schema(table, column)?;
+            if !column_schema.geo_point {
+                return Err(QueryError::SpatialOperatorRequiresPoint {
+                    column: column.clone(),
+                });
+            }
+            groove::spatial::SpatialPredicate::within(area)?;
+            Ok(())
+        }
+        Predicate::SpatialIntersects { column, area } => {
+            let column_schema = column_schema(table, column)?;
+            if !column_schema.geo_point {
+                return Err(QueryError::SpatialOperatorRequiresPoint {
+                    column: column.clone(),
+                });
+            }
+            groove::spatial::SpatialPredicate::intersects(area)?;
+            Ok(())
         }
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())

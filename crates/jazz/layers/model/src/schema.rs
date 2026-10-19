@@ -646,6 +646,11 @@ pub struct ColumnSchema {
     /// physical large-scalar envelope. JSON remains logically string-shaped in
     /// Groove, but cannot be decoded or staged as text at this boundary.
     pub large_value_kind: LargeValueSemanticKind,
+    /// Schema-derived point semantics. The storage representation is still a
+    /// two-element F64 array, so its meaning cannot be recovered from the
+    /// Groove descriptor alone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub geo_point: bool,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
@@ -658,7 +663,13 @@ struct SerializedColumnSchema {
     #[serde(default)]
     large_value_kind: Option<LargeValueSemanticKind>,
     #[serde(default)]
+    geo_point: bool,
+    #[serde(default)]
     default: Option<Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl<'de> serde::Deserialize<'de> for ColumnSchema {
@@ -682,12 +693,26 @@ impl<'de> serde::Deserialize<'de> for ColumnSchema {
                 "large-value semantic kind does not match the declared column type",
             ));
         }
+        if serialized.geo_point && !is_geo_point_storage_type(&serialized.column_type) {
+            return Err(serde::de::Error::custom(
+                "point semantics require an F64 array storage column",
+            ));
+        }
         Ok(Self {
             name: serialized.name,
             column_type: serialized.column_type,
             large_value_kind,
+            geo_point: serialized.geo_point,
             default: serialized.default,
         })
+    }
+}
+
+fn is_geo_point_storage_type(column_type: &GrooveColumnType) -> bool {
+    match column_type {
+        GrooveColumnType::Nullable(inner) => is_geo_point_storage_type(inner),
+        GrooveColumnType::Array(inner) => matches!(inner.as_ref(), GrooveColumnType::F64),
+        _ => false,
     }
 }
 
@@ -712,8 +737,15 @@ impl ColumnSchema {
             name: name.into(),
             large_value_kind: large_value_kind_for_type(&column_type),
             column_type,
+            geo_point: false,
             default: None,
         }
+    }
+
+    /// Mark this array-shaped column as a logical WGS84 point.
+    pub fn as_geo_point(mut self) -> Self {
+        self.geo_point = true;
+        self
     }
 
     /// Attach a literal insert default to this column.
@@ -791,6 +823,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
             name: column.name,
             large_value_kind: large_value_kind_for_type(&column.column_type),
             column_type: column.column_type,
+            geo_point: false,
             default: None,
         }
     }
@@ -1097,10 +1130,24 @@ impl TableSchema {
             PrimaryKeyColumn::uuid("row_uuid"),
         ]));
         for indexed in &indexed_columns {
-            content_table = content_table.with_index(GrooveIndexSchema::new(
-                global_current_index_name(indexed),
-                ["branch_key".to_owned(), app_storage_column_name(indexed)],
-            ));
+            let physical_column = app_storage_column_name(indexed);
+            let index = if self
+                .columns
+                .iter()
+                .any(|column| column.name == *indexed && column.geo_point)
+            {
+                GrooveIndexSchema::s2_point_v1(
+                    global_current_index_name(indexed),
+                    ["branch_key".to_owned(), physical_column.clone()],
+                    physical_column,
+                )
+            } else {
+                GrooveIndexSchema::new(
+                    global_current_index_name(indexed),
+                    ["branch_key".to_owned(), physical_column],
+                )
+            };
+            content_table = content_table.with_index(index);
         }
         for columns in &self.composite_indexes {
             content_table = content_table.with_index(GrooveIndexSchema::new(
@@ -1143,12 +1190,30 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
-            // One overlay row per row: the newest pending local image.
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-            ]))
+        let mut content_table =
+            GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
+                // One overlay row per row: the newest pending local image.
+                .with_primary_key(PrimaryKey::composite([
+                    PrimaryKeyColumn::bytes("branch_key"),
+                    PrimaryKeyColumn::uuid("row_uuid"),
+                ]));
+        for indexed in self
+            .global_current_indexed_columns()
+            .into_iter()
+            .filter(|indexed| {
+                self.columns
+                    .iter()
+                    .any(|column| column.name == *indexed && column.geo_point)
+            })
+        {
+            let physical_column = app_storage_column_name(&indexed);
+            content_table = content_table.with_index(GrooveIndexSchema::s2_point_v1(
+                global_current_index_name(&indexed),
+                ["branch_key".to_owned(), physical_column.clone()],
+                physical_column,
+            ));
+        }
+        content_table
         // No transaction index: an overlay row is found through the history
         // rows its pending transaction lists in `jazz_tx_touched_rows`.
     }
@@ -1641,16 +1706,26 @@ const SCHEMA_ID_DOMAIN_V1: &str = "jazz-schema-v1-large-value-kinds";
 /// length-prefixed column name. A distinct domain tag rather than an optional
 /// trailing section keeps the encoding injective.
 const SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES: &str = "jazz-schema-v2-composite-indexes";
+/// Domain tag for schemas that contain at least one semantic point column.
+/// The v1/v2 byte layouts remain untouched for schemas without points.
+const SCHEMA_ID_DOMAIN_V3_SPATIAL_POINTS: &str = "jazz-schema-v3-spatial-points";
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let with_composite_indexes = schema
         .tables
         .iter()
         .any(|table| !table.composite_indexes.is_empty());
+    let with_spatial_points = schema
+        .tables
+        .iter()
+        .flat_map(|table| &table.columns)
+        .any(|column| column.geo_point);
     let mut bytes = Vec::new();
     put_str(
         &mut bytes,
-        if with_composite_indexes {
+        if with_spatial_points {
+            SCHEMA_ID_DOMAIN_V3_SPATIAL_POINTS
+        } else if with_composite_indexes {
             SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES
         } else {
             SCHEMA_ID_DOMAIN_V1
@@ -1671,6 +1746,9 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
                 LargeValueSemanticKind::String => 2,
                 LargeValueSemanticKind::Json => 3,
             });
+            if with_spatial_points {
+                bytes.push(u8::from(column.geo_point));
+            }
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1684,7 +1762,7 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for column in branch_by {
             put_str(&mut bytes, column);
         }
-        if with_composite_indexes {
+        if with_composite_indexes || with_spatial_points {
             // `BTreeSet<Vec<String>>` iterates in canonical order.
             put_u64(&mut bytes, table.composite_indexes.len() as u64);
             for columns in &table.composite_indexes {
@@ -1999,6 +2077,44 @@ mod tests {
         assert_eq!(schema_a.version_id(), schema_b.version_id());
         assert_eq!(schema_a.canonical_bytes(), schema_b.canonical_bytes());
         assert_ne!(schema_a.version_id(), schema_c.version_id());
+    }
+
+    /// Pin Alice's point-schema identity bytes independently of Groove. This
+    /// lower-level test is needed because the encoding is a durable address
+    /// for schema versions; changing it must leave schemas without points
+    /// untouched for Bob and other existing peers.
+    #[test]
+    fn point_schema_identity_uses_the_versioned_spatial_domain() {
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "places",
+            [ColumnSchema::new("location", ColumnType::F64.array_of()).as_geo_point()],
+        )]);
+        let expected = "000000000000001d6a617a7a2d736368656d612d76332d7370617469616c2d706f696e747300000000000000010000000000000006706c61636573000000000000000100000000000000086c6f636174696f6e0d0600010000000000000000000000000000000000";
+        let actual = schema.canonical_bytes();
+        let mut expected = expected
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |value: u8| match value {
+                    b'0'..=b'9' => value - b'0',
+                    b'a'..=b'f' => value - b'a' + 10,
+                    _ => panic!("invalid test hex fixture"),
+                };
+                digit(pair[0]) * 16 + digit(pair[1])
+            })
+            .collect::<Vec<_>>();
+        // The v3 point domain pins a fixed composite-index section, including
+        // an explicit zero count for tables without composite indexes.
+        expected.extend([0; 8]);
+        assert_eq!(actual, expected);
+        assert!(
+            RuntimeSchema::new([TableSchema::new(
+                "todos",
+                [ColumnSchema::new("title", ColumnType::String)],
+            )])
+            .canonical_bytes()
+            .starts_with(b"\0\0\0\0\0\0\0\x20jazz-schema-v1-large-value-kinds")
+        );
     }
 
     #[test]

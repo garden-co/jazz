@@ -409,6 +409,31 @@ impl Database {
                 });
             }
         }
+        if let Some(derivation) = &index.key_derivation {
+            match derivation {
+                IndexKeyDerivation::S2PointV1 { point_column } => {
+                    let point_type = existing
+                        .columns
+                        .iter()
+                        .find(|column| column.name == *point_column)
+                        .map(|column| &column.column_type);
+                    let mut point_type = point_type;
+                    while let Some(ColumnType::Nullable(inner)) = point_type {
+                        point_type = Some(inner);
+                    }
+                    if index.unique
+                        || index.columns.last() != Some(point_column)
+                        || !matches!(point_type, Some(ColumnType::Array(element)) if matches!(element.as_ref(), ColumnType::F64))
+                    {
+                        return Err(Error::InvalidDerivedIndexDefinition {
+                            table: table.to_owned(),
+                            index: index.name,
+                            reason: "S2PointV1 requires a non-unique index whose final column is Array<F64>".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
         if !self.resident_publications.is_empty() {
             return Err(Error::TableIndexRegistrationWhilePublicationsResident {
                 table: table.to_owned(),

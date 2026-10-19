@@ -364,6 +364,36 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             put_str(&mut bytes, case);
             put_bytes(&mut bytes, &canonical_predicate_key(payload));
         }
+        Predicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => {
+            bytes.push(b'q');
+            put_str(&mut bytes, column);
+            for value in center {
+                bytes.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+            bytes.extend_from_slice(&min_distance_meters.to_bits().to_be_bytes());
+            bytes.extend_from_slice(&max_distance_meters.to_bits().to_be_bytes());
+        }
+        Predicate::SpatialWithin { column, area } => {
+            bytes.push(b'w');
+            put_str(&mut bytes, column);
+            put_bytes(
+                &mut bytes,
+                &postcard::to_allocvec(area).expect("validated spatial area serializes"),
+            );
+        }
+        Predicate::SpatialIntersects { column, area } => {
+            bytes.push(b'x');
+            put_str(&mut bytes, column);
+            put_bytes(
+                &mut bytes,
+                &postcard::to_allocvec(area).expect("validated spatial area serializes"),
+            );
+        }
     }
     bytes
 }

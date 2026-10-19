@@ -255,7 +255,10 @@ pub fn single_table_scalar_query(query: &crate::query::Query) -> bool {
             | Predicate::Contains(a, b) => scalar(a) && scalar(b),
             Predicate::In(a, values) => scalar(a) && values.iter().all(scalar),
             Predicate::IsNull(a) => scalar(a),
-            Predicate::EnumMatch { .. } => false,
+            Predicate::EnumMatch { .. }
+            | Predicate::SpatialNear { .. }
+            | Predicate::SpatialWithin { .. }
+            | Predicate::SpatialIntersects { .. } => false,
         }
     }
     query.filters.iter().all(predicate)

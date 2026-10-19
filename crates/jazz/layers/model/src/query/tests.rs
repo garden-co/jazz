@@ -1871,6 +1871,257 @@ mod tests {
         );
     }
 
+    /// This byte-level contract pins the new spatial query identity. Public
+    /// query integration tests cover the observable spatial reads; this direct
+    /// assertion is needed because an encoding drift changes peer shape IDs.
+    #[test]
+    fn spatial_query_canonical_bytes_and_identity_are_versioned() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let query = Query::from("places").filter(Predicate::SpatialNear {
+            column: "location".to_owned(),
+            center: [-69.9312, 18.4861],
+            min_distance_meters: 0.0,
+            max_distance_meters: 5_000.0,
+        });
+        let validated = query.validate(&schema).expect("spatial query validates");
+
+        assert_eq!(
+            hex::encode(validated.canonical_bytes()),
+            "6a617a7a2d71756572792d76300000000000000006706c61636573000000000000000100000000000000317100000000000000086c6f636174696f6ec0517b98c7e2824140327c710cb295ea000000000000000040b388000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            validated.shape_id().0.to_string(),
+            "b6b40847-103a-55a5-b1a8-8a57d3206f6b"
+        );
+    }
+
+    /// Alice's nearest-first query has one unambiguous spatial scope. The
+    /// typed errors guard boolean branches and caller ordering that cannot
+    /// preserve that contract.
+    #[test]
+    fn near_query_shape_rejects_ambiguous_ordering_and_branches() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let near = || Predicate::SpatialNear {
+            column: "location".to_owned(),
+            center: [1.0, 2.0],
+            min_distance_meters: 0.0,
+            max_distance_meters: 1_000.0,
+        };
+
+        assert_eq!(
+            Query::from("places")
+                .filter(Predicate::Any(vec![near()]))
+                .validate(&schema)
+                .unwrap_err(),
+            QueryError::NearInBooleanBranch
+        );
+        assert_eq!(
+            Query::from("places")
+                .filter(Predicate::All(vec![near(), near()]))
+                .validate(&schema)
+                .unwrap_err(),
+            QueryError::MultipleNearPredicates
+        );
+        assert_eq!(
+            Query::from("places")
+                .filter(near())
+                .order_by("id", OrderDirection::Asc)
+                .validate(&schema)
+                .unwrap_err(),
+            QueryError::NearWithExplicitOrdering
+        );
+    }
+
+    /// A related near predicate is a membership test at each relationship
+    /// scope. Validation must still descend through arbitrarily nested joins
+    /// and correlated arrays before a query can reach source preparation.
+    #[test]
+    fn near_query_shape_validates_deep_relationship_scopes() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let near = || Predicate::SpatialNear {
+            column: "location".to_owned(),
+            center: [1.0, 2.0],
+            min_distance_meters: 0.0,
+            max_distance_meters: 1_000.0,
+        };
+
+        let nested = JoinVia {
+            table: "deep".to_owned(),
+            on_column: "owner".to_owned(),
+            target: JoinTarget::Column,
+            source_column: None,
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: vec![Predicate::Any(vec![near()])],
+            nested_joins: Vec::new(),
+        };
+        let query = Query::from("places").join_via_with_nested_joins(
+            "middle",
+            "owner",
+            [],
+            [JoinVia {
+                table: "inner".to_owned(),
+                on_column: "owner".to_owned(),
+                target: JoinTarget::Column,
+                source_column: None,
+                source_lookup: None,
+                correlated_filters: Vec::new(),
+                filters: Vec::new(),
+                nested_joins: vec![nested],
+            }],
+        );
+
+        assert_eq!(
+            query.validate(&schema).unwrap_err(),
+            QueryError::NearInBooleanBranch
+        );
+    }
+
+    /// A nested array is its own result scope: nearest-first ordering cannot
+    /// be combined with a caller-specified order within that child scope.
+    #[test]
+    fn near_query_shape_rejects_explicit_array_scope_ordering() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let query = Query {
+            array_subqueries: vec![ArraySubquery {
+                column_name: "nearby".to_owned(),
+                table: "places".to_owned(),
+                inner_column: "id".to_owned(),
+                outer_column: "id".to_owned(),
+                filters: vec![Predicate::SpatialNear {
+                    column: "location".to_owned(),
+                    center: [1.0, 2.0],
+                    min_distance_meters: 0.0,
+                    max_distance_meters: 1_000.0,
+                }],
+                select: None,
+                order_by: vec![OrderBy {
+                    column: "id".to_owned(),
+                    direction: OrderDirection::Asc,
+                }],
+                limit: None,
+                offset: 0,
+                requirement: ArraySubqueryRequirement::Optional,
+                nested_arrays: Vec::new(),
+            }],
+            ..Query::from("places")
+        };
+
+        assert_eq!(
+            query.validate(&schema).unwrap_err(),
+            QueryError::NearWithExplicitOrdering
+        );
+    }
+
+    /// The public relation-query wire tree shares the ordinary nearest-first
+    /// contract and cannot hide a conflicting output order from admission.
+    #[test]
+    fn near_query_shape_rejects_relation_facade_ordering() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let point_column = RelationColumnRef {
+            scope: Some("places".to_owned()),
+            column: "location".to_owned(),
+        };
+        let relation = RelationQuery {
+            rel: RelationExpr::OrderBy {
+                input: Box::new(RelationExpr::Project {
+                    input: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "places".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::SpatialNear {
+                            column: point_column.clone(),
+                            center: [1.0, 2.0],
+                            min_distance_meters: Some(0.0),
+                            max_distance_meters: 1_000.0,
+                        },
+                    }),
+                    columns: vec![RelationProjectColumn {
+                        alias: "location".to_owned(),
+                        expr: RelationProjectExpr::Column(point_column.clone()),
+                    }],
+                }),
+                terms: vec![RelationOrderBy {
+                    column: point_column,
+                    direction: OrderDirection::Asc,
+                }],
+            },
+        };
+
+        assert_eq!(
+            Query {
+                relation: Some(relation),
+                ..Query::from("places")
+            }
+            .validate(&schema)
+            .unwrap_err(),
+            QueryError::NearWithExplicitOrdering
+        );
+    }
+
+    /// Two individually sub-budget polygons cannot evade the query-wide
+    /// vertex cap. This checks admission before S2 compilation by using rings
+    /// that would otherwise fail geometric validation.
+    #[test]
+    fn spatial_vertex_budget_is_checked_before_geometry_compilation() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .column("location", PublicColumnType::Point),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("Point schema compiles");
+        let area = || {
+            groove::spatial::GeoArea::Polygon(vec![vec![[0.0, 0.0]; 2_049]])
+        };
+        let query = Query::from("places").filter(Predicate::Any(vec![
+            Predicate::SpatialWithin {
+                column: "location".to_owned(),
+                area: area(),
+            },
+            Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area(),
+            },
+        ]));
+
+        assert_eq!(
+            query.validate(&schema).unwrap_err(),
+            QueryError::SpatialVertexBudgetExceeded { max: 4_096 }
+        );
+    }
+
     fn nullable_correlation_schema() -> RuntimeSchema {
         RuntimeSchema::new([
             TableSchema::new("shows", [ColumnSchema::new("name", ColumnType::String)]),

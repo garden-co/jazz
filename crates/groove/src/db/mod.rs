@@ -34,8 +34,8 @@ use crate::records::{
     encode_variant_record, split_variant_record,
 };
 use crate::schema::{
-    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
-    PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
+    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexKeyDerivation, IndexSchema,
+    IntegerKeyType, PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
     BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
@@ -1909,6 +1909,12 @@ pub enum Error {
     TableFieldDefinitionMismatch { table: String, field: String },
     #[error("index definition does not match the live catalogue: {table}.{index}")]
     TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("invalid derived index {table}.{index}: {reason}")]
+    InvalidDerivedIndexDefinition {
+        table: String,
+        index: String,
+        reason: String,
+    },
     #[error("cannot register index {table}.{index} while database publications remain resident")]
     TableIndexRegistrationWhilePublicationsResident { table: String, index: String },
     #[error("index {table}.{index} references unknown field {field}")]

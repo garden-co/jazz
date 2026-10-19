@@ -588,6 +588,44 @@ rows as inline roots, then evaluates them with the authenticated identity over
 current or branch-view sources. The former direct policy interpreter is not an
 alternative execution path and has been removed.
 
+### 14.9 Spatial access-path lowering
+
+Spatial predicates lower through the ordinary Jazz query program and Groove
+sources used by one-shot Global/Local reads, authorization, live subscriptions,
+and sync. A bound geometry is validated and compiled once, then represented in
+the binding identity together with its schema, branch selection, and
+authorization context. Geometry or candidate caches MUST NOT cross any of
+those identities.
+
+Lowering selects a spatial access path before execution. A positive spatial
+predicate supplies a conservative S2 cell-range scan over `S2PointV1`; the
+normal current-row visibility and pending-write resolution then mask stale
+settled positions before exact predicate evaluation. Permissions, scalar
+residuals, relationship witnesses, ordering, and pagination remain in the
+existing semantic pipeline. `near` projects spherical distance once per
+candidate and uses the maintained `TopBy` ordering `(distance ASC, row_uuid
+ASC)`; limits apply only after exact filtering and required relationship
+membership.
+
+AND may use `near` as its anchor, otherwise the first spatial predicate in
+canonical order. OR is executable only when each branch has a bounded spatial
+anchor; candidate streams are unioned and deduplicated before relational
+processing, while the original boolean expression remains the exact residual.
+NOT cannot be an access path. Multiple competing `near` predicates, `near`
+under OR/NOT, explicit order conflicting with nearest-first, and mixed OR arms
+without a spatial anchor are typed unsupported-query errors. Planning MUST NOT
+expand arbitrary boolean expressions into an exponential normal form.
+
+An existence check may use a related table's spatial index to find qualifying
+related rows and then perform bounded indexed lookups of owner keys. It tests
+membership only and does not rank the outer rows. Unsupported relationship
+shapes and spatial joins comparing stored points MUST identify the exact
+unsupported pattern before storage access.
+
+The spatial compiler rejects historical cuts and frozen-base branch views
+that need historical spatial state. All other unsupported, missing-index, or
+incompatible-schema cases fail before a source can fall back to a full scan.
+
 ## Open Questions
 
 - 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Core-owned query output and authorization-source lowering.

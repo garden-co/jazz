@@ -388,8 +388,12 @@ the existing exact decode.
 
 The optional feature bits are `PayloadLz4=1<<3`,
 `PayloadZstd=1<<4`,
-`AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`, and
-`ScopeIsolatedClientRelay=1<<9`. `Hello` negotiates only the intersection of optional features.
+`AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`,
+`ScopeIsolatedClientRelay=1<<9`, and `SpatialPoints=1<<10`. `Hello` negotiates
+only the intersection of optional features. Point-bearing schema publications
+and catalogue snapshots require `SpatialPoints`; a sender MUST reject them
+before emission when the peer did not negotiate that bit. Spatial query AST
+variants MUST require the same bit when they are added to the query grammar.
 A channel extent MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
 bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.

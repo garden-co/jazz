@@ -102,6 +102,8 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
       return "s.uuid()";
     case "Array":
       return `s.array(${baseBuilderExpression(columnType.element)})`;
+    case "Point":
+      return "s.point()";
     case "BigInt":
       return "s.bigint()";
     case "Row":
@@ -232,6 +234,8 @@ function renderColumnOperationExpression(
       return `${m}.int({ ${defaultEntry} })`;
     case "Double":
       return `${m}.float({ ${defaultEntry} })`;
+    case "Point":
+      return `${m}.point({ ${defaultEntry} })`;
     case "Timestamp":
       return `${m}.timestamp({ ${defaultEntry} })`;
     case "Bytea":

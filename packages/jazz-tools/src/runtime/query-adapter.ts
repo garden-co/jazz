@@ -25,6 +25,7 @@ import {
 } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import type {
+  RelGeoArea,
   RelColumnRef,
   RelExpr,
   RelJoinCondition,
@@ -66,6 +67,53 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
+}
+
+function parseSpatialPoint(value: unknown, name: string): [number, number] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    typeof value[0] !== "number" ||
+    !Number.isFinite(value[0]) ||
+    value[0] < -180 ||
+    value[0] > 180 ||
+    typeof value[1] !== "number" ||
+    !Number.isFinite(value[1]) ||
+    value[1] < -90 ||
+    value[1] > 90
+  ) {
+    throw new Error(`${name} must be a finite WGS84 [longitude, latitude] pair.`);
+  }
+  return [value[0], value[1]];
+}
+
+function parseSpatialArea(value: unknown): RelGeoArea {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !("type" in value) ||
+    !("coordinates" in value)
+  ) {
+    throw new Error("Spatial area must be a GeoJSON Polygon or MultiPolygon.");
+  }
+  const geometry = value as { type: unknown; coordinates: unknown };
+  const positions: unknown[] = [];
+  const visit = (node: unknown): void => {
+    if (!Array.isArray(node)) throw new Error("Invalid GeoJSON spatial coordinates.");
+    if (node.length === 2 && node.every((coordinate) => typeof coordinate === "number")) {
+      positions.push(node);
+      if (positions.length > 4096) throw new Error("Spatial area exceeds the 4096 vertex limit.");
+      return;
+    }
+    node.forEach(visit);
+  };
+  if (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") {
+    throw new Error('Spatial area type must be "Polygon" or "MultiPolygon".');
+  }
+  visit(geometry.coordinates);
+  positions.forEach((position) => parseSpatialPoint(position, "GeoJSON position"));
+  return value as RelGeoArea;
 }
 
 function toTimestampMs(value: unknown): number {
@@ -384,6 +432,48 @@ function conditionToRelPredicate(
   const columnType = getColumnType(schema, table, column);
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
+  }
+  if (cond.op === "near" || cond.op === "within" || cond.op === "intersects") {
+    if (columnType.type !== "Point") {
+      throw new Error(
+        `Spatial operator "${cond.op}" requires a Point column; "${column}" is not Point.`,
+      );
+    }
+    if (cond.op === "near") {
+      if (typeof cond.value !== "object" || cond.value === null || Array.isArray(cond.value)) {
+        throw new Error('"near" requires { center, minDistanceMeters?, maxDistanceMeters }.');
+      }
+      const near = cond.value as Record<string, unknown>;
+      const center = parseSpatialPoint(near.center, '"near.center"');
+      const maxDistance = near.maxDistanceMeters;
+      const minDistance = near.minDistanceMeters;
+      if (typeof maxDistance !== "number" || !Number.isFinite(maxDistance) || maxDistance < 0) {
+        throw new Error('"near.maxDistanceMeters" must be finite and non-negative.');
+      }
+      if (
+        minDistance !== undefined &&
+        (typeof minDistance !== "number" ||
+          !Number.isFinite(minDistance) ||
+          minDistance < 0 ||
+          minDistance > maxDistance)
+      ) {
+        throw new Error(
+          '"near.minDistanceMeters" must be finite, non-negative, and <= maxDistanceMeters.',
+        );
+      }
+      return {
+        SpatialNear: {
+          column: columnRef,
+          center,
+          ...(minDistance === undefined ? {} : { min_distance_meters: minDistance }),
+          max_distance_meters: maxDistance,
+        },
+      };
+    }
+    const area = parseSpatialArea(cond.value);
+    return cond.op === "within"
+      ? { SpatialWithin: { column: columnRef, area } }
+      : { SpatialIntersects: { column: columnRef, area } };
   }
   if (columnType.type === "Row" && magicColumnType(column)) {
     if (cond.op !== "eq" && cond.op !== "ne") {
@@ -940,7 +1030,9 @@ function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQue
     builder.union !== undefined ||
     builder.hops.length > 0 ||
     builder.gather !== undefined ||
-    builder.conditions.some((condition) => condition.op === "match")
+    builder.conditions.some((condition) =>
+      ["match", "near", "within", "intersects"].includes(condition.op),
+    )
   );
 }
 

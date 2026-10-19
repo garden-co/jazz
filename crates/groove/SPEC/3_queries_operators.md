@@ -111,6 +111,30 @@ the ch. 4 overlay-probe direction: binding side resident, deletions ride
 deltas, binding-delta probes read the durable boundary arrangement through the
 staged-write overlay so probes see post-tick state).
 
+#### S2 point candidate access
+
+Jazz may supply a bounded set of static half-open ranges over the versioned
+`S2PointV1` ordered index to a source operator. The ranges are part of node and
+binding identity. Their union is a conservative candidate set: it may include
+false positives but MUST NOT omit a point satisfying the original spherical
+predicate. Overlapping ranges and OR branches are deduplicated by source row
+identity before relational processing. Candidate access does not replace
+exact predicate evaluation, current-row visibility, pending-write resolution,
+or authorization.
+
+Initial covering settings are minimum level 0, maximum level 30, level modulus
+1, and at most 64 cells per region. A bound query is limited to 4,096 supplied
+vertices and 4,096 merged scan ranges. Exceeding a bound returns a typed query
+error before a scan; it never widens to an unbounded table source. Inclusive
+S2 cell ranges are converted to half-open ordered-key ranges with every
+primary-key suffix at the final cell retained.
+
+Distance ranking is a hidden numeric projection computed once per exact
+candidate and consumed by `TopBy` ordered by distance ascending and source row
+identity ascending. A bounded `near` examines all candidates admitted by the
+covering before applying its result limit; a small result limit does not imply
+an adaptive nearest-neighbour cursor or bounded candidate work.
+
 ### 3.3 Stateless operators
 
 Stateless operators transform or route deltas without keeping persistent

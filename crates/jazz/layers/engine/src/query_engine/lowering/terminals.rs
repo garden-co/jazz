@@ -1576,9 +1576,13 @@ fn align_collect_root_window(
                     .iter()
                     .map(|key| {
                         let field = collect_root_input_for_value(layout, &key.value, source)?;
-                        Ok(match key.direction {
-                            SortDirection::Asc => TopByOrder::asc(field),
-                            SortDirection::Desc => TopByOrder::desc(field),
+                        Ok(if let Some(center) = key.spatial_distance_center {
+                            TopByOrder::spatial_distance(field, center.map(f64::from_bits))
+                        } else {
+                            match key.direction {
+                                SortDirection::Asc => TopByOrder::asc(field),
+                                SortDirection::Desc => TopByOrder::desc(field),
+                            }
                         })
                     })
                     .collect::<CapabilityResult<Vec<_>>>()?;

@@ -7,7 +7,7 @@ import { schemaToWasm } from "./codegen/schema-reader.js";
 import { resolveSchemaSource } from "./schema-source.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
-import type { AddOp } from "./schema.js";
+import type { AddOp, DropOp, PointSqlType } from "./schema.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -113,6 +113,53 @@ describe("bytes DSL API", () => {
     expect(s.bytes()._sqlType).toBe("BYTEA");
     expect(m.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(m.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+  });
+});
+
+describe("point DSL API", () => {
+  it("supports point defaults in explicit migration operations", () => {
+    const added = m.add.point({ default: [-69.9312, 18.4861] });
+    const nullable = m.add.point({ default: null });
+    const dropped = m.drop.point({ backwardsDefault: [-70, 19] });
+
+    const typedAdd: AddOp<PointSqlType, readonly [-69.9312, 18.4861]> = added;
+    const typedNullableAdd: AddOp<PointSqlType, null> = nullable;
+    const typedDrop: DropOp<PointSqlType, readonly [-70, 19]> = dropped;
+
+    expect(typedAdd.default).toEqual([-69.9312, 18.4861]);
+    expect(typedNullableAdd.default).toBeNull();
+    expect(typedDrop.backwardsDefault).toEqual([-70, 19]);
+  });
+
+  it("keeps a WGS84 Point distinct in the generated binding schema", () => {
+    resetCollectedState();
+    table("places", {
+      location: s.point().default([-69.9312, 18.4861]),
+      optionalLocation: s.point().optional(),
+      coordinates: s.array(s.float()),
+    });
+
+    const wasm = schemaToWasm(getCollectedSchema());
+    expect(wasm.places?.columns).toEqual([
+      {
+        name: "location",
+        column_type: { type: "Point" },
+        nullable: false,
+        default: {
+          type: "Array",
+          value: [
+            { type: "Double", value: -69.9312 },
+            { type: "Double", value: 18.4861 },
+          ],
+        },
+      },
+      { name: "optionalLocation", column_type: { type: "Point" }, nullable: true },
+      {
+        name: "coordinates",
+        column_type: { type: "Array", element: { type: "Double" } },
+        nullable: false,
+      },
+    ]);
   });
 });
 

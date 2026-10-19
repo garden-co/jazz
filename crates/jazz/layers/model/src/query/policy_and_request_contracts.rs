@@ -606,6 +606,33 @@ pub enum Predicate {
     },
     /// Nullable value is null.
     IsNull(Operand),
+    /// A point's spherical distance from `center` lies within the inclusive
+    /// bounds. Coordinates use WGS84 longitude/latitude degrees.
+    SpatialNear {
+        /// Point column being queried.
+        column: String,
+        /// Center as `[longitude, latitude]` in WGS84 degrees.
+        center: [f64; 2],
+        /// Inclusive lower distance bound in metres.
+        min_distance_meters: f64,
+        /// Inclusive upper distance bound in metres.
+        max_distance_meters: f64,
+    },
+    /// A point lies strictly inside a GeoJSON Polygon or MultiPolygon.
+    SpatialWithin {
+        /// Point column being queried.
+        column: String,
+        /// GeoJSON Polygon or MultiPolygon area.
+        area: groove::spatial::GeoArea,
+    },
+    /// A point lies inside or on the boundary of a GeoJSON Polygon or
+    /// MultiPolygon.
+    SpatialIntersects {
+        /// Point column being queried.
+        column: String,
+        /// GeoJSON Polygon or MultiPolygon area.
+        area: groove::spatial::GeoArea,
+    },
 }
 
 impl Predicate {
@@ -636,6 +663,9 @@ impl Predicate {
                 values.iter_mut().for_each(f);
             }
             Self::IsNull(operand) => f(operand),
+            Self::SpatialNear { .. }
+            | Self::SpatialWithin { .. }
+            | Self::SpatialIntersects { .. } => {}
         }
     }
 
@@ -658,6 +688,9 @@ impl Predicate {
             | Self::Contains(left, right) => f(left) || f(right),
             Self::In(left, values) => f(left) || values.iter().any(f),
             Self::IsNull(operand) => f(operand),
+            Self::SpatialNear { .. }
+            | Self::SpatialWithin { .. }
+            | Self::SpatialIntersects { .. } => false,
         }
     }
 }

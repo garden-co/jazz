@@ -110,7 +110,8 @@ export type ColumnType =
   | { type: "Uuid" }
   | { type: "Bytea" }
   | { type: "Array"; element: ColumnType }
-  | { type: "Row"; columns: ColumnDescriptor[] };
+  | { type: "Row"; columns: ColumnDescriptor[] }
+  | { type: "Point" };
 
 export type ColumnMergeStrategy = "Counter" | "GSet";
 

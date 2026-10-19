@@ -252,6 +252,24 @@ pub enum RelationPredicate {
     Not(Box<RelationPredicate>),
     True,
     False,
+    /// Spherical distance predicate over a WGS84 point column.
+    SpatialNear {
+        column: RelationColumnRef,
+        center: [f64; 2],
+        #[serde(default)]
+        min_distance_meters: Option<f64>,
+        max_distance_meters: f64,
+    },
+    /// Strict-interior GeoJSON Polygon/MultiPolygon predicate.
+    SpatialWithin {
+        column: RelationColumnRef,
+        area: groove::spatial::GeoArea,
+    },
+    /// Inclusive-boundary GeoJSON Polygon/MultiPolygon predicate.
+    SpatialIntersects {
+        column: RelationColumnRef,
+        area: groove::spatial::GeoArea,
+    },
 }
 
 #[allow(missing_docs)]

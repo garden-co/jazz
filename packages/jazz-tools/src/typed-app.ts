@@ -24,7 +24,15 @@ import { assertSchemaNameAllowed } from "./schema-name.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
-import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
+import type {
+  Column,
+  GeoArea,
+  NearQuery,
+  PointSqlType,
+  Schema as SchemaAst,
+  SqlType,
+  TSTypeFromSqlType,
+} from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
 
@@ -460,40 +468,46 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
             ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "UUID"
               ? UuidWhere<ColumnBuilderOptional<TBuilder>>
-              : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-                ? WhereEqNe<
-                    Uint8Array,
-                    ColumnBuilderOptional<TBuilder>,
-                    Membership<Uint8Array | number[]>
-                  >
-                : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+              : ColumnBuilderSqlType<TBuilder> extends PointSqlType
+                ? {
+                    near?: NearQuery;
+                    within?: GeoArea;
+                    intersects?: GeoArea;
+                  } & NullableWhere<ColumnBuilderOptional<TBuilder>>
+                : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
                   ? WhereEqNe<
-                      StoredColumnValue<TBuilder>,
+                      Uint8Array,
                       ColumnBuilderOptional<TBuilder>,
-                      Membership<StoredColumnValue<TBuilder>>
+                      Membership<Uint8Array | number[]>
                     >
-                  : ColumnBuilderSqlType<TBuilder> extends {
-                        kind: "ENUM";
-                        variants: readonly (infer TVariant extends string)[];
-                      }
-                    ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
+                  : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+                    ? WhereEqNe<
+                        StoredColumnValue<TBuilder>,
+                        ColumnBuilderOptional<TBuilder>,
+                        Membership<StoredColumnValue<TBuilder>>
+                      >
                     : ColumnBuilderSqlType<TBuilder> extends {
                           kind: "ENUM";
-                          cases: readonly unknown[];
+                          variants: readonly (infer TVariant extends string)[];
                         }
-                      ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                      ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
                       : ColumnBuilderSqlType<TBuilder> extends {
-                            kind: "ARRAY";
-                            element: infer TElementSql extends SqlType;
+                            kind: "ENUM";
+                            cases: readonly unknown[];
                           }
-                        ? WhereEqNe<
-                            StoredColumnValue<TBuilder>,
-                            ColumnBuilderOptional<TBuilder>,
-                            { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
-                              StoredColumnValue<TBuilder>
+                        ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                        : ColumnBuilderSqlType<TBuilder> extends {
+                              kind: "ARRAY";
+                              element: infer TElementSql extends SqlType;
+                            }
+                          ? WhereEqNe<
+                              StoredColumnValue<TBuilder>,
+                              ColumnBuilderOptional<TBuilder>,
+                              { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
+                                StoredColumnValue<TBuilder>
+                              >
                             >
-                          >
-                        : never;
+                          : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,

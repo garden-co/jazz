@@ -282,6 +282,10 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
     };
   }
 
+  if (sqlType.kind === "POINT") {
+    return { type: "Point" };
+  }
+
   return {
     type: "Array",
     element: sqlTypeToWasmColumnType(sqlType.element),

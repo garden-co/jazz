@@ -661,6 +661,39 @@ application columns. Catalogue rows stay on the schema/lens catalogue lane
 (ch. 10); they are not ordinary user rows even though they reuse the same storage
 and sync machinery.
 
+### 2.15 Spatial point columns
+
+`Point` is a logical, schema-declared type with WGS84 longitude/latitude
+coordinates in that order. It is not inferred from an array's shape. Its row
+value is an atomic `Array<F64>` pair so ordinary LWW merge and existing row
+value codecs apply; point semantics remain in the compiled schema and schema
+identity. A non-null pair MUST contain exactly two finite values, longitude in
+`[-180, 180]`, and latitude in `[-90, 90]`. Nullable points use the normal
+nullable column envelope; a null has no spatial-index entry and cannot satisfy
+a spatial predicate.
+
+Point columns support LWW updates and optional/default modifiers. They MUST be
+rejected as branch keys, composite-index columns, scalar-ordering values, or
+merge-strategy inputs other than LWW. `Point` is a new schema type; existing
+ordinary arrays retain their existing identity and meaning and are never
+implicitly converted to points.
+
+Point-bearing schema IDs use the dedicated `jazz-schema-v3-spatial-points`
+identity domain. Schema IDs and canonical bytes for schemas without points
+remain unchanged. The persistent point-to-cell index is the separately
+versioned `groove.s2-point-key.v1` derivation; the version is part of its
+identity and definition bytes, not a new point row-value encoding.
+
+- `INV-DATA-24`: Point semantics MUST be explicit in the logical schema and
+  canonical identity; a physical two-element array MUST NOT acquire spatial
+  behavior by shape inference.
+- `INV-DATA-25`: Every admitted non-null point MUST be a finite WGS84
+  `[longitude, latitude]` pair within the coordinate bounds, on defaults,
+  local writes, and replicated writes.
+- `INV-DATA-26`: A spatial index MUST be derived from the selected current
+  point value, versioned independently from row bytes, and omitted for null
+  points. Schema admission MUST make the index ready before queries may use it.
+
 ## Open Questions
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.

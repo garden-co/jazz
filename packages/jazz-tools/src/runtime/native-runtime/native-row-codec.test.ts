@@ -418,6 +418,37 @@ describe("native row codec", () => {
     expect(decodeNativeRowValues(columns, encoded)).toEqual(values);
   });
 
+  it("stores a point as one fixed pair of little-endian f64 values", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "location", column_type: { type: "Point" }, nullable: false },
+    ];
+    const values: Value[] = [
+      {
+        type: "Array",
+        value: [
+          { type: "Double", value: -69.9312 },
+          { type: "Double", value: 18.4861 },
+        ],
+      },
+    ];
+
+    const encoded = encodeNativeRowValues(columns, values);
+    expect(encoded).toHaveLength(16);
+    expect(bytesToHex(encoded)).toBe("4182e2c7987b51c0ea95b20c717c3240");
+    expect(decodeNativeRowValues(columns, encoded)).toEqual(values);
+    expect(() =>
+      encodeNativeRowValues(columns, [
+        {
+          type: "Array",
+          value: [
+            { type: "Double", value: 181 },
+            { type: "Double", value: 0 },
+          ],
+        },
+      ]),
+    ).toThrow("point requires finite WGS84 longitude/latitude coordinates");
+  });
+
   it("rejects signed integer values outside their declared widths", () => {
     const integerColumn = [
       { name: "value", column_type: { type: "Integer" as const }, nullable: false },

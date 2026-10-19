@@ -1,4 +1,998 @@
-use crate::query::{in_list, is_null};
+use crate::query::is_null;
+
+/// alice inserts four places and the query engine serves indexed spatial
+/// reads; the contract covers nearest-first ordering, anchored spatial
+/// negation, and strict versus inclusive polygon boundaries through Jazz's
+/// public query model. bob reads the same public result surface and mallory's
+/// unanchored OR arm is rejected.
+#[test]
+fn indexed_point_queries_support_near_within_and_intersects() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places").column("location", PublicColumnType::Point),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xe1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xe2), schema);
+
+    let duplicate = row(0xe0);
+    let inside = row(0xe1);
+    let boundary = row(0xe2);
+    let outside = row(0xe3);
+    for (row_uuid, timestamp, longitude, latitude) in [
+        (duplicate, 9, 1.0, 1.0),
+        (inside, 10, 1.0, 1.0),
+        (boundary, 11, 0.0, 1.0),
+        (outside, 12, 3.0, 1.0),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(longitude), Value::F64(latitude)]),
+            )])),
+        );
+    }
+
+    let near = crate::query::Query::from("places").filter(
+        crate::query::Predicate::SpatialNear {
+            column: "location".to_owned(),
+            center: [1.0, 1.0],
+            min_distance_meters: 0.0,
+            max_distance_meters: 120_000.0,
+        },
+    );
+    let (near_rows, near_metrics) =
+        query_rows_by_uuid(&mut core, near.clone(), DurabilityTier::Global);
+    assert_eq!(near_rows, [duplicate, inside, boundary]);
+    assert!(near_metrics.source_index_probes > 0);
+    assert_eq!(near_metrics.source_full_scans, 0);
+    assert_eq!(
+        maintained_rows_by_uuid_for_identity_in_table(
+            &mut core,
+            near.clone(),
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            "places",
+        )
+        .0,
+        [duplicate, inside, boundary],
+        "maintained results keep nearest-first ordering with stable row identity ties"
+    );
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let second_area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [2.5, 0.0],
+        [3.5, 0.0],
+        [3.5, 2.0],
+        [2.5, 2.0],
+        [2.5, 0.0],
+    ]]);
+    let spatial_or = crate::query::Query::from("places").filter(
+        crate::query::Predicate::Any(vec![
+            crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area.clone(),
+            },
+            crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: second_area,
+            },
+        ]),
+    );
+    let (spatial_or_rows, spatial_or_metrics) =
+        query_rows_by_uuid(&mut core, spatial_or, DurabilityTier::Global);
+    assert_eq!(
+        spatial_or_rows.iter().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([duplicate, inside, boundary, outside])
+    );
+    assert_eq!(spatial_or_rows.len(), 4);
+    assert!(spatial_or_metrics.source_index_probes > 0);
+    assert_eq!(spatial_or_metrics.source_full_scans, 0);
+    let unbounded_or = crate::query::Query::from("places").filter(
+        crate::query::Predicate::Any(vec![
+            crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area.clone(),
+            },
+            crate::query::Predicate::Not(Box::new(
+                crate::query::Predicate::SpatialIntersects {
+                    column: "location".to_owned(),
+                    area: area.clone(),
+                },
+            )),
+        ]),
+    );
+    let unbounded_shape = unbounded_or.validate(&core.catalogue.schema).unwrap();
+    let unbounded_binding = unbounded_shape.bind(BTreeMap::new()).unwrap();
+    assert!(matches!(
+        core.query_rows_for_link(
+            &unbounded_shape,
+            &unbounded_binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap_err(),
+        Error::UnsupportedSpatialQuery(_)
+    ));
+
+    let subtract_area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.5, 0.5],
+        [1.5, 0.5],
+        [1.5, 1.5],
+        [0.5, 1.5],
+        [0.5, 0.5],
+    ]]);
+    let anchored_not = crate::query::Query::from("places").filter(
+        crate::query::Predicate::All(vec![
+            crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area.clone(),
+            },
+            crate::query::Predicate::Not(Box::new(
+                crate::query::Predicate::SpatialIntersects {
+                    column: "location".to_owned(),
+                    area: subtract_area,
+                },
+            )),
+        ]),
+    );
+    assert_eq!(
+        query_rows_by_uuid(&mut core, anchored_not, DurabilityTier::Global).0,
+        [boundary]
+    );
+
+    let within = crate::query::Query::from("places").filter(
+        crate::query::Predicate::SpatialWithin {
+            column: "location".to_owned(),
+            area: area.clone(),
+        },
+    );
+    assert_eq!(
+        query_rows_by_uuid(&mut core, within, DurabilityTier::Global)
+            .0
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([duplicate, inside])
+    );
+
+    let intersects = crate::query::Query::from("places").filter(
+        crate::query::Predicate::SpatialIntersects { column: "location".to_owned(), area },
+    );
+    assert_eq!(
+        query_rows_by_uuid(&mut core, intersects, DurabilityTier::Global)
+            .0
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([duplicate, inside, boundary])
+    );
+    let within_query = crate::query::Query::from("places").filter(
+        crate::query::Predicate::SpatialWithin {
+            column: "location".to_owned(),
+            area: groove::spatial::GeoArea::Polygon(vec![vec![
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 2.0],
+                [0.0, 2.0],
+                [0.0, 0.0],
+            ]]),
+        },
+    );
+    assert_eq!(
+        query_rows_by_uuid(&mut core, within_query.clone(), DurabilityTier::Local)
+            .0
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([duplicate, inside])
+    );
+
+    // A Local read must find the pending point inside the area and mask the
+    // settled location of the moved row, while ignoring an unrelated pending
+    // point outside the covering.
+    let pending_inside = row(0xe4);
+    let pending_outside = row(0xe5);
+    for (row_uuid, tx_time, location) in [
+        (inside, 20, [20.0, 20.0]),
+        (pending_inside, 21, [1.5, 1.5]),
+        (pending_outside, 22, [40.0, 40.0]),
+    ] {
+        core.commit_mergeable_settled(MergeableCommit::new("places", row_uuid, tx_time).cells(
+            BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+            )]),
+        ))
+        .unwrap();
+    }
+    // A pending deletion has no point-index entry, but its row presence must
+    // still mask the matching settled point by candidate row identity.
+    core.commit_mergeable_settled(
+        MergeableCommit::new("places", duplicate, 23).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    let (local_after_moves, local_metrics) =
+        query_rows_by_uuid(&mut core, within_query, DurabilityTier::Local);
+    assert_eq!(
+        local_after_moves.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([pending_inside])
+    );
+    assert_eq!(local_metrics.source_full_scans, 0);
+}
+
+/// Maintained spatial membership follows indexed point changes instead of
+/// recomputing over unrelated rows. The ordinary subscription delta path must
+/// report both enter and leave transitions for the query's candidate set.
+#[test]
+fn spatial_subscription_tracks_point_moves_with_bounded_membership() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places").column("location", PublicColumnType::Point),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xeb), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xec), schema);
+
+    let inside = row(0xeb);
+    let outside = row(0xec);
+    let unrelated = row(0xed);
+    for (row_uuid, timestamp, location) in [
+        (inside, 10, [1.0, 1.0]),
+        (outside, 11, [20.0, 20.0]),
+        (unrelated, 12, [40.0, 40.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+            )])),
+        );
+    }
+
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let query = Query::from("places").filter(crate::query::Predicate::SpatialIntersects {
+        column: "location".to_owned(),
+        area,
+    });
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, initial_received) =
+        core.open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    if !initial_received {
+        crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+        while let Ok(deltas) = subscription.try_recv() {
+            maintained
+                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+                .unwrap();
+        }
+    }
+    let active_rows = |maintained: &crate::node::maintained_subscription_view::MaintainedSubscriptionView| {
+        maintained
+            .active_result_members()
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .filter_map(|(table, row_uuid, _)| (table.as_str() == "places").then_some(row_uuid))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(active_rows(&maintained), BTreeSet::from([inside]));
+
+    // Move one current match out and one non-match in. A point update beyond
+    // the covering must not add an unrelated terminal transition.
+    for (row_uuid, timestamp, location) in [
+        (inside, 20, [10.0, 10.0]),
+        (outside, 21, [1.5, 1.5]),
+        (unrelated, 22, [41.0, 41.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+            )])),
+        );
+    }
+    crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+
+    let mut changed_roots = BTreeSet::new();
+    while let Ok(deltas) = subscription.try_recv() {
+        let transitions = maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+            .unwrap();
+        changed_roots.extend(
+            transitions
+                .terminal_operations
+                .into_iter()
+                .map(|operation| operation.root_key),
+        );
+    }
+    assert_eq!(active_rows(&maintained), BTreeSet::from([outside]));
+    assert_eq!(
+        changed_roots.len(),
+        2,
+        "only rows entering or leaving the spatial result should be patched"
+    );
+    core.unsubscribe_groove_subscription(subscription.id());
+}
+
+#[test]
+fn local_spatial_subscription_masks_settled_matches_for_pending_moves() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places").column("location", PublicColumnType::Point),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xef), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xf0), schema);
+    let settled_match = row(0xf1);
+    let pending_match = row(0xf2);
+    for (row_uuid, timestamp, location) in [
+        (settled_match, 10, [1.0, 1.0]),
+        (pending_match, 11, [20.0, 20.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+            )])),
+        );
+    }
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let shape = Query::from("places")
+        .filter(crate::query::Predicate::SpatialIntersects {
+            column: "location".to_owned(),
+            area,
+        })
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, initial_received) =
+        core.open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Local,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    if !initial_received {
+        crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+        while let Ok(deltas) = subscription.try_recv() {
+            maintained
+                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+                .unwrap();
+        }
+    }
+    let active_rows = |maintained: &crate::node::maintained_subscription_view::MaintainedSubscriptionView| {
+        maintained
+            .active_result_members()
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .filter_map(|(table, row_uuid, _)| (table.as_str() == "places").then_some(row_uuid))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(active_rows(&maintained), BTreeSet::from([settled_match]));
+
+    core.commit_mergeable_settled(MergeableCommit::new("places", settled_match, 20).cells(
+        BTreeMap::from([(
+            "location".to_owned(),
+            Value::Array(vec![Value::F64(20.0), Value::F64(20.0)]),
+        )]),
+    ))
+    .unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("places", pending_match, 21).cells(
+        BTreeMap::from([(
+            "location".to_owned(),
+            Value::Array(vec![Value::F64(1.5), Value::F64(1.5)]),
+        )]),
+    ))
+    .unwrap();
+    crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+    while let Ok(deltas) = subscription.try_recv() {
+        maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+            .unwrap();
+    }
+    assert_eq!(
+        active_rows(&maintained),
+        BTreeSet::from([pending_match]),
+        "a pending move out masks its settled spatial entry while a pending move in joins the result"
+    );
+    core.unsubscribe_groove_subscription(subscription.id());
+}
+
+/// Alice and Bob each own a nearby place. The same indexed `near` query must
+/// still apply the ordinary row policy before returning either person's row.
+#[test]
+fn indexed_point_queries_preserve_row_permissions() {
+    let select_owner = public_claim_eq("owner", "sub");
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("places")
+                .column("owner", PublicColumnType::Uuid)
+                .column("location", PublicColumnType::Point)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(select_owner)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xe6), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xe7), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    let alice_place = row(0xe6);
+    let bob_place = row(0xe7);
+    for (row_uuid, timestamp, owner, location) in [
+        (alice_place, 30, alice, [1.0, 1.0]),
+        (bob_place, 31, bob, [1.1, 1.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                (
+                    "location".to_owned(),
+                    Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+                ),
+            ])),
+        );
+    }
+    let query = Query::from("places").filter(crate::query::Predicate::SpatialNear {
+        column: "location".to_owned(),
+        center: [1.0, 1.0],
+        min_distance_meters: 0.0,
+        max_distance_meters: 100_000.0,
+    });
+
+    assert_eq!(
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, alice).0,
+        [alice_place]
+    );
+    assert_eq!(
+        maintained_rows_by_uuid_for_identity_in_table(
+            &mut core,
+            query.clone(),
+            DurabilityTier::Global,
+            alice,
+            "places",
+        )
+        .0,
+        [alice_place]
+    );
+    assert_eq!(
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, bob).0,
+        [bob_place]
+    );
+}
+
+/// Alice's positive spatial OR can use different Point indexes. The same row
+/// may be a candidate through both indexes, but query membership remains one
+/// row before permissions and later relationship work.
+#[test]
+fn spatial_or_across_point_columns_deduplicates_index_candidates() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places")
+            .column("location", PublicColumnType::Point)
+            .column("origin", PublicColumnType::Point),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xf0), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xf1), schema);
+    let first = row(0xf2);
+    let second = row(0xf3);
+    let both = row(0xf4);
+    for (row_uuid, timestamp, location, origin) in [
+        (first, 10, [1.0, 1.0], [20.0, 20.0]),
+        (second, 11, [20.0, 20.0], [11.0, 11.0]),
+        (both, 12, [1.5, 1.5], [11.5, 11.5]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([
+                (
+                    "location".to_owned(),
+                    Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+                ),
+                (
+                    "origin".to_owned(),
+                    Value::Array(vec![Value::F64(origin[0]), Value::F64(origin[1])]),
+                ),
+            ])),
+        );
+    }
+    let around_first = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let around_second = groove::spatial::GeoArea::Polygon(vec![vec![
+        [10.0, 10.0],
+        [12.0, 10.0],
+        [12.0, 12.0],
+        [10.0, 12.0],
+        [10.0, 10.0],
+    ]]);
+    let query = Query::from("places").filter(crate::query::Predicate::Any(vec![
+        crate::query::Predicate::SpatialIntersects {
+            column: "location".to_owned(),
+            area: around_first,
+        },
+        crate::query::Predicate::SpatialIntersects {
+            column: "origin".to_owned(),
+            area: around_second,
+        },
+    ]));
+
+    let (rows, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Global);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([first, second, both])
+    );
+    assert!(metrics.source_index_probes >= 2);
+    assert_eq!(metrics.source_full_scans, 0);
+}
+
+/// Explicit index selection can opt a Point out of its default spatial index;
+/// queries then fail before a source scan instead of silently becoming O(n).
+#[test]
+fn spatial_query_requires_the_point_index() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("places")
+                .column("name", PublicColumnType::Text)
+                .column("location", PublicColumnType::Point)
+                .index_only(["name"]),
+        ),
+    );
+    let (_dir, mut core) = open_node_with_schema(node(0xe8), schema);
+    let query = Query::from("places").filter(crate::query::Predicate::SpatialWithin {
+        column: "location".to_owned(),
+        area: groove::spatial::GeoArea::Polygon(vec![vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+        ]]),
+    });
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(matches!(
+        core.query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap_err(),
+        Error::SpatialIndexUnavailable { table, column }
+            if table == "places" && column == "location"
+    ));
+    assert_eq!(core.query_engine_read_metrics().source_full_scans, 0);
+}
+
+/// alice submits two individually valid area filters; bob's query engine
+/// admits their complete program before preparing a spatial source, while
+/// mallory's over-budget request is rejected without probing storage. This
+/// public query test pins the query-wide geometry budget.
+#[test]
+fn spatial_query_budget_is_enforced_across_or_arms_before_reads() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places").column("location", PublicColumnType::Point),
+    ));
+    let (_dir, mut core) = open_node_with_schema(node(0xd7), schema.clone());
+    let area = |center_longitude: f64| {
+        let mut ring = (0..2_048)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / 2_048.0;
+                [center_longitude + angle.cos(), 1.0 + angle.sin()]
+            })
+            .collect::<Vec<_>>();
+        ring.push(ring[0]);
+        groove::spatial::GeoArea::Polygon(vec![ring])
+    };
+    let query = Query::from("places").filter(crate::query::Predicate::Any(vec![
+        crate::query::Predicate::SpatialIntersects {
+            column: "location".to_owned(),
+            area: area(0.0),
+        },
+        crate::query::Predicate::SpatialIntersects {
+            column: "location".to_owned(),
+            area: area(4.0),
+        },
+    ]));
+    core.reset_query_engine_read_metrics();
+
+    assert!(matches!(
+        query.validate(&schema).unwrap_err(),
+        crate::query::QueryError::SpatialVertexBudgetExceeded { max: 4_096 }
+    ));
+    let metrics = core.query_engine_read_metrics();
+    assert_eq!(metrics.source_full_scans, 0);
+    assert_eq!(metrics.source_index_probes, 0);
+}
+
+#[test]
+fn related_spatial_filter_fails_before_an_unbounded_source_read() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("owners"))
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .fk_column("owner_id", "owners")
+                    .column("location", PublicColumnType::Point),
+            ),
+    );
+    let (_dir, mut core) = open_node_with_schema(node(0xf3), schema.clone());
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let shape = Query::from("owners")
+        .join_via(
+            "places",
+            "owner_id",
+            [crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area,
+            }],
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_query_engine_read_metrics();
+
+    assert!(matches!(
+        core.query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap_err(),
+        Error::UnsupportedSpatialQuery(message)
+            if message.contains("indexed restriction on every source")
+                && message.contains("'owners'")
+    ));
+    let metrics = core.query_engine_read_metrics();
+    assert_eq!(metrics.source_full_scans, 0);
+    assert_eq!(metrics.source_index_probes, 0);
+}
+
+/// Alice's two independently bounded relation-union arms retain their public
+/// occurrence labels: an overlapping row is returned once per arm, while no
+/// unbounded source fallback is introduced.
+#[test]
+fn spatial_relation_union_arms_keep_occurrences_and_index_bounds() {
+    use crate::query::{
+        RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
+        RelationProjectExpr, RelationQuery, RelationRowIdRef, RelationUnionArm,
+    };
+
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("places").column("location", PublicColumnType::Point),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xfa), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xfb), schema);
+    let matching = row(0xfc);
+    let other_matching = row(0xfd);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("places", matching, 10).cells(BTreeMap::from([(
+            "location".to_owned(),
+            Value::Array(vec![Value::F64(1.0), Value::F64(1.0)]),
+        )])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("places", other_matching, 11).cells(BTreeMap::from([(
+            "location".to_owned(),
+            Value::Array(vec![Value::F64(11.0), Value::F64(11.0)]),
+        )])),
+    );
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let arm = |label: &str, arm_area: groove::spatial::GeoArea| RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "places".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::SpatialIntersects {
+                    column: RelationColumnRef {
+                        scope: Some("places".to_owned()),
+                        column: "location".to_owned(),
+                    },
+                    area: arm_area,
+                },
+            }),
+            columns: vec![
+                RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                RelationProjectColumn {
+                    alias: "location".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("places".to_owned()),
+                        column: "location".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+    let query = Query {
+        relation: Some(RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: vec![arm("left", area.clone()), arm("right", area.clone())],
+            },
+        }),
+        ..Query::from("places")
+    };
+
+    let (rows, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Global);
+    assert_eq!(rows, [matching, matching]);
+    assert!(metrics.source_index_probes > 0);
+    assert_eq!(metrics.source_full_scans, 0);
+
+    let other_area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [10.0, 10.0],
+        [12.0, 10.0],
+        [12.0, 12.0],
+        [10.0, 12.0],
+        [10.0, 10.0],
+    ]]);
+    let different_areas_query = Query {
+        relation: Some(RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: vec![arm("first-area", area.clone()), arm("second-area", other_area)],
+            },
+        }),
+        ..Query::from("places")
+    };
+    let (different_area_rows, different_area_metrics) =
+        query_rows_by_uuid(&mut core, different_areas_query, DurabilityTier::Global);
+    assert_eq!(different_area_rows, [matching, other_matching]);
+    assert!(different_area_metrics.source_index_probes > 0);
+    assert_eq!(different_area_metrics.source_full_scans, 0);
+
+    let unbounded_arm = RelationUnionArm {
+        label: "unbounded".to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "places".to_owned(),
+                alias: None,
+            }),
+            columns: vec![
+                RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                RelationProjectColumn {
+                    alias: "location".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("places".to_owned()),
+                        column: "location".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+    let unbounded_query = Query {
+        relation: Some(RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: vec![arm("bounded", area), unbounded_arm],
+            },
+        }),
+        ..Query::from("places")
+    };
+    let unbounded_shape = unbounded_query
+        .validate(&core.catalogue.schema)
+        .expect("the union shape is valid before access-path planning");
+    let unbounded_binding = unbounded_shape.bind(BTreeMap::new()).unwrap();
+    core.reset_query_engine_read_metrics();
+    assert!(matches!(
+        core.query_rows_for_link(
+            &unbounded_shape,
+            &unbounded_binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap_err(),
+        Error::UnsupportedSpatialQuery(message)
+            if message.contains("each spatial row-set union arm")
+    ));
+    let metrics = core.query_engine_read_metrics();
+    assert_eq!(metrics.source_full_scans, 0);
+    assert_eq!(metrics.source_index_probes, 0);
+}
+
+#[test]
+fn spatial_join_accepts_independently_indexed_sources() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("owners")
+                    .column("location", PublicColumnType::Point),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("places")
+                    .fk_column("owner_id", "owners")
+                    .column("location", PublicColumnType::Point),
+            ),
+    );
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xf4), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xf5), schema);
+    let matching_owner = row(0xf4);
+    let outside_owner = row(0xf5);
+    for (row_uuid, timestamp, location) in [
+        (matching_owner, 10, [1.0, 1.0]),
+        (outside_owner, 11, [10.0, 10.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("owners", row_uuid, timestamp).cells(BTreeMap::from([(
+                "location".to_owned(),
+                Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+            )])),
+        );
+    }
+    for (row_uuid, timestamp, owner_id, location) in [
+        (row(0xf6), 12, matching_owner, [1.5, 1.5]),
+        (row(0xf7), 13, outside_owner, [1.5, 1.5]),
+        (row(0xf8), 14, matching_owner, [10.0, 10.0]),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("places", row_uuid, timestamp).cells(BTreeMap::from([
+                ("owner_id".to_owned(), Value::Uuid(owner_id.0)),
+                (
+                    "location".to_owned(),
+                    Value::Array(vec![Value::F64(location[0]), Value::F64(location[1])]),
+                ),
+            ])),
+        );
+    }
+
+    let area = groove::spatial::GeoArea::Polygon(vec![vec![
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [2.0, 2.0],
+        [0.0, 2.0],
+        [0.0, 0.0],
+    ]]);
+    let query = Query::from("owners")
+        .filter(crate::query::Predicate::SpatialIntersects {
+            column: "location".to_owned(),
+            area: area.clone(),
+        })
+        .join_via(
+            "places",
+            "owner_id",
+            [crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area.clone(),
+            }],
+        );
+
+    let (rows, metrics) = query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    assert_eq!(rows, [matching_owner]);
+    assert!(metrics.source_index_probes > 0);
+    assert_eq!(metrics.source_full_scans, 0);
+
+    // A related-side spatial predicate is also safe when the owner itself is
+    // bounded by the existing primary-key point lookup.
+    let known_owner_query = Query::from("owners")
+        .filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(matching_owner.0)),
+        ))
+        .join_via(
+            "places",
+            "owner_id",
+            [crate::query::Predicate::SpatialIntersects {
+                column: "location".to_owned(),
+                area: area.clone(),
+            }],
+        );
+    let (known_owner_rows, known_owner_metrics) =
+        query_rows_by_uuid(&mut core, known_owner_query, DurabilityTier::Global);
+    assert_eq!(known_owner_rows, [matching_owner]);
+    assert_eq!(known_owner_metrics.source_full_scans, 0);
+
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, initial_received) =
+        core.open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    if !initial_received {
+        crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+        while let Ok(deltas) = subscription.try_recv() {
+            maintained
+                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+                .unwrap();
+        }
+    }
+    let active_owners = |maintained: &crate::node::maintained_subscription_view::MaintainedSubscriptionView| {
+        maintained
+            .active_result_members()
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .filter_map(|(table, row_uuid, _)| (table.as_str() == "owners").then_some(row_uuid))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(active_owners(&maintained), BTreeSet::from([matching_owner]));
+
+    // A child leaving its spatial range removes the matching owner through
+    // the maintained relational graph without scanning either full table.
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("places", row(0xf6), 20).cells(BTreeMap::from([(
+            "location".to_owned(),
+            Value::Array(vec![Value::F64(10.0), Value::F64(10.0)]),
+        )])),
+    );
+    crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
+    while let Ok(deltas) = subscription.try_recv() {
+        maintained
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &core.node_aliases)
+            .unwrap();
+    }
+    assert!(active_owners(&maintained).is_empty());
+    assert_eq!(core.query_engine_read_metrics().source_full_scans, 0);
+    core.unsubscribe_groove_subscription(subscription.id());
+}
 
 fn access_path_schema() -> JazzSchema {
     build_public_test_schema(
@@ -126,6 +1120,16 @@ fn maintained_rows_by_uuid_for_identity(
     tier: DurabilityTier,
     identity: AuthorSubject,
 ) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    maintained_rows_by_uuid_for_identity_in_table(node, query, tier, identity, "docs")
+}
+
+fn maintained_rows_by_uuid_for_identity_in_table(
+    node: &mut NodeState,
+    query: Query,
+    tier: DurabilityTier,
+    identity: AuthorSubject,
+    table: &str,
+) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
     // Keep the maintained subscription path on the same authenticated claim
     // binding as the public one-shot helper above.
     if identity != AuthorSubject::SYSTEM {
@@ -155,7 +1159,7 @@ fn maintained_rows_by_uuid_for_identity(
         .active_result_members()
         .iter()
         .filter_map(crate::protocol::ResultMemberEntry::as_row)
-        .filter_map(|(table, row_uuid, _)| (table.as_str() == "docs").then_some(row_uuid))
+        .filter_map(|(row_table, row_uuid, _)| (row_table.as_str() == table).then_some(row_uuid))
         .collect();
     node.unsubscribe_groove_subscription(receiver.id());
     (rows, node.query_engine_read_metrics().clone())

@@ -1042,6 +1042,69 @@ lower into the same query AST and reject unsupported SQL constructs loudly.
 Custom DSL helpers should likewise normalize into the AST rather than building
 parallel query identities.
 
+### 6.9 Spatial point predicates
+
+Spatial operators are valid only on schema-declared `Point` columns. Coordinates
+are WGS84 longitude/latitude degrees, with spherical calculations using an
+Earth radius of 6,371,008.8 metres and shortest great-circle polygon edges.
+Supported area inputs are GeoJSON `Polygon` and `MultiPolygon`, including
+holes. Feature wrappers and non-polygon geometries are rejected. Query
+normalization compiles geometry into immutable predicate values which are
+reused by exact evaluation and incremental maintenance.
+
+The operators have distinct boundary contracts:
+
+| Operator     | Match rule                                                                                               | Result order                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `near`       | Spherical distance is inclusively within `minDistanceMeters` (default 0) and finite `maxDistanceMeters`. | Distance ascending, then stable row identity. |
+| `within`     | Point is strictly inside a polygon area; boundaries do not match.                                        | Existing query order.                         |
+| `intersects` | Point is inside or on the polygon boundary.                                                              | Existing query order.                         |
+
+Hole interiors do not match either area operator. Hole edges match `intersects`
+but not `within`. Either ring winding is accepted and normalized to the
+smaller spherical exterior. The first ring is the exterior and each remaining
+ring is a direct hole; outside, nested, or overlapping holes are rejected.
+Unclosed rings, invalid topology, out-of-range coordinates, antipodal edges,
+and exactly hemispherical ambiguity are errors.
+Distance bounds must be finite and non-negative, with minimum no greater than
+maximum. A null point never matches.
+
+The complete bound query has a limit of 4,096 supplied polygon positions and
+4,096 normalized index scan ranges across nested scopes and OR arms. Exceeding
+either limit is a typed admission error before source preparation.
+
+Spatial planning MUST use a conservative S2 covering to read candidates from
+the versioned point index, then evaluate the original exact predicate before
+permissions, relationships, ordering, or pagination expose results. Covering
+false positives are permitted; false negatives and whole-table fallbacks are
+not. One positive `near` is allowed per query scope and cannot occur inside
+`OR` or `NOT`; area `NOT` can be evaluated as a residual under a positive
+spatial anchor but cannot create an access path. A `near` nested in an existence check tests relation membership
+without changing the outer ordering. Unsupported boolean or relationship
+shapes MUST fail with a typed error naming the exact unsupported pattern.
+
+The current implementation supports current Global and Local reads. Historical
+cuts and frozen-base branch views requiring historical spatial indexes return
+a typed unsupported error. A row-set join is spatially bounded only when each
+stored source has its own admitted index path, or the root is bounded by an
+exact primary-key lookup; an unbounded source makes the whole query return
+`UnsupportedSpatialQuery` before a source scan. This allows independently
+indexed spatial/scalar join inputs and related spatial filtering for an
+exactly addressed root. Auxiliary include and reference sources must also be
+bounded by the admitted relationship path. A spatial filter only on the related side still needs
+a bounded relationship-key lookup back to unindexed outer rows, which is not
+implemented. Positive area OR is supported across different Point columns on
+one source: their conservative candidate ranges are unioned and the original
+boolean predicate remains the exact membership test. Public relation-union
+arms retain their occurrence labels; each arm must independently bound every
+stored source with a positive spatial predicate. Shared-source ranges are
+merged before candidate reads, and an unbounded arm fails before source access.
+`near` inside relation-union arms is rejected because each arm would define a
+competing nearest-first order. Recursive relations remain unsupported.
+Supported root, bounded-join, and bounded-union queries retain the ordinary
+read-policy, sync, pending-write, and subscription semantics of the enclosing
+query, subject to the remaining acceptance gates in the compatibility proof.
+
 ## Open Questions
 
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Read settling, cancellation, offline authority-tier behavior, and relay coverage.

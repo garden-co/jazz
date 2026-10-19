@@ -969,6 +969,33 @@ graph per outer row. The likely direction is a binding/prepared-shape style
 correlation relation that lets parent keys flow as data, then routes child
 result changes back to the correct parent output.
 
+### 16.9 Spatial index maintenance
+
+A spatial query subscription keeps the same normalized query, binding,
+authorization, and read-view identities as its one-shot form. The bound
+geometry's conservative cell ranges select index-source deltas; every candidate
+is then checked against the exact spherical predicate in the normal maintained
+graph. Geometry caches and range caches are isolated by schema, branch,
+binding, and authorization context.
+
+Settled and pending spatial-index candidates are combined only after resolving
+the current row winner. A pending point move out of a range must hide the
+settled entry at its old cell even though the new pending entry is outside the
+queried ranges. This uses targeted pending-presence lookup by candidate row
+identity and MUST NOT enumerate the pending overlay. Deletes and null
+transitions remove a candidate through the same winner-resolution path.
+
+For root spatial queries and joins whose stored inputs each have an admitted
+index path (or whose root is fixed by an exact primary-key lookup), only
+changes touching a selected index path may recompute the relevant maintained
+result. A point change outside those ranges MUST NOT
+rehydrate unrelated rows or trigger whole-view semantic evaluation. A
+related-only spatial filter that needs a lookup from matching relationship
+keys back to unindexed outer rows is not implemented; it fails before source
+access. For `near`, distance is computed once per exact candidate and the
+existing maintained ordered-window operator selects by distance ascending,
+then stable row identity.
+
 ## Open Questions
 
 - 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the local-first remote-answer inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.

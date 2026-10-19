@@ -974,6 +974,7 @@ fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut
         | PredicateExpr::IsNull(_)
         | PredicateExpr::IsNotNull(_)
         | PredicateExpr::EnumMatch { .. }
+        | PredicateExpr::Spatial { .. }
         | PredicateExpr::Or(_)
         | PredicateExpr::Not(_) => {}
     }

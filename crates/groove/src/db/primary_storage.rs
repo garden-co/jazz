@@ -759,7 +759,7 @@ impl Database {
         let table_schema = self.table(table)?;
         let index = self.index(table, index_name)?;
         let mut logical_key = Vec::new();
-        for (value, column_name) in prefix.iter().zip(&index.columns) {
+        for (position, (value, column_name)) in prefix.iter().zip(&index.columns).enumerate() {
             let column = table_schema
                 .columns
                 .iter()
@@ -769,7 +769,20 @@ impl Database {
                         "index {index_name} references unknown column {column_name}"
                     ))
                 })?;
-            encode_index_prefix_part(&mut logical_key, value, &column.column_type)?;
+            let is_derived_point = matches!(
+                &index.key_derivation,
+                Some(IndexKeyDerivation::S2PointV1 { point_column })
+                    if point_column == column_name && position + 1 == index.columns.len()
+            );
+            encode_index_prefix_part(
+                &mut logical_key,
+                value,
+                if is_derived_point {
+                    &ColumnType::U64
+                } else {
+                    &column.column_type
+                },
+            )?;
         }
         // Durable entries are the index id followed directly by the ordered,
         // prefix-free part encodings, so a logical prefix stays a byte prefix.

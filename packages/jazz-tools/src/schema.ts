@@ -12,6 +12,32 @@ export type ScalarSqlType =
   | "UUID"
   | "BYTEA";
 
+/** WGS84 longitude/latitude coordinate in degrees. */
+export type Point = readonly [longitude: number, latitude: number];
+
+export interface PointSqlType {
+  kind: "POINT";
+}
+
+export type GeoPolygon = {
+  type: "Polygon";
+  coordinates: readonly (readonly Point[])[];
+};
+
+export type GeoMultiPolygon = {
+  type: "MultiPolygon";
+  coordinates: readonly (readonly (readonly Point[])[])[];
+};
+
+/** GeoJSON polygonal area used by `within` and `intersects`. */
+export type GeoArea = GeoPolygon | GeoMultiPolygon;
+
+export type NearQuery = {
+  center: Point;
+  maxDistanceMeters: number;
+  minDistanceMeters?: number;
+};
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | { [key: string]: JsonValue } | JsonValue[];
 export type JsonSchema = Exclude<JSONSchema, boolean>;
@@ -41,7 +67,12 @@ export interface JsonSqlType<Output = JsonValue> {
    */
   __output?: Output;
 }
-export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
+export type SqlType =
+  | ScalarSqlType
+  | ArraySqlType
+  | EnumSqlType
+  | JsonSqlType<unknown>
+  | PointSqlType;
 export type ColumnMergeStrategy = "counter" | "g-set";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
 
@@ -78,9 +109,11 @@ type SqlTypeValue<T extends SqlType, Init extends boolean> = T extends ScalarSql
         : T["cases"] extends readonly EnumCaseSqlType[]
           ? EnumValueFromCases<T["cases"], Init>
           : never
-      : T extends JsonSqlType<infer Output>
-        ? Output
-        : never;
+      : T extends PointSqlType
+        ? Point
+        : T extends JsonSqlType<infer Output>
+          ? Output
+          : never;
 
 export interface Column {
   name: string;

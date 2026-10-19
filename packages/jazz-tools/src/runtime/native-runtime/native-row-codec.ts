@@ -752,10 +752,34 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
+    case "Point":
+      return encodeNativePointValue(value);
     case "Row":
       if (value.type !== "Row") throw new Error("expected Row value");
       return encodeNativeRowValue(type.columns, value.value);
   }
+}
+
+function encodeNativePointValue(value: Value): Uint8Array {
+  if (value.type !== "Array" || value.value.length !== 2) {
+    throw new Error("expected [longitude, latitude] point value");
+  }
+  const longitude = value.value[0]!;
+  const latitude = value.value[1]!;
+  if (longitude.type !== "Double" || latitude.type !== "Double") {
+    throw new Error("point requires finite WGS84 longitude/latitude coordinates");
+  }
+  if (
+    !Number.isFinite(longitude.value) ||
+    !Number.isFinite(latitude.value) ||
+    longitude.value < -180 ||
+    longitude.value > 180 ||
+    latitude.value < -90 ||
+    latitude.value > 90
+  ) {
+    throw new Error("point requires finite WGS84 longitude/latitude coordinates");
+  }
+  return encodeNativeArrayValue({ type: "Double" }, [longitude, latitude]);
 }
 
 function encodeNativeRowValue(
@@ -877,6 +901,10 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
       return { tag: 11 };
     case "Array":
       return { tag: 14, inner: storageColumnTypeToValueType(type.element, enumName) };
+    case "Point":
+      // Logical point semantics are carried by the schema; the physical
+      // record remains a fixed pair of IEEE-754 values.
+      return { tag: 14, inner: { tag: 6 } };
     case "Row":
       return { tag: 9 };
   }
@@ -920,6 +948,8 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
       return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
+    case "Point":
+      return { type: "Array", value: decodeArray({ type: "Double" }, bytes) };
     case "Row":
       return { type: "Row", value: decodeRowValue(type.columns, bytes) };
   }

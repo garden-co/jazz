@@ -11,6 +11,9 @@ export const WHERE_OPERATORS = [
   "in",
   "notIn",
   "isNull",
+  "near",
+  "within",
+  "intersects",
 ] as const;
 
 export type WhereOperator = (typeof WHERE_OPERATORS)[number];
@@ -57,6 +60,9 @@ function operatorsForColumn(
         break;
       case "Array":
         operators.push("eq", "contains", "in", "notIn");
+        break;
+      case "Point":
+        operators.push("near", "within", "intersects");
         break;
       case "Row":
         break;

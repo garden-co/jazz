@@ -493,6 +493,7 @@ fn add_root_provenance_window(
                     field,
                 },
                 direction,
+                spatial_distance_center: None,
             }],
         },
     );
@@ -774,6 +775,7 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
                     field: ProvenanceField::CreatedAt,
                 },
                 direction: SortDirection::Asc,
+                spatial_distance_center: None,
             }],
         },
     );

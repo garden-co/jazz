@@ -10,6 +10,33 @@ Any column can be made nullable by chaining `.optional()`.
 
 <AvailableColumnTypes />
 
+## Geographic points
+
+Use `s.point()` for a geographic location. A point is a distinct schema type
+whose value is a WGS84 coordinate pair in `[longitude, latitude]` order. Both
+coordinates must be finite numbers; longitude must be between `-180` and `180`
+and latitude between `-90` and `90`.
+
+```ts
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  places: s.table(
+    {
+      name: s.string(),
+      location: s.point(),
+    },
+    {},
+  ),
+};
+```
+
+Use `.optional()` for a nullable point. Ordinary number arrays remain arrays
+and do not gain point validation or spatial query behavior.
+
+See [spatial filters](/docs/reading/filters-and-sorting#spatial-filters) for
+`near`, `within`, and `intersects` queries and their boundary behavior.
+
 ## Transformed Columns
 
 > **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.

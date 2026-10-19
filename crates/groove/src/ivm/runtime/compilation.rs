@@ -2,6 +2,71 @@
 
 use super::*;
 
+fn validate_collect_by_order_fields(
+    input: &RecordDescriptor,
+    field_indices: &[usize],
+    order_cols: &[TopByOrder],
+) -> Result<Option<TopBySpatialOrder>, IvmRuntimeError> {
+    let spatial_positions = order_cols
+        .iter()
+        .enumerate()
+        .filter_map(|(index, order)| order.spatial_center.map(|center| (index, center)))
+        .collect::<Vec<_>>();
+    if spatial_positions.len() > 1
+        || spatial_positions
+            .first()
+            .is_some_and(|(index, _)| *index != 0)
+    {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "spatial distance ordering must be the only leading order key".to_owned(),
+        ));
+    }
+
+    let spatial_order = if let Some((_, center)) = spatial_positions.first() {
+        let field_idx = *field_indices.first().ok_or_else(|| {
+            IvmRuntimeError::InvalidCollectBy(
+                "spatial ordering has no Point order field".to_owned(),
+            )
+        })?;
+        let value_type = &input
+            .fields()
+            .get(field_idx)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?
+            .value_type;
+        if !matches!(
+            value_type.non_nullable(),
+            ValueType::Array(element) if matches!(element.as_ref(), ValueType::F64)
+        ) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "spatial order fields must be two-number Point values".to_owned(),
+            ));
+        }
+        Some(TopBySpatialOrder {
+            field: field_name_at(input, field_idx)?,
+            center: *center,
+        })
+    } else {
+        None
+    };
+
+    for (index, field_idx) in field_indices.iter().copied().enumerate() {
+        if spatial_order.is_some() && index == 0 {
+            continue;
+        }
+        let field = input
+            .fields()
+            .get(field_idx)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+        if field.value_type.contains_record() || !collect_by_ordered_scalar(&field.value_type) {
+            return Err(IvmRuntimeError::InvalidCollectBy(format!(
+                "group, order, and tie fields must be scalar ordered values without records; field {:?} has type {:?}",
+                field.name, field.value_type
+            )));
+        }
+    }
+    Ok(spatial_order)
+}
+
 impl IvmRuntime {
     fn add_arrangement_node(
         &mut self,
@@ -969,7 +1034,28 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
-                for &field_idx in order_field_indices.iter().chain(&tie_field_indices) {
+                for (order, field_idx) in order_cols.iter().zip(&order_field_indices) {
+                    let value_type = &output
+                        .fields()
+                        .get(*field_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?
+                        .value_type;
+                    let orderable = if order.spatial_center.is_some() {
+                        matches!(
+                            value_type.non_nullable(),
+                            ValueType::Array(element) if matches!(element.as_ref(), ValueType::F64)
+                        )
+                    } else {
+                        collect_by_ordered_scalar(value_type)
+                    };
+                    if !orderable {
+                        return Err(IvmRuntimeError::InvalidTopBy(format!(
+                            "sort field {} must be an orderable scalar or a two-number Point for spatial distance ordering",
+                            field_name_at(&output, *field_idx)?
+                        )));
+                    }
+                }
+                for &field_idx in &tie_field_indices {
                     let value_type = &output
                         .fields()
                         .get(field_idx)
@@ -977,7 +1063,7 @@ impl IvmRuntime {
                         .value_type;
                     if !collect_by_ordered_scalar(value_type) {
                         return Err(IvmRuntimeError::InvalidTopBy(format!(
-                            "sort field {} must be an orderable scalar",
+                            "tie field {} must be an orderable scalar",
                             field_name_at(&output, field_idx)?
                         )));
                     }
@@ -996,6 +1082,26 @@ impl IvmRuntime {
                         })
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let spatial_orders = order_cols
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, order)| order.spatial_center.map(|center| (index, center)))
+                    .collect::<Vec<_>>();
+                if spatial_orders.len() > 1
+                    || spatial_orders.first().is_some_and(|(index, _)| *index != 0)
+                {
+                    return Err(IvmRuntimeError::InvalidTopBy(
+                        "spatial distance ordering must be the only leading order key".to_owned(),
+                    ));
+                }
+                let spatial_order =
+                    spatial_orders
+                        .first()
+                        .map(|(index, center)| TopBySpatialOrder {
+                            field: field_name_at(&output, order_field_indices[*index])
+                                .expect("resolved spatial order field"),
+                            center: *center,
+                        });
                 let tie_field_names = tie_field_indices
                     .iter()
                     .map(|field| field_name_at(&output, *field))
@@ -1025,6 +1131,7 @@ impl IvmRuntime {
                             group_fields: group_field_names,
                             group_field_indices,
                             order_fields,
+                            spatial_order,
                             tie_fields: tie_field_names,
                             sort_field_indices,
                             sort_directions,
@@ -1606,7 +1713,11 @@ impl IvmRuntime {
                     .map(|field| resolve_field_ref(&input_output, field))
                     .collect::<Result<Vec<_>, _>>()?
             };
-            validate_collect_by_key_types(&input_output, &order_field_indices)?;
+            let spatial_order = validate_collect_by_order_fields(
+                &input_output,
+                &order_field_indices,
+                &collect.order_cols,
+            )?;
             validate_collect_by_key_types(&input_output, &tie_field_indices)?;
             let group_fields = group_field_indices
                 .iter()
@@ -1646,6 +1757,7 @@ impl IvmRuntime {
                                 })
                             })
                             .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                        spatial_order,
                         tie_fields: tie_field_indices
                             .iter()
                             .map(|field| field_name_at(&input_output, *field))
@@ -1719,7 +1831,11 @@ impl IvmRuntime {
                 "order and tie fields must both be complete and non-empty".into(),
             ));
         }
-        validate_collect_by_key_types(&input_output, &order_field_indices)?;
+        let spatial_order = validate_collect_by_order_fields(
+            &input_output,
+            &order_field_indices,
+            &collect.order_cols,
+        )?;
         validate_collect_by_key_types(&input_output, &tie_field_indices)?;
         let group_fields = group_field_indices
             .iter()
@@ -1791,6 +1907,7 @@ impl IvmRuntime {
                         .collect::<Result<Vec<_>, _>>()?,
                     occurrence_id_field_indices,
                     order_fields,
+                    spatial_order,
                     tie_fields,
                     sort_field_indices,
                     sort_directions,

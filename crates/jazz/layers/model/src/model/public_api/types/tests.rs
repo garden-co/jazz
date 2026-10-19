@@ -349,6 +349,7 @@ fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
             "uuid",
             "bytea",
             "array",
+            "point",
             "row",
             "nullable-text",
             "nested-composite",

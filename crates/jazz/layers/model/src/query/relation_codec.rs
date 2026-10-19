@@ -292,6 +292,20 @@ enum WireRelationPredicate {
     Not(#[serde(deserialize_with = "deserialize_nested_box")] Box<WireRelationPredicate>),
     True,
     False,
+    SpatialNear {
+        column: WireRelationColumnRef,
+        center: [f64; 2],
+        min_distance_meters: Option<f64>,
+        max_distance_meters: f64,
+    },
+    SpatialWithin {
+        column: WireRelationColumnRef,
+        area: WireJson,
+    },
+    SpatialIntersects {
+        column: WireRelationColumnRef,
+        area: WireJson,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum WireRelationCmpOp {
@@ -686,6 +700,35 @@ fn wire_predicate(value: &RelationPredicate) -> WireResult<WireRelationPredicate
         }
         RelationPredicate::True => WireRelationPredicate::True,
         RelationPredicate::False => WireRelationPredicate::False,
+        RelationPredicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => WireRelationPredicate::SpatialNear {
+            column: wire_column(column),
+            center: *center,
+            min_distance_meters: *min_distance_meters,
+            max_distance_meters: *max_distance_meters,
+        },
+        RelationPredicate::SpatialWithin { column, area } => {
+            WireRelationPredicate::SpatialWithin {
+                column: wire_column(column),
+                area: wire_json(
+                    &serde_json::to_value(area)
+                        .map_err(|_| RelationWireError::Invalid("invalid spatial area"))?,
+                )?,
+            }
+        }
+        RelationPredicate::SpatialIntersects { column, area } => {
+            WireRelationPredicate::SpatialIntersects {
+                column: wire_column(column),
+                area: wire_json(
+                    &serde_json::to_value(area)
+                        .map_err(|_| RelationWireError::Invalid("invalid spatial area"))?,
+                )?,
+            }
+        }
     })
 }
 fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredicate> {
@@ -745,6 +788,33 @@ fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredic
         }
         WireRelationPredicate::True => RelationPredicate::True,
         WireRelationPredicate::False => RelationPredicate::False,
+        WireRelationPredicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => RelationPredicate::SpatialNear {
+            column: relation_column(column),
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        },
+        WireRelationPredicate::SpatialWithin { column, area } => {
+            let value = relation_json(area)?;
+            RelationPredicate::SpatialWithin {
+                column: relation_column(column),
+                area: serde_json::from_value(value)
+                    .map_err(|_| RelationWireError::Invalid("invalid spatial area"))?,
+            }
+        }
+        WireRelationPredicate::SpatialIntersects { column, area } => {
+            let value = relation_json(area)?;
+            RelationPredicate::SpatialIntersects {
+                column: relation_column(column),
+                area: serde_json::from_value(value)
+                    .map_err(|_| RelationWireError::Invalid("invalid spatial area"))?,
+            }
+        }
     })
 }
 
@@ -1130,6 +1200,26 @@ fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
                     Ok(())
                 }
                 WireRelationPredicate::Not(value) => self.predicate(value, depth + 1),
+                WireRelationPredicate::SpatialNear {
+                    column,
+                    center,
+                    min_distance_meters,
+                    max_distance_meters,
+                } => {
+                    self.column(column)?;
+                    if !center.iter().all(|value| value.is_finite())
+                        || !max_distance_meters.is_finite()
+                        || min_distance_meters.is_some_and(|value| !value.is_finite())
+                    {
+                        return Err(RelationWireError::NonFiniteNumber);
+                    }
+                    Ok(())
+                }
+                WireRelationPredicate::SpatialWithin { column, area }
+                | WireRelationPredicate::SpatialIntersects { column, area } => {
+                    self.column(column)?;
+                    self.json(area, depth + 1)
+                }
                 WireRelationPredicate::True | WireRelationPredicate::False => Ok(()),
             }
         }
@@ -1311,6 +1401,36 @@ mod relation_postcard_tests {
         };
         let bytes = encode_relation_query_postcard(&query).unwrap();
         assert!(!bytes.starts_with(b"JRQ\x01"));
+        assert_eq!(decode_relation_query_postcard(&bytes).unwrap(), query);
+    }
+
+    /// This internal byte fixture is needed because the separately numbered
+    /// relation-query wire union crosses binding boundaries; the public Jazz
+    /// point-query integration test verifies visible results.
+    #[test]
+    fn spatial_relation_predicate_has_pinned_postcard_bytes() {
+        let query = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "places".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::SpatialNear {
+                    column: RelationColumnRef {
+                        scope: Some("places".to_owned()),
+                        column: "location".to_owned(),
+                    },
+                    center: [-69.9312, 18.4861],
+                    min_distance_meters: Some(0.0),
+                    max_distance_meters: 5_000.0,
+                },
+            },
+        };
+        let bytes = encode_relation_query_postcard(&query).unwrap();
+        assert_eq!(
+            hex::encode(&bytes),
+            "010006706c61636573000b0106706c61636573086c6f636174696f6e4182e2c7987b51c0ea95b20c717c3240010000000000000000000000000088b340"
+        );
         assert_eq!(decode_relation_query_postcard(&bytes).unwrap(), query);
     }
 

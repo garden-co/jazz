@@ -129,6 +129,9 @@ pub(super) fn rewrite_claim_predicate_for_binding(
             }
         }
         Predicate::IsNull(operand) => Predicate::IsNull(operand),
+        spatial @ (Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. }) => spatial,
     }
 }
 
@@ -210,6 +213,9 @@ fn bind_scope_claim_predicate(
         Predicate::EnumMatch { payload, .. } => {
             bind_scope_claim_predicate(payload, claim_values, binding_values);
         }
+        Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. } => {}
     }
 }
 
@@ -833,6 +839,9 @@ fn bind_query_predicate(
             case,
             payload,
         },
+        spatial @ (Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. }) => spatial,
     })
 }
 

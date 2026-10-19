@@ -395,6 +395,9 @@ fn collect_predicate_requirements(
         PredicateExpr::IsNull(value) | PredicateExpr::IsNotNull(value) => {
             collect_value_requirements(value, source, requirements)
         }
+        PredicateExpr::Spatial { value, .. } => {
+            collect_value_requirements(value, source, requirements)
+        }
         PredicateExpr::And(predicates) | PredicateExpr::Or(predicates) => {
             for predicate in predicates {
                 collect_predicate_requirements(predicate, source, requirements)?;

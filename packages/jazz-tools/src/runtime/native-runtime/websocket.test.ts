@@ -6,6 +6,7 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   FEATURE_PAYLOAD_ZSTD,
+  FEATURE_SPATIAL_POINTS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -87,6 +88,11 @@ describe("admitted websocket policy claims", () => {
 });
 
 describe("websocket frame carrier", () => {
+  it("reserves the point feature bit without advertising incomplete spatial execution", () => {
+    expect(FEATURE_SPATIAL_POINTS).toBe(1 << 10);
+    expect(CLIENT_WIRE_FEATURES & FEATURE_SPATIAL_POINTS).toBe(0);
+  });
+
   it("types close listeners with close event details", () => {
     type CloseListener = Parameters<BrowserWebSocket["addEventListener"]>[1];
 

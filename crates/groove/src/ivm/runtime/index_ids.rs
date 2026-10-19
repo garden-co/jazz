@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::schema::IndexSchema;
+use crate::schema::{IndexKeyDerivation, IndexSchema};
 use crate::storage::{OrderedKvStorage, OwnedWriteOperation, ScanRequest};
 
 /// The logical storage family that holds every durable schema index.
@@ -273,7 +273,20 @@ fn index_definition_bytes(index: &IndexSchema) -> Vec<u8> {
         );
         bytes.extend(column.as_bytes());
     }
-    bytes
+    match &index.key_derivation {
+        None => bytes,
+        Some(IndexKeyDerivation::S2PointV1 { point_column }) => {
+            let mut derived = b"groove.s2-point-key.v1\0".to_vec();
+            derived.extend(bytes);
+            derived.extend(
+                u16::try_from(point_column.len())
+                    .expect("column names fit u16")
+                    .to_be_bytes(),
+            );
+            derived.extend(point_column.as_bytes());
+            derived
+        }
+    }
 }
 
 fn encode_registry_key(table: &str, index: &str) -> Vec<u8> {
@@ -449,5 +462,24 @@ mod tests {
         );
         assert!(decode_registry_value(b"\x00\x00\x00\x00").is_err());
         assert!(decode_registry_key(b"\0groove-index-id\0\x00\x09albums").is_err());
+    }
+
+    #[test]
+    fn s2_point_index_definition_bytes_are_versioned_and_exact() {
+        let ordinary = IndexSchema::new("by_location", ["location"]);
+        let derived = IndexSchema::s2_point_v1("by_location", ["location"], "location");
+
+        assert_eq!(
+            index_definition_bytes(&ordinary),
+            b"\x00\x00\x01\x00\x08location"
+        );
+        assert_eq!(
+            index_definition_bytes(&derived),
+            b"groove.s2-point-key.v1\0\x00\x00\x01\x00\x08location\x00\x08location"
+        );
+        let mut registry = IndexIdRegistry::default();
+        let ordinary_id = registry.resolve("places", &ordinary);
+        let derived_id = registry.resolve("places", &derived);
+        assert_ne!(ordinary_id, derived_id);
     }
 }

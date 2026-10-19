@@ -85,6 +85,33 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       return { type: "BigInt", value: toBigInt64(value) };
     case "Double":
       return { type: "Double", value: Number(value) };
+    case "Point": {
+      if (!Array.isArray(value) || value.length !== 2) {
+        throw new Error("Point values must be [longitude, latitude].");
+      }
+      const [longitude, latitude] = value;
+      if (
+        typeof longitude !== "number" ||
+        typeof latitude !== "number" ||
+        !Number.isFinite(longitude) ||
+        !Number.isFinite(latitude) ||
+        longitude < -180 ||
+        longitude > 180 ||
+        latitude < -90 ||
+        latitude > 90
+      ) {
+        throw new Error(
+          "Point values require finite WGS84 longitude/latitude in [-180, 180] × [-90, 90].",
+        );
+      }
+      return {
+        type: "Array",
+        value: [
+          { type: "Double", value: longitude },
+          { type: "Double", value: latitude },
+        ],
+      };
+    }
     case "Timestamp":
       return { type: "Timestamp", value: toTimestampMs(value) };
     case "Uuid":

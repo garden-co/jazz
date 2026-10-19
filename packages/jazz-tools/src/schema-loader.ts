@@ -180,6 +180,8 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       };
     case "Array":
       return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
+    case "Point":
+      return { kind: "POINT" };
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued columns.");
   }
@@ -274,6 +276,16 @@ function wasmValueToDefault(value: Value, columnType: ColumnType, nullable = tru
         throw new Error("Array default does not match column type.");
       }
       return value.value.map((inner) => wasmValueToDefault(inner, columnType.element));
+    case "Point":
+      if (value.type !== "Array" || value.value.length !== 2) {
+        throw new Error("Point default does not match column type.");
+      }
+      return value.value.map((coordinate) => {
+        if (coordinate.type !== "Double") {
+          throw new Error("Point default coordinates must be Double values.");
+        }
+        return coordinate.value;
+      });
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued defaults.");
   }

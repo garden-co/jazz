@@ -468,6 +468,7 @@ fn default_root_order(source: SourceId) -> LinearStep {
     LinearStep::OrderBy(vec![OrderKey {
         value: NormalizedValueRef::RowId(RowIdRef::Source(source)),
         direction: SortDirection::Asc,
+        spatial_distance_center: None,
     }])
 }
 

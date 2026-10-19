@@ -34,15 +34,16 @@ use crate::ivm::{
     LookupOp, MAX_COLLECT_BY_TREE_DEPTH, MapProjectOp, NodeDescriptor, NodeDurability, NodeId,
     NodeOutput, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
     ProjectionExpr, RecursiveEnumRemaps, RecursiveOp, Retainer, StaticScanSpec,
-    StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
-    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrder,
+    TopByOrderField, TopBySpatialOrder, UnnestOp, UnwrapNullableOp, ValueComparison,
+    VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
     RawProjectionField, RawProjectionScratch, RecordDescriptor, Value, ValueType,
     collect_by_ordered_scalar,
 };
-use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
+use crate::schema::{DatabaseSchema, IndexKeyDerivation, IndexSchema, TableSchema};
 use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, ScanRequest};
 use thiserror::Error;
 
@@ -586,6 +587,16 @@ pub enum IvmRuntimeError {
     EnumProjectionNonEnum,
     #[error("index not found: {0}")]
     IndexNotFound(String),
+    #[error("invalid derived index source value: {0}")]
+    InvalidDerivedIndexValue(&'static str),
+    #[error("invalid derived index definition {table}.{index}: {reason}")]
+    InvalidDerivedIndexDefinition {
+        table: String,
+        index: String,
+        reason: &'static str,
+    },
+    #[error(transparent)]
+    Spatial(#[from] crate::spatial::SpatialError),
     #[error("invalid persisted index entry: {0}")]
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]

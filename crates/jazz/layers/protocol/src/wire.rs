@@ -48,6 +48,10 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+/// Peers understand logical Point schemas and registered spatial query
+/// predicates. The capability is required by Point schema publications and
+/// every spatial query shape that crosses a peer boundary.
+pub const FEATURE_SPATIAL_POINTS: WireFeatures = 1 << 10;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -2228,6 +2232,19 @@ mod tests {
                 features: FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
         );
+    }
+
+    /// Alice and Bob negotiate current protocol features; Mallory represents a
+    /// peer that requests spatial support before Jazz has passed the spatial
+    /// acceptance gate. This pins the public capability-advertisement contract.
+    #[test]
+    fn spatial_points_are_not_advertised_until_acceptance_is_complete() {
+        let current = current_wire_features();
+        assert_eq!(current & FEATURE_SPATIAL_POINTS, 0);
+
+        let spatial_peer = WireHello::current(WirePeerRole::Core, current | FEATURE_SPATIAL_POINTS);
+        let negotiated = negotiate_wire(&spatial_peer, current).unwrap();
+        assert_eq!(negotiated.features & FEATURE_SPATIAL_POINTS, 0);
     }
 
     #[test]

@@ -100,6 +100,9 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
+        for index in &table.indices {
+            validate_derived_index_definition(&table, index)?;
+        }
         self.table_storage_descriptors
             .insert(table.name.clone(), table.record_schema());
         if !table.has_variants() {
@@ -295,6 +298,7 @@ impl IvmRuntime {
             .iter()
             .position(|candidate| candidate.name == table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        validate_derived_index_definition(&self.schema.tables[table_position], &index)?;
         self.schema.tables[table_position]
             .indices
             .push(index.clone());
@@ -965,6 +969,35 @@ impl IvmRuntime {
             .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)
             .await
     }
+}
+
+fn validate_derived_index_definition(
+    table: &TableSchema,
+    index: &IndexSchema,
+) -> Result<(), IvmRuntimeError> {
+    let Some(crate::schema::IndexKeyDerivation::S2PointV1 { point_column }) = &index.key_derivation
+    else {
+        return Ok(());
+    };
+    let mut column_type = table
+        .columns
+        .iter()
+        .find(|column| column.name == *point_column)
+        .map(|column| &column.column_type);
+    while let Some(ValueType::Nullable(inner)) = column_type {
+        column_type = Some(inner);
+    }
+    if index.unique
+        || index.columns.last() != Some(point_column)
+        || !matches!(column_type, Some(ValueType::Array(element)) if matches!(element.as_ref(), ValueType::F64))
+    {
+        return Err(IvmRuntimeError::InvalidDerivedIndexDefinition {
+            table: table.name.clone(),
+            index: index.name.clone(),
+            reason: "S2PointV1 requires a non-unique index ending in an Array<F64> point column",
+        });
+    }
+    Ok(())
 }
 
 fn record_descriptors_registry_compatible(

@@ -521,6 +521,9 @@ fn collect_root_literal_equalities(
         | Predicate::Lte(_, _)
         | Predicate::Contains(_, _)
         | Predicate::EnumMatch { .. }
+        | Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. }
         | Predicate::IsNull(_) => {}
     }
     Ok(())
@@ -569,6 +572,38 @@ pub(super) fn select_current_access_path(
         reverse: false,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
+        spatial_ranges: None,
+        spatial_alternates: Vec::new(),
+        maintained: false,
+        candidate_filter: None,
+        source_limit: None,
+    })
+}
+
+pub(super) fn select_spatial_ranges_access_path(
+    table: &TableSchema,
+    column: &str,
+    ranges: &[groove::spatial::S2CellRange],
+) -> Option<CurrentAccessPath> {
+    if !table
+        .global_current_indexed_columns()
+        .iter()
+        .any(|indexed| indexed == column)
+        || !table
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == column && candidate.geo_point)
+    {
+        return None;
+    }
+    Some(CurrentAccessPath::Index {
+        column: column.to_owned(),
+        order_column: None,
+        reverse: false,
+        prefix: Vec::new(),
+        intersections: Vec::new(),
+        spatial_ranges: Some(ranges.to_vec()),
+        spatial_alternates: Vec::new(),
         maintained: false,
         candidate_filter: None,
         source_limit: None,
@@ -599,6 +634,8 @@ pub(super) fn select_composite_leading_equality_access_path(
             reverse: false,
             prefix: vec![physical_current_index_value(table, first, value)],
             intersections: Vec::new(),
+            spatial_ranges: None,
+            spatial_alternates: Vec::new(),
             maintained: false,
             candidate_filter: None,
             source_limit: None,
@@ -809,6 +846,41 @@ fn normalize_predicate(
                 )?),
             }
         }
+        Predicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => {
+            let center = groove::spatial::GeoPoint::new(center[0], center[1])
+                .map_err(|error| Error::QueryLowering(error.to_string()))?;
+            let predicate = groove::spatial::SpatialPredicate::near(
+                center,
+                Some(*min_distance_meters),
+                *max_distance_meters,
+            )
+            .map_err(|error| Error::QueryLowering(error.to_string()))?;
+            NormalizedPredicateExpr::Spatial {
+                value: normalize_operand(source, &Operand::Column(column.clone()))?,
+                predicate,
+            }
+        }
+        Predicate::SpatialWithin { column, area } => {
+            let predicate = groove::spatial::SpatialPredicate::within(area)
+                .map_err(|error| Error::QueryLowering(error.to_string()))?;
+            NormalizedPredicateExpr::Spatial {
+                value: normalize_operand(source, &Operand::Column(column.clone()))?,
+                predicate,
+            }
+        }
+        Predicate::SpatialIntersects { column, area } => {
+            let predicate = groove::spatial::SpatialPredicate::intersects(area)
+                .map_err(|error| Error::QueryLowering(error.to_string()))?;
+            NormalizedPredicateExpr::Spatial {
+                value: normalize_operand(source, &Operand::Column(column.clone()))?,
+                predicate,
+            }
+        }
     })
 }
 
@@ -914,6 +986,13 @@ pub(super) fn normalize_enum_payload_predicate(
         Predicate::EnumMatch { .. } => {
             return Err(Error::QueryLowering(
                 "nested payload enum matches are not supported".to_owned(),
+            ));
+        }
+        Predicate::SpatialNear { .. }
+        | Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. } => {
+            return Err(Error::QueryLowering(
+                "spatial predicates inside payload enum matches are not supported".to_owned(),
             ));
         }
     })
@@ -1194,7 +1273,30 @@ fn normalize_order_key(
             OrderDirection::Asc => NormalizedSortDirection::Asc,
             OrderDirection::Desc => NormalizedSortDirection::Desc,
         },
+        spatial_distance_center: None,
     })
+}
+
+fn positive_near_order(predicate: &Predicate) -> Option<(String, [f64; 2])> {
+    match predicate {
+        Predicate::SpatialNear { column, center, .. } => Some((column.clone(), *center)),
+        Predicate::All(predicates) => predicates.iter().find_map(positive_near_order),
+        // A branch-local distance does not define one nearest-first order for
+        // the query scope. Validation/lowering reject these unbounded shapes.
+        Predicate::Any(_) | Predicate::Not(_) => None,
+        Predicate::SpatialWithin { .. }
+        | Predicate::SpatialIntersects { .. }
+        | Predicate::Eq(_, _)
+        | Predicate::Ne(_, _)
+        | Predicate::Gt(_, _)
+        | Predicate::Gte(_, _)
+        | Predicate::Lt(_, _)
+        | Predicate::Lte(_, _)
+        | Predicate::In(_, _)
+        | Predicate::Contains(_, _)
+        | Predicate::IsNull(_)
+        | Predicate::EnumMatch { .. } => None,
+    }
 }
 
 fn normalized_aggregate_group_by(
@@ -3411,17 +3513,35 @@ where
             )?;
         }
 
-        if query.aggregate.is_none() && !query.order_by.is_empty() {
+        let order_keys = if query.order_by.is_empty() {
+            query
+                .filters
+                .iter()
+                .find_map(positive_near_order)
+                .map(|(column, center)| -> Result<NormalizedOrderKey, Error> {
+                    Ok(NormalizedOrderKey {
+                        value: normalize_operand(&root_source, &Operand::Column(column))?,
+                        direction: NormalizedSortDirection::Asc,
+                        spatial_distance_center: Some(center.map(f64::to_bits)),
+                    })
+                })
+                .transpose()?
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            query
+                .order_by
+                .iter()
+                .map(|order| normalize_order_key(&root_source, order))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if query.aggregate.is_none() && !order_keys.is_empty() {
             let order_node = RowSetNodeId("order".to_owned());
             nodes.insert(
                 order_node.clone(),
                 RowSetExpr::OrderBy {
                     input: current,
-                    keys: query
-                        .order_by
-                        .iter()
-                        .map(|order| normalize_order_key(&root_source, order))
-                        .collect::<Result<Vec<_>, Error>>()?,
+                    keys: order_keys,
                 },
             );
             current = order_node;
@@ -3600,6 +3720,7 @@ where
                                     OrderDirection::Asc => NormalizedSortDirection::Asc,
                                     OrderDirection::Desc => NormalizedSortDirection::Desc,
                                 },
+                                spatial_distance_center: None,
                             })
                         })
                         .collect::<Result<Vec<_>, Error>>()?,

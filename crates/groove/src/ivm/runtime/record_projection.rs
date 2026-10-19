@@ -1171,16 +1171,16 @@ pub(super) fn validate_collect_by_key_types(
     indices: &[usize],
 ) -> Result<(), IvmRuntimeError> {
     for &index in indices {
-        let value_type = &input
+        let field = input
             .fields()
             .get(index)
-            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
-            .value_type;
-        let scalar = collect_by_ordered_scalar(value_type);
-        if value_type.contains_record() || !scalar {
-            return Err(IvmRuntimeError::InvalidCollectBy(
-                "group, order, and tie fields must be scalar ordered values without records".into(),
-            ));
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
+        let scalar = collect_by_ordered_scalar(&field.value_type);
+        if field.value_type.contains_record() || !scalar {
+            return Err(IvmRuntimeError::InvalidCollectBy(format!(
+                "group, order, and tie fields must be scalar ordered values without records; field {:?} has type {:?}",
+                field.name, field.value_type
+            )));
         }
     }
     Ok(())
@@ -2086,6 +2086,39 @@ pub(super) fn apply_index_by(
     input_deltas: &[RecordDelta],
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let mut deltas = Vec::new();
+    if let Some(IndexSchema {
+        key_derivation: Some(IndexKeyDerivation::S2PointV1 { .. }),
+        ..
+    }) = &index_by.explicit_index
+    {
+        for delta in input_deltas {
+            if delta.weight == 0 {
+                continue;
+            }
+            let key = s2_point_index_key(index_by, input_descriptor, delta.raw())?;
+            let Some(key) = key else {
+                // Optional Points have no spatial index entry.
+                continue;
+            };
+            if let Some(scan) = &index_by.scan
+                && !key_matches_static_scan(&key, scan)?
+            {
+                continue;
+            }
+            let value = if index_by.store_value {
+                primary_key_value_bytes(input_descriptor, delta.raw(), &index_by.value_fields)?
+            } else {
+                Vec::new()
+            };
+            deltas.push(RecordDelta {
+                record: index_record_descriptor()
+                    .create(&[Value::Bytes(key), Value::Bytes(value)])?
+                    .into(),
+                weight: delta.weight,
+            });
+        }
+        return Ok(deltas);
+    }
     let scalar_key_fields = index_key_fields_are_scalar(index_by, input_descriptor)?;
     for delta in input_deltas {
         let value = if index_by.store_value {
@@ -2125,6 +2158,68 @@ pub(super) fn apply_index_by(
         }
     }
     Ok(deltas)
+}
+
+fn s2_point_index_key(
+    index_by: &IndexByOp,
+    input_descriptor: &RecordDescriptor,
+    record: &[u8],
+) -> Result<Option<Vec<u8>>, IvmRuntimeError> {
+    let index =
+        index_by
+            .explicit_index
+            .as_ref()
+            .ok_or(IvmRuntimeError::InvalidDerivedIndexValue(
+                "derived index descriptor is missing",
+            ))?;
+    let Some(IndexKeyDerivation::S2PointV1 { point_column }) = &index.key_derivation else {
+        return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+            "S2PointV1 derivation is missing",
+        ));
+    };
+    if index.columns.last() != Some(point_column)
+        || index_by.key_fields.len() != index.columns.len()
+    {
+        return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+            "S2PointV1 must derive the final index column",
+        ));
+    }
+    let point_field =
+        *index_by
+            .key_fields
+            .last()
+            .ok_or(IvmRuntimeError::InvalidDerivedIndexValue(
+                "S2PointV1 index has no source fields",
+            ))?;
+    let point_value = input_descriptor.get_idx(record, point_field)?;
+    let point_value = match point_value {
+        Value::Nullable(None) => return Ok(None),
+        Value::Nullable(Some(value)) => *value,
+        value => value,
+    };
+    let Value::Array(coordinates) = point_value else {
+        return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+            "S2PointV1 source must be Array<F64>",
+        ));
+    };
+    let [Value::F64(longitude), Value::F64(latitude)] = coordinates.as_slice() else {
+        return Err(IvmRuntimeError::InvalidDerivedIndexValue(
+            "S2PointV1 source must contain two F64 coordinates",
+        ));
+    };
+    let cell_id = crate::spatial::GeoPoint::new(*longitude, *latitude)?.leaf_cell_id();
+
+    let mut key = Vec::new();
+    for field_idx in &index_by.key_fields[..index_by.key_fields.len() - 1] {
+        encode_record_field_key_part(&mut key, input_descriptor, record, *field_idx)?;
+    }
+    encode_key_part(&mut key, &Value::U64(cell_id))?;
+    if index_by.append_value_to_key {
+        let value = primary_key_value_bytes(input_descriptor, record, &index_by.value_fields)?;
+        key.push(0xff);
+        key.extend(value);
+    }
+    Ok(Some(key))
 }
 
 fn index_key_fields_are_scalar(
@@ -2280,4 +2375,84 @@ pub(super) fn persisted_index_scan_bounds(
             end: prefixed(static_scan_key(end)?),
         },
     })
+}
+
+#[cfg(test)]
+mod spatial_index_tests {
+    use super::*;
+
+    /// Direct key-byte coverage is required because this derived key is a
+    /// durable contract; public Jazz tests cannot reveal a swapped type tag or
+    /// an omitted primary-key suffix.
+    #[test]
+    fn s2_point_index_key_uses_u64_leaf_cell_and_row_identity_suffix() {
+        let descriptor = RecordDescriptor::new([
+            ("id", ValueType::U64),
+            ("location", ValueType::F64.array_of()),
+        ]);
+        let record = descriptor
+            .create(&[
+                Value::U64(7),
+                Value::Array(vec![Value::F64(0.0), Value::F64(0.0)]),
+            ])
+            .unwrap();
+        let index_by = IndexByOp {
+            key_expressions: vec![PlanExpr::field("location")],
+            value_expressions: vec![PlanExpr::field("id")],
+            explicit_index: Some(IndexSchema::s2_point_v1(
+                "by_location",
+                ["location"],
+                "location",
+            )),
+            key_fields: vec![1],
+            value_fields: vec![0],
+            unique: false,
+            append_value_to_key: true,
+            store_value: false,
+            scan: None,
+        };
+
+        let key = s2_point_index_key(&index_by, &descriptor, &record).unwrap();
+        let expected = [
+            vec![3],
+            0x1000_0000_0000_0001_u64.to_be_bytes().to_vec(),
+            vec![0xff, 3],
+            7_u64.to_be_bytes().to_vec(),
+        ]
+        .concat();
+        assert_eq!(key, Some(expected));
+    }
+
+    /// Optional null points must have no derived entry; checking this below
+    /// the public API prevents a nullable envelope from becoming a fake cell.
+    #[test]
+    fn s2_point_index_omits_null_points() {
+        let descriptor = RecordDescriptor::new([
+            ("id", ValueType::U64),
+            ("location", ValueType::F64.array_of().nullable()),
+        ]);
+        let record = descriptor
+            .create(&[Value::U64(7), Value::Nullable(None)])
+            .unwrap();
+        let index_by = IndexByOp {
+            key_expressions: vec![PlanExpr::field("location")],
+            value_expressions: vec![PlanExpr::field("id")],
+            explicit_index: Some(IndexSchema::s2_point_v1(
+                "by_location",
+                ["location"],
+                "location",
+            )),
+            key_fields: vec![1],
+            value_fields: vec![0],
+            unique: false,
+            append_value_to_key: true,
+            store_value: false,
+            scan: None,
+        };
+
+        assert_eq!(
+            s2_point_index_key(&index_by, &descriptor, &record).unwrap(),
+            None
+        );
+    }
 }

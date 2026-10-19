@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { schema as s } from "../schema-namespace.js";
 import { translateQuery } from "./query-adapter.js";
 
 const app = s.defineApp({
@@ -51,12 +51,50 @@ const scalarApp = s.defineApp({
     {},
   ),
 });
+const spatialApp = s.defineApp({
+  places: s.table({ location: s.point() }, {}),
+});
 
 function translatedConditions(query: { _build(): string }) {
   return JSON.parse(translateQuery(query._build(), scalarApp.wasmSchema)).conditions;
 }
 
 describe("translateQuery", () => {
+  it("translates near, within, and intersects for typed Point columns", () => {
+    const polygon = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [9, 19],
+          [9, 21],
+          [11, 21],
+          [11, 19],
+          [9, 19],
+        ],
+      ],
+    } as const;
+    const near = translateQuery(
+      spatialApp.places
+        .where({ location: { near: { center: [-69.9312, 18.4861], maxDistanceMeters: 5000 } } })
+        ._build(),
+      spatialApp.wasmSchema,
+    );
+    const within = translateQuery(
+      spatialApp.places.where({ location: { within: polygon } })._build(),
+      spatialApp.wasmSchema,
+    );
+    const intersects = translateQuery(
+      spatialApp.places.where({ location: { intersects: polygon } })._build(),
+      spatialApp.wasmSchema,
+    );
+
+    expect(near).toContain('"SpatialNear"');
+    expect(near).toContain('"max_distance_meters":5000');
+    expect(near).toContain('"center":[-69.9312,18.4861]');
+    expect(within).toContain('"SpatialWithin"');
+    expect(intersects).toContain('"SpatialIntersects"');
+  });
+
   it("uses total structured author equality in both flat and relation predicates", () => {
     const author = {
       account: "00000000-0000-4000-8000-000000000001",

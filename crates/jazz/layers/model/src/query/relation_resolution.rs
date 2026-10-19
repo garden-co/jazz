@@ -837,6 +837,9 @@ fn relation_gather_step_predicates(
         | RelationPredicate::In { .. }
         | RelationPredicate::Contains { .. }
         | RelationPredicate::EnumMatch { .. }
+        | RelationPredicate::SpatialNear { .. }
+        | RelationPredicate::SpatialWithin { .. }
+        | RelationPredicate::SpatialIntersects { .. }
         | RelationPredicate::Or(_)
         | RelationPredicate::Not(_) => {
             filters.push(predicate.clone());
@@ -1149,6 +1152,34 @@ fn relation_predicate_to_query_predicate(
                 payload: Box::new(relation_payload_predicate_to_predicate(payload)?),
             },
         ))),
+        RelationPredicate::SpatialNear {
+            column,
+            center,
+            min_distance_meters,
+            max_distance_meters,
+        } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::SpatialNear {
+                column: column.column.clone(),
+                center: *center,
+                min_distance_meters: min_distance_meters.unwrap_or(0.0),
+                max_distance_meters: *max_distance_meters,
+            },
+        ))),
+        RelationPredicate::SpatialWithin { column, area } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::SpatialWithin {
+                column: column.column.clone(),
+                area: area.clone(),
+            },
+        ))),
+        RelationPredicate::SpatialIntersects { column, area } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::SpatialIntersects {
+                column: column.column.clone(),
+                area: area.clone(),
+            },
+        ))),
         RelationPredicate::And(predicates) => relation_predicate_list(predicates, true),
         RelationPredicate::Or(predicates) => relation_predicate_list(predicates, false),
         RelationPredicate::Not(predicate) => {
@@ -1204,6 +1235,11 @@ fn relation_payload_predicate_to_predicate(
         RelationPredicate::False => Ok(Predicate::Any(Vec::new())),
         RelationPredicate::EnumMatch { .. } => Err(relation_unification_error(
             "nested payload enum matches are not supported",
+        )),
+        RelationPredicate::SpatialNear { .. }
+        | RelationPredicate::SpatialWithin { .. }
+        | RelationPredicate::SpatialIntersects { .. } => Err(relation_unification_error(
+            "spatial predicates inside payload enum matches are not supported",
         )),
         RelationPredicate::Cmp { .. }
         | RelationPredicate::IsNull { .. }

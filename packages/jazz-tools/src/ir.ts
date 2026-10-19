@@ -14,6 +14,10 @@ export type RelValueRef =
   | { RowId: RelRowIdRef };
 
 export type RelPredicateCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+export type RelPoint = readonly [longitude: number, latitude: number];
+export type RelGeoArea =
+  | { type: "Polygon"; coordinates: readonly (readonly RelPoint[])[] }
+  | { type: "MultiPolygon"; coordinates: readonly (readonly (readonly RelPoint[])[])[] };
 
 export type RelPredicateExpr =
   | {
@@ -28,6 +32,16 @@ export type RelPredicateExpr =
   | { In: { left: RelColumnRef; values: RelValueRef[] } }
   | { Contains: { left: RelColumnRef; right: RelValueRef } }
   | { EnumMatch: { column: RelColumnRef; case: string; payload: RelPredicateExpr } }
+  | {
+      SpatialNear: {
+        column: RelColumnRef;
+        center: RelPoint;
+        min_distance_meters?: number;
+        max_distance_meters: number;
+      };
+    }
+  | { SpatialWithin: { column: RelColumnRef; area: RelGeoArea } }
+  | { SpatialIntersects: { column: RelColumnRef; area: RelGeoArea } }
   | { And: RelPredicateExpr[] }
   | { Or: RelPredicateExpr[] }
   | { Not: RelPredicateExpr }
@@ -422,7 +436,20 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
     }
     tagged(
       value,
-      ["Cmp", "IsNull", "IsNotNull", "In", "Contains", "EnumMatch", "And", "Or", "Not"],
+      [
+        "Cmp",
+        "IsNull",
+        "IsNotNull",
+        "In",
+        "Contains",
+        "EnumMatch",
+        "And",
+        "Or",
+        "Not",
+        "SpatialNear",
+        "SpatialWithin",
+        "SpatialIntersects",
+      ],
       "predicate",
     );
     if ("Cmp" in value) {
@@ -460,9 +487,26 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
       u64(7);
       collection(value.Or.length);
       value.Or.forEach((child) => nested(() => predicate(child)));
-    } else {
+    } else if ("Not" in value) {
       u64(8);
       nested(() => predicate(value.Not));
+    } else if ("SpatialNear" in value) {
+      u64(11);
+      column(value.SpatialNear.column);
+      if (value.SpatialNear.center.length !== 2) fail("spatial center");
+      value.SpatialNear.center.forEach((coordinate) => json(coordinate));
+      option(value.SpatialNear.min_distance_meters, () =>
+        json(value.SpatialNear.min_distance_meters),
+      );
+      json(value.SpatialNear.max_distance_meters);
+    } else if ("SpatialWithin" in value) {
+      u64(12);
+      column(value.SpatialWithin.column);
+      nested(() => json(value.SpatialWithin.area));
+    } else {
+      u64(13);
+      column(value.SpatialIntersects.column);
+      nested(() => json(value.SpatialIntersects.area));
     }
   };
   const expr = (value: RelExpr): void => {

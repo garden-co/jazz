@@ -6324,6 +6324,9 @@ fn predicate_references_id(predicate: &Predicate) -> bool {
         Predicate::EnumMatch {
             column, payload, ..
         } => column == "id" || predicate_references_id(payload),
+        Predicate::SpatialNear { column, .. }
+        | Predicate::SpatialWithin { column, .. }
+        | Predicate::SpatialIntersects { column, .. } => column == "id",
     }
 }
 
