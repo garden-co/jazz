@@ -163,6 +163,8 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  readonly preparationOwner?: object;
+  readCanEstablishAbsence?(sessionJson?: string, transaction?: OpenTransactionId): boolean;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
   remoteLinkState?(): RemoteLinkState;
   /** @internal Observe {@link Runtime.remoteLinkState} changes. */
@@ -1115,8 +1117,9 @@ export class JazzClient {
     kind: TransactionKind,
     session?: Session,
     attribution?: string,
+    reservedId?: OpenTransactionId,
   ): OpenTransactionId {
-    const id = createOpenTransactionId();
+    const id = reservedId ?? createOpenTransactionId();
     const prerequisite = transactionAdmission.get(this);
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
@@ -1150,6 +1153,22 @@ export class JazzClient {
     );
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
+  }
+
+  /** @internal Shared across schema clients attached to one runtime owner. */
+  preparationOwner(): object {
+    return this.runtime.preparationOwner ?? this.runtime;
+  }
+
+  /** @internal An empty policy-filtered result does not establish that a row is absent. */
+  readCanEstablishAbsence(session?: Session, transaction?: OpenTransactionId): boolean {
+    const effective = session ?? this.resolvedSession;
+    return (
+      this.runtime.readCanEstablishAbsence?.(
+        effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
+        transaction,
+      ) ?? false
+    );
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
