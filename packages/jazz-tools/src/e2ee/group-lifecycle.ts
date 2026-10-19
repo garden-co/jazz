@@ -15,7 +15,7 @@ import { sameSnapshotValue } from "./public-snapshot.js";
 import type {
   GroupTables,
   GroupRoot,
-  GroupMember,
+  GroupRecipient,
   GroupMembership,
   GroupDelivery,
   GroupRecoveryDelivery,
@@ -277,7 +277,7 @@ export class Groups {
     return undefined;
   }
 
-  add(id: string, member: GroupMember): Promise<void> {
+  add(id: string, member: GroupRecipient): Promise<void> {
     return this.changeMembership(id, member, "add");
   }
 
@@ -433,36 +433,44 @@ export class Groups {
     }
   }
 
-  remove(id: string, member: GroupMember): Promise<void> {
+  remove(id: string, member: GroupRecipient): Promise<void> {
     return this.changeMembership(id, member, "remove");
   }
 
   private async changeMembership(
     id: string,
-    member: GroupMember,
+    member: GroupRecipient,
     operation: "add" | "remove",
   ): Promise<void> {
+    const inferred = typeof member === "string";
     if (
-      !member ||
-      (member.kind !== "account" && member.kind !== "group") ||
-      typeof member.id !== "string" ||
-      !member.id
+      inferred
+        ? !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(member)
+        : !member ||
+          (member.kind !== "account" && member.kind !== "group") ||
+          typeof member.id !== "string" ||
+          !member.id
     )
       throw new Error("Invalid E2EE group member selector");
-    const { kind: memberKind, id: memberId } = member;
+    const memberId = inferred ? member : member.id;
+    const explicitKind = inferred ? undefined : member.kind;
     const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "remote" });
     if (!observed) throw new Error("E2EE group not found");
     const child =
-      memberKind === "group"
+      inferred || explicitKind === "group"
         ? await this.db.one(this.tables.__e2ee_groups.where({ id: memberId }), { tier: "remote" })
         : null;
-    if (memberKind === "group" && !child) throw new Error("Missing E2EE child group");
-    const relatedGroupId = memberKind === "group" ? memberId : undefined;
+    if (explicitKind === "group" && !child) throw new Error("Missing E2EE child group");
+    const relatedGroupId = inferred || explicitKind === "group" ? memberId : undefined;
     await this.warmMembership(
       {
         groupIds: relatedGroupId === undefined ? [observed.id] : [observed.id, relatedGroupId],
       },
-      [observed.accountId, memberKind === "account" ? memberId : child!.accountId],
+      [
+        observed.accountId,
+        ...(inferred || explicitKind === "account" ? [memberId] : []),
+        ...(child ? [child.accountId] : []),
+      ],
     );
     const device = await this.loadDevice();
     try {
@@ -493,6 +501,21 @@ export class Groups {
         // must not stand in for the authority-settled account binding.
         const { keyRoot, sealed, graph } = await this.acceptedMembership(root, position, group);
         if (sealed) throw new Error("E2EE group is sealed");
+        // Resolve both namespaces in the same covered snapshot that authorises
+        // the change. Discovery reads never establish recipient authority.
+        const accountHistory =
+          inferred || explicitKind === "account"
+            ? await readPublicMembershipHistory(tx, memberId, this.tables)
+            : undefined;
+        const memberKind =
+          explicitKind ??
+          (() => {
+            const isGroup = graph.has(memberId);
+            const isAccount = !!accountHistory?.roots.rows.length;
+            if (isGroup && isAccount) throw new Error("Ambiguous E2EE group recipient ID");
+            if (!isGroup && !isAccount) throw new Error("E2EE group recipient not found");
+            return isGroup ? "group" : "account";
+          })();
         if (memberKind === "group") {
           const recipient = graph.get(memberId);
           if (!recipient || (operation === "add" && recipient.sealed))
@@ -503,8 +526,11 @@ export class Groups {
               throw new Error("E2EE group cycle or depth limit exceeded");
           }
         } else {
-          const recipient = await readPublicMembershipHistory(tx, memberId, this.tables);
-          await replayAccountMembership(recipient, this.accountContext(memberId), this.signer);
+          await replayAccountMembership(
+            accountHistory!,
+            this.accountContext(memberId),
+            this.signer,
+          );
         }
         const record = {
           id: crypto.randomUUID(),

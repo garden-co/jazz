@@ -6,7 +6,6 @@ import {
   type DbConfig,
 } from "jazz-tools";
 import { app } from "../schema.js";
-import { createKeyStore } from "./account-store.js";
 
 // The account manager's public browser adapter persists account selection with Web Locks.
 const managers = new Map<string, Promise<AccountManager<JWTAuth>>>();
@@ -34,6 +33,7 @@ export async function prepareAccountConfig(): Promise<DbConfig> {
     serverUrl,
     env,
     account,
-    e2ee: { app, store: createKeyStore({ registry, env, accountId: account.id }) },
+    // The SDK persists private keys in a separate, account-scoped IndexedDB store.
+    e2ee: { app },
   };
 }

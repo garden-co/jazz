@@ -8,19 +8,20 @@ import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
+import { accountRelation } from "./account-relation.js";
 
 async function fixture(denyMemberUpdates = false) {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
       { ownerId: s.uuid(), title: s.string() },
-      { owner: s.rel("__e2ee_account_identities", "ownerId") },
+      { owner: accountRelation("ownerId") },
     ),
     projectOwners: s.table(
       { projectId: s.uuid(), accountId: s.uuid() },
       {
         project: s.rel("projects", "projectId"),
-        account: s.rel("__e2ee_account_identities", "accountId"),
+        account: accountRelation(),
       },
     ),
     notes: s
@@ -272,8 +273,17 @@ it("derives CRUD from direct and nested membership, retracts live rows and rejec
     await visible([]);
     const parent = await owner.db.e2ee.groups.create().wait();
     const child = await owner.db.e2ee.groups.create().wait();
-    await owner.db.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
-    await owner.db.e2ee.groups.add(child.id, { kind: "account", id: reader.id }).wait();
+    await expect(owner.db.e2ee.groups.add(parent.id, crypto.randomUUID()).wait()).rejects.toThrow(
+      "E2EE group recipient not found",
+    );
+    await expect(
+      owner.db.e2ee.groups.remove(parent.id, crypto.randomUUID()).wait(),
+    ).rejects.toThrow("E2EE group recipient not found");
+    await expect(owner.db.e2ee.groups.add(parent.id, "invalid").wait()).rejects.toThrow(
+      "Invalid E2EE group member selector",
+    );
+    await owner.db.e2ee.groups.add(parent.id, child.id).wait();
+    await owner.db.e2ee.groups.add(child.id, reader.id).wait();
     await owner.db.e2ee.spaces.grant(app.projects, project.id, parent.id).wait();
     await visible([{ id: note.id }]);
     const nested = await reader.db
@@ -287,7 +297,11 @@ it("derives CRUD from direct and nested membership, retracts live rows and rejec
     ).toMatchObject({ body: "Nested update" });
     await reader.db.delete(app.notes, nested.id).wait({ tier: "global" });
     await visible([{ id: note.id }]);
-    await owner.db.e2ee.groups.remove(child.id, { kind: "account", id: reader.id }).wait();
+    await owner.db.e2ee.groups.remove(parent.id, child.id).wait();
+    await visible([]);
+    await owner.db.e2ee.groups.add(parent.id, child.id).wait();
+    await visible([{ id: note.id }]);
+    await owner.db.e2ee.groups.remove(child.id, reader.id).wait();
     await visible([]);
   } finally {
     stop?.();

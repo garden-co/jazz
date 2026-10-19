@@ -27,6 +27,12 @@ prove that the current account owns the specific chat. The managed space's
 with a creator-only root policy, which would let other accounts insert conflicting
 roots for an existing chat.
 
+`accountRelation()` from `jazz-tools/e2ee` declares the binding's `accountId`
+relationship to the SDK-managed account identity table. Pass a different local
+column when needed, for example `accountRelation("ownerId")`. The application
+table name is arbitrary: administration policies explicitly connect its account
+and scope references to the space creator and `identifier`.
+
 ## Derive row permissions from space membership
 
 Use `fromEncryptionSpace()` when every recipient of a space should have ordinary
@@ -97,7 +103,27 @@ keys or plaintext that a former recipient already retained.
 
 ## Keep account and key storage separate
 
-Configure `e2ee: { app, store }` when creating the authenticated Db. The store implements `AccountStore`, but must use a different value from account-selection storage. Its `update(transform)` operation must be atomic across concurrent callers; the synchronous transform can run more than once. The browser example uses IndexedDB read/write transactions and scopes the record by registry, environment and account.
+Configure `e2ee: { app }` when creating the authenticated Db in a browser. Jazz
+defaults to a persistent IndexedDB key store, separate from account selection
+and the Jazz row cache. Its records are scoped by the canonical account registry
+URL (which includes the server and application ID), environment and account ID.
+Concurrent tabs update keys atomically, and writes wait for strict IndexedDB
+transaction durability. Storage failures are reported; Jazz never substitutes
+an in-memory store. Clearing the row cache does not delete this key store.
+
+Supply `e2ee: { app, store }` to override the browser default. Native Node and
+other non-browser hosts require this explicit store. The store implements
+`AccountStore`, but must use a different value from account-selection storage.
+Its `update(transform)` operation must be atomic across concurrent callers; the
+synchronous transform can run more than once. Custom stores retain their
+existing format and location: enabling the browser default does not migrate
+keys from a previously configured custom store.
+
+The default IndexedDB storage format is `jazz-e2ee-keys-v1`, IDB schema version
+1, object store `accounts`. A record key is the JSON tuple
+`[registry, environment, accountId]`; its value is the existing versioned E2EE
+key-state string. This is a new namespace and does not modify account-selection
+or Jazz row-cache encodings.
 
 Do not use an in-memory closure when keys must survive reload. Do not use a localStorage read/modify/write sequence as an atomic store. Losing key storage is not equivalent to logging in again: another device requires approval or recovery. Protect stored keys against browser-profile theft and cross-site scripting. E2EE cannot protect plaintext from compromised application code running on a recipient device.
 
@@ -194,7 +220,7 @@ Ordinary queries materialise the entire image in memory. Bounded upload memory i
 
 `db.e2ee.devices.list()` distinguishes verified membership (`state`) from this caller's key-delivery readiness (`keyReadiness`). Approve a pending device from an already authorised device with `devices.approve(deviceId).wait()`; revoke through `devices.revoke(deviceId).wait()`. Do not infer remote key possession merely from an active ledger entry.
 
-Groups contain accounts or other groups. To use them, add the exported `groupSchema` from `jazz-tools/e2ee` to the application schema and define its administration permissions. The chat example does not include groups. `db.e2ee.groups.create()`, `groups.add(groupId, recipientId)` and `groups.remove(groupId, recipientId)` have wait handles. A space grant can target a group ID. Accepted topology and epoch history, not a client-supplied member list, determine effective membership.
+Groups contain accounts or other groups. To use them, add the exported `groupSchema` from `jazz-tools/e2ee` to the application schema and define its administration permissions. The chat example does not include groups. `db.e2ee.groups.create()`, `groups.add(groupId, recipientId)` and `groups.remove(groupId, recipientId)` have wait handles. A bare recipient ID is resolved against accepted account and group history in the transaction authorising the change; unknown and ambiguous IDs reject without a membership write. Explicit `{ kind: "account" | "group", id }` selectors remain supported. A space grant can target a group ID. Accepted topology and epoch history, not a client-supplied member list, determine effective membership.
 
 `recovery.create().wait()` returns recovery material. Treat it as a credential: do not put it in logs, normal UI state or ordinary rows. `recovery.status(material?)` reports coverage and validation; `recovery.use(material?).wait()` performs recovery. Account recovery and complete coverage of every group/space are different outcomes. The chat example does not provide a device/recovery administration UI; retain browser storage or implement that flow before depending on another device.
 
