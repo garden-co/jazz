@@ -11,10 +11,10 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
-      { name: s.string(), creatorAccountId: s.uuid(), updaterAccountId: s.uuid() },
+      { name: s.string(), ownerId: s.uuid(), editorId: s.uuid() },
       {
-        creator: e2eeAccountRelation("creatorAccountId"),
-        updater: e2eeAccountRelation("updaterAccountId"),
+        creator: e2eeAccountRelation("ownerId"),
+        updater: e2eeAccountRelation("editorId"),
       },
     ),
     notes: s
@@ -29,7 +29,7 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
   const permissions = definePermissions(app, ({ policy: p, session }) => {
     p.projects.allowRead.always();
     p.projects.allowInsert.where({
-      creatorAccountId: session.user.account,
+      ownerId: session.user.account,
       "$createdBy.account": session.user.account,
     });
     p.projects.allowUpdate.always();
@@ -37,14 +37,14 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
     p.notes.space.allowRead.always();
     p.notes.space.allowInsert.where((space) =>
       p.projects.existsIncludingCreated.where({
-        creatorAccountId: space.creatorAccountId,
+        ownerId: space.creatorAccountId,
         id: space.identifier,
       }),
     );
     p.notes.space.allowUpdate.where((space) =>
       p.projects.exists.where({
         id: space.identifier,
-        creatorAccountId: session.user.account,
+        ownerId: session.user.account,
       }),
     );
   });
@@ -94,15 +94,15 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves stored
     const project = await alice.db
       .insert(app.projects, {
         name: "Creator-owned",
-        creatorAccountId: alice.id,
-        updaterAccountId: alice.id,
+        ownerId: alice.id,
+        editorId: alice.id,
       })
       .wait({ tier: "global" });
     const note = await alice.db
       .insert(app.notes, { projectId: project.id, body: "Private" })
       .wait({ tier: "global" });
     await bob.db
-      .update(app.projects, project.id, { name: "Edited by Bob", updaterAccountId: bob.id })
+      .update(app.projects, project.id, { name: "Edited by Bob", editorId: bob.id })
       .wait({ tier: "global" });
     const row = await alice.db.one(
       app.projects.where({ id: project.id }).include({ creator: true, updater: true }),

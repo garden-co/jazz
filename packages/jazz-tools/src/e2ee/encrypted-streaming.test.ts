@@ -1,3 +1,5 @@
+import { TypedTableQueryBuilder } from "../typed-app.js";
+import { permissionSpaceColumn } from "./current-membership-names.js";
 import {
   spaceAdministrationSchema,
   spaceAdministrationTable,
@@ -39,6 +41,15 @@ it("streams a plaintext-only update without loading encryption keys", async () =
       )
       .encrypted({ space: "projectId", columns: ["payload"] }),
   });
+  const rawSchema = { ...app.wasmSchema };
+  const physicalProjects = new TypedTableQueryBuilder(
+    "projects",
+    rawSchema,
+  ) as unknown as typeof physical.projects;
+  const physicalFiles = new TypedTableQueryBuilder(
+    "files",
+    rawSchema,
+  ) as unknown as typeof physical.files;
   const permissions = definePermissions(physical, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -53,25 +64,27 @@ it("streams a plaintext-only update without loading encryption keys", async () =
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: physical,
+      schema: app,
       permissions,
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
-    const project = db.insert(physical.projects, { title: "Public" });
+    const project = db.insert(physicalProjects, { title: "Public" });
     await project.wait({ tier: "global" });
     // Existing opaque bytes must survive without the caller knowing a key.
-    const file = db.insert(physical.files, {
+    const storedValues = {
       projectId: project.value.id,
       payload: new Uint8Array([7, 8]),
       notes: "Before",
-    });
+      [permissionSpaceColumn]: project.value.id,
+    };
+    const file = db.insert(physicalFiles, storedValues);
     await file.wait({ tier: "global" });
     const source = (async function* () {
       yield "After";
     })();
     const update = await db.updateStreaming(app.files, file.value.id, { notes: source });
     await update.wait({ tier: "global" });
-    expect(await db.one(physical.files.where({ id: file.value.id }), { tier: "remote" })).toEqual({
+    expect(await db.one(physicalFiles.where({ id: file.value.id }), { tier: "remote" })).toEqual({
       ...file.value,
       notes: "After",
     });

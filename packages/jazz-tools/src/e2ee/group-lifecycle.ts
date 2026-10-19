@@ -1,5 +1,6 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import { currentMembershipId, maintainGroupMember } from "./current-membership.js";
+import { usesCurrentMembership } from "./encrypted-schema.js";
 import { currentGroupMembersTable } from "./current-membership-names.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
@@ -465,7 +466,7 @@ export class Groups {
     if (explicitKind === "group" && !child) throw new Error("Missing E2EE child group");
     const relatedGroupId = inferred || explicitKind === "group" ? memberId : undefined;
     const schema = this.tables.__e2ee_groups._schema;
-    if (schema[currentGroupMembersTable]) {
+    if (usesCurrentMembership(schema)) {
       // Signed history and its current-edge projection are separate sync inputs.
       // Load the exact register we will upsert before freezing the write snapshot.
       const kind = explicitKind ?? (child ? "group" : "account");

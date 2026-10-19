@@ -1,3 +1,4 @@
+import { TypedTableQueryBuilder } from "../../typed-app.js";
 import {
   spaceAdministrationSchema,
   spaceAdministrationTable,
@@ -24,7 +25,7 @@ export const uploadApp = s.defineApp({
     .encrypted({ space: "projectId", columns: ["payload", "name"] }),
 });
 // Same deployed physical schema/identities, without automatic scope initialisation.
-export const legacyUploadApp = s.defineApp({
+const legacyPhysical = s.defineApp({
   ...deviceRequestSchema,
   ...groupSchema,
   ...spaceSchema,
@@ -35,6 +36,15 @@ export const legacyUploadApp = s.defineApp({
     { project: s.rel("projects", "projectId") },
   ),
 });
+
+const rawSchema = { ...uploadApp.wasmSchema };
+export const legacyUploadApp = {
+  projects: new TypedTableQueryBuilder(
+    "projects",
+    rawSchema,
+  ) as unknown as typeof legacyPhysical.projects,
+  files: new TypedTableQueryBuilder("files", rawSchema) as unknown as typeof legacyPhysical.files,
+};
 
 export async function uploadFixture(native = false, denied = false, withRecipient = false) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });

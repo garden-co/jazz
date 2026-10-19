@@ -1,3 +1,4 @@
+import { TypedTableQueryBuilder } from "../typed-app.js";
 import {
   spaceAdministrationSchema,
   spaceAdministrationTable,
@@ -38,6 +39,9 @@ it("publishes an encrypted file and metadata that a granted recipient can read",
       { project: s.rel("projects", "projectId") },
     ),
   });
+  const physicalTable = new TypedTableQueryBuilder("files", {
+    ...app.wasmSchema,
+  }) as unknown as typeof physical.files;
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -112,7 +116,7 @@ it("publishes an encrypted file and metadata that a granted recipient can read",
       name: "private-photo.png",
       payload,
     });
-    const stored = await observer!.one(physical.files.where({ id: inserted.value.id }), {
+    const stored = await observer!.one(physicalTable.where({ id: inserted.value.id }), {
       tier: "remote",
     });
     expect(stored).not.toBeNull();

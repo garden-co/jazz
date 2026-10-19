@@ -17,6 +17,11 @@ import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
 import { spaceAdministrationPrefix } from "../e2ee/space-administration-schema.js";
+import {
+  currentGroupMembersTable,
+  currentSpaceMembersPrefix,
+  permissionSpacesPrefix,
+} from "../e2ee/current-membership-names.js";
 import { managedEncryptionSchema } from "../typed-app.js";
 import {
   encodePublishedMigrationValue,
@@ -167,20 +172,29 @@ export function resolveCanonicalMigrationForward(
   // leaves the source binding outside the migration's table partition.
   for (const lens of requested) {
     if (!lens.renamedFrom) continue;
-    const source = `${spaceAdministrationPrefix}${lens.renamedFrom}`;
-    const target = `${spaceAdministrationPrefix}${lens.table}`;
-    if (
-      Object.hasOwn(canonical.fromSchema, source) &&
-      Object.hasOwn(canonical.toSchema, target) &&
-      !forward.some((entry) => entry.table === target)
-    )
-      forward.push({ table: target, renamedFrom: source, operations: [] });
+    for (const prefix of [
+      spaceAdministrationPrefix,
+      currentSpaceMembersPrefix,
+      permissionSpacesPrefix,
+    ]) {
+      const source = `${prefix}${lens.renamedFrom}`;
+      const target = `${prefix}${lens.table}`;
+      if (
+        Object.hasOwn(canonical.fromSchema, source) &&
+        Object.hasOwn(canonical.toSchema, target) &&
+        !forward.some((entry) => entry.table === target)
+      )
+        forward.push({ table: target, renamedFrom: source, operations: [] });
+    }
   }
   const managedAdditions = new Set(
     Object.keys(canonical.toSchema).filter(
       (table) =>
         (Object.hasOwn(managedEncryptionSchema, table) ||
-          table.startsWith(spaceAdministrationPrefix)) &&
+          table === currentGroupMembersTable ||
+          [spaceAdministrationPrefix, currentSpaceMembersPrefix, permissionSpacesPrefix].some(
+            (prefix) => table.startsWith(prefix),
+          )) &&
         !Object.hasOwn(canonical.fromSchema, table) &&
         !forward.some((lens) => lens.table === table && lens.renamedFrom),
     ),
