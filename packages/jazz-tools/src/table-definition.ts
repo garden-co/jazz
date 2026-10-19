@@ -257,5 +257,5 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable(columns, relations);
+  return new DefinedTable<TColumns, TRelations>(columns, relations);
 }
