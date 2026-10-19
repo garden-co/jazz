@@ -67,6 +67,17 @@ it("does not enable membership maintenance or require registration for explicit-
   expect(usesCurrentMembership(app.wasmSchema)).toBe(false);
 });
 
+it("preserves explicit policies when a compiled definition is reused or spread", () => {
+  const source = definition();
+  const names = Object.keys(source);
+  s.defineApp(source);
+  for (const app of [s.defineApp(source), s.defineApp({ ...source })]) {
+    definePermissions(app, ({ policy: p }) => p.notes.allowWrite().always());
+    expect(usesCurrentMembership(app.wasmSchema)).toBe(false);
+  }
+  expect(Object.keys(source)).toEqual(names);
+});
+
 it("keeps automatic, legacy explicit and migration schemas structurally identical", () => {
   const source = definition();
   const automatic = s.defineApp(source);
