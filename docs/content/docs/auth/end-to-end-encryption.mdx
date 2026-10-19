@@ -309,7 +309,7 @@ permissions callback. For groups administered by their creators:
 
 ```ts title="permissions.ts (group rules)"
 export const permissions = definePermissions(app, ({ policy: p, session, e2ee }) => {
-  e2ee.groups.allowInsert.where({ creatorAccountId: session.user.account });
+  e2ee.groups.allowInsert.always();
   e2ee.groups.allowUpdate.where({ creatorAccountId: session.user.account });
   // Include your application-data and space-administration rules here too.
 });
@@ -324,6 +324,12 @@ complete group creation under this owner-managed configuration, including the
 creator's initial membership and key delivery. Signed roots and history remain
 immutable. Omitted rules deny the corresponding operations. Group membership
 or possession of a key does not grant administration authority.
+
+Here, `allowInsert.always()` lets any authenticated account create its own
+group; Jazz supplies the authentication and creator checks. Membership changes
+and later key maintenance use the same `allowUpdate` rule. With the creator-only
+rule above, later delivery to additional devices or recovery recipients requires
+an available creator device with the relevant keys.
 
 Jazz generates the underlying authenticated author checks and policies. Repair
 requests may be authored by the requesting account; they grant no membership
