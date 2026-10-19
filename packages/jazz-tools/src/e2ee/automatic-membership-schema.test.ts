@@ -43,6 +43,12 @@ it("infers each scope once, including siblings and tables with other references"
   expectTypeOf<s.RowOf<typeof app.__e2ee_v1_space_members_teams>>().toMatchTypeOf<{
     scopeId: string;
   }>();
+  expect(app.__e2ee_v1_space_members_projects._table).toBe("__e2ee_v1_space_members_projects");
+  expect(app.__e2ee_v1_space_members_teams._table).toBe("__e2ee_v1_space_members_teams");
+  const sliceable = s.defineSliceableApp(definition());
+  const slice = sliceable.slice("notes");
+  expect(slice.__e2ee_v1_space_members_projects._schema).toBe(sliceable.wasmSchema);
+  expect(slice.__e2ee_v1_group_members._table).toBe("__e2ee_v1_group_members");
   definePermissions(app, ({ policy: p }) => {
     p.notes.fromEncryptionSpace();
     p.files.fromEncryptionSpace();

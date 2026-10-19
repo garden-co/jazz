@@ -24,7 +24,9 @@ import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
 import {
+  currentGroupMembersTable,
   currentSpaceMembersPrefix,
+  currentSpaceMembersTable,
   permissionSpacesTable,
 } from "./e2ee/current-membership-names.js";
 import { encryptionSpacePolicySchema } from "./e2ee/current-membership-schema.js";
@@ -1887,13 +1889,19 @@ function createAppForTables(
   const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
-  if (encryptedSchemas.has(wasmSchema)) {
+  const encryption = encryptedSchemas.get(wasmSchema);
+  if (encryption) {
     tableNames = [
       ...new Set([
         ...tableNames,
         ...Object.keys(deviceRequestSchema),
         ...Object.keys(groupSchema),
         ...Object.keys(spaceSchema),
+        currentGroupMembersTable,
+        ...[...encryption.scopes].flatMap((scope) => [
+          currentSpaceMembersTable(scope),
+          permissionSpacesTable(scope),
+        ]),
       ]),
     ];
   }
