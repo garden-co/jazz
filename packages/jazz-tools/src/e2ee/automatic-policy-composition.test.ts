@@ -21,7 +21,7 @@ it("preserves explicit administration rules and encrypted mutations when composi
     const account = await localAccountConfig(server.appId, server.url);
     const administration = definePermissions(app, ({ policy, session }) => {
       policy.__e2ee_spaces.allowRead.always();
-      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+      policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
       policy.__e2ee_space_grants.allowRead.always();
       policy.__e2ee_space_grants.allowInsert.where({
         authorAccountId: session.user.account,
