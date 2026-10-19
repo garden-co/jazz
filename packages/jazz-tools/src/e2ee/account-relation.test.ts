@@ -119,7 +119,7 @@ it.each([false, true])(
       p.notes.space.allowInsert.where((space) =>
         p.projects.existsIncludingCreated.where({
           id: space.identifier,
-          "$createdBy.account": space.accountId,
+          "$createdBy.account": space.creatorAccountId,
         }),
       );
       p.notes.space.allowUpdate.where((space) =>

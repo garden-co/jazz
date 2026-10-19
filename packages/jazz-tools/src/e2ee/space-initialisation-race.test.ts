@@ -41,7 +41,7 @@ async function prepare() {
     policy.notes.allowRead.where(authenticated);
     policy.notes.allowInsert.where(authenticated);
     policy.__e2ee_spaces.allowRead.where(authenticated);
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.where(authenticated);
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_deliveries.allowRead.where(authenticated);

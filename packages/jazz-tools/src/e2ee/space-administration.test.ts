@@ -50,7 +50,7 @@ it.each([false, true])(
       p.notes.space.allowRead.always();
       p.notes.space.allowInsert.where((space) =>
         p.owners.existsIncludingCreated.where({
-          accountId: space.accountId,
+          accountId: space.creatorAccountId,
           projectId: space.identifier,
         }),
       );
@@ -120,7 +120,7 @@ it("rejects unsupported membership context instead of guessing a root creator", 
       p.notes.space.allowUpdate.where(
         raw({
           type: "Cmp",
-          column: "accountId",
+          column: "creatorAccountId",
           op: "Eq",
           value: { type: "Literal", value: crypto.randomUUID() },
         }),

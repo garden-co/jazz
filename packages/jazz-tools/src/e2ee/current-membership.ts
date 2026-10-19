@@ -87,14 +87,14 @@ export function initialiseSpaceAdministration(
   scope: string,
   rootId: string,
   identifier: string,
-  accountId: string,
+  creatorAccountId: string,
 ): void {
   if (!usesSpaceAdministration(schema, scope)) return;
   const table = spaceAdministrationTable(scope);
   if (!schema[table]) throw new Error("Missing E2EE space administration schema");
   tx.insert(
     new TypedTableQueryBuilder(table, schema),
-    { rootId, identifier, accountId },
+    { rootId, identifier, creatorAccountId },
     { id: rootId },
   );
 }

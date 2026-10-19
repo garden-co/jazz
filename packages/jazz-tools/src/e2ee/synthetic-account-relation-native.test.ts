@@ -34,7 +34,7 @@ it("keeps Alice's creator ownership when Bob edits a project and resolves both s
     p.notes.space.allowInsert.where((space) =>
       p.projects.existsIncludingCreated.where({
         id: space.identifier,
-        "$createdBy.account": space.accountId,
+        "$createdBy.account": space.creatorAccountId,
       }),
     );
     p.notes.space.allowUpdate.where((space) =>

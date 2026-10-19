@@ -118,7 +118,7 @@ export function compileSpaceAdministration(
     // Validate update expressions even when this scope has no projections yet.
     const member = all(authenticated, spaceMemberPredicate(update));
     add("__e2ee_spaces", "select", all(bound, acceptedOnly(any(actions.read))));
-    add("__e2ee_spaces", "insert", all(bound, author("accountId"), any(actions.insert)));
+    add("__e2ee_spaces", "insert", all(bound, author("creatorAccountId"), any(actions.insert)));
     // USING provides an inheritable administration capability. No root mutation
     // can pass WITH CHECK: signed roots remain immutable.
     add(
@@ -134,13 +134,13 @@ export function compileSpaceAdministration(
     result[administration] = {
       select: { using: authenticated },
       insert: {
-        with_check: all(author("accountId"), {
+        with_check: all(author("creatorAccountId"), {
           type: "ExistsIncludingCreated",
           table: "__e2ee_spaces",
           condition: all(
             { type: "Cmp", column: "id", op: "Eq", value: outer("rootId") },
             { type: "Cmp", column: "identifier", op: "Eq", value: outer("identifier") },
-            { type: "Cmp", column: "accountId", op: "Eq", value: outer("accountId") },
+            { type: "Cmp", column: "creatorAccountId", op: "Eq", value: outer("creatorAccountId") },
             scopeBinding(scope),
           ),
         }),
@@ -159,7 +159,7 @@ export function compileSpaceAdministration(
       condition: all(
         { type: "Cmp", column: "id", op: "Eq", value: outer("spaceId") },
         scopeBinding(scope),
-        { type: "Cmp", column: "accountId", op: "Eq", value: account },
+        { type: "Cmp", column: "creatorAccountId", op: "Eq", value: account },
         ...(grant
           ? [
               {

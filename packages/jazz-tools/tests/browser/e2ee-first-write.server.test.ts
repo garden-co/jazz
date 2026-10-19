@@ -26,8 +26,8 @@ it("initialises a legacy space in the browser without replacing a hidden existin
     policy.projects.allowRead.always();
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
-    policy.__e2ee_spaces.allowRead.where({ accountId: session.user.account });
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowRead.where({ creatorAccountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_spaces.allowUpdate.always();
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });

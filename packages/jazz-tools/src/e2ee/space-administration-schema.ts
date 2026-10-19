@@ -15,11 +15,11 @@ export function spaceAdministrationSchema(scope: string) {
 }
 function definition(scope: string) {
   return new DefinedTable(
-    { rootId: s.uuid(), identifier: s.uuid(), accountId: s.uuid() },
+    { rootId: s.uuid(), identifier: s.uuid(), creatorAccountId: s.uuid() },
     {
       root: rel("__e2ee_spaces", "rootId"),
       scope: rel(scope, "identifier"),
-      account: rel("__e2ee_account_identities", "accountId"),
+      account: rel("__e2ee_account_identities", "creatorAccountId"),
     },
   );
 }

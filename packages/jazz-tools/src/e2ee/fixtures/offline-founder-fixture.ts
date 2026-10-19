@@ -39,7 +39,7 @@ export const founderPermissions = definePermissions(app, ({ policy, session }) =
   policy.uploads.allowRead.always();
   policy.uploads.allowInsert.always();
   policy.__e2ee_spaces.allowRead.always();
-  policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+  policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
   policy.__e2ee_space_grants.allowRead.always();
   policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
   policy.__e2ee_space_deliveries.allowRead.always();
@@ -276,7 +276,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
     const root = await founder.one(app.__e2ee_spaces.where({ identifier: project.id }), {
       tier: "local-first",
     });
-    expect(root?.accountId).toBe(founderAccount.account.id);
+    expect(root?.creatorAccountId).toBe(founderAccount.account.id);
 
     if (scenario === "provisional-update") {
       await founder

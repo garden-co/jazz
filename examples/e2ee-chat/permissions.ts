@@ -76,7 +76,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
   policy.messages.space.allowRead.where(authenticated);
   policy.messages.space.allowInsert.where((space) =>
     policy.chatOwners.existsIncludingCreated.where({
-      accountId: space.accountId,
+      accountId: space.creatorAccountId,
       chatId: space.identifier,
     }),
   );
