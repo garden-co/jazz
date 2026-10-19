@@ -991,8 +991,12 @@ function toFlatConditions(
  * @param schema WasmSchema for relation analysis
  * @returns JSON string for runtime query()
  */
-export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+export function translateQuery(
+  builderJson: string,
+  schema: WasmSchema,
+  prepared?: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  const builder = prepared ?? normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const selectColumns =
     builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
