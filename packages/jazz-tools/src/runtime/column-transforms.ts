@@ -21,20 +21,24 @@ export function columnTransformDependencies(transforms: DependencyTransforms): D
   if (cached) return cached;
   const columns = new Set<string>();
   const byColumn = new Map<string, readonly string[]>();
+  const visiting = new Set<string>();
   const visit = (column: string): readonly string[] => {
     const previous = byColumn.get(column);
     if (previous) return previous;
+    if (visiting.has(column)) throw new Error(`Cyclic transform dependency at "${column}".`);
     const dependencies = transforms[column]?.dependsOn;
     if (!dependencies?.length) {
       byColumn.set(column, emptyDependencies);
       return emptyDependencies;
     }
+    visiting.add(column);
     const closure = new Set<string>();
     for (const dependency of dependencies) {
       columns.add(dependency);
       for (const transitive of visit(dependency)) closure.add(transitive);
       closure.add(dependency);
     }
+    visiting.delete(column);
     const result = [...closure];
     byColumn.set(column, result);
     return result;
