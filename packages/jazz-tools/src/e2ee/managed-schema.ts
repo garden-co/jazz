@@ -365,7 +365,7 @@ export const spaceSchema = {
     {
       scopeId: s.uuid(),
       identifier: s.uuid(),
-      accountId: s.uuid(),
+      creatorAccountId: s.uuid(),
       deviceId: s.uuid(),
       accountEpochId: s.uuid(),
       epochId: s.uuid(),
@@ -377,7 +377,7 @@ export const spaceSchema = {
       signature: s.bytes(),
     },
     {
-      account: rel("__e2ee_account_identities", "accountId"),
+      account: rel("__e2ee_account_identities", "creatorAccountId"),
       device: rel("__e2ee_device_requests", "deviceId"),
       __e2ee_space_successorsViaSpace: reverse("__e2ee_space_successors", "space"),
       __e2ee_space_grantsViaSpace: reverse("__e2ee_space_grants", "space"),
