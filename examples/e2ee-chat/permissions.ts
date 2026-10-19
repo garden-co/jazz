@@ -98,14 +98,20 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
   policy.__e2ee_space_successors.allowInsert.where((successor) =>
     allOf([
       { authorAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.exists.where({ id: successor.spaceId, creatorAccountId: session.user.account }),
+      policy.__e2ee_spaces.exists.where({
+        id: successor.spaceId,
+        creatorAccountId: session.user.account,
+      }),
     ]),
   );
   policy.__e2ee_space_deliveries.allowRead.where(authenticated);
   policy.__e2ee_space_deliveries.allowInsert.where((delivery) =>
     allOf([
       { senderAccountId: session.user.account, "$createdBy.account": session.user.account },
-      policy.__e2ee_spaces.exists.where({ id: delivery.spaceId, creatorAccountId: session.user.account }),
+      policy.__e2ee_spaces.exists.where({
+        id: delivery.spaceId,
+        creatorAccountId: session.user.account,
+      }),
     ]),
   );
 });
