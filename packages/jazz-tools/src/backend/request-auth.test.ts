@@ -695,6 +695,8 @@ describe("backend request auth", () => {
   ])("verifies signing keys over HTTP at canonical loopback %s", async (hostname, listenHost) => {
     const secret = randomUUID();
     const path = `/jwks/${randomUUID()}`;
+    const remapLoopback = process.platform === "darwin" && listenHost === "127.255.255.254";
+    let restoreFetch = () => {};
     let requests = 0;
     const server = createHttpServer((request, response) => {
       if (request.url !== path) {
@@ -712,11 +714,23 @@ describe("backend request auth", () => {
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
-        server.listen(0, listenHost, () => resolve());
+        server.listen(0, remapLoopback ? "127.0.0.1" : listenHost, () => resolve());
       });
       const address = server.address();
       if (!address || typeof address === "string") {
         throw new Error("failed to allocate loopback test port");
+      }
+      const jwksUrl = `http://${hostname}:${address.port}${path}`;
+      if (remapLoopback) {
+        // macOS lacks this 127/8 socket route; keep URL policy and real HTTP verification.
+        const fetch = globalThis.fetch;
+        const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation((input, options) => {
+          const url = new URL(input instanceof Request ? input.url : input.toString());
+          expect(url.href).toBe(jwksUrl);
+          url.hostname = "127.0.0.1";
+          return fetch(url, options);
+        });
+        restoreFetch = () => fetcher.mockRestore();
       }
       const token = signHs256Jwt({ iss: "https://issuer.example", sub: "loopback-user" }, secret);
 
@@ -725,7 +739,7 @@ describe("backend request auth", () => {
           { headers: { authorization: `Bearer ${token}` } },
           {
             appId: "app-with-loopback-jwks",
-            jwksUrl: `http://${hostname}:${address.port}${path}`,
+            jwksUrl,
           },
         ),
       ).resolves.toMatchObject({
@@ -735,6 +749,7 @@ describe("backend request auth", () => {
       });
       expect(requests).toBe(1);
     } finally {
+      restoreFetch();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

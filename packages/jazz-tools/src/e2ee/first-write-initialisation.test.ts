@@ -55,11 +55,11 @@ it.each([
       policy.notes.allowRead.always();
       if (mode !== "deny-data") policy.notes.allowInsert.always();
       if (mode.startsWith("hidden-existing"))
-        policy.__e2ee_spaces.allowRead.where({ accountId: session.user.account });
+        policy.__e2ee_spaces.allowRead.where({ creatorAccountId: session.user.account });
       else policy.__e2ee_spaces.allowRead.always();
       if (mode === "hidden-existing-updatable") policy.__e2ee_spaces.allowUpdate.always();
       if (mode !== "deny-root")
-        policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+        policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
       policy.__e2ee_space_grants.allowRead.always();
       if (mode !== "deny-grant")
         policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
