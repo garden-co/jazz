@@ -264,10 +264,7 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
         let mut published = published_record(row)?;
         // Convert public history metadata only after query execution. Ordering
         // and occurrence identity retain the full HLC inside the core.
-        if row
-            .table()
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if crate::schema::history::is_history_table(&row.table()) {
             use crate::schema::history::{ACCEPTED_AT_COLUMN, TRANSACTION_ID_COLUMN};
             use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
             let metadata = published

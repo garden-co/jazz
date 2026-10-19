@@ -1,4 +1,4 @@
-import { HISTORY_PREFIX, resolveQueryTable } from "./history-relation.js";
+import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
@@ -637,7 +637,7 @@ function normalizeQueryOptions(
 }
 
 function assertWritableTable(table: { readonly _table: string }): void {
-  if (table._table.startsWith(HISTORY_PREFIX)) {
+  if (isHistoryTable(table._table)) {
     throw new Error(`History table "${table._table}" is read-only`);
   }
 }

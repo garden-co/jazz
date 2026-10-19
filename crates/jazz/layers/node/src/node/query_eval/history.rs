@@ -20,10 +20,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         let table = self
             .node
             .table_in_schema(&request.source.table, schema_version)?;
-        let base_name = request
-            .source
-            .table
-            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+        let base_name = crate::schema::history::history_source_table(&request.source.table)
             .ok_or_else(|| unsupported("unknown history source"))?;
         let base_table = self.node.table_in_schema(base_name, schema_version)?;
         let path = self

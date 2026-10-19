@@ -2300,21 +2300,14 @@ where
     type Error = Error;
 
     fn requires_key_lookup(&self, request: &SourceRequest) -> bool {
-        request
-            .source
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        crate::schema::history::is_history_table(&request.source.table)
             && !self.access_paths.contains_key(&request.source)
     }
 
     fn supports_lookup(&self, request: &SourceRequest, field: &str) -> bool {
         // History currently has only a branch/row primary-key access path.
         // Future history indexes extend this source-local eligibility check.
-        request
-            .source
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-            && field == "id"
+        crate::schema::history::is_history_table(&request.source.table) && field == "id"
     }
 
     fn prepare_source_graph_with_lookup<'a>(
@@ -2331,11 +2324,7 @@ where
         &'a mut self,
         request: &'a SourceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
-        if request
-            .source
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if crate::schema::history::is_history_table(&request.source.table) {
             return Box::pin(self.prepare_history_source_graph(request));
         }
         Box::pin(async move {
@@ -2571,11 +2560,7 @@ where
         // History compiles its underlying current-table authorization program
         // as a graph dependency. Prepare those policies in that program, never
         // against the historical values or the virtual table name.
-        if request
-            .source
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if crate::schema::history::is_history_table(&request.source.table) {
             return Ok(None);
         }
         let SourceAuthorizationRequest::PolicyFiltered {
@@ -4246,11 +4231,16 @@ fn lookup_probe_count(lookup: &SourceLookup) -> u64 {
     }
 }
 
-fn row_id_lookup(values: &[Value]) -> Result<SourceLookup, Error> {
-    Ok(SourceLookup {
+fn row_id_lookup(values: &[Value]) -> Result<Option<SourceLookup>, Error> {
+    // Access-path selection is optional: nullable or claim-bound values must
+    // remain predicates, rather than fail while constructing UUID probes.
+    if values.iter().any(|value| !matches!(value, Value::Uuid(_))) {
+        return Ok(None);
+    }
+    Ok(Some(SourceLookup {
         fields: vec!["row_uuid".into()],
         keys: primary_key_rows(values)?,
-    })
+    }))
 }
 
 fn apply_source_lookup(rows: GraphBuilder, lookup: &SourceLookup) -> Result<GraphBuilder, Error> {
@@ -5609,10 +5599,12 @@ where
                     _ => unreachable!("validated primary-key bound"),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            access_paths.insert(
-                root_source_id(&query.table),
-                SourceAccessPath::Lookup(row_id_lookup(&values)?),
-            );
+            if let Some(lookup) = row_id_lookup(&values)? {
+                access_paths.insert(
+                    root_source_id(&query.table),
+                    SourceAccessPath::Lookup(lookup),
+                );
+            }
         }
         if let Some(join) = &query.flat_join {
             let sources = std::iter::once((
@@ -5648,10 +5640,9 @@ where
                             _ => unreachable!("finite primary-key operand"),
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    access_paths.insert(
-                        source.clone(),
-                        SourceAccessPath::Lookup(row_id_lookup(&values)?),
-                    );
+                    if let Some(lookup) = row_id_lookup(&values)? {
+                        access_paths.insert(source.clone(), SourceAccessPath::Lookup(lookup));
+                    }
                 }
             }
         }
@@ -6057,8 +6048,10 @@ fn collect_primary_key_sets(
                     .iter()
                     .map(|option| normalized_bound_value(option, binding, policy))
                     .collect::<Result<Option<Vec<_>>, _>>()?;
-                if let Some(values) = values {
-                    paths.insert(source, SourceAccessPath::Lookup(row_id_lookup(&values)?));
+                if let Some(values) = values
+                    && let Some(lookup) = row_id_lookup(&values)?
+                {
+                    paths.insert(source, SourceAccessPath::Lookup(lookup));
                 }
             }
         }
@@ -6066,7 +6059,10 @@ fn collect_primary_key_sets(
             for source in sources.keys() {
                 paths.insert(
                     source.clone(),
-                    SourceAccessPath::Lookup(row_id_lookup(&[])?),
+                    SourceAccessPath::Lookup(SourceLookup {
+                        fields: vec!["row_uuid".into()],
+                        keys: primary_key_rows(&[])?,
+                    }),
                 );
             }
         }

@@ -238,7 +238,7 @@ fn content_row_members_for_bundle(
             // Virtual history outputs refer to ordinary stored versions. Use
             // their base table for immutable bodies and visibility witnesses,
             // including restore-only events needed by local-first readers.
-            let table = table.strip_prefix(crate::schema::history::HISTORY_PREFIX)
+            let table = crate::schema::history::history_source_table(&table)
                 .map(|name| name.to_owned().into()).unwrap_or(table);
             Ok((table, row, tx))
         })
@@ -735,9 +735,7 @@ where
         schema: SchemaVersionId,
         table: &str,
     ) -> Result<crate::ids::GlobalPhysicalTableId, Error> {
-        let table = table
-            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-            .unwrap_or(table);
+        let table = crate::schema::history::history_source_table(&table).unwrap_or(table);
         self.catalogue
             .physical_mappings
             .get(&schema)
@@ -758,7 +756,7 @@ where
             let physical = self.scope_physical_table(schema, name)?;
             tables.insert(
                 physical,
-                name.strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                crate::schema::history::history_source_table(&name)
                     .unwrap_or(name)
                     .to_owned()
                     .into(),

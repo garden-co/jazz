@@ -1849,10 +1849,7 @@ where
                 continue;
             }
             let table = self.table_in_schema_ref(
-                source_request
-                    .source
-                    .table
-                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                crate::schema::history::history_source_table(&source_request.source.table)
                     .unwrap_or(&source_request.source.table),
                 request.reads.primary.read_schema,
             )?;
@@ -1869,9 +1866,8 @@ where
             occurrences.push((source_request.source, descriptor));
         }
         for (table_name, metadata) in table_metadata {
-            let stored_name = table_name
-                .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                .unwrap_or(&table_name);
+            let stored_name =
+                crate::schema::history::history_source_table(&table_name).unwrap_or(&table_name);
             let table = self.table_in_schema_ref(stored_name, request.reads.primary.read_schema)?;
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
@@ -1894,10 +1890,7 @@ where
             let shared = &sources[&self
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
-            if !occurrence
-                .table
-                .starts_with(crate::schema::history::HISTORY_PREFIX)
-            {
+            if !crate::schema::history::is_history_table(&occurrence.table) {
                 graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
             }
             if shared.descriptor != descriptor {
@@ -4763,9 +4756,8 @@ where
         // coordinate follows the row's authored schema across a table rename.
         let mut witness_table_names = BTreeMap::new();
         for logical_name in tables.keys() {
-            let stored_name = logical_name
-                .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                .unwrap_or(logical_name);
+            let stored_name =
+                crate::schema::history::history_source_table(&logical_name).unwrap_or(logical_name);
             if stored_name != logical_name {
                 let physical_table = *maintained
                     .physical_tables

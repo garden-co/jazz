@@ -5,6 +5,18 @@ use super::{ColumnSchema, GrooveColumnType, TableSchema};
 
 /// Reserved prefix for query-visible history relations.
 pub const HISTORY_PREFIX: &str = "history.";
+/// Whether a name occupies the reserved history namespace.
+/// This does not imply that its source table exists or the relation is valid.
+pub fn is_history_table(name: &str) -> bool {
+    history_source_table(name).is_some()
+}
+
+/// Extract the source name from the history namespace; catalogue resolution
+/// remains responsible for rejecting empty, nested, or unknown source names.
+pub fn history_source_table(name: &str) -> Option<&str> {
+    name.strip_prefix(HISTORY_PREFIX)
+}
+
 /// Portable transaction identity of a settled content version.
 pub const TRANSACTION_ID_COLUMN: &str = "$transactionId";
 /// Acceptance HLC of a settled content version.

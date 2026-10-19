@@ -1,5 +1,5 @@
 import type { TxId } from "./runtime/client.js";
-import { resolveQueryTable } from "./runtime/history-relation.js";
+import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
 import { assertRelationshipDeclaration } from "./relationships.js";
 import {
   columnTransformDependencies,
@@ -2011,7 +2011,7 @@ function createAppForTables(
       enumerable: true,
       get: () =>
         new TypedTableQueryBuilder(
-          `history.${tableName}`,
+          historyTableName(tableName),
           wasmSchema,
           columnTransformsByTable?.[tableName],
           columnTransformsByTable,

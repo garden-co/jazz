@@ -2192,9 +2192,7 @@ impl CurrentRow {
         column_binding: impl Fn(&str) -> Option<usize>,
     ) -> Result<Self, Error> {
         let history_metadata = |name: &str| {
-            table
-                .name
-                .starts_with(crate::schema::history::HISTORY_PREFIX)
+            crate::schema::history::is_history_table(&table.name)
                 && crate::schema::history::HistoryMetadataColumn::contains(name)
         };
         let projected_public_name = |column_name: &str| -> String {
@@ -2325,9 +2323,7 @@ impl CurrentRow {
                 binding_field_names.push(None);
             }
         }
-        if !table
-            .name
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        if !crate::schema::history::is_history_table(&table.name)
             && let Some((time, node)) = self.projected_tx_alias()
         {
             descriptor_fields.extend([

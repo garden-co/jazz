@@ -518,10 +518,7 @@ fn convert_table(
     name: &TableName,
     table: &TableSchema,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
-    if name
-        .as_str()
-        .starts_with(crate::schema::history::HISTORY_PREFIX)
-    {
+    if crate::schema::history::is_history_table(&name.as_str()) {
         return Err(err(
             format!("$.{}", name.as_str()),
             "table names starting with \"history.\" are reserved for virtual history relations",

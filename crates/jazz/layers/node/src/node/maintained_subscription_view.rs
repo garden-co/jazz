@@ -710,9 +710,7 @@ impl MaintainedSubscriptionView {
             .to_owned()
             .into();
         Ok(SupportingRow {
-            is_current: !source
-                .table
-                .starts_with(crate::schema::history::HISTORY_PREFIX),
+            is_current: !crate::schema::history::is_history_table(&source.table),
             physical_table,
             version_table,
             row: row.row_uuid(),
@@ -3163,10 +3161,7 @@ fn decode_typed_version_witness(
     // History sources retain packed provenance timestamps; current sources
     // expose Unix milliseconds. Both witnesses reconstruct the authored image.
     let provenance_time = |value, message| {
-        if table
-            .name
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if crate::schema::history::is_history_table(&table.name) {
             Ok(TxTime(value))
         } else {
             TxTime::from_physical_ms(value).map_err(|_| super::Error::InvalidStoredValue(message))

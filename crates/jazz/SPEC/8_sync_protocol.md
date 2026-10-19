@@ -148,13 +148,6 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Current/history supporting facts — part of the planned wire v6 break.**
-`SupportingRow` appends `is_current: bool` after its version reference. Current
-sources consume admitted current winners; history sources consume all admitted
-content versions. This updates the unreleased v6 layout and fixtures in place,
-without another protocol-version bump or a compatibility decoder. See
-`dev/proofs/history-current-support-wire-compatibility.md`.
-
 **Linear-history boundary, 2026-10-08 — the sole wire protocol is v6.** Wire v6
 replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
 v5's compact durability tags, Edge-free peer roles and flagless shape
@@ -201,6 +194,9 @@ baseline, frozen fresh rather than appended to v5, is:
   `ViewUpdate` whose semantic payload exceeds the routed payload limit; the
   final part is an ordinary `ViewUpdate` (SPEC 13, "Oversized view updates").
   It is a mandatory v6 variant with no feature bit.
+- `SupportingRow` appends `is_current: bool` after its version reference. Current
+  sources consume admitted current winners; history sources consume all admitted
+  content versions.
 
 Clients, relays and Core servers must upgrade together; there is no v5 decoder
 or migration. The storage boundary moves with it (SPEC 2 §2.7.1).

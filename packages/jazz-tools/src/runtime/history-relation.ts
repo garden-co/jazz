@@ -1,6 +1,19 @@
 import type { ColumnDescriptor, WasmSchema } from "../drivers/types.js";
 
-export const HISTORY_PREFIX = "history.";
+const HISTORY_PREFIX = "history.";
+
+/** Namespace recognition only; source validity is checked during resolution. */
+export function isHistoryTable(name: string): boolean {
+  return historySourceTable(name) !== undefined;
+}
+
+export function historySourceTable(name: string): string | undefined {
+  return name.startsWith(HISTORY_PREFIX) ? name.slice(HISTORY_PREFIX.length) : undefined;
+}
+
+export function historyTableName(source: string): string {
+  return `${HISTORY_PREFIX}${source}`;
+}
 
 // Query descriptors only. Never add these virtual sources to the schema sent
 // for catalogue admission, migration, permissions, or writes.
@@ -20,9 +33,9 @@ export function resolveQueryTable(
   schema: WasmSchema,
   name: string,
 ): WasmSchema[string] | undefined {
-  if (!name.startsWith(HISTORY_PREFIX)) return schema[name];
-  const base = name.slice(HISTORY_PREFIX.length);
-  if (base.startsWith(HISTORY_PREFIX) || !Object.hasOwn(schema, base)) return undefined;
+  const base = historySourceTable(name);
+  if (base === undefined) return schema[name];
+  if (isHistoryTable(base) || !Object.hasOwn(schema, base)) return undefined;
   let relations = cache.get(schema);
   if (!relations) cache.set(schema, (relations = new Map()));
   let relation = relations.get(name);

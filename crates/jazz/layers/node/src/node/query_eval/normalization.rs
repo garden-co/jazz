@@ -1128,10 +1128,7 @@ pub(super) fn operand_column_type(
         return Ok(Some(ColumnType::Uuid));
     }
     let history;
-    let columns = if let Some(table) = source
-        .table
-        .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-    {
+    let columns = if let Some(table) = crate::schema::history::history_source_table(&source.table) {
         history = crate::schema::history::HistoryRelationSchema::new(table_schema(schema, table)?);
         history.columns()
     } else {
@@ -3010,7 +3007,7 @@ where
                 .iter()
                 .flat_map(|join| join.sources.iter().map(|source| &source.table)),
         ) {
-            if table.starts_with(crate::schema::history::HISTORY_PREFIX)
+            if crate::schema::history::is_history_table(&table)
                 && !virtual_schema
                     .tables
                     .iter()

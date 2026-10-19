@@ -1205,9 +1205,7 @@ impl ClientDb {
         // A projected history result still needs its version to form a stable
         // public key. Decode values against the caller's original projection.
         let mut query = query;
-        if query
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        if crate::schema::history::is_history_table(&query.table)
             && let Some(columns) = &mut query.select
             && !columns
                 .iter()
@@ -3462,10 +3460,7 @@ impl PublicQueryDecoder {
         if let Some(columns) = &query.select {
             return Ok(columns.clone());
         }
-        if let Some(base) = query
-            .table
-            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-        {
+        if let Some(base) = crate::schema::history::history_source_table(&query.table) {
             let source = self
                 .core_schema
                 .tables()
@@ -3495,9 +3490,7 @@ impl PublicQueryDecoder {
         let schema = self.schema.as_ref();
         let table_schema = schema
             .get(&TableName::new(
-                table
-                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                    .unwrap_or(table),
+                crate::schema::history::history_source_table(&table).unwrap_or(table),
             ))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if query.aggregate.is_some() {
@@ -3528,9 +3521,7 @@ impl PublicQueryDecoder {
             for (source, table) in sources {
                 let table_schema = schema
                     .get(&TableName::new(
-                        table
-                            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                            .unwrap_or(&table),
+                        crate::schema::history::history_source_table(&table).unwrap_or(&table),
                     ))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
                 for name in
@@ -3625,9 +3616,7 @@ impl PublicQueryDecoder {
             .map(|row| {
                 if query.aggregate.is_none()
                     && query.flat_join.is_none()
-                    && query
-                        .table
-                        .starts_with(crate::schema::history::HISTORY_PREFIX)
+                    && crate::schema::history::is_history_table(&query.table)
                 {
                     let Some(CoreValue::Tuple(version)) =
                         row.application_field(crate::schema::history::TRANSACTION_ID_COLUMN)
@@ -3690,9 +3679,7 @@ impl PublicQueryDecoder {
         let table = query.table.as_str();
         let table_schema = schema
             .get(&TableName::new(
-                table
-                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                    .unwrap_or(table),
+                crate::schema::history::history_source_table(&table).unwrap_or(table),
             ))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
         if let Some(aggregate) = &query.aggregate {
@@ -3723,9 +3710,7 @@ impl PublicQueryDecoder {
             for (source, table) in sources {
                 let source_schema = schema
                     .get(&TableName::new(
-                        table
-                            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                            .unwrap_or(&table),
+                        crate::schema::history::history_source_table(&table).unwrap_or(&table),
                     ))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
                 names.extend(
@@ -3876,7 +3861,7 @@ impl PublicQueryDecoder {
         row: &crate::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
-        if table.starts_with(crate::schema::history::HISTORY_PREFIX)
+        if crate::schema::history::is_history_table(&table)
             && crate::schema::history::HistoryMetadataColumn::contains(column)
         {
             return row

@@ -1,4 +1,4 @@
-import { resolveQueryTable } from "../history-relation.js";
+import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
@@ -5199,7 +5199,7 @@ function coerceQueryPredicate(
   if (filter.op === "Not") {
     return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
   }
-  if (table.startsWith("history.") && "column" in filter) {
+  if (isHistoryTable(table) && "column" in filter) {
     if (filter.column === "$transactionId") {
       throw new Error("History $transactionId predicates do not accept user-provided values");
     }

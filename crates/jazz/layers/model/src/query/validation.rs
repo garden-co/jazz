@@ -410,7 +410,7 @@ impl Query {
                     .iter()
                     .flat_map(|join| join.sources.iter().map(|source| &source.table)),
             )
-            .any(|table| table.starts_with(crate::schema::history::HISTORY_PREFIX))
+            .any(|table| crate::schema::history::is_history_table(&table))
     }
 
     /// A conjunctive finite row constraint bounds a primary-key source.
@@ -462,9 +462,7 @@ fn validate_history_query(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
-    let source_name = query
-        .table
-        .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+    let source_name = crate::schema::history::history_source_table(&query.table)
         .ok_or_else(|| QueryError::UnknownTable(query.table.clone()))?;
     let source = schema_table(schema, source_name)
         .map_err(|_| QueryError::UnknownTable(query.table.clone()))?;
@@ -1149,7 +1147,7 @@ fn validate_query_canonical_parts_as(
                 .flat_map(|join| join.sources.iter().map(|source| &source.table)),
         )
         .filter(|name| {
-            name.starts_with(crate::schema::history::HISTORY_PREFIX)
+            crate::schema::history::is_history_table(&name)
                 && !schema.tables.iter().any(|table| &table.name == *name)
         })
         .cloned()
@@ -1157,10 +1155,9 @@ fn validate_query_canonical_parts_as(
     if !history_names.is_empty() {
         let mut virtual_schema = schema.clone();
         for name in &history_names {
-            let base = name
-                .strip_prefix(crate::schema::history::HISTORY_PREFIX)
-                .unwrap();
-            let source = schema_table(schema, base)?;
+            let base = crate::schema::history::history_source_table(&name).unwrap();
+            let source = schema_table(schema, base)
+                .map_err(|_| QueryError::UnknownTable(name.clone()))?;
             if !source.branch_by.is_empty() {
                 return Err(QueryError::UnsupportedRelationQuery(
                     "Reading branched tables is not supported in history queries yet".into(),
@@ -2000,9 +1997,7 @@ fn validate_aggregate_order_by(
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
         "id" => Ok(()),
-        name if table
-            .name
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        name if crate::schema::history::is_history_table(&table.name)
             && crate::schema::history::HistoryMetadataColumn::contains(name) =>
         {
             column_type(table, column).map(|_| ())
