@@ -3527,13 +3527,22 @@ impl PublicQueryDecoder {
             }));
             for (source, table) in sources {
                 let table_schema = schema
-                    .get(&TableName::new(&table))
+                    .get(&TableName::new(
+                        table
+                            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                            .unwrap_or(&table),
+                    ))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
-                for column in &table_schema.columns.columns {
-                    output_columns.push((
-                        format!("{source}.{}", column.name),
-                        column.column_type.clone(),
-                    ));
+                for name in
+                    self.projected_column_names(&Query::from(table.as_str()), table_schema)?
+                {
+                    let ty = table_schema
+                        .columns
+                        .columns
+                        .iter()
+                        .find(|column| column.name.as_str() == name)
+                        .map(|column| column.column_type.clone());
+                    output_columns.push((format!("{source}.{name}"), ty));
                 }
             }
             return rows
@@ -3547,7 +3556,10 @@ impl PublicQueryDecoder {
                                 .ok_or_else(|| {
                                     JazzError::Query(format!("flat join row missing {field}"))
                                 })
-                                .and_then(|value| core_to_public_value_for_column_type(value, ty))
+                                .and_then(|value| match ty {
+                                    Some(ty) => core_to_public_value_for_column_type(value, ty),
+                                    None => core_to_public_value(value),
+                                })
                         })
                         .collect::<Result<Vec<_>>>()?;
                     Ok((row_id, values))
@@ -3612,6 +3624,7 @@ impl PublicQueryDecoder {
             .iter()
             .map(|row| {
                 if query.aggregate.is_none()
+                    && query.flat_join.is_none()
                     && query
                         .table
                         .starts_with(crate::schema::history::HISTORY_PREFIX)
@@ -3709,14 +3722,16 @@ impl PublicQueryDecoder {
             }));
             for (source, table) in sources {
                 let source_schema = schema
-                    .get(&TableName::new(&table))
+                    .get(&TableName::new(
+                        table
+                            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                            .unwrap_or(&table),
+                    ))
                     .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
                 names.extend(
-                    source_schema
-                        .columns
-                        .columns
-                        .iter()
-                        .map(|column| format!("{source}.{}", column.name)),
+                    self.projected_column_names(&Query::from(table.as_str()), source_schema)?
+                        .into_iter()
+                        .map(|name| format!("{source}.{name}")),
                 );
             }
             return Ok(names);

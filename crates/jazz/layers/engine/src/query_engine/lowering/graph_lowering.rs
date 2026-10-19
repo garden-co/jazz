@@ -1880,7 +1880,7 @@ fn lower_linear_plan_steps_cached(
                             .or_insert(*depth);
                     }
                 }
-                let project_fields = field_plans
+                let mut project_fields = field_plans
                     .into_iter()
                     .map(|mut field| {
                         let output_depth = field
@@ -1908,6 +1908,65 @@ fn lower_linear_plan_steps_cached(
                         field.project
                     })
                     .collect::<Vec<_>>();
+                // Occurrence carriers come from the source identity descriptor,
+                // never from application-column name resolution.
+                for column in columns {
+                    let position = if column.output.name == "row_uuid" {
+                        Some(0)
+                    } else {
+                        column
+                            .output
+                            .name
+                            .strip_prefix("__flat_join_row_")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    };
+                    let Some(position) = position else { continue };
+                    let NormalizedValueRef::RowId(RowIdRef::Source(id)) = &column.value else {
+                        continue;
+                    };
+                    let Some(source) = resolved_sources.get(id) else {
+                        continue;
+                    };
+                    if matches!(
+                        source.row_shape.occurrence_key,
+                        SourceOccurrenceKey::Current { .. }
+                    ) {
+                        continue;
+                    }
+                    let key = &source.row_shape.occurrence_key;
+                    let mut inputs = BTreeMap::new();
+                    for (name, _) in key.fields() {
+                        let input = if id == &root_source.row_shape.source {
+                            if last_join_right.is_some() {
+                                left_field(name)
+                            } else {
+                                name.clone()
+                            }
+                        } else if last_join_right
+                            .as_ref()
+                            .is_some_and(|(right, ..)| right.root_source() == Some(id))
+                        {
+                            right_field(name)
+                        } else {
+                            let (field, _) = accumulated_join_fields
+                                .get(&(id.clone(), name.clone()))
+                                .ok_or_else(|| {
+                                    UnsupportedReason::Runtime(
+                                        "joined occurrence field is missing".into(),
+                                    )
+                                })?;
+                            if last_join_right.is_some() {
+                                left_field(field)
+                            } else {
+                                field.clone()
+                            }
+                        };
+                        inputs.insert(name.clone(), input);
+                    }
+                    let output = SourceOccurrenceKey::joined_field(position);
+                    project_fields.retain(|field| field.output_name != output);
+                    project_fields.push(key.project(output, |name| inputs[name].clone()));
+                }
                 for (field, depth) in &unwrap_fields {
                     for _ in 0..*depth {
                         graph = graph.unwrap_nullable(field.clone());
@@ -1989,10 +2048,8 @@ fn lower_linear_plan_steps_cached(
                 graph = graph
                     .project_fields(project_fields)
                     .narrow_projected_join_chain();
-                fields = columns
-                    .iter()
-                    .map(|column| column.output.name.clone())
-                    .collect();
+                fields = projected_outputs;
+
                 fields.extend(retained_route_fields.iter().cloned());
                 if let Some(retained_fields) = retained_contributor_fields {
                     fields.extend(retained_fields);

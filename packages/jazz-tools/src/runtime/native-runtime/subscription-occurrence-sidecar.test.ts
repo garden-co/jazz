@@ -34,7 +34,7 @@ function encodeSubscriptionDelta(delta: {
 it("preserves typed occurrence keys in the native subscription wire sidecar", () => {
   const typedKey = (label: string) => {
     const labelBytes = new TextEncoder().encode(label);
-    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 1);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
     key[0] = 2;
     key.fill(1, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
@@ -84,7 +84,7 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     "malformed ResultKey",
   );
 
-  const zeroArm = new Uint8Array(42);
+  const zeroArm = new Uint8Array(43);
   zeroArm[0] = 2;
   zeroArm.fill(1, 1, 17);
   new DataView(zeroArm.buffer).setUint32(17, 1);
@@ -125,8 +125,9 @@ it("preserves versioned result keys and rejects malformed history sidecars", () 
       new URL("../../../../../crates/jazz/fixtures/result-key.json", import.meta.url),
       "utf8",
     ),
-  ) as { key: number[] };
+  ) as { key: number[]; joined_key: number[] };
   const key = Uint8Array.from(fixture.key);
+  const joined = Uint8Array.from(fixture.joined_key);
   const earlier = key.slice();
   earlier[33] = 254;
   const decode = (keys: Uint8Array[]) =>
@@ -140,6 +141,7 @@ it("preserves versioned result keys and rejects malformed history sidecars", () 
         }),
       ),
     );
+  expect(decode([joined]).removedOccurrenceKeys).toEqual([joined]);
   expect(decode([key, earlier]).removedOccurrenceKeys).toEqual([key, earlier]);
   const oldCurrentKey = Uint8Array.from([1, ...key.slice(1, 25)]);
   const oldHistoryKey = Uint8Array.from([...key.slice(0, 25), ...key.slice(26)]);

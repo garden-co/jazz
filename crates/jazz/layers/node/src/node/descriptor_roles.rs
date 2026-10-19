@@ -62,8 +62,14 @@ fn validate_role_fields(
             ResultDescriptorRole::Current
                 if tag == "occurrence" && last_union_position.is_none() =>
             {
-                if field.value_type != records::ValueType::Uuid {
+                if !super::query_engine::SourceOccurrenceKey::is_value_type(&field.value_type) {
                     return Err(invalid());
+                }
+                // A historical root has a separate complete occurrence carrier;
+                // metadata/row_uuid remains the application-facing row identity.
+                if !values_started && ordinal == "0" && field.value_type != records::ValueType::Uuid
+                {
+                    occurrence_ordinal = 0;
                 }
                 values_started = true;
                 let index = occurrence_ordinal;
@@ -296,8 +302,10 @@ fn current_role_schema(
         .iter()
         .map(|key| key.row_field())
         .collect::<std::collections::BTreeSet<_>>();
-    if schema.occurrence_keys.first().map(|key| key.row_field()) != Some(&schema.row_field)
-        || unique_sources.len() != schema.occurrence_keys.len()
+    if schema.occurrence_keys.first().is_none_or(|key| {
+        !matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+            && key.row_field() != &schema.row_field
+    }) || unique_sources.len() != schema.occurrence_keys.len()
         || schema
             .occurrence_union_arm_fields
             .keys()
@@ -347,11 +355,18 @@ fn current_role_schema(
             field.ty.clone(),
         ));
     }
-    for (ordinal, key) in schema.occurrence_keys.iter().enumerate().skip(1) {
+    for (ordinal, key) in schema
+        .occurrence_keys
+        .iter()
+        .enumerate()
+        .filter(|(position, key)| {
+            *position > 0 || matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+        })
+    {
         let name = key.row_field();
         fields.push(DescriptorField::new(
             format!("occurrence/{ordinal}/{name}"),
-            records::ValueType::Uuid,
+            key.fields()[0].1.clone(),
         ));
     }
     for (position, name) in &schema.occurrence_union_arm_fields {
@@ -390,8 +405,15 @@ impl CurrentPayloadEncodePlan {
                 schema
                     .occurrence_keys
                     .iter()
-                    .skip(1)
-                    .map(|key| key.row_field().as_str()),
+                    .enumerate()
+                    .filter(|(position, key)| {
+                        *position > 0
+                            || matches!(
+                                key,
+                                super::query_engine::SourceOccurrenceKey::Packed { .. }
+                            )
+                    })
+                    .map(|(_, key)| key.row_field().as_str()),
             )
             .chain(
                 schema
@@ -523,7 +545,12 @@ pub(super) fn decode_current_payload_record(
             "result occurrence differs from compiled sources",
         ));
     }
-    if schema.occurrence_keys.len() > 1 {
+    if schema.occurrence_keys.len() > 1
+        || matches!(
+            schema.occurrence_keys.first(),
+            Some(super::query_engine::SourceOccurrenceKey::Packed { .. })
+        )
+    {
         let occurrence = payload
             .member
             .output_occurrence_id()
@@ -537,19 +564,26 @@ pub(super) fn decode_current_payload_record(
                 "result occurrence differs from compiled sources",
             ));
         }
-        for (name, source) in schema
+        for (position, (key, source)) in schema
             .occurrence_keys
             .iter()
-            .skip(1)
-            .zip(occurrence.joined_sources())
+            .zip(occurrence.source_occurrences())
+            .enumerate()
         {
-            let name = name.row_field();
-            if values[fields.len()] != records::Value::Uuid(*source.uuid()) {
+            if position == 0
+                && !matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+            {
+                continue;
+            }
+            let name = key.row_field();
+            if super::query_engine::SourceOccurrenceKey::decode_value(values[fields.len()].clone())
+                != Some(source)
+            {
                 return Err(Error::InvalidStoredValue(
                     "result payload differs from its joined source identity",
                 ));
             }
-            fields.push(DescriptorField::new(name, records::ValueType::Uuid));
+            fields.push(DescriptorField::new(name, key.fields()[0].1.clone()));
             publications.push(CurrentRowPublicationField::ResultField {
                 name: name.clone(),
                 visibility: CurrentRowResultVisibility::HiddenMetadata,

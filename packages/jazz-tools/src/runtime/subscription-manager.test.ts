@@ -92,7 +92,7 @@ function typedResultKey(
     pushU32Be(bytes, encoded.byteLength);
     bytes.push(...encoded);
   }
-  bytes.push(0);
+  bytes.push(...Array.from({ length: joined.length + 1 }, () => 0));
   return Uint8Array.from(bytes);
 }
 

@@ -303,7 +303,8 @@ where
             .await?;
         if let Some(row) = &mut row {
             if let Some(columns) = local.relation_projection_for_member(member)? {
-                let table = self.table(local.result_table.as_str())?.clone();
+                let table =
+                    self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
                 *row = row.project_relation(&table, columns)?;
                 Self::bind_app_row_schema_fields(
                     row,
@@ -350,7 +351,8 @@ where
         // membership witness continues to identify the exact immutable
         // version across a rename.  Payloads and application rows, however,
         // are interpreted in this subscription's read schema.
-        let table = self.table(local.result_table.as_str())?.clone();
+        let table =
+            self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -479,7 +481,8 @@ where
         };
         // See the non-cached path above: the entry label is canonical while
         // the materialized row belongs to the subscription read schema.
-        let table = self.table(local.result_table.as_str())?.clone();
+        let table =
+            self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -1401,7 +1404,8 @@ where
             )?;
         }
         if local.result_relation_projections.is_some() {
-            let table = self.table(local.result_table.as_str())?.clone();
+            let table =
+                self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
             let schema = local.terminal_schemas.direct_app_row_schema()?;
             for (row, occurrence) in rows.iter_mut().zip(&root_occurrence_ids) {
                 if let Some(columns) = local.relation_projection_for_occurrence(occurrence)? {
@@ -1410,7 +1414,8 @@ where
                 }
             }
         } else if let Some(columns) = &local.result_relation_projection {
-            let table = self.table(local.result_table.as_str())?.clone();
+            let table =
+                self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
             let schema = local.terminal_schemas.direct_app_row_schema()?;
             for row in &mut rows {
                 *row = row.project_relation(&table, columns)?;

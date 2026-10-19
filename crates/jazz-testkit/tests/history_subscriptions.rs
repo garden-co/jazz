@@ -832,3 +832,321 @@ async fn history_empty_id_list_has_zero_count() {
         })
         .await;
 }
+
+/// Alice joins current tasks to their retained versions. Bob's identical update
+/// creates a distinct joined occurrence even though its projected content agrees.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_on_right_preserves_versions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, alice) = backend(schema).await;
+            let (row, _, tx) = alice
+                .insert("tasks", row_input!("title" => "same"))
+                .unwrap();
+            settled(&alice, tx).await;
+            let tx = alice
+                .update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap();
+            settled(&alice, tx).await;
+            let query =
+                Query::from("tasks").flat_join("history.tasks", "tasks.id", "history.tasks.id");
+            let rows = alice.query(query, ReadTier::LocalOnly).await.unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_ne!(rows[0].key, rows[1].key);
+            assert_eq!(
+                rows[0].get("history.tasks.title"),
+                Some(&Value::Text("same".into()))
+            );
+            alice.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice can put history on the left: the current task IDs bound the same
+/// physical history lookup, without an explicit literal ID filter.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_on_left_preserves_versions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, alice) = backend(schema).await;
+            let (row, _, tx) = alice
+                .insert("tasks", row_input!("title" => "first"))
+                .unwrap();
+            settled(&alice, tx).await;
+            settled(
+                &alice,
+                alice
+                    .update(
+                        "tasks",
+                        row,
+                        vec![("title".into(), Value::Text("second".into()))],
+                    )
+                    .unwrap(),
+            )
+            .await;
+            let query =
+                Query::from("history.tasks").flat_join("tasks", "history.tasks.id", "tasks.id");
+            let rows = alice.query(query, ReadTier::LocalOnly).await.unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_ne!(rows[0].key, rows[1].key);
+            for row in rows {
+                assert_eq!(row.get("tasks.title"), Some(&Value::Text("second".into())));
+            }
+            alice.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's subscription follows Bob's foreign-key changes and accepted
+/// versions: reference -> bounded history lookup -> distinct result deltas.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_subscription_follows_reference_changes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .table(TableSchema::builder("links").column("task", ColumnType::Uuid))
+                .allow_all()
+                .build();
+            let (_server, alice) = backend(schema).await;
+            let (first, _, tx) = alice
+                .insert("tasks", row_input!("title" => "first"))
+                .unwrap();
+            settled(&alice, tx).await;
+            let (second, _, tx) = alice
+                .insert("tasks", row_input!("title" => "second"))
+                .unwrap();
+            settled(&alice, tx).await;
+            let (link, _, tx) = alice
+                .insert("links", row_input!("task" => Value::Uuid(first)))
+                .unwrap();
+            settled(&alice, tx).await;
+            let query =
+                Query::from("links").flat_join("history.tasks", "links.task", "history.tasks.id");
+            let mut stream = alice
+                .subscribe_with_read_tier(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 1);
+            let old_key = initial.added[0].id.clone();
+            settled(
+                &alice,
+                alice
+                    .update("links", link, vec![("task".into(), Value::Uuid(second))])
+                    .unwrap(),
+            )
+            .await;
+            let changed = next(&mut stream).await;
+            assert_eq!(changed.removed.len(), 1);
+            assert_eq!(changed.removed[0].id, old_key);
+            assert_eq!(changed.added.len(), 1);
+            let second_key = changed.added[0].id.clone();
+            settled(
+                &alice,
+                alice
+                    .update(
+                        "tasks",
+                        second,
+                        vec![("title".into(), Value::Text("second".into()))],
+                    )
+                    .unwrap(),
+            )
+            .await;
+            let added = next(&mut stream).await;
+            assert_eq!(added.added.len(), 1);
+            assert!(added.removed.is_empty());
+            assert_ne!(added.added[0].id, second_key);
+            assert_eq!(
+                alice.query(query, ReadTier::LocalOnly).await.unwrap().len(),
+                2
+            );
+            drop(stream);
+            alice.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice joins two historical occurrences of Bob's task. Each pair of content
+/// versions has its own result key, even when all application values agree.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_two_histories_preserves_version_pairs() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (_server, alice) = backend(schema).await;
+            let (row, _, tx) = alice
+                .insert("tasks", row_input!("title" => "same"))
+                .unwrap();
+            settled(&alice, tx).await;
+            settled(
+                &alice,
+                alice
+                    .update(
+                        "tasks",
+                        row,
+                        vec![("title".into(), Value::Text("same".into()))],
+                    )
+                    .unwrap(),
+            )
+            .await;
+            let query = Query::from(jazz::query::table("history.tasks").alias("a"))
+                .flat_join(
+                    jazz::query::table("history.tasks").alias("b"),
+                    "a.id",
+                    "b.id",
+                )
+                .filter(eq(
+                    col("a.id"),
+                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
+                ));
+            let rows = alice
+                .query(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 4);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.key.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                4
+            );
+            let mut stream = alice
+                .subscribe_with_read_tier(query, ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(next(&mut stream).await.added.len(), 4);
+            settled(
+                &alice,
+                alice
+                    .update(
+                        "tasks",
+                        row,
+                        vec![("title".into(), Value::Text("same".into()))],
+                    )
+                    .unwrap(),
+            )
+            .await;
+            let changed = next(&mut stream).await;
+            assert_eq!(changed.added.len(), 5);
+            assert!(changed.removed.is_empty());
+            drop(stream);
+            alice.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's joined history is gated by the current task's read policy.
+/// Bob hides the task, retracting every joined historical version.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_retracts_versions_when_current_access_is_revoked() {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("visible", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Cmp {
+                                    column: "visible".into(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(Value::Boolean(true)),
+                                })
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .table(
+                    TableSchema::builder("links")
+                        .column("task", ColumnType::Uuid)
+                        .allow_all(),
+                )
+                .build();
+            let (_server, bob) = backend(schema).await;
+            let alice = bob.for_session(session("alice", 1));
+            let (row, _, tx) = bob
+                .insert("tasks", row_input!("title" => "same", "visible" => true))
+                .unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let (_, _, tx) = bob
+                .insert("links", row_input!("task" => Value::Uuid(row)))
+                .unwrap();
+            settled(&bob, tx).await;
+            let query =
+                Query::from("links").flat_join("history.tasks", "links.task", "history.tasks.id");
+            let mut stream = alice
+                .subscribe_with_read_tier(query.clone(), ReadTier::LocalOnly)
+                .await
+                .unwrap();
+            assert_eq!(next(&mut stream).await.added.len(), 2);
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("visible".into(), Value::Boolean(false))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let revoked = next(&mut stream).await;
+            assert_eq!(revoked.removed.len(), 2);
+            assert!(revoked.added.is_empty());
+            assert!(
+                alice
+                    .query(query, ReadTier::LocalOnly)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(stream);
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice gets an explicit error when Bob's history would require an unbounded
+/// scan: an application-field join alone does not supply historical row IDs.
+#[tokio::test(flavor = "current_thread")]
+async fn history_join_rejects_unbounded_history_reads() {
+    tokio::task::LocalSet::new().run_until(async {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+            .allow_all().build();
+        let (_server, alice) = backend(schema).await;
+        let query = Query::from("tasks").flat_join("history.tasks", "tasks.title", "history.tasks.title");
+        assert_eq!(alice.query(query, ReadTier::LocalOnly).await.unwrap_err().to_string(),
+            "Query error: Query: unsupported relation query: Reading history without a bounded row access path is not supported in history queries yet");
+        alice.shutdown().await.unwrap();
+    }).await;
+}

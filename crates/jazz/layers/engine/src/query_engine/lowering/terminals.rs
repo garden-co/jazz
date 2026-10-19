@@ -735,11 +735,22 @@ pub(super) fn lowered_terminals(
             }
             PayloadProjection::Tree(tree) => collect_app_rows(&tree)?,
             _ if projected_output.is_some() => {
-                let (output_source_id, output_fields, _is_flat) = projected_output
+                let (output_source_id, original_fields, _is_flat) = projected_output
                     .as_ref()
                     .expect("guarded projected multi-source output");
                 let output_source =
                     ResolvedSource::lookup(resolved_sources, output_source_id, "projected output")?;
+                let mut output_fields = original_fields.clone();
+                for (name, ty) in self::root_occurrence_fields(plan, resolved_sources, request)? {
+                    if !name.starts_with("__flat_join_row_") {
+                        continue;
+                    }
+                    if let Some(field) = output_fields.iter_mut().find(|field| field.name == name) {
+                        field.ty = ty;
+                    } else {
+                        output_fields.push(TypedOutputField { name, ty });
+                    }
+                }
                 let hidden_fields = hidden_source_fields(&output_source.row_shape)
                     .into_iter()
                     .chain(
@@ -1820,23 +1831,21 @@ pub(super) fn root_occurrence_fields(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &LoweringContext<'_>,
 ) -> CapabilityResult<Vec<(String, ValueType)>> {
-    let mut fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
     let source = ResolvedSource::lookup(resolved_sources, plan.root_source(), "root occurrence")?;
-    if let SourceOccurrenceKey::History { .. } = &source.row_shape.occurrence_key {
-        if !fields.is_empty() {
-            return Err(CapabilityReport::runtime(
-                "history joins and union occurrences are not supported",
-            ));
+    let mut fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
+    for key in result_occurrence_keys(plan, source, resolved_sources, request)? {
+        let skip = if matches!(key, SourceOccurrenceKey::Packed { .. }) {
+            0
+        } else {
+            1
+        };
+        for (name, ty) in key.fields().into_iter().skip(skip) {
+            if let Some((_, existing)) = fields.iter_mut().find(|(field, _)| field == name) {
+                *existing = ty;
+            } else {
+                fields.push((name.clone(), ty));
+            }
         }
-        fields.extend(
-            source
-                .row_shape
-                .occurrence_key
-                .fields()
-                .into_iter()
-                .skip(1)
-                .map(|(name, ty)| (name.clone(), ty)),
-        );
     }
     Ok(fields)
 }
@@ -2561,13 +2570,40 @@ fn result_occurrence_keys(
     if let Some(LinearStep::Project(columns)) =
         root_linear_steps(plan).and_then(|steps| steps.last())
     {
-        fields.extend(columns.iter().filter_map(|column| {
-            column
-                .output
-                .name
-                .strip_prefix("__flat_join_row_")
-                .map(|_| SourceOccurrenceKey::current(column.output.name.clone()))
-        }));
+        if columns
+            .iter()
+            .any(|column| column.output.name.starts_with("__flat_join_row_"))
+        {
+            fields.clear();
+            for column in columns {
+                let position = if column.output.name == "row_uuid" {
+                    Some(0)
+                } else {
+                    column
+                        .output
+                        .name
+                        .strip_prefix("__flat_join_row_")
+                        .and_then(|value| value.parse::<usize>().ok())
+                };
+                let Some(position) = position else { continue };
+                let NormalizedValueRef::RowId(RowIdRef::Source(id)) = &column.value else {
+                    continue;
+                };
+                let source = ResolvedSource::lookup(resolved_sources, id, "flat join occurrence")?;
+                fields.push(source.row_shape.occurrence_key.projected(
+                    if position == 0
+                        && matches!(
+                            source.row_shape.occurrence_key,
+                            SourceOccurrenceKey::Current { .. }
+                        )
+                    {
+                        column.output.name.clone()
+                    } else {
+                        SourceOccurrenceKey::joined_field(position)
+                    },
+                ));
+            }
+        }
     } else {
         fields.extend(
             root_join_occurrence_fields(plan, resolved_sources, request)?

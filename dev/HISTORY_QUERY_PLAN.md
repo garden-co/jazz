@@ -11,10 +11,11 @@ It is addressable by the ordinary query API wherever a supported table source
 is accepted. `tasks` continues to mean current rows. No public current/history
 source-selector enum or separate history query API is required.
 
-The initial implementation supports filtering, projection, ordering, aggregates,
-and live subscriptions for a bounded set of rows' histories. User queries joining history to current
-tables or other history relations are deferred and receive explicit
-unsupported-pattern errors. History relations expose retained content versions,
+The implementation supports filtering, projection, ordering, aggregates,
+and live subscriptions for a bounded set of rows' histories. Rust flat inner
+joins may place history on either side, including history-to-history joins.
+History reads must be bounded by explicit IDs or an equality joining the
+history source's `id` to a live join input's UUID column. History relations expose retained content versions,
 not deletion/restore events or a transaction audit log. They enumerate versions
 rather than reconstructing a point-in-time snapshot.
 
@@ -40,9 +41,23 @@ adds a result; losing current read permission retracts the row's history.
 - Accepted, settled content images. Pending authored patches are not exposed as
   complete historical images, and rejected transactions are excluded. Requests
   for pending/local-history semantics fail explicitly in this initial scope.
-- No user-authored joins involving history, including relationship traversals
-  or includes that would introduce another source. Internal policy joins remain
-  necessary and use the ordinary authorization machinery.
+- Rust flat inner joins use the ordinary joined query pipeline. A live join
+  input can supply the row IDs for a history source; changing a reference adds
+  or removes the corresponding history lookups. Both sides retain their normal
+  visibility and permission checks. Explicitly bounded history sources may also
+  join on application columns. Unbounded or cyclic history dependencies are
+  rejected before execution. Relationship includes and recursive traversal
+  remain deferred, as does the typed TypeScript join surface.
+- Source preparation resolves independent inputs first, then lowers a resolved
+  join input into a live key relation for deferred history sources. It never
+  executes the query during preparation. `SourceAccessPath::Lookup` carries
+  matching fields and a key relation; literal filters supply constant rows and
+  joins supply maintained rows. Source adapters decide which fields have a
+  compatible access path. History currently accepts only row IDs: the fixed
+  branch prefix and authorized IDs drive its physical lookups. This restriction
+  belongs to history access selection, not the shared lookup representation.
+  Currently the driving key must belong to that input's root source; keys from
+  intermediate joined occurrences need further planner support.
 - Rust queries support count, sum, average, minimum, maximum, and grouping over
   application columns across the selected rows' histories. Filters apply before aggregation;
   identical versions contribute separately. Aggregate results use ordinary
@@ -171,8 +186,8 @@ making the eligible versions available to Bob.
 Client-local reads do not evaluate policies. They retain the current-row visibility
 gate (including deletion) without a policy proof.
 
-For trusted serving reads, apply authorization before user filtering and output. Deferring user joins does
-not remove the internal semijoin with authorized current row identities. Track policy dependencies in the normal maintained
+For trusted serving reads, apply authorization before user filtering and output,
+using an internal semijoin with authorized current row identities. Track policy dependencies in the normal maintained
 query graph so permission changes retract results. Policy proof sources remain
 the normal current sources; resolving a history relation must not recursively
 reinterpret its policy sources as history.
@@ -219,13 +234,13 @@ secondary index. Do not add a new index as part of this implementation.
 Push exact branch and row constraints into primary-key prefix/range reads before
 hydrating history. Apply remaining predicates to that bounded row history.
 Sequence bounds should narrow the scan when their key position permits it.
-The initial admission rules are:
+The admission rules are:
 
-| Shape                                                          | Initial admission rule                                                                                                             |
+| Shape                                                          | Admission rule                                                                                                                     |
 | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Explicit row IDs, optionally filtered and ordered              | Admit using one exact branch/row prefix per distinct ID. Combine versions before filtering, aggregation, ordering, and pagination. |
-| Any user join involving history, even through indexed keys     | Explicitly unsupported in the first slice.                                                                                         |
-| Current-table selection expanded into multiple rows' histories | Explicitly unsupported in the first slice.                                                                                         |
+| Flat inner joins involving history                             | Admit with explicit row IDs or a live join input supplying history row IDs.                                                        |
+| Current-table selection expanded into multiple rows' histories | Admit through a flat inner join on the history row ID.                                                                             |
 | History filtered only by an unindexed application field        | Reject if it requires scanning unrelated history.                                                                                  |
 | Small limit over otherwise unbounded history                   | Reject; a limit alone does not establish a bounded access path.                                                                    |
 
@@ -372,19 +387,23 @@ revocations. Do not interpret an empty local result as proof of complete history
 
 ## Compatibility and validation
 
-All results use one ResultKey encoding, with an optional root transaction:
+All results use one ResultKey encoding, with an optional transaction per source:
 `2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
-(position:u32be | label_length:u32be | label:utf8)* | has_transaction:u8 |
-[tx_time:u64be | tx_node:16]`.
-Current rows, joins, and unions set `has_transaction` to 0. History roots set it
-to 1 and carry the full packed HLC and originating-node UUID; `$acceptedAt` and
-projected values do not participate. History joins and unions remain unsupported.
+(position:u32be | label_length:u32be | label:utf8)* |
+(has_transaction:u8 | [tx_time:u64be | tx_node:16])*(joined_count+1)`.
+Transaction flags follow source order: root, then each joined source. Current
+sources set their flag to 0; historical sources set it to 1 and carry their full
+packed HLC and originating-node UUID. `$acceptedAt` and projected values do not
+participate. Equal projected version pairs remain distinct. History unions
+remain unsupported.
 The shared `result-key.json` fixture pins a history key including the full
-`u64` range; the binding golden fixture covers current rows and union results.
+`u64` range and a pair of historical source identities; the binding golden fixture covers current rows and union results.
 
 Result keys are ephemeral binding values, not persisted data or active peer
 messages. Rust and TypeScript migrate together to this one format, rejecting
-previous encodings. No compatibility decoder or database migration is needed.
+previous encodings. Joined current-row keys now also carry one zero transaction
+flag per source; single-source keys keep the same bytes. No compatibility decoder
+or database migration is needed.
 Stored row/history bytes and the active peer source-closure protocol are
 unchanged. Direct `OutputOccurrenceId` serialization delegates to `ResultKey`,
 including inside removed rows and internal result members. The old lossy
@@ -411,8 +430,9 @@ Read `crates/jazz/TESTING_GUIDELINES.md` before implementing Rust tests. Cover:
   writes, and pending patches obey the defined visibility contract.
 - Current permission changes and deletion retract the affected history; history
   additions/removals agree between fresh reads and subscriptions.
-- User joins involving history fail explicitly, including history/current,
-  history/history, relationship traversals, and includes.
+- Flat history/current and history/history joins preserve every version pair in
+  reads and subscriptions. Unbounded joins, relationship traversals, and includes
+  fail explicitly.
 - Schema-renamed fields use the selected read schema or fail explicitly.
 - Indexed row/sequence restrictions avoid decoding unrelated history, for
   both cold reads and subscription maintenance; unsupported scans fail early.

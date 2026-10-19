@@ -404,7 +404,7 @@ pub struct PolicyAuthorizationGraph {
     /// Physical source narrowing derived while compiling this policy program.
     /// This is only an optimization hint: the policy graph remains the sole
     /// authorization decision.
-    pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    pub(super) access_paths: BTreeMap<SourceId, SourceAccessPath>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -574,7 +574,7 @@ pub struct SupportedQueryProgram {
 
 fn admission_program_key(
     request: &QueryProgramRequest,
-    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+    access_paths: &BTreeMap<SourceId, SourceAccessPath>,
 ) -> Option<[u8; 32]> {
     (matches!(
         request.authorization_mode,
@@ -620,7 +620,7 @@ fn query_program_sources_cache_safe(request: &QueryProgramRequest) -> bool {
 
 fn query_program_cache_key(
     request: &QueryProgramRequest,
-    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+    access_paths: &BTreeMap<SourceId, SourceAccessPath>,
 ) -> String {
     format!("request={request:?};access_paths={access_paths:?}")
 }
@@ -636,7 +636,7 @@ where
     pub(super) async fn ensure_query_program_request_supported(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<(), Error> {
         // Branches, overlays, inline snapshots and covered inputs
         // likewise stay on the ordinary path. No data-sensitive source is
@@ -733,7 +733,7 @@ where
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<QueryProgram, Error> {
         let key = admission_program_key(&request, &access_paths);
         if let Some(key) = key
@@ -796,7 +796,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
             request,
@@ -821,7 +821,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     ) -> Result<QueryProgram, Error> {
@@ -845,7 +845,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         transaction_overlay: TransactionWriteOverlay,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -864,7 +864,7 @@ where
     pub(super) async fn compile_query_program_request_with_shared_access_paths(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -883,7 +883,7 @@ where
     pub(super) async fn compile_query_program_request_with_bounded_deletion_register(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: (SourceId, GraphBuilder),
     ) -> Result<QueryProgram, Error> {
         // The inline register is bound to this snapshot. A cached program
@@ -910,7 +910,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
@@ -1043,7 +1043,7 @@ where
         &mut self,
         request: &QueryProgramRequest,
         source_requests: &[SourceRequest],
-        outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+        outer_access_paths: &BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: Option<&(SourceId, GraphBuilder)>,
         lease: &std::rc::Rc<()>,
     ) -> Result<PolicyDependencyFootprint, Error> {

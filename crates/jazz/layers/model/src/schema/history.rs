@@ -33,7 +33,7 @@ impl HistoryMetadataColumn {
 
     fn schema(self) -> ColumnSchema {
         let ty = match self {
-            Self::TransactionId => super::tx_id_column(),
+            Self::TransactionId => crate::tx::TxId::value_type(),
             Self::AcceptedAt => GrooveColumnType::U64,
         };
         ColumnSchema::new(self.name(), ty)

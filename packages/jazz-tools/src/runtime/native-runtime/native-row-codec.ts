@@ -231,12 +231,10 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     previousPosition = position;
     cursor += length;
   }
-  const hasTransaction = bytes[cursor++];
-  if (hasTransaction === 1) {
-    if (joined !== 0 || discriminators !== 0) return false;
-    cursor += 24;
-  } else if (hasTransaction !== 0) {
-    return false;
+  for (let index = 0; index <= joined; index++) {
+    const hasTransaction = bytes[cursor++];
+    if (hasTransaction === 1) cursor += 24;
+    else if (hasTransaction !== 0) return false;
   }
   return cursor === bytes.length;
 }

@@ -1620,7 +1620,7 @@ fn maintained_policy_point_subscription_uses_point_source_and_keeps_witnesses() 
             node.current_query_primary_key_access_paths(&shape, &binding)
                 .unwrap()
                 .get(&root_source_id("issues")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
         ),
         "a policy-scoped maintained id lookup narrows its content source to the one row"
     );
@@ -1711,14 +1711,14 @@ fn policy_root_retains_reachable_point_access_paths() {
     assert!(
         matches!(
             paths.get(&reachable_access_source_id(reachable, "reachable:0")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
         ),
         "the literal access edge remains independently safe to point-scan"
     );
     assert!(
         matches!(
             paths.get(&reachable_edge_source_id(reachable, "reachable:0")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
         ),
         "the literal recursive edge remains independently safe to point-scan"
     );

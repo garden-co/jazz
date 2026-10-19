@@ -332,20 +332,17 @@ where
         self.physical_history_source_graph_with_scan(schema_version, logical_table, None)
     }
 
-    /// Read only one row's history under its exact stored branch coordinate.
-    pub(super) fn physical_history_row_source_graph(
+    pub(super) fn physical_history_branch_source_graph(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
         branch_key: &BranchKey,
-        row: RowUuid,
     ) -> Result<GraphBuilder, Error> {
         self.physical_history_source_graph_with_scan(
             schema_version,
             logical_table,
             Some(groove::ivm::StaticScanSpec::Prefix(vec![
                 Value::Bytes(branch_key.canonical_bytes()).into(),
-                Value::Uuid(row.0).into(),
             ])),
         )
     }

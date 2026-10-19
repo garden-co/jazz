@@ -56,7 +56,7 @@ use super::query_engine::{
     RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
     RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
     SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
-    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
+    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceLookup, SourceMetadataFields,
     SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
     SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
     UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
@@ -539,7 +539,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
-    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, SourceAccessPath>), Error> {
         // A branch view's layers are masked before their predicates (SPEC 4
         // §4.7), so an index bounds each of its content layers for a one-shot
         // read as much as for a maintained one.
@@ -565,7 +565,7 @@ where
             access_paths.extend(
                 self.query_program_access_paths(&request, true)?
                     .into_iter()
-                    .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+                    .filter(|(_, path)| matches!(path, SourceAccessPath::Index { .. })),
             );
         }
         Ok((request, access_paths))
@@ -635,7 +635,7 @@ where
         if access_paths.contains_key(&root) {
             return Ok(None);
         }
-        access_paths.insert(root.clone(), CurrentAccessPath::PrimaryKeyPage { cap });
+        access_paths.insert(root.clone(), SourceAccessPath::PrimaryKeyPage { cap });
         let (register, exhausted) = self
             .bounded_deletion_register_for_uuid_page(shape, cap)
             .await?;
@@ -842,7 +842,7 @@ where
             binding,
             HydrationLifetime::FirstResult,
         )?;
-        let Some(CurrentAccessPath::Index {
+        let Some(SourceAccessPath::Index {
             column,
             order_column,
             reverse,
@@ -899,10 +899,10 @@ where
     async fn bounded_deletion_register_for_ordered_page(
         &mut self,
         shape: &ValidatedQuery,
-        path: &CurrentAccessPath,
+        path: &SourceAccessPath,
         cap: usize,
     ) -> Result<(GraphBuilder, bool), Error> {
-        let CurrentAccessPath::Index {
+        let SourceAccessPath::Index {
             column,
             order_column: Some(order_column),
             reverse,
@@ -1076,7 +1076,7 @@ where
             return Ok(None);
         }
         let paths = self.one_shot_access_paths(shape, binding, DurabilityTier::Global)?;
-        let Some(CurrentAccessPath::Index {
+        let Some(SourceAccessPath::Index {
             column,
             intersections,
             ..
@@ -1178,7 +1178,7 @@ where
         tier: DurabilityTier,
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request_with_inline_binding_source(
@@ -1202,11 +1202,7 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
-        if shape
-            .query()
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if shape.query().uses_history() {
             return Err(history::unsupported("history relations at a snapshot cut"));
         }
         self.catalogue
@@ -1330,7 +1326,7 @@ where
         let access_paths = if let Some(row) = physical_row {
             BTreeMap::from([(
                 root_source_id(&shape.query().table),
-                CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+                SourceAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
             )])
         } else {
             self.one_shot_access_paths(shape, binding, tier)?
@@ -1487,11 +1483,7 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
-        if shape
-            .query()
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if shape.query().uses_history() {
             if !matches!(
                 output,
                 CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::MaintainedView
@@ -1533,10 +1525,7 @@ where
             && tier == DurabilityTier::Local
             && read_view.is_default()
             && matches!(output, CurrentQueryProgramOutput::MaintainedView);
-        let use_prepared_binding_source = !shape
-            .query()
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
+        let use_prepared_binding_source = !shape.query().uses_history()
             && (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
@@ -1926,7 +1915,7 @@ where
     async fn compile_client_one_shot_with_covered_inputs(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         result_schema_version: SchemaVersionId,
         read_view: &ReadViewSpec,
         authority_result_key: &AuthorityResultKey,
@@ -2051,11 +2040,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if shape
-            .query()
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if shape.query().uses_history() {
             if include_deleted {
                 return Err(history::unsupported("deleted-row history"));
             }
@@ -3301,7 +3286,7 @@ where
             .clone();
         let access_paths = BTreeMap::from([(
             root_source_id(&shape.query().table),
-            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+            SourceAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
         let program = self
             .compile_current_query_program_with_access_paths(
@@ -4077,11 +4062,7 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
-        if shape
-            .query()
-            .table
-            .starts_with(crate::schema::history::HISTORY_PREFIX)
-        {
+        if shape.query().uses_history() {
             return Err(history::unsupported("peer subscriptions"));
         }
         // `JoinVia` is an existential constraint on this query's root-row

@@ -7073,16 +7073,22 @@ where
 
 #[doc(hidden)]
 pub fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    let root = ObjectId::from_uuid(row.row_uuid().0);
+    use crate::node::query_engine::SourceOccurrenceKey;
+    let root = row
+        .raw_field(&SourceOccurrenceKey::joined_field(0))
+        .map(|value| SourceOccurrenceKey::decode_value(value).expect("valid root occurrence"))
+        .unwrap_or_else(|| {
+            crate::object::SourceOccurrenceId::current(ObjectId::from_uuid(row.row_uuid().0))
+        });
     let mut joined = Vec::new();
     for position in 1.. {
-        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
-        else {
+        let Some(value) = row.raw_field(&SourceOccurrenceKey::joined_field(position)) else {
             break;
         };
-        joined.push(ObjectId::from_uuid(row_id));
+        joined.push(SourceOccurrenceKey::decode_value(value).expect("valid joined occurrence"));
     }
-    OutputOccurrenceId::new(root, joined)
+    OutputOccurrenceId::from_source_occurrences(root, joined, [])
+        .expect("source occurrences without union arms")
 }
 
 fn subscription_outputs_with_occurrence_sidecar(

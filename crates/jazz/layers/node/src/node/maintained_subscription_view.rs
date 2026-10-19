@@ -26,7 +26,7 @@ use crate::node::terminal_root::{
     TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
 };
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
-use crate::object::{ObjectId, OutputOccurrenceId};
+use crate::object::OutputOccurrenceId;
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
@@ -2626,20 +2626,10 @@ fn decode_typed_terminal_record(
                 .occurrence_keys
                 .iter()
                 .map(|key| {
-                    use crate::node::query_engine::SourceOccurrenceKey;
-                    use crate::object::SourceOccurrenceId;
-                    let row =
-                        ObjectId::from_uuid(record.get_uuid(field_idx(record, key.row_field())?)?);
-                    Ok(match key {
-                        SourceOccurrenceKey::Current { .. } => SourceOccurrenceId::current(row),
-                        SourceOccurrenceKey::History { time, node, .. } => {
-                            SourceOccurrenceId::history(
-                                row,
-                                TxTime(record_u64(record, time)?),
-                                crate::ids::NodeUuid(record.get_uuid(field_idx(record, node)?)?),
-                            )
-                        }
-                    })
+                    key.decode(|name| record.get_idx(field_idx(record, name).ok()?).ok())
+                        .ok_or(super::Error::InvalidStoredValue(
+                            "invalid source occurrence",
+                        ))
                 })
                 .collect::<Result<Vec<_>, super::Error>>()?;
             let Some((root, joined)) = occurrence_ids.split_first() else {

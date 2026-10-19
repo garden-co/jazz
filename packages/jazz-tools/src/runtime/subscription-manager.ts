@@ -987,14 +987,17 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     previousPosition = position;
     arms.set(position, sidecar.subarray(cursor, (cursor += length)));
   }
-  const hasTransaction = sidecar[cursor++];
-  let transaction: Uint8Array | undefined;
-  if (hasTransaction === 1) {
-    if (joinedCount !== 0 || discriminatorCount !== 0) return undefined;
-    transaction = sidecar.subarray(cursor, cursor + 24);
-    cursor += 24;
-  } else if (hasTransaction !== 0) {
-    return undefined;
+  const transactions: (Uint8Array | undefined)[] = [];
+  for (let index = 0; index <= joinedCount; index++) {
+    const hasTransaction = sidecar[cursor++];
+    if (hasTransaction === 1) {
+      transactions.push(sidecar.subarray(cursor, cursor + 24));
+      cursor += 24;
+    } else if (hasTransaction === 0) {
+      transactions.push(undefined);
+    } else {
+      return undefined;
+    }
   }
   if (cursor !== sidecar.byteLength) return undefined;
 
@@ -1002,6 +1005,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   const rootArm = arms.get(0);
   if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
   ordered.push(10, ...root);
+  const transaction = transactions[0];
   if (transaction) {
     ordered.push(3, ...transaction.subarray(0, 8), 10, ...transaction.subarray(8));
   }
@@ -1011,6 +1015,8 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
       ordered.push(6, ...orderedBytes(arm));
     }
     ordered.push(10, ...uuid);
+    const transaction = transactions[index + 1];
+    if (transaction) ordered.push(3, ...transaction.subarray(0, 8), 10, ...transaction.subarray(8));
   }
   return Uint8Array.from(ordered);
 }
@@ -1043,7 +1049,7 @@ function terminalKeyId(encoded: readonly number[]): string {
   // Groove terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
   // occurrence sidecar uses the equivalent ResultKey (`2, root UUID,
-  // joined count, joined UUIDs, label count, transaction flag`). Normalize only this exact
+  // joined count, joined UUIDs, label count, per-source transaction flags`). Normalize only this exact
   // physical form so terminal patches meet the same full occurrence identity
   // that seeded the subscription state.
   if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
@@ -1054,7 +1060,7 @@ function terminalKeyId(encoded: readonly number[]): string {
       }
       uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
-    const occurrence = new Uint8Array(26 + (uuids.length - 1) * 16);
+    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16 + uuids.length);
     occurrence[0] = 2;
     occurrence.set(uuids[0]!, 1);
     new DataView(occurrence.buffer).setUint32(17, uuids.length - 1);

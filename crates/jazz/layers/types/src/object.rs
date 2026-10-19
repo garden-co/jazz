@@ -120,7 +120,10 @@ mod occurrence {
 
     impl OutputOccurrenceId {
         pub fn has_typed_discriminators(&self) -> bool {
-            !self.union_arms.is_empty() || self.root.version().is_some()
+            !self.union_arms.is_empty()
+                || self
+                    .source_occurrences()
+                    .any(|source| source.version().is_some())
         }
 
         pub fn root_source(&self) -> ObjectId {
@@ -158,8 +161,7 @@ mod occurrence {
             )
         }
 
-        /// Compose complete source identities. History joins and history union
-        /// arms remain unsupported by the current result-key encoding.
+        /// Compose complete source identities in declared join order.
         pub fn from_source_occurrences(
             root: SourceOccurrenceId,
             joined: impl IntoIterator<Item = SourceOccurrenceId>,
@@ -168,11 +170,9 @@ mod occurrence {
             let joined = joined.into_iter().collect::<SmallVec<[_; 2]>>();
             let mut union_arms = union_arms.into_iter().collect::<SmallVec<[_; 1]>>();
             union_arms.sort_by_key(|(position, _)| *position);
-            let valid = !joined.iter().any(|source| source.version().is_some())
-                && (root.version().is_none() || (joined.is_empty() && union_arms.is_empty()))
-                && union_arms
-                    .iter()
-                    .all(|(position, label)| *position <= joined.len() && !label.is_empty())
+            let valid = union_arms
+                .iter()
+                .all(|(position, label)| *position <= joined.len() && !label.is_empty())
                 && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
             valid.then_some(Self {
                 root,
@@ -219,12 +219,15 @@ mod occurrence {
         /// Each component is a fixed-width UUID, so concatenating root followed by
         /// joined rows is unambiguous; byte length records the number of joined
         /// sources and component position records declared join position.
-        /// History roots use their versioned ResultKey bytes so the transaction
-        /// remains part of identity, independently of the selected row fields.
+        /// Historical occurrences use their complete ResultKey bytes so every
+        /// contributing version remains part of identity, independently of payload.
         pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
             if self.has_typed_discriminators() {
                 let mut bytes = self.typed_canonical_bytes();
-                if self.root.version().is_some() {
+                if self
+                    .source_occurrences()
+                    .any(|source| source.version().is_some())
+                {
                     bytes.insert(0, RESULT_KEY_WIRE_VERSION);
                 }
                 return bytes;
@@ -250,10 +253,12 @@ mod occurrence {
                 bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
                 bytes.extend_from_slice(label.as_bytes());
             }
-            bytes.push(u8::from(self.root.version().is_some()));
-            if let Some((time, node)) = self.root.version() {
-                bytes.extend_from_slice(&time.0.to_be_bytes());
-                bytes.extend_from_slice(node.0.as_bytes());
+            for source in self.source_occurrences() {
+                bytes.push(u8::from(source.version().is_some()));
+                if let Some((time, node)) = source.version() {
+                    bytes.extend_from_slice(&time.0.to_be_bytes());
+                    bytes.extend_from_slice(node.0.as_bytes());
+                }
             }
             bytes
         }
@@ -377,24 +382,25 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         previous_position = Some(position);
         union_arms.push((position, label));
     }
-    let root_version = match take(identity, &mut cursor, 1)?[0] {
-        0 => None,
-        1 if joined.is_empty() && union_arms.is_empty() => {
-            let time = TxTime(u64::from_be_bytes(
-                take(identity, &mut cursor, 8)?.try_into().ok()?,
-            ));
-            let node = NodeUuid(Uuid::from_slice(take(identity, &mut cursor, 16)?).ok()?);
-            Some((time, node))
-        }
-        _ => return None,
-    };
+    let mut sources = Vec::with_capacity(joined_count + 1);
+    for row in std::iter::once(root).chain(joined) {
+        sources.push(match take(identity, &mut cursor, 1)?[0] {
+            0 => SourceOccurrenceId::current(row),
+            1 => {
+                let time = TxTime(u64::from_be_bytes(
+                    take(identity, &mut cursor, 8)?.try_into().ok()?,
+                ));
+                let node = NodeUuid(Uuid::from_slice(take(identity, &mut cursor, 16)?).ok()?);
+                SourceOccurrenceId::history(row, time, node)
+            }
+            _ => return None,
+        });
+    }
     if cursor != identity.len() {
         return None;
     }
-    match root_version {
-        Some((time, node)) => Some(ResultKey(OutputOccurrenceId::history(root, time, node))),
-        None => OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(ResultKey),
-    }
+    let mut sources = sources.into_iter();
+    OutputOccurrenceId::from_source_occurrences(sources.next()?, sources, union_arms).map(ResultKey)
 }
 
 impl ResultKey {
@@ -556,12 +562,56 @@ mod tests {
         let mut invalid_flag = bytes.clone();
         invalid_flag[25] = 2;
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid_flag)).is_err());
-        // A versioned root cannot disguise a joined/union history shape.
+        // Corrupt counts cannot manufacture missing joined/union components.
         for offset in [17, 21] {
             let mut invalid = bytes.clone();
             invalid[offset] = 1;
             assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid)).is_err());
         }
+    }
+
+    /// Alice's joined historical versions round-trip with both source keys.
+    /// Byte fixtures belong here because public queries treat keys as opaque.
+    #[test]
+    fn joined_history_result_key_preserves_each_source_version() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/result-key.json")).unwrap();
+        let root = SourceOccurrenceId::history(
+            ObjectId::from_uuid(Uuid::from_bytes([0x11; 16])),
+            TxTime(u64::MAX),
+            NodeUuid(Uuid::from_bytes([0x22; 16])),
+        );
+        let joined = SourceOccurrenceId::history(
+            ObjectId::from_uuid(Uuid::from_bytes([0x33; 16])),
+            TxTime(7),
+            NodeUuid(Uuid::from_bytes([0x44; 16])),
+        );
+        let occurrence = OutputOccurrenceId::from_source_occurrences(root, [joined], []).unwrap();
+        let key = ResultKey::from_occurrence(occurrence.clone());
+        assert_eq!(serde_json::to_value(&key).unwrap(), fixture["joined_key"]);
+        assert_eq!(
+            serde_json::from_value::<ResultKey>(fixture["joined_key"].clone()).unwrap(),
+            key
+        );
+        assert_eq!(
+            postcard::from_bytes::<ResultKey>(&postcard::to_allocvec(&key).unwrap()).unwrap(),
+            key
+        );
+        assert_eq!(
+            occurrence.source_occurrences().collect::<Vec<_>>(),
+            vec![root, joined]
+        );
+        let replaced = OutputOccurrenceId::from_source_occurrences(
+            root,
+            [SourceOccurrenceId::history(
+                joined.row_id(),
+                TxTime(8),
+                joined.version().unwrap().1,
+            )],
+            [],
+        )
+        .unwrap();
+        assert_ne!(occurrence.canonical_bytes(), replaced.canonical_bytes());
     }
 
     #[test]
@@ -577,7 +627,7 @@ mod tests {
         expected.extend_from_slice(&1_u32.to_be_bytes());
         expected.extend_from_slice(joined.uuid().as_bytes());
         expected.extend_from_slice(&0_u32.to_be_bytes());
-        expected.push(0);
+        expected.extend_from_slice(&[0, 0]);
         assert_eq!(&plain_wire[1..], expected);
 
         let typed = ResultKey(
@@ -657,7 +707,7 @@ mod tests {
         zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
         zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
         zero_arm.truncate(41);
-        zero_arm.push(0);
+        zero_arm.extend_from_slice(&[0, 0]);
         assert_eq!(
             serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm))
                 .expect("ordinary joined key is valid"),
@@ -684,7 +734,7 @@ mod tests {
 
         let mut invalid_utf8 = vec![RESULT_KEY_WIRE_VERSION];
         invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
-        let label_end = invalid_utf8.len() - 2;
+        let label_end = invalid_utf8.len() - 3;
         invalid_utf8[label_end] = 0xff;
         assert!(
             serde_json::from_value::<ResultKey>(serde_json::json!(invalid_utf8)).is_err(),
