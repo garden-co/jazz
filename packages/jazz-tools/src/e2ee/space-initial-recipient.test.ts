@@ -21,7 +21,7 @@ it("completes uninterrupted and resumed recipient handoffs without implicit crea
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_space_successors.allowRead.always();
@@ -117,7 +117,7 @@ it("completes uninterrupted and resumed recipient handoffs without implicit crea
       const root = await creator.one(app.__e2ee_spaces.where({ identifier: project.id }), {
         tier: "remote",
       });
-      expect(root!.accountId).toBe(alice.account.id);
+      expect(root!.creatorAccountId).toBe(alice.account.id);
       expect(roots.has(root!.id)).toBe(false);
       roots.add(root!.id);
       const grants = await creator.all(app.__e2ee_space_grants.where({ spaceId: root!.id }), {

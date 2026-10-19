@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { createBrowserDeviceSigner } from "./browser.js";
+import { spaceSchema } from "./managed-schema.js";
 import {
   spaceContext,
   spaceRootBytes,
@@ -15,7 +16,7 @@ const root = {
   initialGrantId: "55555555-5555-4555-8555-555555555555",
   scopeId: "77777777-7777-4777-8777-777777777777",
   identifier: "88888888-8888-4888-8888-888888888888",
-  accountId: "account-id",
+  creatorAccountId: "account-id",
   mechanism: "test",
   version: 1,
   verification: new Uint8Array([0xaa]),
@@ -25,26 +26,40 @@ const grant = {
   id: root.initialGrantId,
   spaceId: root.id,
   epochId: root.epochId,
-  authorAccountId: root.accountId,
+  authorAccountId: root.creatorAccountId,
   authorDeviceId: root.deviceId,
   authorEpochId: root.accountEpochId,
   operation: "add",
   recipientKind: "account",
-  recipientId: root.accountId,
+  recipientId: root.creatorAccountId,
   recipientEpochId: root.accountEpochId,
 };
 const delivery = {
   id: "66666666-6666-4666-8666-666666666666",
   spaceId: root.id,
   epochId: root.epochId,
-  senderAccountId: root.accountId,
+  senderAccountId: root.creatorAccountId,
   senderDeviceId: root.deviceId,
   senderEpochId: root.accountEpochId,
-  recipientAccountId: root.accountId,
+  recipientAccountId: root.creatorAccountId,
   recipientDeviceId: "99999999-9999-4999-8999-999999999999",
   recipientEpochId: root.accountEpochId,
   envelope: new Uint8Array([0xbb, 0xcc]),
 };
+
+it("pins the space creator column descriptor without a legacy alias", () => {
+  const table = spaceSchema.__e2ee_spaces;
+  expect("accountId" in table.columns).toBe(false);
+  expect(
+    JSON.stringify({
+      version: 1,
+      column: table.columns.creatorAccountId._build("creatorAccountId"),
+      reference: table.relations.account,
+    }),
+  ).toBe(
+    '{"version":1,"column":{"name":"creatorAccountId","sqlType":"UUID","nullable":false},"reference":{"kind":"forward","table":"__e2ee_account_identities","column":"creatorAccountId"}}',
+  );
+});
 
 // Independently emitted by SPEC/fixtures/e2ee-space.c, not these serializers.
 it("matches independent root, grant and delivery transcripts", () => {
@@ -75,7 +90,7 @@ it("rejects signatures transplanted between coordinates, recipients and envelope
       { scopeId: delivery.id },
       { identifier: delivery.id },
       { epochId: delivery.id },
-      { accountId: "other-account" },
+      { creatorAccountId: "other-account" },
       { deviceId: delivery.id },
       { accountEpochId: delivery.id },
       { initialGrantId: delivery.id },

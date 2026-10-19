@@ -25,7 +25,7 @@ async function createFixture(runtime: "wasm" | "native") {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
     policy.__e2ee_space_grants.allowRead.always();
     // Deliberately admit adversarial rows: E2EE replay must still authenticate them.
     policy.__e2ee_space_grants.allowInsert.always();
