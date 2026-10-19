@@ -2860,7 +2860,12 @@ export class Spaces {
         const successor = state.successor;
         const previous = await this.keys.unwrap(
           secret,
-          spaceSuccessorContext(this.accountContext(root.creatorAccountId), root, successor, "history"),
+          spaceSuccessorContext(
+            this.accountContext(root.creatorAccountId),
+            root,
+            successor,
+            "history",
+          ),
           successor.history,
         );
         owned?.fill(0);
