@@ -274,6 +274,26 @@ fn snapshot_reference_codec_matches_pinned_bytes_and_preserves_wire_layout() {
     }
 }
 
+/// Alice restores a reference containing unsorted duplicate transaction dots.
+/// Rust re-encoding canonicalises the string without changing its frontier.
+#[test]
+fn snapshot_reference_codec_canonicalises_unsorted_duplicate_dots() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/snapshot_ref_v1.json")).unwrap();
+    for case in fixture["noncanonical"].as_array().unwrap() {
+        let mut restored =
+            SnapshotRef::from_persisted(case["reference"].as_str().unwrap()).unwrap();
+        let canonical = case["canonical"].as_str().unwrap();
+        let expected = SnapshotRef::from_persisted(canonical).unwrap();
+        assert_ne!(restored.dots, expected.dots);
+        assert_eq!(restored.to_persisted(), canonical);
+        restored.dots.sort_unstable();
+        restored.dots.dedup();
+        assert_eq!(restored, expected);
+        assert_eq!(expected.to_persisted(), canonical);
+    }
+}
+
 fn branch_owner_policy() -> PolicyExpr {
     PolicyExpr::Exists {
         table: "branches".to_owned(),

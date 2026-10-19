@@ -9,6 +9,7 @@ const fixture = JSON.parse(
   ),
 ) as {
   cases: { name: string; reference: string }[];
+  noncanonical: { name: string; reference: string; canonical: string }[];
   invalid: string[];
 };
 
@@ -17,6 +18,12 @@ describe("application snapshot reference format", () => {
     it(`round-trips the Rust-owned ${name} fixture through JSON and storage`, () => {
       const restored = parseSnapshotRef(JSON.parse(JSON.stringify(reference)));
       expect(serializeSnapshotRef(restored)).toBe(reference);
+    });
+  }
+  for (const { name, reference, canonical } of fixture.noncanonical) {
+    it(`preserves opaque ${name} bytes and accepts Rust's canonical encoding`, () => {
+      expect(serializeSnapshotRef(parseSnapshotRef(reference))).toBe(reference);
+      expect(serializeSnapshotRef(parseSnapshotRef(canonical))).toBe(canonical);
     });
   }
   for (const reference of [...fixture.invalid, null, 1, {}, []]) {

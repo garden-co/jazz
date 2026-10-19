@@ -238,17 +238,18 @@ where
         Ok(snapshot.into())
     }
 
-    /// Local frozen history must be complete, or supplied by the ordinary
-    /// authority-covered source path. A partial foreign store cannot certify
-    /// an owner's prefix just because it happens to hold one of its rows.
+    /// The originating store can reconstruct its captured local view after
+    /// authority receipts advance the settled cut. A partial foreign store
+    /// cannot certify that cut or the owner's prefix merely by holding a row;
+    /// it needs complete history or the ordinary authority-covered source path.
     pub(super) async fn ensure_frozen_snapshot_available(
         &mut self,
         snapshot: &crate::protocol::SnapshotRef,
     ) -> Result<(), Error> {
         if snapshot.global_base > self.clock.committed_global_time
             || (!self.history_complete
-                && (snapshot.global_base != GlobalTime::default()
-                    || (snapshot.owner != self.node_uuid && snapshot.dots.is_empty())))
+                && snapshot.owner != self.node_uuid
+                && (snapshot.global_base != GlobalTime::default() || snapshot.dots.is_empty()))
         {
             return Err(Error::SnapshotHistoryUnavailable);
         }

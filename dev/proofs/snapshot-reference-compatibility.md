@@ -15,9 +15,13 @@ The decoded bytes are:
 | 32     | Dot count        | Unsigned 32-bit little-endian integer                                           |
 | 36     | Transaction dots | Count repetitions of an 8-byte little-endian transaction time and 16 UUID bytes |
 
-Writers sort dots by transaction time, then node UUID, and remove duplicates.
-Readers accept any dot order. The reference describes the existing dotted
-snapshot frontier; it contains no rows, credentials or history retention lease.
+Rust writers sort dots by transaction time, then node UUID, and remove duplicates.
+Readers accept any dot order and duplicate dots. Re-encoding a parsed reference
+in Rust therefore canonicalises its string; TypeScript preserves the opaque
+input string. Both forms describe the same frontier. The shared fixture pins
+this behaviour as well as canonical round trips. The reference describes the
+existing dotted snapshot frontier; it contains no rows, credentials or history
+retention lease.
 Capture adds explicit dots for known unsequenced transactions so later rejection
 or missing pending history is observable when restoring the reference. Capture
 enumerates the unsequenced index bucket, without scanning settled history.
@@ -59,7 +63,12 @@ feature or storage epoch.
 
 Restoring an encoding does not establish history coverage. Local frozen-history
 resolution refuses an unknown global cut, missing or rejected transaction dots,
-partial transaction payloads and partial stores that cannot certify the cut.
+partial transaction payloads and foreign partial stores that cannot certify the cut.
+The originating store can reconstruct its own captured local view after server
+receipts advance its known global cut; a nonzero cut does not require that
+client to hold the authority's complete history.
+Frozen source authorization preserves the source's declared delivery metadata,
+including version and coverage witnesses, for ordinary server subscriptions.
 A restarted local-only store can read its pending frontier when the complete
 captured transaction dots remain available. An authority-covered query uses the
 standard sync source path. History truncation remains refused at store open.

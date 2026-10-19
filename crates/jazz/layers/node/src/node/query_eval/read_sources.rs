@@ -1046,8 +1046,20 @@ where
                             );
                             request
                         });
-                        let mut output_fields = current_row_fields(&table);
-                        output_fields.extend(branch_witness_field.map(str::to_owned));
+                        // Remote delivery consumes the version and coverage
+                        // witnesses declared by this source's descriptor too.
+                        // Keep them through authorization alongside public
+                        // cells, so the graph matches the advertised layout.
+                        let output_fields = descriptor
+                            .fields()
+                            .iter()
+                            .map(|field| {
+                                field
+                                    .name
+                                    .clone()
+                                    .expect("compiler-owned frozen source fields are named")
+                            })
+                            .collect::<Vec<_>>();
                         self.node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
