@@ -39,7 +39,7 @@ export function spaceRootBytes(
       root,
       JSON.stringify([
         "root",
-        root.accountId,
+        root.creatorAccountId,
         root.deviceId,
         root.accountEpochId,
         root.initialGrantId,
