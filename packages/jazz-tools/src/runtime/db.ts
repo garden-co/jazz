@@ -1893,17 +1893,20 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         : ownerClient.commitTransaction(openTransactionId).txId;
     let txId: Promise<TxId>;
     if (preparation.pending || preparation.failed || this.pendingReads.size > 0) {
-      txId = Promise.all([preparation.drain(), ...this.pendingReads]).then(commit, async (error) => {
-        this.failedRead = true;
-        try {
-          await ownerClient.rollbackTransaction(openTransactionId);
-          this.failedReadCleanupComplete = true;
-        } catch {
-          // Preserve the original pending read error.
-        }
-        this.clearInitialSpaceKeys();
-        throw error;
-      });
+      txId = Promise.all([preparation.drain(), ...this.pendingReads]).then(
+        commit,
+        async (error) => {
+          this.failedRead = true;
+          try {
+            await ownerClient.rollbackTransaction(openTransactionId);
+            this.failedReadCleanupComplete = true;
+          } catch {
+            // Preserve the original pending read error.
+          }
+          this.clearInitialSpaceKeys();
+          throw error;
+        },
+      );
     } else {
       txId = commit();
     }
