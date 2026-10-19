@@ -28,7 +28,7 @@ const policies = definePermissions(app, ({ policy, session }) => {
   // Ordinary row access remains open so the encryption lifecycle owns refusal.
   policy.notes.allowUpdate.always();
   policy.__e2ee_spaces.allowRead.always();
-  policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+  policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
   policy.__e2ee_space_grants.allowRead.always();
   policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
   policy.__e2ee_space_deliveries.allowRead.always();

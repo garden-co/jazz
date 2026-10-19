@@ -9,7 +9,7 @@ import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
 
-async function fixture(denyMemberUpdates = false) {
+async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
   const app = s.defineApp({
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
@@ -45,7 +45,13 @@ async function fixture(denyMemberUpdates = false) {
       ownerId: session.user.account,
       "$createdBy.account": session.user.account,
     });
-    p.notes.fromEncryptionSpace();
+    p.notes.fromEncryptionSpace(
+      ownNotesOnly
+        ? {
+            write: { "$createdBy.account": session.user.account },
+          }
+        : undefined,
+    );
     p.files.fromEncryptionSpace();
     p.drafts.allowRead.always();
     p.drafts.allowInsert.always();
@@ -63,9 +69,9 @@ async function fixture(denyMemberUpdates = false) {
     p.__e2ee_spaces.allowRead.always();
     p.__e2ee_spaces.allowInsert.where((space) =>
       allOf([
-        { accountId: session.user.account, "$createdBy.account": session.user.account },
+        { creatorAccountId: session.user.account, "$createdBy.account": session.user.account },
         p.projectOwners.existsIncludingCreated.where({
-          accountId: space.accountId,
+          accountId: space.creatorAccountId,
           projectId: space.identifier,
         }),
       ]),
@@ -76,7 +82,7 @@ async function fixture(denyMemberUpdates = false) {
         { authorAccountId: session.user.account },
         p.__e2ee_spaces.existsIncludingCreated.where({
           id: grant.spaceId,
-          accountId: session.user.account,
+          creatorAccountId: session.user.account,
         }),
       ]),
     );
@@ -84,14 +90,14 @@ async function fixture(denyMemberUpdates = false) {
     p.__e2ee_space_successors.allowInsert.where((row) =>
       p.__e2ee_spaces.existsIncludingCreated.where({
         id: row.spaceId,
-        accountId: session.user.account,
+        creatorAccountId: session.user.account,
       }),
     );
     p.__e2ee_space_deliveries.allowRead.always();
     p.__e2ee_space_deliveries.allowInsert.where((row) =>
       p.__e2ee_spaces.existsIncludingCreated.where({
         id: row.spaceId,
-        accountId: session.user.account,
+        creatorAccountId: session.user.account,
       }),
     );
     p.__e2ee_groups.allowInsert.where({
@@ -194,6 +200,52 @@ async function fixture(denyMemberUpdates = false) {
     throw error;
   }
 }
+
+it("restricts member writes to their own notes and retains membership checks after revocation", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(false, true);
+  try {
+    const project = await createProject("Shared project");
+    const aliceNote = await owner.db
+      .insert(app.notes, {
+        projectId: project.id,
+        body: "Alice's note",
+      })
+      .wait({ tier: "global" });
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait();
+    expect(
+      await reader.db.one(app.notes.where({ id: aliceNote.id }), { tier: "remote" }),
+    ).toMatchObject({ body: "Alice's note" });
+    await expect(
+      reader.db.update(app.notes, aliceNote.id, { body: "Bob's edit" }).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(
+      reader.db.delete(app.notes, aliceNote.id).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const bobNote = await reader.db
+      .insert(app.notes, {
+        projectId: project.id,
+        body: "Bob's note",
+      })
+      .wait({ tier: "global" });
+    await reader.db.update(app.notes, bobNote.id, { body: "Bob's edit" }).wait({ tier: "global" });
+    await owner.db.e2ee.spaces.revoke(app.projects, project.id, reader.id).wait();
+    // Ownership alone must not allow a write after space membership is removed.
+    // Physical access exercises the deployed policy independently of SDK key checks.
+    const physicalNotes = new TypedTableQueryBuilder("notes", { ...app.wasmSchema });
+    await expect(
+      reader.db
+        .update(physicalNotes, bobNote.id, { body: new Uint8Array([1]) })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(
+      reader.db.delete(physicalNotes, bobNote.id).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait();
+    await reader.db.delete(app.notes, bobNote.id).wait({ tier: "global" });
+  } finally {
+    await close();
+  }
+});
 
 it("derives CRUD from direct and nested membership, retracts live rows and rejects mismatched scopes", async () => {
   const { app, owner, reader, createProject, close } = await fixture();

@@ -29,9 +29,10 @@ roots for an existing chat.
 
 ## Derive row permissions from space membership
 
-Use `fromEncryptionSpace()` when every recipient of a space should have ordinary
-read, insert, update and delete permission on its encrypted rows. Opt the scope
-into current membership tables, then choose the helper on each protected table:
+Use `fromEncryptionSpace()` to derive row permissions from current space
+membership. With no options, recipients can read, insert, update and delete its
+encrypted rows. Opt the scope into current membership tables, then choose the
+helper on each protected table:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
@@ -90,8 +91,27 @@ source. Creating the scope and its first helper-protected row in one transaction
 is not supported. Tables using explicit policies retain their atomic first-write
 behaviour, even when they reference the same scope.
 
-Choose either the helper or explicit policies for a table; they cannot be
-combined. Initial membership matches the explicit recipient list, which can
+Pass optional `read`, `insert`, `update` and `delete` predicates to restrict each
+operation further. `write` supplies a common predicate for insert, update and
+delete. All supplied predicates are ANDed with membership; when both `write`
+and an operation-specific predicate are present, both must pass. Predicates
+accept the same where objects, expressions and row callbacks as `.where()`.
+Update restrictions apply to both the existing and proposed row.
+
+```ts
+p.messages.fromEncryptionSpace({
+  write: { "$createdBy.account": session.user.account },
+});
+```
+
+This lets members read all messages and change only their own. Omitted
+operations require membership alone. Keep restrictions inside the helper:
+separate explicit allow rules are ORed, so combining them with the helper is
+rejected to prevent bypassing membership. A read predicate such as
+`{ visibility: "public" }` still requires membership and does not make encrypted
+content public outside the space.
+
+Initial membership matches the explicit recipient list, which can
 exclude the creator. Revocation retracts ordinary row access but cannot erase
 keys or plaintext that a former recipient already retained.
 

@@ -859,6 +859,17 @@ interface TableRelationBuilder<WhereInput, Row> extends TableJoinTarget, Permiss
   select(columns: Record<string, string>): PermissionRelation;
 }
 
+/** Additional restrictions, always ANDed with current encryption-space membership. */
+export type EncryptionSpacePolicyOptions<WhereInput, Row> = {
+  [Operation in "read" | "insert" | "update" | "delete" | "write"]?: WhereInputOrCallback<
+    PermissionWhereInput<WhereInput>,
+    Row
+  >;
+};
+
+type EncryptionSpaceOperation = "read" | "insert" | "update" | "delete" | "write";
+type EncryptionSpaceConditions = Partial<Record<EncryptionSpaceOperation, Condition>>;
+
 interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<WhereInput, Row> {
   allowRead: ActionBuilder<WhereInput, Row>;
   allowReads: ActionBuilder<WhereInput, Row>;
@@ -869,7 +880,8 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
   managedByCreator(): void;
-  fromEncryptionSpace(): void;
+  /** `write` restricts all writes; operation-specific predicates add further restrictions. */
+  fromEncryptionSpace(options?: EncryptionSpacePolicyOptions<WhereInput, Row>): void;
   exists: ExistsBuilder<WhereInput>;
   existsIncludingCreated: ExistsBuilder<WhereInput>;
 }
@@ -1034,6 +1046,7 @@ export function definePermissions<TApp extends AppLike>(
   const relationsByTable = collectRelationsByTable(app);
   const rules: RuleLike[] = [];
   const encryptionPolicyTables = new Set<string>();
+  const encryptionPolicyConditions = new Map<string, EncryptionSpaceConditions>();
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
     if (seenRules.has(ruleLike)) {
@@ -1048,7 +1061,7 @@ export function definePermissions<TApp extends AppLike>(
       relationsByTable,
       tablesWithTypeColumn,
       collectRule,
-      (table) => {
+      (table, options) => {
         if (encryptionPolicyTables.has(table))
           throw new Error(`fromEncryptionSpace() was already specified for "${table}"`);
         const schema = appSchema as WasmSchema | undefined;
@@ -1063,6 +1076,21 @@ export function definePermissions<TApp extends AppLike>(
           throw new Error(
             `fromEncryptionSpace() requires encryptionSpacePolicySchema("${declaration.scope}") in the application schema`,
           );
+        const conditions: EncryptionSpaceConditions = {};
+        if (options !== undefined) {
+          if (!isPlainObject(options))
+            throw new Error("fromEncryptionSpace() options must be an object");
+          for (const [operation, input] of Object.entries(options)) {
+            if (!["read", "insert", "update", "delete", "write"].includes(operation))
+              throw new Error(`Unknown fromEncryptionSpace() operation: "${operation}"`);
+            if (input !== undefined)
+              conditions[operation as EncryptionSpaceOperation] = resolveWhereInput(
+                input,
+                tablesWithTypeColumn.has(table),
+              );
+          }
+        }
+        encryptionPolicyConditions.set(table, conditions);
         encryptionPolicyTables.add(table);
       },
     ),
@@ -1112,11 +1140,21 @@ export function definePermissions<TApp extends AppLike>(
         permissionScopeBinding(declaration.scope, declaration.space, permissionSpaceColumn, false),
       ],
     };
+    const extensions = encryptionPolicyConditions.get(table)!;
+    const restrict = (operation: Exclude<EncryptionSpaceOperation, "write">): PolicyExpr => {
+      const inputs =
+        operation === "read" ? [extensions.read] : [extensions.write, extensions[operation]];
+      const extra = inputs
+        .filter((input): input is Condition => input !== undefined)
+        .map((input) => compileCondition(input, table, fkReferencesByTable, relationsByTable)!);
+      return extra.length === 0 ? condition : { type: "And", exprs: [condition, ...extra] };
+    };
+    const update = restrict("update");
     application[table] = {
-      select: { using: condition },
-      insert: { with_check: condition },
-      update: { using: condition, with_check: condition },
-      delete: { using: condition },
+      select: { using: restrict("read") },
+      insert: { with_check: restrict("insert") },
+      update: { using: update, with_check: update },
+      delete: { using: restrict("delete") },
     };
   }
   for (const access of Object.keys(appSchema ?? {}).filter((name) =>
@@ -1349,7 +1387,7 @@ function buildPolicyContext(
   relationsByTable: Map<string, Relation[]>,
   tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
-  fromEncryptionSpace?: (table: string) => void,
+  fromEncryptionSpace?: (table: string, options: unknown) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
@@ -1376,7 +1414,7 @@ function buildTablePolicyBuilder(
   relationsByTable: Map<string, Relation[]>,
   hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
-  fromEncryptionSpace?: (table: string) => void,
+  fromEncryptionSpace?: (table: string, options: unknown) => void,
 ): Record<string, unknown> {
   const registerRule = (rule: Rule): Rule => {
     collectRule(rule);
@@ -1445,10 +1483,10 @@ function buildTablePolicyBuilder(
       return updateFactory();
     },
     managedByCreator,
-    fromEncryptionSpace: () => {
+    fromEncryptionSpace: (options: unknown) => {
       if (!fromEncryptionSpace)
         throw new Error("fromEncryptionSpace() requires definePermissions(app, ...)");
-      fromEncryptionSpace(table);
+      fromEncryptionSpace(table, options);
     },
     exists,
     existsIncludingCreated,

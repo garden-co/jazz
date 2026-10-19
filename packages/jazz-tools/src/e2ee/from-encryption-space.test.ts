@@ -14,7 +14,10 @@ function application() {
     ...encryptionSpacePolicySchema("projects"),
     projects: s.table({ title: s.string() }, {}),
     notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
+      .table(
+        { projectId: s.uuid(), body: s.string(), visibility: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
       .encrypted({ space: "projectId", columns: ["body"] }),
   });
 }
@@ -41,6 +44,76 @@ it.each(["before", "after"])("rejects explicit policies %s the helper", (order) 
       if (order === "after") policy.notes.allowInsert.always();
     }),
   ).toThrow(/cannot be combined with explicit policies/);
+});
+it.each(["read", "insert", "update", "delete"] as const)(
+  "ANDs the optional %s restriction with membership and leaves other operations unchanged",
+  (operation) => {
+    const app = application();
+    const baseline = definePermissions(app, ({ policy: p }) => p.notes.fromEncryptionSpace());
+    const permissions = definePermissions(app, ({ policy: p, session }) =>
+      p.notes.fromEncryptionSpace({ [operation]: { "$createdBy.account": session.user.account } }),
+    );
+    const before = mergePermissionsIntoWasmSchema(app.wasmSchema, baseline).notes!.policies!;
+    const after = mergePermissionsIntoWasmSchema(app.wasmSchema, permissions).notes!.policies!;
+    const clause = { read: "select", insert: "insert", update: "update", delete: "delete" }[
+      operation
+    ];
+    for (const name of ["select", "insert", "update", "delete"] as const) {
+      if (name !== clause) expect(after[name]).toEqual(before[name]);
+    }
+    const restricted =
+      operation === "insert"
+        ? after.insert!.with_check
+        : operation === "read"
+          ? after.select!.using
+          : after[operation]!.using;
+    expect(restricted).toMatchObject({
+      type: "And",
+      exprs: [before.select!.using, expect.anything()],
+    });
+    if (operation === "update") expect(after.update!.with_check).toEqual(after.update!.using);
+  },
+);
+it("combines compound reads, common writes and operation-specific callback restrictions", () => {
+  const app = application();
+  const baseline = definePermissions(app, ({ policy: p }) => p.notes.fromEncryptionSpace());
+  const membership = mergePermissionsIntoWasmSchema(app.wasmSchema, baseline).notes!.policies!
+    .select!.using;
+  const permissions = definePermissions(app, ({ policy: p, session, anyOf }) => {
+    p.notes.fromEncryptionSpace({
+      read: anyOf([{ "$createdBy.account": session.user.account }, { visibility: "public" }]),
+      write: { "$createdBy.account": session.user.account },
+      update: (note) => p.projects.exists.where({ id: note.projectId, title: "Editable" }),
+      delete: anyOf([]),
+    });
+  });
+  const policy = mergePermissionsIntoWasmSchema(app.wasmSchema, permissions).notes!.policies!;
+  expect(policy.select!.using).toMatchObject({ type: "And", exprs: [membership, { type: "Or" }] });
+  expect(policy.insert!.with_check).toMatchObject({
+    type: "And",
+    exprs: [membership, expect.anything()],
+  });
+  expect(policy.update!.using).toMatchObject({
+    type: "And",
+    exprs: [membership, expect.anything(), expect.anything()],
+  });
+  expect(policy.update!.with_check).toEqual(policy.update!.using);
+  expect(policy.delete!.using).toMatchObject({
+    type: "And",
+    exprs: [membership, expect.anything(), { type: "False" }],
+  });
+});
+it("fails closed for invalid extension options and does not register failed policies", () => {
+  for (const options of [null, [], { typo: {} }, { read: null }, { update: () => undefined }]) {
+    const app = application();
+    expect(() =>
+      definePermissions(app, ({ policy: p }) =>
+        // Untyped callers must not silently lose an intended restriction.
+        p.notes.fromEncryptionSpace(options as never),
+      ),
+    ).toThrow();
+    expect(() => assertEncryptionPoliciesRegistered(app.wasmSchema)).toThrow(/not registered/);
+  }
 });
 it("rejects missing schema opt-in, ordinary tables and repeated declarations", () => {
   const app = application();

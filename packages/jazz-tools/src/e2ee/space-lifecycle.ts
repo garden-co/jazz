@@ -179,7 +179,7 @@ const isInitialAuthor = (
   accountEpochId: string,
 ) =>
   epochId === root.epochId &&
-  accountId === root.accountId &&
+  accountId === root.creatorAccountId &&
   deviceId === root.deviceId &&
   accountEpochId === root.accountEpochId;
 
@@ -571,7 +571,7 @@ export class Spaces {
       )
         continue;
       const context = spaceRecoveryContext(
-        this.accountContext(root.accountId),
+        this.accountContext(root.creatorAccountId),
         { ...root, epochId },
         row,
       );
@@ -1170,7 +1170,7 @@ export class Spaces {
     const root = {
       id: spaceRootId(address),
       ...address,
-      accountId: this.accountId,
+      creatorAccountId: this.accountId,
       deviceId: device.id,
       accountEpochId: state.epochId,
       epochId: crypto.randomUUID(),
@@ -1178,7 +1178,7 @@ export class Spaces {
       mechanism: this.keys.mechanism.id,
       version: this.keys.mechanism.version,
     };
-    const application = this.accountContext(root.accountId);
+    const application = this.accountContext(root.creatorAccountId);
     const verification = await this.keys.wrap(
       secret,
       spaceContext(application, root, "verification"),
@@ -1547,7 +1547,7 @@ export class Spaces {
       [
         this.accountId,
         ...extra,
-        ...roots.map((row) => row.accountId),
+        ...roots.map((row) => row.creatorAccountId),
         ...grants.flatMap((row) => [
           row.authorAccountId,
           ...(row.recipientKind === "account" ? [row.recipientId] : []),
@@ -1673,7 +1673,7 @@ export class Spaces {
         };
         const signature = await this.sign(
           device,
-          spaceGrantBytes(this.accountContext(root.accountId), keyRoot, record),
+          spaceGrantBytes(this.accountContext(root.creatorAccountId), keyRoot, record),
         );
         this.assertOpen();
         const { id, ...values } = record;
@@ -1740,7 +1740,7 @@ export class Spaces {
       new Map(
         [
           ...new Set([
-            ...authority.roots.rows.map((root) => root.accountId),
+            ...authority.roots.rows.map((root) => root.creatorAccountId),
             ...authority.histories.keys(),
             ...(authority.group?.histories.keys() ?? []),
           ]),
@@ -1800,13 +1800,13 @@ export class Spaces {
       throw new Error("Invalid or unsupported E2EE space membership");
     let rootBytes: Uint8Array;
     try {
-      rootBytes = spaceRootBytes(accountContext(root.accountId), root);
+      rootBytes = spaceRootBytes(accountContext(root.creatorAccountId), root);
     } catch {
       throw new InvalidSpaceRoot("Malformed E2EE space root transcript");
     }
     if (root.id !== spaceRootId(root))
       throw new InvalidSpaceRoot("Invalid E2EE space root identity");
-    const history = snapshot.histories.get(root.accountId);
+    const history = snapshot.histories.get(root.creatorAccountId);
     if (!history) throw new Error("Missing E2EE space creator history");
     const position = positionOf(snapshot.roots, root.id);
     if (!position) throw new Error("E2EE space root lacks authority coverage");
@@ -1815,7 +1815,7 @@ export class Spaces {
       throw new InvalidSpaceRoot("Ineligible E2EE space creator");
     const initial = await replayAccountMembership(
       initialHistory,
-      accountContext(root.accountId),
+      accountContext(root.creatorAccountId),
       this.signer,
     );
     if (!initial.active.has(root.deviceId) || initial.epochId !== root.accountEpochId)
@@ -1839,7 +1839,7 @@ export class Spaces {
       grant.id !== root.initialGrantId ||
       grant.operation !== "add" ||
       (grant.recipientKind !== "account" && grant.recipientKind !== "group") ||
-      grant.authorAccountId !== root.accountId ||
+      grant.authorAccountId !== root.creatorAccountId ||
       grant.authorDeviceId !== root.deviceId ||
       grant.authorEpochId !== root.accountEpochId
     )
@@ -1848,7 +1848,7 @@ export class Spaces {
       !(await this.verify(
         history,
         grant.authorDeviceId,
-        spaceGrantBytes(accountContext(root.accountId), root, grant),
+        spaceGrantBytes(accountContext(root.creatorAccountId), root, grant),
         grant.signature,
       ))
     )
@@ -1882,7 +1882,7 @@ export class Spaces {
       const recipientHistory = snapshot.histories.get(grant.recipientId);
       if (!recipientHistory) throw new Error("Missing E2EE initial recipient history");
       const recipient =
-        grant.recipientId === root.accountId
+        grant.recipientId === root.creatorAccountId
           ? initial
           : await replayAccountMembership(
               historyBefore(recipientHistory, BigInt(position)),
@@ -2004,7 +2004,7 @@ export class Spaces {
         (event.kind !== "grant" ||
           event.row.operation !== "add" ||
           event.row.epochId !== root.epochId ||
-          event.row.authorAccountId !== root.accountId ||
+          event.row.authorAccountId !== root.creatorAccountId ||
           event.row.authorDeviceId !== root.deviceId ||
           event.row.authorEpochId !== root.accountEpochId)
       )
@@ -2043,7 +2043,7 @@ export class Spaces {
           continue;
         let bytes: Uint8Array;
         try {
-          bytes = spaceSuccessorBytes(accountContext(root.accountId), root, row);
+          bytes = spaceSuccessorBytes(accountContext(root.creatorAccountId), root, row);
         } catch {
           continue;
         }
@@ -2076,7 +2076,7 @@ export class Spaces {
         continue;
       let bytes: Uint8Array;
       try {
-        bytes = spaceGrantBytes(accountContext(root.accountId), keyRoot, record);
+        bytes = spaceGrantBytes(accountContext(root.creatorAccountId), keyRoot, record);
       } catch {
         continue;
       }
@@ -2180,18 +2180,18 @@ export class Spaces {
             grant.epochId === root.epochId &&
             grant.spaceId === root.id &&
             grant.authorDeviceId === root.deviceId &&
-            grant.authorAccountId === root.accountId &&
+            grant.authorAccountId === root.creatorAccountId &&
             grant.authorEpochId === root.accountEpochId &&
             (!founder || grant.recipientEpochId === founder.epochId),
         );
         if (
           !grant ||
           root.deviceId !== device.id ||
-          root.accountId !== this.accountId ||
+          root.creatorAccountId !== this.accountId ||
           (founder && root.accountEpochId !== founder.epochId)
         )
           return { state: "refused", reason: "not-a-space-recipient" };
-        const application = this.accountContext(root.accountId);
+        const application = this.accountContext(root.creatorAccountId);
         if (
           !(await this.signer.verify(
             device.signing.publicKey,
@@ -2608,10 +2608,10 @@ export class Spaces {
     const { root, keyRoot, successor, position } = state;
     let secret: Uint8Array | undefined;
     try {
-      if (!successor && root.accountId === this.accountId && root.deviceId === device.id) {
+      if (!successor && root.creatorAccountId === this.accountId && root.deviceId === device.id) {
         secret = await this.keys.open(
           device,
-          spaceContext(this.accountContext(root.accountId), root, "author", device.id),
+          spaceContext(this.accountContext(root.creatorAccountId), root, "author", device.id),
           root.authorEnvelope,
         );
         this.assertCurrentReconciliation(reconciliation);
@@ -2624,7 +2624,7 @@ export class Spaces {
         secret = await this.keys.open(
           device,
           spaceSuccessorContext(
-            this.accountContext(root.accountId),
+            this.accountContext(root.creatorAccountId),
             root,
             successor,
             "author-envelope",
@@ -2653,7 +2653,7 @@ export class Spaces {
             continue;
           this.assertCurrentReconciliation(reconciliation);
           const context = spaceDeliveryContext(
-            this.accountContext(root.accountId),
+            this.accountContext(root.creatorAccountId),
             keyRoot,
             delivery,
           );
@@ -2763,7 +2763,7 @@ export class Spaces {
           authorDeviceId: device.id,
           authorEpochId: snapshot.state.epochId,
         };
-        const application = this.accountContext(state.root.accountId);
+        const application = this.accountContext(state.root.creatorAccountId);
         const context = spaceSuccessorContext(
           application,
           state.root,
@@ -2846,7 +2846,7 @@ export class Spaces {
     // Only the candidate's current key can be unavailable. Once it is confirmed,
     // predecessor processing and historical replay failures belong to the operation.
     const currentContext = spaceContext(
-      this.accountContext(root.accountId),
+      this.accountContext(root.creatorAccountId),
       state.keyRoot,
       "verification",
     );
@@ -2860,7 +2860,7 @@ export class Spaces {
         const successor = state.successor;
         const previous = await this.keys.unwrap(
           secret,
-          spaceSuccessorContext(this.accountContext(root.accountId), root, successor, "history"),
+          spaceSuccessorContext(this.accountContext(root.creatorAccountId), root, successor, "history"),
           successor.history,
         );
         owned?.fill(0);
@@ -2934,8 +2934,8 @@ export class Spaces {
     try {
       bytes =
         "recoveryRootId" in row
-          ? spaceRecoveryBytes(this.accountContext(root.accountId), keyRoot, row)
-          : spaceDeliveryBytes(this.accountContext(root.accountId), keyRoot, row);
+          ? spaceRecoveryBytes(this.accountContext(root.creatorAccountId), keyRoot, row)
+          : spaceDeliveryBytes(this.accountContext(root.creatorAccountId), keyRoot, row);
     } catch {
       return false;
     }
@@ -3051,7 +3051,7 @@ export class Spaces {
       secret ??
       (await this.keys.open(
         device,
-        spaceContext(this.accountContext(root.accountId), root, "author", device.id),
+        spaceContext(this.accountContext(root.creatorAccountId), root, "author", device.id),
         root.authorEnvelope,
       ));
     try {
@@ -3123,12 +3123,12 @@ export class Spaces {
             };
             const envelope = await this.keys.seal(
               recoveryRoot.publicKey,
-              spaceRecoveryContext(this.accountContext(root.accountId), keyRoot, row),
+              spaceRecoveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
               deliverySecret,
             );
             const signature = await this.sign(
               device,
-              spaceRecoveryBytes(this.accountContext(root.accountId), keyRoot, {
+              spaceRecoveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
                 ...row,
                 envelope,
               }),
@@ -3165,12 +3165,12 @@ export class Spaces {
           };
           const envelope = await this.keys.seal(
             key.publicKey,
-            spaceDeliveryContext(this.accountContext(root.accountId), keyRoot, row),
+            spaceDeliveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
             deliverySecret,
           );
           const signature = await this.sign(
             device,
-            spaceDeliveryBytes(this.accountContext(root.accountId), keyRoot, {
+            spaceDeliveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
               ...row,
               envelope,
             }),
@@ -3201,7 +3201,7 @@ export class Spaces {
       | "scopeId"
       | "identifier"
       | "epochId"
-      | "accountId"
+      | "creatorAccountId"
       | "mechanism"
       | "version"
       | "verification"
@@ -3217,7 +3217,7 @@ export class Spaces {
       throw new Error("Invalid or unsupported E2EE space key");
     const opened = await this.keys.unwrap(
       secret,
-      context ?? spaceContext(this.accountContext(root.accountId), root, "verification"),
+      context ?? spaceContext(this.accountContext(root.creatorAccountId), root, "verification"),
       root.verification,
     );
     try {
