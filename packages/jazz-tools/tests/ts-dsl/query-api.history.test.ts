@@ -75,7 +75,7 @@ describe("TS Query API history", () => {
     await insertNote("unrelated");
     await db.update(app.notes, a.id, { title: "a2" }).wait({ tier: "global" });
     const rows = await db.all(
-      app.notes.history
+      app.$history.notes
         .where({ id: { in: [a.id, b.id, a.id] } })
         .orderBy("title")
         .select("title"),
@@ -89,7 +89,7 @@ describe("TS Query API history", () => {
 
   it("returns an empty query and subscription for an empty ID list", async () => {
     await insertNote();
-    const query = app.notes.history.where({ id: { in: [] } });
+    const query = app.$history.notes.where({ id: { in: [] } });
     expect(await db.all(query)).toEqual([]);
     const latest = watch(query);
     await expect.poll(latest).toEqual([]);
@@ -102,7 +102,7 @@ describe("TS Query API history", () => {
     await db.update(app.notes, b.id, { title: "c" }).wait({ tier: "global" });
     expect(
       await db.all(
-        app.notes.history
+        app.$history.notes
           .where({ id: { in: [a.id, b.id] } })
           .orderBy("title")
           .offset(1)
@@ -119,7 +119,7 @@ describe("TS Query API history", () => {
     const a = await insertNote("a1");
     const b = await insertNote("b1");
     const latest = watch(
-      app.notes.history
+      app.$history.notes
         .where({ id: { in: [a.id, b.id] } })
         .orderBy("title")
         .select("title"),
@@ -142,7 +142,7 @@ describe("TS Query API history", () => {
     const a = await insertNote("a");
     const futureId = "00000000-0000-4000-8000-000000000001";
     const latest = watch(
-      app.notes.history
+      app.$history.notes
         .where({ id: { in: [a.id, futureId] } })
         .orderBy("title")
         .select("title"),
@@ -158,7 +158,7 @@ describe("TS Query API history", () => {
   it("returns typed content and transaction metadata for an accepted version", async () => {
     const startedAt = Date.now();
     const note = await insertNote();
-    const rows = await db.all(app.notes.history.where({ id: note.id }));
+    const rows = await db.all(app.$history.notes.where({ id: note.id }));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: note.id, title: "first", done: false });
     expectTypeOf(rows[0]!.$acceptedAt).toEqualTypeOf<Date>();
@@ -166,14 +166,14 @@ describe("TS Query API history", () => {
     expect(rows[0]!.$acceptedAt).toBeInstanceOf(Date);
     expect(rows[0]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(startedAt);
     expect(rows[0]!.$acceptedAt.getTime()).toBeLessThanOrEqual(Date.now());
-    const latest = watch(app.notes.history.where({ id: note.id }).select("$acceptedAt"));
+    const latest = watch(app.$history.notes.where({ id: note.id }).select("$acceptedAt"));
     await expect.poll(latest).toEqual([{ id: note.id, $acceptedAt: rows[0]!.$acceptedAt }]);
     expect(typeof rows[0]!.$transactionId).toBe("string");
   });
 
   it("projects selected fields while preserving the logical row id", async () => {
     const note = await insertNote();
-    const rows = await db.all(app.notes.history.where({ id: note.id }).select("title"));
+    const rows = await db.all(app.$history.notes.where({ id: note.id }).select("title"));
     expectTypeOf(rows).toEqualTypeOf<{ id: string; title: string }[]>();
     expect(rows).toEqual([{ id: note.id, title: "first" }]);
   });
@@ -181,7 +181,7 @@ describe("TS Query API history", () => {
   it("orders versions by acceptance sequence", async () => {
     const note = await insertNote();
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
-    const query = app.notes.history.where({ id: note.id });
+    const query = app.$history.notes.where({ id: note.id });
     const rows = await db.all(query.orderBy("$acceptedAt"));
     expect(rows.map((row) => row.title)).toEqual(["first", "second"]);
     expect(rows[1]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(rows[0]!.$acceptedAt.getTime());
@@ -193,7 +193,7 @@ describe("TS Query API history", () => {
     const note = await insertNote();
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
     await db.update(app.notes, note.id, { title: "third" }).wait({ tier: "global" });
-    const page = app.notes.history
+    const page = app.$history.notes
       .where({ id: note.id })
       .orderBy("$acceptedAt")
       .offset(1)
@@ -204,7 +204,7 @@ describe("TS Query API history", () => {
 
   it("keeps equal projections as separate versions in subscriptions", async () => {
     const note = await insertNote("same");
-    const query = app.notes.history.where({ id: note.id }).select("title");
+    const query = app.$history.notes.where({ id: note.id }).select("title");
     const latest = watch(query);
     await expect.poll(latest).toEqual([{ id: note.id, title: "same" }]);
     await db.update(app.notes, note.id, { title: "same" }).wait({ tier: "global" });
@@ -219,7 +219,7 @@ describe("TS Query API history", () => {
   it("retracts every retained version when the row is deleted", async () => {
     const note = await insertNote();
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
-    const query = app.notes.history.where({ id: note.id });
+    const query = app.$history.notes.where({ id: note.id });
     const latest = watch(query);
     await expect.poll(() => latest()?.length).toBe(2);
     await db.delete(app.notes, note.id).wait({ tier: "global" });
@@ -229,7 +229,7 @@ describe("TS Query API history", () => {
 
   it("restores old versions and adds the replacement content version", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+    const query = app.$history.notes.where({ id: note.id }).orderBy("$acceptedAt");
     const original = await db.all(query);
     await db.delete(app.notes, note.id).wait({ tier: "global" });
     const latest = watch(query);
@@ -246,7 +246,7 @@ describe("TS Query API history", () => {
 
   it("local-first history retracts cached versions when upstream access is revoked", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+    const query = app.$history.notes.where({ id: note.id }).orderBy("$acceptedAt");
     const latest = watch(query);
     await expect.poll(() => latest()?.length).toBe(1);
     // The deployed read policy denies done=true; writes remain allowed.
@@ -258,7 +258,7 @@ describe("TS Query API history", () => {
   it("includeDeleted returns content versions of a deleted row", async () => {
     const note = await insertNote("first");
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
-    const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+    const query = app.$history.notes.where({ id: note.id }).orderBy("$acceptedAt");
     const versions = await db.all(query);
     await db.delete(app.notes, note.id).wait({ tier: "global" });
 
@@ -274,7 +274,7 @@ describe("TS Query API history", () => {
     await db.delete(app.notes, note.id).wait({ tier: "global" });
 
     const rows = await db.all(
-      app.notes.history.includeDeleted().where({ id: note.id, title: "first" }).select("title"),
+      app.$history.notes.includeDeleted().where({ id: note.id, title: "first" }).select("title"),
     );
     expectTypeOf(rows).toEqualTypeOf<{ id: string; title: string }[]>();
     expect(rows).toEqual([{ id: note.id, title: "first" }]);
@@ -282,7 +282,7 @@ describe("TS Query API history", () => {
 
   it("includeDeleted retains old versions after content restoration", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).includeDeleted().orderBy("$acceptedAt");
+    const query = app.$history.notes.where({ id: note.id }).includeDeleted().orderBy("$acceptedAt");
     const versions = await db.all(query);
     await db.delete(app.notes, note.id).wait({ tier: "global" });
     await db
@@ -296,7 +296,7 @@ describe("TS Query API history", () => {
 
   it("remote history reads return content and version metadata", async () => {
     const note = await insertNote();
-    const rows = await db.all(app.notes.history.where({ id: note.id }), { tier: "remote" });
+    const rows = await db.all(app.$history.notes.where({ id: note.id }), { tier: "remote" });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: note.id, title: "first", done: false });
     expect(typeof rows[0]!.$transactionId).toBe("string");
@@ -305,7 +305,7 @@ describe("TS Query API history", () => {
   });
 
   it("rejects history reads without a bounded row id constraint", async () => {
-    await expect(db.all(app.notes.history)).rejects.toMatchObject({
+    await expect(db.all(app.$history.notes)).rejects.toMatchObject({
       message:
         "Query: unsupported relation query: Reading history without an id equality or IN constraint is not supported in history queries yet",
       code: "query",
@@ -315,7 +315,7 @@ describe("TS Query API history", () => {
   it("rejects insertion into a history query at type and runtime boundaries", () => {
     expect(() => {
       // @ts-expect-error History is not a mutation target.
-      db.insert(app.notes.history, { title: "wrong", done: false });
+      db.insert(app.$history.notes, { title: "wrong", done: false });
     }).toThrow(new Error('History table "history.notes" is read-only'));
   });
 
@@ -323,7 +323,7 @@ describe("TS Query API history", () => {
     const note = await insertNote();
     expect(() => {
       // @ts-expect-error History is not a mutation target.
-      db.delete(app.notes.history, note.id);
+      db.delete(app.$history.notes, note.id);
     }).toThrow(new Error('History table "history.notes" is read-only'));
   });
 
@@ -331,7 +331,7 @@ describe("TS Query API history", () => {
     const note = await insertNote("before");
     await db.update(app.notes, note.id, { title: "after" }).wait({ tier: "global" });
     const rows = await db.all(
-      app.notes.history.where({ id: note.id, title: "before" }).select("title"),
+      app.$history.notes.where({ id: note.id, title: "before" }).select("title"),
     );
     expect(rows).toEqual([{ id: note.id, title: "before" }]);
   });
@@ -340,7 +340,7 @@ describe("TS Query API history", () => {
     const note = await insertNote("a");
     await db.update(app.notes, note.id, { title: "b" }).wait({ tier: "global" });
     await db.update(app.notes, note.id, { title: "c" }).wait({ tier: "global" });
-    const query = app.notes.history
+    const query = app.$history.notes
       .where({ id: note.id })
       .where({ title: { in: ["b", "c"], ne: "c" }, done: false })
       .select("title");
@@ -351,7 +351,7 @@ describe("TS Query API history", () => {
     const note = await insertNote("b");
     await db.update(app.notes, note.id, { title: "c" }).wait({ tier: "global" });
     await db.update(app.notes, note.id, { title: "a" }).wait({ tier: "global" });
-    const query = app.notes.history.where({ id: note.id });
+    const query = app.$history.notes.where({ id: note.id });
     const byAcceptance = await db.all(query.orderBy("$acceptedAt"));
     expect(
       await db.all(query.orderBy("title").offset(1).limit(1).select("$transactionId")),
@@ -363,7 +363,7 @@ describe("TS Query API history", () => {
 
   it("keeps matching old versions when a new version fails the subscription filter", async () => {
     const note = await insertNote("keep");
-    const query = app.notes.history.where({ id: note.id, title: "keep" }).select("title");
+    const query = app.$history.notes.where({ id: note.id, title: "keep" }).select("title");
     const latest = watch(query);
     const expected = { id: note.id, title: "keep" };
     await expect.poll(latest).toEqual([expected]);
@@ -376,7 +376,7 @@ describe("TS Query API history", () => {
   it("updates an application-ordered subscription window", async () => {
     const note = await insertNote("z");
     const latest = watch(
-      app.notes.history.where({ id: note.id }).orderBy("title").limit(1).select("title"),
+      app.$history.notes.where({ id: note.id }).orderBy("title").limit(1).select("title"),
     );
     await expect.poll(latest).toEqual([{ id: note.id, title: "z" }]);
     await db.update(app.notes, note.id, { title: "a" }).wait({ tier: "global" });
@@ -388,7 +388,7 @@ describe("TS Query API history", () => {
     async (op) => {
       const note = await insertNote("first");
       await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
-      const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
+      const query = app.$history.notes.where({ id: note.id }).orderBy("$acceptedAt");
       const rows = await db.all(query);
       const date = rows[0]!.$acceptedAt;
       const matches = (value: Date) => {
@@ -421,7 +421,7 @@ describe("TS Query API history", () => {
 
   it("handles $acceptedAt dates outside the HLC range", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id });
+    const query = app.$history.notes.where({ id: note.id });
     const rows = await db.all(query);
     expect(await db.all(query.where({ $acceptedAt: { gt: new Date(-1) } }))).toEqual(rows);
     expect(await db.all(query.where({ $acceptedAt: { lt: new Date(-1) } }))).toEqual([]);
@@ -430,7 +430,7 @@ describe("TS Query API history", () => {
   });
 
   it("rejects application filters without a bounded id constraint", async () => {
-    await expect(db.all(app.notes.history.where({ title: "first" }))).rejects.toMatchObject({
+    await expect(db.all(app.$history.notes.where({ title: "first" }))).rejects.toMatchObject({
       message:
         "Query: unsupported relation query: Reading history without an id equality or IN constraint is not supported in history queries yet",
       code: "query",
@@ -439,7 +439,7 @@ describe("TS Query API history", () => {
 
   it("rejects user-provided transaction ID predicates", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({
+    const query = app.$history.notes.where({
       id: note.id,
       // @ts-expect-error Transaction IDs can be selected but not supplied as predicates.
       $transactionId: "0123456789abcdef0123456789abcdef",
@@ -451,7 +451,7 @@ describe("TS Query API history", () => {
 
   it("projects each version's own creation and update timestamps as Dates", async () => {
     const note = await insertNote();
-    const query = app.notes.history
+    const query = app.$history.notes
       .where({ id: note.id })
       .orderBy("$acceptedAt")
       .select("title", "$createdAt", "$updatedAt");
@@ -477,7 +477,7 @@ describe("TS Query API history", () => {
 
   it("filters and orders versions by their authored timestamps", async () => {
     const note = await insertNote();
-    const query = app.notes.history
+    const query = app.$history.notes
       .where({ id: note.id })
       .select("title", "$createdAt", "$updatedAt");
     const first = (await db.all(query))[0]!;
@@ -498,7 +498,7 @@ describe("TS Query API history", () => {
 
   it("subscribes to projected historical timestamps without overwriting older versions", async () => {
     const note = await insertNote();
-    const query = app.notes.history
+    const query = app.$history.notes
       .where({ id: note.id })
       .orderBy("$updatedAt")
       .select("$createdAt", "$updatedAt");
@@ -524,7 +524,7 @@ describe("TS Query API history", () => {
     const current = (
       await db.all(app.notes.where({ id: note.id }).select(...PROVENANCE_MAGIC_COLUMNS))
     )[0]!;
-    const query = app.notes.history.where({ id: note.id }).select(...PROVENANCE_MAGIC_COLUMNS);
+    const query = app.$history.notes.where({ id: note.id }).select(...PROVENANCE_MAGIC_COLUMNS);
     const rows = await db.all(query);
     expectTypeOf(rows[0]!.$createdBy).toEqualTypeOf<RowAuthor>();
     expectTypeOf(rows[0]!.$updatedBy).toEqualTypeOf<RowAuthor>();
@@ -538,7 +538,7 @@ describe("TS Query API history", () => {
     PROVENANCE_MAGIC_COLUMNS.filter((column) => column !== "$createdAt" && column !== "$updatedAt"),
   )("filters historical provenance by %s", async (column) => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id }).select(column);
+    const query = app.$history.notes.where({ id: note.id }).select(column);
     const rows = await db.all(query);
     const value = rows[0]![column];
     expect(value).toBeDefined();
@@ -549,7 +549,7 @@ describe("TS Query API history", () => {
   it("orders history by author subfields with a version tie-breaker", async () => {
     const note = await insertNote();
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
-    const query = app.notes.history
+    const query = app.$history.notes
       .where({ id: note.id })
       .select("title", "$updatedBy.identity.subject")
       .orderBy("$updatedBy.identity.subject")
@@ -561,7 +561,7 @@ describe("TS Query API history", () => {
 
   it("keeps provenance opt-in when selecting a wildcard", async () => {
     const note = await insertNote();
-    const query = app.notes.history.where({ id: note.id });
+    const query = app.$history.notes.where({ id: note.id });
     const plain = (await db.all(query.select("*")))[0]!;
     for (const column of PROVENANCE_MAGIC_COLUMNS) expect(plain).not.toHaveProperty(column);
     const selected = (await db.all(query.select("*", "$createdBy")))[0]!;
@@ -574,7 +574,7 @@ describe("TS Query API history", () => {
   it("rejects relationship includes on history queries", async () => {
     const note = await insertNote();
     // @ts-expect-error History joins/includes are deferred.
-    const query = app.notes.history.where({ id: note.id }).include({ owner: true });
+    const query = app.$history.notes.where({ id: note.id }).include({ owner: true });
     await expect(db.all(query)).rejects.toThrow(
       new Error('Unknown relation "owner" on table "history.notes"'),
     );
@@ -680,7 +680,7 @@ describe("TS Query API history schema migrations", () => {
   });
 
   it("reads and filters older versions under a renamed column", async () => {
-    const query = v2.notes.history.where({ id }).orderBy("$acceptedAt").select("heading");
+    const query = v2.$history.notes.where({ id }).orderBy("$acceptedAt").select("heading");
     const rows = await db.all(query);
     expectTypeOf(rows).toEqualTypeOf<{ id: string; heading: string }[]>();
     expect(rows).toEqual([
@@ -691,14 +691,14 @@ describe("TS Query API history schema migrations", () => {
   });
 
   it("uses the added column's lens default in older versions", async () => {
-    expect(await db.all(v2.notes.history.where({ id }).select("category"))).toEqual([
+    expect(await db.all(v2.$history.notes.where({ id }).select("category"))).toEqual([
       { id, category: "uncategorized" },
       { id, category: "uncategorized" },
     ]);
   });
 
   it("omits dropped columns from historical wildcard results", async () => {
-    const rows = await db.all(v2.notes.history.where({ id }).orderBy("$acceptedAt").select("*"));
+    const rows = await db.all(v2.$history.notes.where({ id }).orderBy("$acceptedAt").select("*"));
     expect(rows).toHaveLength(2);
     expect(rows.map(({ $transactionId, $acceptedAt, ...content }) => content)).toEqual([
       { id, heading: "first", category: "uncategorized" },
@@ -707,7 +707,7 @@ describe("TS Query API history schema migrations", () => {
   });
 
   it("subscribes to old and new versions using the reader's schema", async () => {
-    const query = v2.notes.history
+    const query = v2.$history.notes
       .where({ id })
       .orderBy("$acceptedAt")
       .select("heading", "category");
@@ -779,7 +779,7 @@ describe("TS Query API upstream history", () => {
   });
 
   function query() {
-    return app.notes.history.where({ id }).orderBy("$acceptedAt").select("title");
+    return app.$history.notes.where({ id }).orderBy("$acceptedAt").select("title");
   }
 
   it("remote reads fetch missing versions on a fresh client", async () => {
@@ -798,7 +798,7 @@ describe("TS Query API upstream history", () => {
 
   it("remote reads settle when the requested row has no history", async () => {
     expect(
-      await reader.all(app.notes.history.where({ id: crypto.randomUUID() }), { tier: "remote" }),
+      await reader.all(app.$history.notes.where({ id: crypto.randomUUID() }), { tier: "remote" }),
     ).toEqual([]);
   });
 
@@ -821,7 +821,7 @@ describe("TS Query API upstream history", () => {
     // Fetch all history versions into the local DB
     await reader.all(query(), { tier: "remote" });
     // Fetch only first history version form remote DB
-    const filtered = app.notes.history.where({ id, title: "first" }).select("title");
+    const filtered = app.$history.notes.where({ id, title: "first" }).select("title");
     expect(await reader.all(filtered, { tier: "remote" })).toEqual([{ id, title: "first" }]);
   });
 

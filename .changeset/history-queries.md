@@ -5,7 +5,7 @@
 "jazz-rn": patch
 ---
 
-Query and subscribe to previous row versions through `app.table.history` in TypeScript or `history.tableName` in Rust.
+Query and subscribe to previous row versions through `app.$history.table` in TypeScript or `history.tableName` in Rust.
 
 History queries support filtering, projection, ordering, pagination, and local-first and remote reads and subscriptions, fetching missing history from upstream when needed. Historical content is transformed through schema lenses to the requested schema.
 

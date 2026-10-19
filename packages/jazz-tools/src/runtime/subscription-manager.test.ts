@@ -1219,7 +1219,6 @@ it("keeps equal history rows distinct and addresses updates by their full transa
         {
           sourceId: id,
           occurrenceKey: keys[1]!,
-          previousIndex: 1,
           index: 1,
           row: makeRow(id, "changed", 2),
         },

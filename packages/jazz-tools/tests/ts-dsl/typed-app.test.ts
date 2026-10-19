@@ -230,6 +230,22 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it("exposes history queries without reserving the table name history", () => {
+    const historyApp = s.defineApp({ history: s.table({ title: s.string() }, {}) });
+
+    expect(historyApp.history._table).toBe("history");
+    expect(historyApp.$history.history._table).toBe("history.history");
+    expect(historyApp.$history.history._schema).toBe(historyApp.wasmSchema);
+    expect(Object.keys(historyApp.wasmSchema)).toEqual(["history"]);
+    expect(Object.keys(historyApp.$history)).toEqual(["history"]);
+  });
+
+  it("reserves $history for the history namespace", () => {
+    expect(() => s.defineApp({ $history: s.table({ title: s.string() }, {}) })).toThrow(
+      'Schema name "$history" is reserved for Jazz schema controls.',
+    );
+  });
+
   it.each(["union", "wasmSchema", "schemaAst"])(
     "rejects a table named %s instead of masking an app control",
     (tableName) => {

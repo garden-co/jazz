@@ -2,6 +2,7 @@ const RESERVED_SCHEMA_NAMES: Record<string, true> = Object.fromEntries(
   [
     ...Object.getOwnPropertyNames(Object.prototype),
     "union",
+    "$history",
     "wasmSchema",
     "schemaAst",
     "_schema",

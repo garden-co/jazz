@@ -1616,13 +1616,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {
-  /** Query accepted content versions of this table. */
-  readonly history: HistoryQuery<
-    TableRowFromMeta<SchemaMeta<TTable, TSchema>>,
-    TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
-  >;
-}
+> {}
 
 export type QueryHandle<
   TTable extends string,
@@ -1637,6 +1631,13 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
+    /** Read-only queries over accepted content versions of each table. */
+    readonly $history: {
+      readonly [TTable in TableName<TSchema>]: HistoryQuery<
+        TableRowFromMeta<SchemaMeta<TTable, TSchema>>,
+        TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
+      >;
+    };
     union<TTable extends TableName<TSchema>>(
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<
@@ -1996,31 +1997,31 @@ function createAppForTables(
   registeredWasmSchema = wasmSchema;
   const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
+  const history = {} as App<Schema<SchemaDefinition>>["$history"];
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
-    tables[tableName] = Object.defineProperty(
-      new TypedTableQueryBuilder(
-        tableName,
-        wasmSchema,
-        columnTransformsByTable?.[tableName],
-        columnTransformsByTable,
-      ),
-      "history",
-      {
-        get: () =>
-          new TypedTableQueryBuilder(
-            `history.${tableName}`,
-            wasmSchema,
-            columnTransformsByTable?.[tableName],
-            columnTransformsByTable,
-          ),
-      },
+    tables[tableName] = new TypedTableQueryBuilder(
+      tableName,
+      wasmSchema,
+      columnTransformsByTable?.[tableName],
+      columnTransformsByTable,
     );
+    Object.defineProperty(history, tableName, {
+      enumerable: true,
+      get: () =>
+        new TypedTableQueryBuilder(
+          `history.${tableName}`,
+          wasmSchema,
+          columnTransformsByTable?.[tableName],
+          columnTransformsByTable,
+        ),
+    });
   }
 
   return {
     ...tables,
+    $history: history,
     union<TTable extends string>(
       relations:
         | readonly RelationSeedQuery<TTable>[]
