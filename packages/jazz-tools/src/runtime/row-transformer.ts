@@ -14,6 +14,13 @@ import {
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
+import {
+  columnTransformDependencies,
+  dependencyContext,
+  storedDependencyValues,
+  type ColumnTransform,
+} from "./column-transforms.js";
+
 export type { WasmValue };
 
 export interface IncludeSpec {
@@ -133,15 +140,18 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<string, Readonly<Record<string, { from(value: unknown): unknown }>> | undefined>
+  Record<string, Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>> | undefined>
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, { from(value: unknown): unknown }>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>>,
   excludedColumns: readonly string[] = [],
+  stored?: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   if (!transforms) return row;
+  const source =
+    stored ?? storedDependencyValues(columnTransformDependencies(transforms).columns, row);
   for (const column in transforms) {
     if (
       !Object.hasOwn(transforms, column) ||
@@ -150,18 +160,10 @@ export function applyColumnTransforms(
     ) {
       continue;
     }
-    row[column] = transforms[column]!.from(row[column]);
+    const transform = transforms[column]!;
+    row[column] = transform.from(row[column], dependencyContext(transform, source));
   }
   return row;
-}
-
-function applyTableColumnTransforms(
-  row: Record<string, unknown>,
-  tableName: string,
-  transformsByTable: ReadColumnTransformRegistry | undefined,
-  excludedColumns: readonly string[],
-): Record<string, unknown> {
-  return applyColumnTransforms(row, transformsByTable?.[tableName], excludedColumns);
 }
 
 function transformIncludedValue(
@@ -264,10 +266,9 @@ function transformRowValues(
   }
 
   return applyRootTransforms
-    ? applyTableColumnTransforms(
+    ? applyColumnTransforms(
         obj,
-        tableName,
-        transformsByTable,
+        transformsByTable?.[tableName],
         encryption ? [...includedRelationNames, ...encryption.columns] : includedRelationNames,
       )
     : obj;
@@ -354,6 +355,7 @@ function prepareRowTransform(
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec,
+  relations?: Map<string, Relation[]>,
 ): PreparedRowTransform {
   if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
@@ -361,7 +363,11 @@ function prepareRowTransform(
   const includePlans =
     Object.keys(includes).length === 0
       ? []
-      : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
+      : buildIncludePlans(
+          tableName,
+          normalizeIncludeEntries(includes),
+          relations ?? analyzeRelations(schema),
+        );
   return {
     includePlans,
     includedRelationNames: includePlans.map((plan) => plan.relation.name),
@@ -439,10 +445,11 @@ export function createRowTransformer<T>(
   projection?: readonly string[],
   transformsByTable?: ReadColumnTransformRegistry,
   applyRootTransforms = true,
+  relations?: Map<string, Relation[]>,
 ): (row: WasmRow) => T {
   let prepared: PreparedRowTransform | undefined;
   return (row) => {
-    prepared ??= prepareRowTransform(schema, tableName, includes);
+    prepared ??= prepareRowTransform(schema, tableName, includes, relations);
     return transformPreparedRow<T>(
       prepared,
       row,
