@@ -23,7 +23,13 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
-import { permissionSpacesTable } from "./e2ee/current-membership-names.js";
+import {
+  currentGroupMembersTable,
+  currentSpaceMembersPrefix,
+  currentSpaceMembersTable,
+  permissionSpacesTable,
+} from "./e2ee/current-membership-names.js";
+import { encryptionSpacePolicySchema } from "./e2ee/current-membership-schema.js";
 import {
   spaceAdministrationSchema,
   spaceAdministrationTable,
@@ -78,7 +84,18 @@ type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
   [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
 };
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
-type ManagedEncryptionSchema = typeof deviceRequestSchema & typeof groupSchema & typeof spaceSchema;
+type EncryptionScope<Relations extends Relationships, Space extends string> = {
+  [Key in keyof Relations]: Relations[Key] extends ForwardRelationship<infer Target, Space>
+    ? Target
+    : never;
+}[keyof Relations];
+type EncryptionScopes<TSchema extends SchemaDefinition> = {
+  [Key in keyof TSchema]: TSchema[Key] extends DefinedTable<any, infer Relations, infer Encryption>
+    ? Encryption extends EncryptionDeclaration
+      ? EncryptionScope<Relations, Encryption["space"]>
+      : never
+    : never;
+}[keyof TSchema];
 type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
   {
     [K in keyof TSchema]: TSchema[K] extends DefinedTable<any, any, infer TEncryption>
@@ -89,7 +106,7 @@ type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
   }[keyof TSchema],
 ] extends [never]
   ? {}
-  : ManagedEncryptionSchema;
+  : ReturnType<typeof encryptionSpacePolicySchema<Extract<EncryptionScopes<TSchema>, string>>>;
 
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
@@ -1692,6 +1709,8 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
 /** Internal package-owned tables shared by app compilation and catalogue publication. */
 export const managedEncryptionSchema = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
 
+const explicitMembershipScopesByDefinition = new WeakMap<SchemaDefinition, ReadonlySet<string>>();
+
 /** Internal: keep app compilation and migration witnesses on the same managed tables. */
 export function withManagedEncryptionTables(definition: SchemaDefinition): SchemaDefinition {
   if (
@@ -1699,6 +1718,13 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
       (table) => table instanceof DefinedTable && table.encryption !== undefined,
     )
   ) {
+    const explicitMembershipScopes =
+      explicitMembershipScopesByDefinition.get(definition) ??
+      new Set(
+        Object.keys(definition)
+          .filter((name) => name.startsWith(currentSpaceMembersPrefix))
+          .map((name) => name.slice(currentSpaceMembersPrefix.length)),
+      );
     for (const [name, table] of Object.entries(managedEncryptionSchema)) {
       if (Object.hasOwn(definition, name) && definition[name] !== table) {
         throw new Error(`Cannot replace managed E2EE table "${name}"`);
@@ -1712,12 +1738,18 @@ export function withManagedEncryptionTables(definition: SchemaDefinition): Schem
       );
       if (!reference) continue;
       const scope = reference.table;
+      for (const [name, table] of Object.entries(encryptionSpacePolicySchema(scope))) {
+        if (Object.hasOwn(definition, name) && definition[name] !== table)
+          throw new Error(`Cannot replace managed E2EE table "${name}"`);
+        definition[name] = table;
+      }
       const name = spaceAdministrationTable(scope);
       if (Object.hasOwn(definition, name)) {
         if (definition[name] !== spaceAdministrationSchema(scope))
           throw new Error(`Cannot replace managed E2EE table "${name}"`);
       } else definition[name] = spaceAdministrationSchema(scope);
     }
+    explicitMembershipScopesByDefinition.set(definition, explicitMembershipScopes);
   }
   return definition;
 }
@@ -1753,6 +1785,7 @@ function compileAppSchema(definition: SchemaDefinition) {
     logical: schemaToWasm(logical),
     tables: encrypted,
     scopes: new Set([...encrypted.values()].map((table) => table.scope)),
+    explicitMembershipScopes: explicitMembershipScopesByDefinition.get(definition) ?? new Set(),
   });
   return { schema, wasmSchema };
 }
@@ -1856,13 +1889,19 @@ function createAppForTables(
   const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
-  if (encryptedSchemas.has(wasmSchema)) {
+  const encryption = encryptedSchemas.get(wasmSchema);
+  if (encryption) {
     tableNames = [
       ...new Set([
         ...tableNames,
         ...Object.keys(deviceRequestSchema),
         ...Object.keys(groupSchema),
         ...Object.keys(spaceSchema),
+        currentGroupMembersTable,
+        ...[...encryption.scopes].flatMap((scope) => [
+          currentSpaceMembersTable(scope),
+          permissionSpacesTable(scope),
+        ]),
       ]),
     ];
   }

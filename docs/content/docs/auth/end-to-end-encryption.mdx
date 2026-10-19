@@ -92,15 +92,14 @@ policies retain that functionality.
 
 Use `fromEncryptionSpace()` to derive row permissions from current space
 membership. With no options, recipients can read, insert, update and delete its
-encrypted rows. Opt the scope into current membership tables, then choose the
-helper on each protected table:
+encrypted rows. Encrypted declarations automatically add the membership tables
+for their referenced scopes. Choose the helper on each protected table:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { e2eeAccountRelation, encryptionSpacePolicySchema } from "jazz-tools/e2ee";
+import { e2eeAccountRelation } from "jazz-tools/e2ee";
 
 export const app = s.defineApp({
-  ...encryptionSpacePolicySchema("chats"),
   chats: s.table({ ownerId: s.uuid() }, { owner: e2eeAccountRelation("ownerId") }),
   messages: s
     .table({ chatId: s.uuid(), text: s.string() }, { chat: s.rel("chats", "chatId") })
@@ -143,8 +142,12 @@ Import `./permissions.js` in the client before creating the Db, using the same
 `app` instance, or define the permissions alongside your schema. A successful
 `definePermissions` call records which tables use the helper in memory. This
 lets write preparation distinguish helper tables from explicit-policy tables.
-Missing registration produces a configuration error. Registration contains no
-secrets and does not replace the deployed policies enforced by the server.
+Registration contains no secrets and does not replace the deployed policies
+enforced by the server. Automatically generated membership tables do not select
+data permissions or enable membership maintenance by themselves. Explicit data
+permissions retain their first-write behaviour. The older
+`encryptionSpacePolicySchema()` declaration remains supported but is unnecessary
+for new encrypted schemas.
 
 Wait for the scope creation handle's `wait({ tier: "global" })` before writing
 helper-protected rows. A missing or unaccepted space throws
@@ -297,8 +300,7 @@ Ordinary queries materialise the entire image in memory. Bounded upload memory i
 `db.e2ee.devices.list()` distinguishes verified membership (`state`) from this caller's key-delivery readiness (`keyReadiness`). Approve a pending device from an already authorised device with `devices.approve(deviceId).wait()`; revoke through `devices.revoke(deviceId).wait()`. Do not infer remote key possession merely from an active ledger entry.
 
 Groups contain accounts or other groups. Encrypted table declarations add the
-managed group schema automatically; `encryptionSpacePolicySchema()` also adds
-the current membership tables used by membership-derived permissions. A
+managed group schema and the current membership tables automatically. A
 group-only application can declare the exported `deviceRequestSchema` and
 `groupSchema` explicitly and include `deviceRequestPermissions` in its deployed
 policy bundle. The chat example does not include groups.

@@ -115,7 +115,7 @@ it("fails closed for invalid extension options and does not register failed poli
     expect(() => assertEncryptionPoliciesRegistered(app.wasmSchema)).toThrow(/not registered/);
   }
 });
-it("rejects missing schema opt-in, ordinary tables and repeated declarations", () => {
+it("rejects ordinary tables and repeated declarations and infers the membership schema", () => {
   const app = application();
   expect(() =>
     definePermissions(app, ({ policy }) => policy.projects.fromEncryptionSpace()),
@@ -134,7 +134,7 @@ it("rejects missing schema opt-in, ordinary tables and repeated declarations", (
   });
   expect(() =>
     definePermissions(ordinary, ({ policy }) => policy.notes.fromEncryptionSpace()),
-  ).toThrow(/encryptionSpacePolicySchema\("projects"\)/);
+  ).not.toThrow();
 });
 it("requires successful local policy registration and keeps it scoped to the application", () => {
   const app = application();

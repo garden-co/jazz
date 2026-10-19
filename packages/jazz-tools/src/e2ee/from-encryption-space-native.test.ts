@@ -5,7 +5,6 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
-import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
 import { e2eeAccountRelation } from "./account-relation.js";
@@ -17,7 +16,6 @@ async function fixture(
   groupHelpers: boolean | "create-only" | "admin-only" | "delegated" = false,
 ) {
   const app = s.defineApp({
-    ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
       { ownerId: s.uuid(), title: s.string() },
       { owner: e2eeAccountRelation("ownerId") },

@@ -2,7 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { E2eeTransactionScope } from "../runtime/db.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
-import { usesSpaceAdministration } from "./encrypted-schema.js";
+import { usesCurrentMembership, usesSpaceAdministration } from "./encrypted-schema.js";
 import { spaceAdministrationTable } from "./space-administration-schema.js";
 import {
   currentGroupMembersTable,
@@ -35,7 +35,7 @@ export function maintainGroupMember(
   recipient: string,
   operation: "add" | "remove",
 ): void {
-  if (!schema[currentGroupMembersTable]) return;
+  if (!usesCurrentMembership(schema)) return;
   tx.upsert(
     new TypedTableQueryBuilder(currentGroupMembersTable, schema),
     currentMembershipId("group", groupId, kind, recipient),
@@ -58,7 +58,7 @@ export function maintainSpaceMember(
   operation: "add" | "remove",
 ): void {
   const table = currentSpaceMembersTable(scope);
-  if (!schema[table]) return;
+  if (!usesCurrentMembership(schema, scope)) return;
   tx.upsert(
     new TypedTableQueryBuilder(table, schema),
     currentMembershipId(scopeIdentity, identifier, kind, recipient),
