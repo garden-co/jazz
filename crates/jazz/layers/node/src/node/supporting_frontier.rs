@@ -21,23 +21,45 @@ pub(super) struct SupportingFrontier {
 }
 
 impl SupportingFrontier {
-    pub(super) fn contains(&self, row: &SupportingRow) -> bool {
+    fn has_weight(&self, row: &SupportingRow) -> bool {
         self.weights
             .get(row)
             .is_some_and(|weights| weights.iter().any(|weight| *weight > 0))
     }
 
+    pub(super) fn contains(&self, row: &SupportingRow) -> bool {
+        if !self.has_weight(row) {
+            return false;
+        }
+        if row.is_current {
+            return true;
+        }
+        let mut current = row.clone();
+        current.is_current = true;
+        !self.has_weight(&current)
+    }
+
     pub(super) fn apply(&mut self, origin: usize, row: SupportingRow, weight: i64) -> Option<bool> {
         let before = self.contains(&row);
+        // Current and historical consumers share one physical version. A current
+        // declaration subsumes historical support; withdrawing it reveals any
+        // remaining historical contribution without duplicating the version.
+        let mut historical = row.clone();
+        historical.is_current = false;
+        let historical_before = self.contains(&historical);
+        let has_historical_support = row.is_current && self.has_weight(&historical);
         if let Some(unpublished) = &mut self.unpublished {
             unpublished.entry(row.clone()).or_insert(before);
+            if has_historical_support {
+                unpublished.entry(historical).or_insert(historical_before);
+            }
         }
         let weights = self.weights.entry(row.clone()).or_default();
         weights[origin] += weight;
-        let after = weights.iter().any(|weight| *weight > 0);
         if weights.iter().all(|weight| *weight == 0) {
             self.weights.remove(&row);
         }
+        let after = self.contains(&row);
         (before != after).then_some(after)
     }
 
@@ -46,7 +68,14 @@ impl SupportingFrontier {
         SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
         self.weights
             .iter()
-            .filter(|(_, weights)| weights.iter().any(|weight| *weight > 0))
+            .filter(|(row, weights)| {
+                weights.iter().any(|weight| *weight > 0)
+                    && (row.is_current || {
+                        let mut current = (*row).clone();
+                        current.is_current = true;
+                        !self.has_weight(&current)
+                    })
+            })
             .map(|(row, _)| row)
     }
 

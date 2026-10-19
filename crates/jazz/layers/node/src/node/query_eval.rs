@@ -379,15 +379,10 @@ where
             })
             .map(|source_request| source_request.source.table)
             .collect::<BTreeSet<_>>();
-        tables
-            .into_iter()
-            .map(|table| {
-                Ok((
-                    self.scope_physical_table(request.reads.primary.read_schema, &table)?,
-                    table.into(),
-                ))
-            })
-            .collect()
+        self.scope_tables(
+            request.reads.primary.read_schema,
+            tables.iter().map(String::as_str),
+        )
     }
 
     async fn compile_current_query_program(
@@ -1854,7 +1849,11 @@ where
                 continue;
             }
             let table = self.table_in_schema_ref(
-                &source_request.source.table,
+                source_request
+                    .source
+                    .table
+                    .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                    .unwrap_or(&source_request.source.table),
                 request.reads.primary.read_schema,
             )?;
             let metadata =
@@ -1864,24 +1863,30 @@ where
                     &table, &metadata,
                 );
             table_metadata
-                .entry(source_request.source.table.clone())
+                .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
             occurrences.push((source_request.source, descriptor));
         }
         for (table_name, metadata) in table_metadata {
-            let table = self.table_in_schema_ref(&table_name, request.reads.primary.read_schema)?;
+            let stored_name = table_name
+                .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                .unwrap_or(&table_name);
+            let table = self.table_in_schema_ref(stored_name, request.reads.primary.read_schema)?;
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
                 );
+            let mut fields = descriptor.fields().to_vec();
+            fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
+            let descriptor = RecordDescriptor::new_with_fields(fields);
             let id = self.database.allocate_input_source(descriptor.clone());
             sources.insert(
                 self.scope_physical_table(request.reads.primary.read_schema, &table_name)?,
                 maintained_views::CoveredInputSource {
                     id,
                     descriptor,
-                    table: table_name.into(),
+                    table: stored_name.to_owned().into(),
                 },
             );
         }
@@ -1889,6 +1894,12 @@ where
             let shared = &sources[&self
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
+            if !occurrence
+                .table
+                .starts_with(crate::schema::history::HISTORY_PREFIX)
+            {
+                graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
+            }
             if shared.descriptor != descriptor {
                 graph = graph.project(
                     descriptor
@@ -4065,9 +4076,6 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
-        if shape.query().uses_history() {
-            return Err(history::unsupported("peer subscriptions"));
-        }
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
         // remain addressed by the selected root row. Flat public join output

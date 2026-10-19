@@ -655,6 +655,7 @@ fn local_unavailable_inputs_follow_cold_current_global_receivers() {
                     &current,
                     alias,
                     &BranchKey::default(),
+                    true,
                 )
                 .unwrap(),
             ],

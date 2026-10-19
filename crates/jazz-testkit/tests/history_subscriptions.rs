@@ -1229,3 +1229,316 @@ async fn history_include_deleted_uses_current_row_permissions() {
         })
         .await;
 }
+
+/// Bob creates two versions before Alice connects. Alice's remote query fetches
+/// both versions through normal sync, including equal projected values.
+/// bob -> authority retains versions -> fresh alice -> remote history
+#[tokio::test(flavor = "current_thread")]
+async fn remote_history_fetches_missing_versions_on_fresh_client() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "same")).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("same".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-history")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let rows = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.query(history(row).select(["title"]), ReadTier::Remote),
+            )
+            .await
+            .expect("remote history settles")
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|row| row.get("title") == Some(&Value::Text("same".into())))
+            );
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice receives an authoritative empty result for an ID Bob never wrote.
+#[tokio::test(flavor = "current_thread")]
+async fn remote_history_settles_an_empty_result() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-empty-history")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let rows = tokio::time::timeout(
+                Duration::from_secs(10),
+                alice.query(
+                    history(ObjectId::from_uuid(uuid::Uuid::new_v4())),
+                    ReadTier::Remote,
+                ),
+            )
+            .await
+            .expect("empty remote history settles")
+            .unwrap();
+            assert!(rows.is_empty());
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's remote subscription fetches Bob's old versions, then follows new
+/// content and deletion without collapsing versions that share the same row ID.
+#[tokio::test(flavor = "current_thread")]
+async fn remote_history_subscription_tracks_versions_and_deletion() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "first")).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("second".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-live-history")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let mut stream = alice
+                .subscribe_with_read_tier(history(row).select(["title"]), ReadTier::Remote)
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 2);
+            assert_ne!(initial.added[0].id, initial.added[1].id);
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("third".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let added = next(&mut stream).await;
+            assert_eq!(added.added.len(), 1);
+            assert!(added.removed.is_empty());
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let removed = next(&mut stream).await;
+            assert_eq!(removed.removed.len(), 3);
+            assert!(removed.added.is_empty());
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice joins the current task to its history; Bob's updates change the current
+/// side once while retaining every historical occurrence.
+/// bob -> authority -> alice's mixed remote query and subscription
+#[tokio::test(flavor = "current_thread")]
+async fn remote_history_joins_current_versions_of_the_same_table() {
+    mixed_current_history_subscription(ReadTier::Remote).await;
+}
+
+/// Alice's local-first mixed query converges to the same version-aware join
+/// as the authority, then follows Bob's current-row updates.
+#[tokio::test(flavor = "current_thread")]
+async fn local_first_history_joins_current_versions_of_the_same_table() {
+    mixed_current_history_subscription(ReadTier::LocalFirst).await;
+}
+
+async fn mixed_current_history_subscription(tier: ReadTier) {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "first")).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("second".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-mixed-history")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let query =
+                Query::from("tasks").flat_join("history.tasks", "tasks.id", "history.tasks.id");
+            let rows = alice.query(query.clone(), ReadTier::Remote).await.unwrap();
+            assert_eq!(rows.len(), 2);
+            for result in &rows {
+                assert_eq!(
+                    result.get("tasks.title"),
+                    Some(&Value::Text("second".into()))
+                );
+            }
+            assert_ne!(rows[0].key, rows[1].key);
+            let mut stream = alice
+                .subscribe_with_read_tier(query.clone(), tier)
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 2);
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("third".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let change = next(&mut stream).await;
+            assert_eq!(change.added.len() + change.updated.len(), 3);
+            let rows = alice.query(query, ReadTier::Remote).await.unwrap();
+            assert_eq!(rows.len(), 3);
+            for result in &rows {
+                assert_eq!(
+                    result.get("tasks.title"),
+                    Some(&Value::Text("third".into()))
+                );
+            }
+            // Reversing the join must still select the true current row, even
+            // when the history predicate selects only the oldest content.
+            let historical_root = Query::from("history.tasks")
+                .flat_join("tasks", "history.tasks.id", "tasks.id")
+                .filter(eq(
+                    col("history.tasks.title"),
+                    lit(jazz::groove::records::Value::String("first".into())),
+                ));
+            let rows = alice
+                .query(historical_root, ReadTier::Remote)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("tasks.title"),
+                Some(&Value::Text("third".into()))
+            );
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let removed = next(&mut stream).await;
+            assert_eq!(removed.removed.len(), 3);
+            assert!(removed.added.is_empty());
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's local-first history follows a delete and restore-only write from Bob,
+/// recovering the same immutable versions through normal upstream sync.
+#[tokio::test(flavor = "current_thread")]
+async fn local_first_history_subscription_restores_versions() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (row, _, tx) = bob.insert("tasks", row_input!("title" => "first")).unwrap();
+            settled(&bob, tx).await;
+            settled(
+                &bob,
+                bob.update(
+                    "tasks",
+                    row,
+                    vec![("title".into(), Value::Text("second".into()))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-local-first-history")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            // Retain both versions before testing local-first visibility.
+            assert_eq!(
+                alice
+                    .query(history(row), ReadTier::Remote)
+                    .await
+                    .unwrap()
+                    .len(),
+                2
+            );
+            let mut stream = alice
+                .subscribe_with_read_tier(history(row).select(["title"]), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 2);
+            assert_ne!(initial.added[0].id, initial.added[1].id);
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let removed = next(&mut stream).await;
+            assert_eq!(removed.removed.len(), 2);
+            assert!(removed.added.is_empty());
+            settled(&bob, bob.restore("tasks", row, None).unwrap()).await;
+            let restored = next(&mut stream).await;
+            assert_eq!(restored.added.len(), 2);
+            assert!(restored.removed.is_empty());
+            assert_eq!(
+                restored.added.iter().map(|row| &row.id).collect::<Vec<_>>(),
+                initial.added.iter().map(|row| &row.id).collect::<Vec<_>>()
+            );
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}

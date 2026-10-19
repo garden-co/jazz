@@ -226,7 +226,7 @@ fn content_row_members_for_bundle(
         .iter()
         .filter(|member| member.as_row().is_some())
         .map(|member| {
-            member.as_row().ok_or(Error::InvalidStoredValue(match member {
+            let (table, row, tx) = member.as_row().ok_or(Error::InvalidStoredValue(match member {
                 ResultMemberEntry::Row(_) => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
@@ -234,7 +234,13 @@ fn content_row_members_for_bundle(
                 ResultMemberEntry::PathTuple { .. } => {
                     "path tuple result members require typed payload facts before row bundle shipping"
                 }
-            }))
+            }))?;
+            // Virtual history outputs refer to ordinary stored versions. Use
+            // their base table for immutable bodies and visibility witnesses,
+            // including restore-only events needed by local-first readers.
+            let table = table.strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                .map(|name| name.to_owned().into()).unwrap_or(table);
+            Ok((table, row, tx))
         })
         .collect()
 }
@@ -268,7 +274,10 @@ pub fn single_table_scalar_query(query: &crate::query::Query) -> bool {
             Predicate::EnumMatch { .. } => false,
         }
     }
-    query.filters.iter().all(predicate)
+    // Current-row reconciliation is keyed by row UUID; history needs its
+    // full occurrence identity and stays on the maintained relational path.
+    !query.uses_history()
+        && query.filters.iter().all(predicate)
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()
@@ -726,6 +735,9 @@ where
         schema: SchemaVersionId,
         table: &str,
     ) -> Result<crate::ids::GlobalPhysicalTableId, Error> {
+        let table = table
+            .strip_prefix(crate::schema::history::HISTORY_PREFIX)
+            .unwrap_or(table);
         self.catalogue
             .physical_mappings
             .get(&schema)
@@ -734,6 +746,25 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "scope physical table mapping missing",
             ))
+    }
+
+    pub(super) fn scope_tables<'a>(
+        &self,
+        schema: SchemaVersionId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<CompiledScopeTables, Error> {
+        let mut tables = CompiledScopeTables::new();
+        for name in names {
+            let physical = self.scope_physical_table(schema, name)?;
+            tables.insert(
+                physical,
+                name.strip_prefix(crate::schema::history::HISTORY_PREFIX)
+                    .unwrap_or(name)
+                    .to_owned()
+                    .into(),
+            );
+        }
+        Ok(tables)
     }
 
     pub(super) fn scope_logical_table(
@@ -810,15 +841,23 @@ where
             }) else {
                 return Err(invalid());
             };
+            let replacement_coordinate = |input: &SupportingRow| {
+                let coordinate = CoveredInputCoordinate::from(input);
+                if input.is_current {
+                    coordinate.row_coordinate()
+                } else {
+                    coordinate
+                }
+            };
             let moved = changed
                 .iter()
                 .chain(left)
-                .map(CoveredInputCoordinate::from)
+                .map(replacement_coordinate)
                 .collect::<BTreeSet<_>>();
             let mut rows = state
                 .covered_input_versions
                 .iter()
-                .filter(|(coordinate, _)| !moved.contains(*coordinate))
+                .filter(|(_, row)| !moved.contains(&replacement_coordinate(row)))
                 .map(|(_, row)| row.clone())
                 .collect::<Vec<_>>();
             rows.extend(changed.iter().cloned());
@@ -931,8 +970,12 @@ where
         // authoritative node store when shipping a newly admitted member.
         // Keep callers' explicit fallback flag for the legacy cases that
         // already use it.
+        // History witnesses use the virtual query schema (including magic
+        // columns). Ship their exact authored storage images, addressed by
+        // the already-authorized supporting row and transaction.
         let allow_storage_witness_fallback = allow_storage_witness_fallback
-            || maintained_facts.uses_storage_backed_result_materialization();
+            || maintained_facts.uses_storage_backed_result_materialization()
+            || shape.query().uses_history();
         let supporting_update = supporting_update.unwrap_or_else(|| {
             crate::protocol::SupportingRowsUpdate::snapshot(
                 maintained_facts.supporting_rows().cloned().collect(),
@@ -2094,6 +2137,35 @@ where
                         }
                     };
                     if adding {
+                        // Each register has at most one admitted current winner,
+                        // alongside any number of exact historical versions.
+                        if row.is_current {
+                            let base = coordinate.row_coordinate();
+                            let changed = changes
+                                .range(base.clone()..)
+                                .take_while(|(key, _)| key.row_coordinate() == base)
+                                .any(|(key, value)| {
+                                    key != &coordinate
+                                        && value.as_ref().is_some_and(|row| row.is_current)
+                                });
+                            let retained = !*cleared
+                                && state.is_some_and(|state| {
+                                    state
+                                        .covered_input_versions
+                                        .range(base.clone()..)
+                                        .take_while(|(key, _)| key.row_coordinate() == base)
+                                        .any(|(key, row)| {
+                                            key != &coordinate
+                                                && row.is_current
+                                                && !changes.contains_key(key)
+                                        })
+                                });
+                            if changed || retained {
+                                return Err(invalid(
+                                    "scope addition conflicts with a retained current row version",
+                                ));
+                            }
+                        }
                         if let Some(retained) = current {
                             return Err(invalid(&format!(
                                 "scope addition duplicates a retained physical coordinate \

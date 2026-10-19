@@ -560,6 +560,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         peer_payload_inventory: Default::default(),
         supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
             jazz::protocol::SupportingRow {
+                is_current: true,
                 physical_table,
                 version_table: "todos".to_owned().into(),
                 row,

@@ -121,6 +121,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 continue;
             };
             let input = SupportingRow {
+                is_current: true,
                 physical_table,
                 version_table: table.clone().into(),
                 row: row.row_uuid(),

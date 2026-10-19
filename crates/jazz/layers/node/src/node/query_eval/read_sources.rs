@@ -6508,8 +6508,9 @@ pub(super) fn covered_input_record(
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
     source_branch: &BranchKey,
+    is_current: bool,
 ) -> Result<Vec<u8>, Error> {
-    inline_current_record_with_source_metadata(
+    let mut values = inline_current_values_with_source_metadata_and_deletion(
         table,
         descriptor,
         row,
@@ -6518,7 +6519,10 @@ pub(super) fn covered_input_record(
         descriptor
             .field_index("supplying_branch_key")
             .map(|_| ("supplying_branch_key", source_branch)),
-    )
+        None,
+    )?;
+    values.push(Value::Bool(is_current));
+    Ok(descriptor.create(&values)?)
 }
 
 fn inline_current_record_with_source_metadata_and_deletion(

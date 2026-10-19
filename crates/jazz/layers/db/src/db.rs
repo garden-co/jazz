@@ -7001,7 +7001,7 @@ where
     else {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     };
-    if shape.query().flat_join.is_none() {
+    if shape.query().flat_join.is_none() && !shape.query().uses_history() {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     }
     let materialized = crate::local_executor::block_on(

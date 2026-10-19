@@ -710,6 +710,9 @@ impl MaintainedSubscriptionView {
             .to_owned()
             .into();
         Ok(SupportingRow {
+            is_current: !source
+                .table
+                .starts_with(crate::schema::history::HISTORY_PREFIX),
             physical_table,
             version_table,
             row: row.row_uuid(),
@@ -3760,6 +3763,7 @@ mod tests {
 
     fn physical_input(input: CoveredInputEntry) -> SupportingRow {
         SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
             version_table: input.version_table,
             row: input.source_row,

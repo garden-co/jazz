@@ -2888,7 +2888,11 @@ pub(crate) fn row_local_membership(query: &crate::query::Query) -> bool {
             select: None,
             ..query.clone()
         });
-    scalar_filters
+    // History membership also depends on the current row's visibility and
+    // policy. The current-row watermark shortcut cannot reconstruct its set
+    // of immutable versions; use the ordinary supporting-set snapshot instead.
+    !query.uses_history()
+        && scalar_filters
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()

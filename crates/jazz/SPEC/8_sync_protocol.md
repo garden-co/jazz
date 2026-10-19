@@ -148,6 +148,13 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
+**Current/history supporting facts — part of the planned wire v6 break.**
+`SupportingRow` appends `is_current: bool` after its version reference. Current
+sources consume admitted current winners; history sources consume all admitted
+content versions. This updates the unreleased v6 layout and fixtures in place,
+without another protocol-version bump or a compatibility decoder. See
+`dev/proofs/history-current-support-wire-compatibility.md`.
+
 **Linear-history boundary, 2026-10-08 — the sole wire protocol is v6.** Wire v6
 replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
 v5's compact durability tags, Edge-free peer roles and flagless shape
@@ -1356,8 +1363,10 @@ updates for other subscriptions are applied before yielding for repair.
 
 Only physical supporting versions cross the wire. Source roles, completeness
 facts, query programs and output operations remain receiver-local. Multiple
-roles referencing one version retain independent local weights; only physical
-0→1 and 1→0 presence changes cross the link. Scope removal does not delete cached
+roles referencing one version retain independent local weights. Physical
+presence changes and changes to the current-winner declaration cross the link.
+A flag change removes the old fact and adds the replacement atomically; it does
+not require resending an already available version body. Scope removal does not delete cached
 bytes or assert global access loss. Existing exact reader/policy, catalogue,
 content/deletion layer, branch and selected-authority boundaries still govern
 disclosure and repair. Reopen never restores transport revision authority from

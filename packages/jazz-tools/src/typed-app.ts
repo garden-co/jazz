@@ -1585,9 +1585,11 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
   $acceptedAt: Date;
 };
 
-/** Read-only query over locally retained accepted content versions.
+/** Read-only query over accepted content versions.
+ * Local-first reads return retained history and fetch missing versions upstream;
+ * remote reads wait for the authority-confirmed query result.
  * Bound the query with an exact row ID or an explicit `id.in` list;
- * joins, transaction-ID predicates, remote coverage and branched tables are not supported yet.
+ * joins, transaction-ID predicates and branched tables are not supported yet.
  */
 export interface HistoryQuery<
   TRow extends { id: string },
@@ -1615,7 +1617,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
 > {
-  /** Query locally retained accepted content versions of this table. */
+  /** Query accepted content versions of this table. */
   readonly history: HistoryQuery<
     TableRowFromMeta<SchemaMeta<TTable, TSchema>>,
     TableWhereFromMeta<SchemaMeta<TTable, TSchema>>

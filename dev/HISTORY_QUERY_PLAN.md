@@ -1,8 +1,9 @@
 # Querying history tables
 
-Status: bounded local history queries and subscriptions are implemented in Rust
-and TypeScript. Rust also supports flat inner joins and application-column
-aggregates. The next goal is TypeScript query-operation parity.
+Status: bounded history queries and subscriptions are implemented in Rust
+and TypeScript, including upstream fetching for remote and local-first reads.
+Rust also supports flat inner joins and application-column aggregates.
+Further TypeScript query-operation parity is deferred.
 
 ## Goal and current coverage
 
@@ -28,7 +29,7 @@ it does not reconstruct point-in-time snapshots or expose a transaction audit lo
 | Large-value page/range selection                   | Object-form `.select(...)`       | Missing                                  |
 | Arbitrary flat joins                               | No dedicated typed builder       | No dedicated typed builder               |
 | Aggregates / grouping                              | No typed builder                 | No typed builder                         |
-| Remote reads / subscriptions                       | Supported                        | Deferred                                 |
+| Remote reads / subscriptions                       | Supported                        | Supported with bounded IDs               |
 | Branched tables                                    | Supported                        | Deferred                                 |
 
 Parity means matching actual regular-query capabilities, not promising every
@@ -139,14 +140,30 @@ grant access. Current-row and permission dependencies remain in the maintained
 query graph so revocation retracts results. Client-local reads do not evaluate
 policies and use ordinary local current-row visibility.
 
-Local queries work on partial replicas and return only retained history. An
-empty result does not prove that upstream history is empty. Automatic fetching
-and complete-history coverage are not implemented.
+Local-first queries return retained history immediately (or wait according to
+`firstLoadRemoteWaitMs`) and request missing history through normal upstream
+query coverage. Subscriptions incorporate fetched and newly accepted versions.
+An immediate local result can be incomplete, including empty.
 
-Remote reads remain deferred until normal sync can deliver the requested history
-with coverage, authorization revocation, and reconnect/replacement semantics.
-Branched-table history, snapshot-cut reads, and reads through a different schema
-version also remain unsupported. These are execution gaps separate from the
+Remote reads wait for an authority-confirmed result. Their local execution uses
+only the exact versions admitted into that query's upstream scope, even when the
+client retains additional history. The authority applies current-row permissions;
+revocation retracts remote and local-first subscription results once coverage is
+updated. A new immediate local-first read can still return retained history;
+revocation does not erase previously downloaded versions from the client.
+
+The existing supporting-row protocol transfers immutable version bodies and
+settles empty results. Reconnection uses ordinary supporting-set snapshots; the
+current-row watermark shortcut does not apply to historical membership.
+Supporting membership includes the transaction identity so several versions of
+one row can coexist. Wire v6 adds `SupportingRow.is_current`: current sources
+consume only admitted current winners, while history consumes all admitted
+content versions. A scope may mix current and historical occurrences of the same
+physical table. Shared versions are sent once; a current-winner declaration
+subsumes historical support until that current contribution is withdrawn.
+
+Schema lenses project historical versions into the requested deployed schema.
+Branched-table history and snapshot-cut reads remain unsupported. These are execution gaps separate from the
 operation-parity work above.
 
 ## Access planning and compatibility
@@ -166,8 +183,10 @@ Other predicates apply within the selected histories. Cost may grow with selecte
 rows' retained history, never unrelated history. A small limit does not justify
 an unbounded scan. No new persistent history index is introduced.
 
-Stored row/history bytes and the active peer source-closure protocol are
-unchanged. Internal result payloads and descriptors are transient local data;
+Stored row/history bytes are unchanged. The peer source-closure protocol is
+the planned wire v6 break; its explicit current-winner flag updates that
+unreleased encoding in place, without a further version bump.
+See [the compatibility contract](proofs/history-current-support-wire-compatibility.md). Internal result payloads and descriptors are transient local data;
 peer publication excludes these outputs. Result keys are ephemeral host-binding
 values, not persisted identities or active peer messages. Their byte contract is
 covered by the shared result-key and binding fixtures. Future durable encoding

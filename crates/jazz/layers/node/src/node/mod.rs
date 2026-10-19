@@ -1274,8 +1274,8 @@ impl RetainedRootWindowSource {
     }
 }
 
-/// Receiver-local replacement key. Content and deletion registers, and
-/// different branches, are independent inputs even when they share a row UUID.
+/// Receiver-local exact version key. History scopes can retain multiple versions
+/// of one row; current scopes separately enforce one version per row/layer.
 /// This index is rebuilt from existing facts; it has no storage or wire codec.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CoveredInputCoordinate {
@@ -1283,6 +1283,7 @@ struct CoveredInputCoordinate {
     row: RowUuid,
     layer: crate::protocol::ResultRowLayer,
     branch: Vec<u8>,
+    transaction: Option<TxId>,
 }
 
 impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
@@ -1292,6 +1293,16 @@ impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
             row: input.row,
             layer: input.version.layer,
             branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
+            transaction: Some(input.version.tx),
+        }
+    }
+}
+
+impl CoveredInputCoordinate {
+    fn row_coordinate(&self) -> Self {
+        Self {
+            transaction: None,
+            ..self.clone()
         }
     }
 }
@@ -3469,6 +3480,7 @@ mod authority_source_incremental_tests {
     fn fact(table: &str) -> crate::protocol::SupportingRow {
         let tx = TxId::new(crate::time::TxTime::from(1), NodeUuid::from_bytes([1; 16]));
         crate::protocol::SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(
                 if table == "a" { 1 } else { 2 },
             )),

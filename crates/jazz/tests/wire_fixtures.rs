@@ -479,6 +479,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
                 supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
                     jazz::protocol::SupportingRow {
+                        is_current: true,
                         physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                             [0x71; 16],
                         )),
@@ -519,6 +520,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
                     jazz::protocol::SupportingRow {
+                        is_current: true,
                         physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                             [0x71; 16],
                         )),
@@ -644,6 +646,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
+    let snapshot = snapshot.clone();
     // A non-final part of an oversized update (tag 28): the update's payload
     // shape, with the inventory reserved for the final `ViewUpdate`.
     let SyncMessage::ViewUpdate(mut part) = snapshot.clone() else {
@@ -666,6 +669,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "view_update_physical_delta",
         "ViewUpdate",
         SyncMessage::ViewUpdate(delta),
+    ));
+    // Pin the atomic transition from current support to retained history.
+    let SyncMessage::ViewUpdate(mut demotion) = snapshot.clone() else {
+        unreachable!()
+    };
+    let old = demotion.supporting_rows.added_rows()[0].clone();
+    let mut historical = old.clone();
+    historical.is_current = false;
+    demotion.supporting_rows = jazz::protocol::SupportingRowsUpdate::Delta {
+        predecessor: [0x51; 16],
+        revision: [0x53; 16],
+        adds: vec![historical],
+        removes: vec![old],
+    };
+    messages.push((
+        "view_update_current_becomes_historical",
+        "ViewUpdate",
+        SyncMessage::ViewUpdate(demotion),
     ));
     messages.push((
         "view_update_part_non_final",
@@ -969,8 +990,7 @@ fn current_rows_cancel_uses_compact_tag() {
     assert_eq!(decode_sync_message(&expected).unwrap(), message);
 }
 
-/// Wire protocol v6 (linear row-state history over v5's compact durability
-/// tags) refuses every pre-v6 peer at the Hello handshake with the typed
+/// Wire protocol v6 (explicit current-winner supporting facts) refuses every pre-v6 peer at the Hello handshake with the typed
 /// `UnsupportedProtocolVersion`/`Never` error, before any payload is decoded.
 ///
 /// Actors: `alice` runs a v6 Core; `bob` still runs a v3 build (alpha.54 to

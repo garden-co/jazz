@@ -633,13 +633,7 @@ function normalizeQueryOptions(
   table: string,
   options?: InternalDbQueryOptions,
 ) {
-  const result = normalizeViewOptions(schema, table, options) ?? {};
-  if (table.startsWith(HISTORY_PREFIX)) {
-    if (result.tier === "remote") throw new Error("Remote history queries are not supported yet");
-    // This selects local data only; native admission still owns authorization.
-    result.tier = "local-only";
-  }
-  return result;
+  return normalizeViewOptions(schema, table, options) ?? {};
 }
 
 function assertWritableTable(table: { readonly _table: string }): void {

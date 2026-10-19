@@ -4097,7 +4097,7 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
 
 /// One exact native row version in a subscription's atomic supporting set.
 ///
-/// No query source occurrence, role or completeness claim crosses this boundary.
+/// Current-winner membership is explicit; query source aliases never cross this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct SupportingRow {
     /// Permanent physical table identity; logical scan aliases never identify a row.
@@ -4110,6 +4110,9 @@ pub struct SupportingRow {
     pub row: RowUuid,
     /// Exact content or deletion-register version.
     pub version: RowVersionRefEntry,
+    /// This scope admits the version as the current winner of its register.
+    /// Historical support alone does not assert current membership.
+    pub is_current: bool,
 }
 
 impl SupportingRow {
@@ -6467,10 +6470,12 @@ mod tests {
             version_table: groove::Intern<String>,
             row: RowUuid,
             version: RowVersionRefEntry,
+            is_current: bool,
         }
         for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
             for populated in [false, true] {
                 let old = PreviousSupportingRow {
+                    is_current: true,
                     physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                         [3; 16],
                     )),
@@ -6606,6 +6611,7 @@ mod tests {
     #[test]
     fn peer_view_rejects_duplicate_exact_supporting_row() {
         let row = SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([3; 16])),
             version_table: "todos".to_owned().into(),
             row: RowUuid::from_bytes([4; 16]),

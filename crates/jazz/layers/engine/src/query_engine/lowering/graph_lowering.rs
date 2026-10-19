@@ -1972,7 +1972,6 @@ fn lower_linear_plan_steps_cached(
                         graph = graph.unwrap_nullable(field.clone());
                     }
                 }
-                let mut project_fields = project_fields;
                 let mut retained_route_fields = BTreeSet::new();
                 let mut projected_outputs = project_fields
                     .iter()

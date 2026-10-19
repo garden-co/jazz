@@ -1127,6 +1127,7 @@ where
             &row,
             schema_alias,
             &version.branch_key(),
+            input.is_current,
         )?;
         #[cfg(feature = "cold-settle-attribution")]
         version.record_conversion("covered_input_record", record.len());

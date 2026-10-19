@@ -244,15 +244,15 @@ describe("TS Query API history", () => {
     expect(restored[1]).toMatchObject({ id: note.id, title: "restored", done: false });
   });
 
-  it("does not re-evaluate read policies for locally retained history", async () => {
+  it("local-first history retracts cached versions when upstream access is revoked", async () => {
     const note = await insertNote();
     const query = app.notes.history.where({ id: note.id }).orderBy("$acceptedAt");
     const latest = watch(query);
     await expect.poll(() => latest()?.length).toBe(1);
     // The deployed read policy denies done=true; writes remain allowed.
     await db.update(app.notes, note.id, { done: true }).wait({ tier: "global" });
-    await expect.poll(() => latest()?.map((row) => row.done)).toEqual([false, true]);
-    expect((await db.all(query)).map((row) => row.done)).toEqual([false, true]);
+    await expect.poll(latest).toEqual([]);
+    expect(await db.all(query, { tier: "remote" })).toEqual([]);
   });
 
   it("includeDeleted returns content versions of a deleted row", async () => {
@@ -294,11 +294,14 @@ describe("TS Query API history", () => {
     expect(restored[1]).toMatchObject({ id: note.id, title: "restored" });
   });
 
-  it("rejects remote history reads", async () => {
+  it("remote history reads return content and version metadata", async () => {
     const note = await insertNote();
-    await expect(
-      db.all(app.notes.history.where({ id: note.id }), { tier: "remote" }),
-    ).rejects.toThrow(new Error("Remote history queries are not supported yet"));
+    const rows = await db.all(app.notes.history.where({ id: note.id }), { tier: "remote" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: note.id, title: "first", done: false });
+    expect(typeof rows[0]!.$transactionId).toBe("string");
+    expect(rows[0]!.$acceptedAt).toBeInstanceOf(Date);
+    expect(Number.isFinite(rows[0]!.$acceptedAt.getTime())).toBe(true);
   });
 
   it("rejects history reads without a bounded row id constraint", async () => {
@@ -730,5 +733,166 @@ describe("TS Query API history schema migrations", () => {
     await db.update(v2.notes, id, { heading: "third", category: "new" }).wait({ tier: "global" });
     await expect.poll(observed).toEqual([...old, { id, heading: "third", category: "new" }]);
     expect(await db.all(query)).toEqual(latest);
+  });
+});
+
+describe("TS Query API upstream history", () => {
+  let writer: Db;
+  let reader: Db;
+  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let id: string;
+  let stop: (() => void) | undefined;
+
+  beforeEach(async () => {
+    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    writer = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    const row = await writer
+      .insert(app.notes, { title: "first", done: false })
+      .wait({ tier: "global" });
+    id = row.id;
+    await writer.update(app.notes, id, { title: "second" }).wait({ tier: "global" });
+    reader = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+  });
+
+  afterEach(async () => {
+    stop?.();
+    stop = undefined;
+    try {
+      await reader?.shutdown();
+      await writer?.shutdown();
+    } finally {
+      await server?.stop();
+    }
+  });
+
+  function query() {
+    return app.notes.history.where({ id }).orderBy("$acceptedAt").select("title");
+  }
+
+  it("remote reads fetch missing versions on a fresh client", async () => {
+    expect(await reader.all(query(), { tier: "local-first", firstLoadRemoteWaitMs: 0 })).toEqual(
+      [],
+    );
+    expect(await reader.all(query(), { tier: "remote" })).toEqual([
+      { id, title: "first" },
+      { id, title: "second" },
+    ]);
+    expect(await reader.all(query(), { tier: "local-first", firstLoadRemoteWaitMs: 0 })).toEqual([
+      { id, title: "first" },
+      { id, title: "second" },
+    ]);
+  });
+
+  it("remote reads settle when the requested row has no history", async () => {
+    expect(
+      await reader.all(app.notes.history.where({ id: crypto.randomUUID() }), { tier: "remote" }),
+    ).toEqual([]);
+  });
+
+  it("remote reads apply ordering and pagination across fetched versions", async () => {
+    expect(await reader.all(query().offset(1).limit(1), { tier: "remote" })).toEqual([
+      { id, title: "second" },
+    ]);
+  });
+
+  it("local-first reads can wait for missing upstream history", async () => {
+    expect(
+      await reader.all(query(), { tier: "local-first", firstLoadRemoteWaitMs: 5_000 }),
+    ).toEqual([
+      { id, title: "first" },
+      { id, title: "second" },
+    ]);
+  });
+
+  it("remote filters exclude other versions already cached by the client", async () => {
+    // Fetch all history versions into the local DB
+    await reader.all(query(), { tier: "remote" });
+    // Fetch only first history version form remote DB
+    const filtered = app.notes.history.where({ id, title: "first" }).select("title");
+    expect(await reader.all(filtered, { tier: "remote" })).toEqual([{ id, title: "first" }]);
+  });
+
+  it("remote reads recover versions accepted while the client was disconnected", async () => {
+    await reader.all(query(), { tier: "remote" });
+    await reader.disconnect();
+    await writer.update(app.notes, id, { title: "third" }).wait({ tier: "global" });
+    await writer.update(app.notes, id, { title: "fourth" }).wait({ tier: "global" });
+    await reader.reconnect();
+    expect(await reader.all(query(), { tier: "remote" })).toEqual([
+      { id, title: "first" },
+      { id, title: "second" },
+      { id, title: "third" },
+      { id, title: "fourth" },
+    ]);
+  });
+
+  it("local-first subscriptions fetch missing versions after their local result", async () => {
+    let latest: { id: string; title: string }[] | undefined;
+    let failure: Error | undefined;
+    const snapshots: { id: string; title: string }[][] = [];
+    stop = reader.subscribe(
+      query(),
+      {
+        onUpdate: (rows) => {
+          latest = rows;
+          snapshots.push(rows);
+        },
+        onError: (error) => {
+          failure = error;
+        },
+      },
+      { tier: "local-first" },
+    );
+    await expect
+      .poll(() => {
+        if (failure) throw failure;
+        return latest;
+      })
+      .toEqual([
+        { id, title: "first" },
+        { id, title: "second" },
+      ]);
+    expect(snapshots[0]).toEqual([]);
+  });
+
+  it("remote subscriptions retract history when current permission is revoked", async () => {
+    let latest: { id: string; title: string }[] | undefined;
+    let failure: Error | undefined;
+    stop = reader.subscribe(
+      query(),
+      {
+        onUpdate: (rows) => {
+          latest = rows;
+        },
+        onError: (error) => {
+          failure = error;
+        },
+      },
+      { tier: "remote" },
+    );
+    const observed = () => {
+      if (failure) throw failure;
+      return latest;
+    };
+    await expect.poll(observed).toEqual([
+      { id, title: "first" },
+      { id, title: "second" },
+    ]);
+    await writer.update(app.notes, id, { done: true }).wait({ tier: "global" });
+    await expect.poll(observed).toEqual([]);
+    expect(await reader.all(query(), { tier: "remote" })).toEqual([]);
   });
 });

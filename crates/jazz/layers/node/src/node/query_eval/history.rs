@@ -17,9 +17,6 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         request: &SourceRequest,
     ) -> Result<ResolvedSource, Error> {
         let schema_version = self.read_view.read_schema;
-        if schema_version != self.node.catalogue.local_schema_version_id {
-            return Err(unsupported("history through a different read schema"));
-        }
         let table = self
             .node
             .table_in_schema(&request.source.table, schema_version)?;
@@ -52,67 +49,82 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             } => *permission_subject,
             _ => return Err(unsupported("history as policy evidence")),
         };
-        let tier = self
-            .read_view
-            .source_current_tier(&request.source)
-            .ok_or_else(|| unsupported("history at a snapshot cut"))?;
+        let local_first = matches!(self.read_view.sources.get(&request.source),
+            Some(SourceExpr::WithOverlays { overlays, .. })
+                if overlays.entries == [OverlayRef::PendingLocal]);
+        // Once upstream coverage is installed, history uses its admitted
+        // versions just like ordinary sources. No pending history is exposed.
+        let covered = self.covered_input_sources.get(&request.source).cloned();
+        let authorized = if let Some(covered) = &covered {
+            // Covered reads consume only the exact authority-admitted versions.
+            // Their row IDs bound physical access; the version join below
+            // excludes other history this client happens to retain.
+            covered.clone().project(["row_uuid"])
+        } else {
+            let tier = if local_first {
+                DurabilityTier::Local
+            } else {
+                self.read_view
+                    .source_current_tier(&request.source)
+                    .ok_or_else(|| unsupported("history at a snapshot cut"))?
+            };
 
-        let schema = &self
-            .node
-            .catalogue
-            .catalogue_schemas
-            .get(&schema_version)
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
-            .schema;
-        let visibility = crate::query::Query::from(base_name)
-            .select(["id"])
-            .validate_with_schema_version(schema, schema_version)?;
-        let binding = visibility.bind(BTreeMap::new())?;
-        // Compile the ordinary authorized point read into the source graph. No
-        // query is executed while preparing history, and permission changes
-        // remain dependencies of the resulting graph.
-        let mut visibility_request = self
-            .node
-            .current_query_program_request_with_inline_binding_source(
-                &visibility,
-                &binding,
-                tier,
-                identity,
-                CurrentQueryProgramOutput::AuthorizedRows,
-                &ReadViewSpec::default(),
-                QueryAuthorizationMode::TrustedServing,
-            )?;
-        // Reuse ordinary deleted-row visibility and policy evaluation for the
-        // current-row gate; historical content eligibility remains unchanged.
-        if request.visibility == RowVisibility::IncludeDeleted {
-            visibility_request.input.shape = self
+            let schema = &self
                 .node
-                .normalized_include_deleted_row_set_shape(&visibility, &binding)?;
-        }
-        let visibility_program =
-            Box::pin(self.node.compile_query_program_request_with_access_paths(
-                visibility_request,
-                BTreeMap::from([(
-                    root_source_id(base_name),
-                    SourceAccessPath::Lookup(SourceLookup {
-                        fields: vec!["row_uuid".into()],
-                        keys,
-                    }),
-                )]),
-            ))
-            .await?;
-        self.nested_program_dependencies.tables.extend(
-            visibility_program
-                .lowered
-                .targeted_refresh_tables
-                .iter()
-                .cloned(),
-        );
-        self.nested_program_dependencies.uncertain |=
-            visibility_program.lowered.targeted_refresh_uncertain;
-        let authorized =
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema;
+            let visibility = crate::query::Query::from(base_name)
+                .select(["id"])
+                .validate_with_schema_version(schema, schema_version)?;
+            let binding = visibility.bind(BTreeMap::new())?;
+            // Compile the ordinary authorized point read into the source graph. No
+            // query is executed while preparing history, and permission changes
+            // remain dependencies of the resulting graph.
+            let mut visibility_request = self
+                .node
+                .current_query_program_request_with_inline_binding_source(
+                    &visibility,
+                    &binding,
+                    tier,
+                    identity,
+                    CurrentQueryProgramOutput::AuthorizedRows,
+                    &ReadViewSpec::default(),
+                    QueryAuthorizationMode::TrustedServing,
+                )?;
+            // Reuse ordinary deleted-row visibility and policy evaluation for the
+            // current-row gate; historical content eligibility remains unchanged.
+            if request.visibility == RowVisibility::IncludeDeleted {
+                visibility_request.input.shape = self
+                    .node
+                    .normalized_include_deleted_row_set_shape(&visibility, &binding)?;
+            }
+            let visibility_program =
+                Box::pin(self.node.compile_query_program_request_with_access_paths(
+                    visibility_request,
+                    BTreeMap::from([(
+                        root_source_id(base_name),
+                        SourceAccessPath::Lookup(SourceLookup {
+                            fields: vec!["row_uuid".into()],
+                            keys,
+                        }),
+                    )]),
+                ))
+                .await?;
+            self.nested_program_dependencies.tables.extend(
+                visibility_program
+                    .lowered
+                    .targeted_refresh_tables
+                    .iter()
+                    .cloned(),
+            );
+            self.nested_program_dependencies.uncertain |=
+                visibility_program.lowered.targeted_refresh_uncertain;
             lowering::lowered_terminal_graph(&visibility_program, "policy.authorized_rows")?
-                .project(["row_uuid"]);
+                .project(["row_uuid"])
+        };
         // The fixed branch prefix plus the live authorized row IDs form the
         // physical history lookup. No whole history scan enters the graph.
         let history_source = self.node.physical_history_branch_source_graph(
@@ -127,6 +139,21 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .filter(PredicateExpr::gt("seq", Value::U64(0)));
         let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
         let history_fields = descriptor_field_names(&history_descriptor)?;
+        let history = if let Some(covered) = covered {
+            GraphBuilder::join(
+                history,
+                covered.project(["row_uuid", "tx_time", "tx_node_id"]),
+                ["row_uuid", "tx_time", "tx_node_id"],
+                ["row_uuid", "tx_time", "tx_node_id"],
+            )
+            .project_fields(
+                history_fields
+                    .iter()
+                    .map(|name| ProjectField::renamed(format!("left.{name}"), name)),
+            )
+        } else {
+            history
+        };
         // Complete received images may omit authored-column metadata. Preserve
         // that representation; only an explicit deletion-only image is excluded.
         let history = history.filter(PredicateExpr::Or(vec![
