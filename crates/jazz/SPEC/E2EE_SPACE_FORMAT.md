@@ -51,7 +51,7 @@ must be canonical lower-case UUID strings. The application context follows the
 existing account-scoped lifecycle convention for the root author.
 
 The root's column is compact JSON
-`["root", accountId, deviceId, accountEpochId, initialGrantId]`; recipient is
+`["root", creatorAccountId, deviceId, accountEpochId, initialGrantId]`; recipient is
 empty. Its signed record frames three fields with u32be lengths: that context,
 the `JE2E`-encoded verification value and the creating device's sealed key
 envelope. The latter uses column `author` and device ID as recipient. It is
@@ -287,3 +287,15 @@ This extracted layer has not been executed by its extraction lane. Historical
 checkpoint timings are not qualification for this stack. Release qualification,
 resource bounds, platform coverage and independent review are tracked in
 [the E2EE qualification issue](https://github.com/garden-co/jazz/issues/3125).
+
+## Space creator column
+
+The immutable `__e2ee_spaces.creatorAccountId` column identifies the account
+that created and signed the initial root. Membership changes preserve that
+identity. It references `__e2ee_account_identities`; it is independent of the
+set of recipients.
+
+The unreleased schema now uses this explicit name throughout. No legacy column
+or alias is retained, and the renamed descriptor changes the schema identity.
+The version-one signed transcript still places the same creator account value
+in the same tuple slot, so its bytes and independent C fixtures are unchanged.
