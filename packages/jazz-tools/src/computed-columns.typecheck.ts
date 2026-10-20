@@ -8,7 +8,7 @@ const table = s.computed(base, {
     compute: (row): "low" | "high" => {
       const score: number = row.score;
       // @ts-expect-error undeclared dependencies are not in the callback context
-      row.label;
+      String(row.label);
       // @ts-expect-error the dependency context is read-only
       row.score = 1;
       return score >= 8 ? "high" : "low";
@@ -58,3 +58,17 @@ const chained = s.computed(table, {
   },
 });
 s.defineApp({ items: chained });
+
+const values = s.defineApp({
+  items: s.computed(base, {
+    object: { dependsOn: ["score"], compute: (row) => ({ score: row.score }) },
+    list: { dependsOn: ["score"], compute: (row) => [row.score] },
+  }),
+});
+declare const result: s.RowOf<typeof values.items>;
+// @ts-expect-error the computed property is read-only
+result.object = { score: 1 };
+// @ts-expect-error inferred computed object values are read-only
+result.object.score = 1;
+// @ts-expect-error inferred computed arrays are read-only
+result.list.push(1);

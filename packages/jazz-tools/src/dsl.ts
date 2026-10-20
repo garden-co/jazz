@@ -221,18 +221,39 @@ export function hasExternalProvenanceNameAllowance(column: {
 }): boolean {
   return column._allowExternalProvenanceName === true;
 }
-export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
-  TBuilder["__jazzSqlType"];
-export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
+/** A client-side, read-only field with no stored column. */
+export interface ComputedColumn<Value = unknown> {
+  readonly _computed: {
+    readonly dependsOn: readonly string[];
+    readonly compute: (row: Readonly<Record<string, unknown>>) => Value;
+  };
+  readonly _transform?: never;
+  readonly _allowExternalProvenanceName?: never;
+  readonly __jazzSqlType: never;
+  readonly __jazzOptional: false;
+  readonly __jazzReferences: undefined;
+  readonly __jazzHasDefault: false;
+  readonly __jazzValue: Readonly<Value>;
+  readonly __jazzInitValue: never;
+}
+
+export type AnyColumnDefinition = AnyTypedColumnBuilder | ComputedColumn;
+
+export function isComputedColumn(column: AnyColumnDefinition): column is ComputedColumn {
+  return "_computed" in column;
+}
+
+export type ColumnBuilderSqlType<TBuilder extends AnyColumnDefinition> = TBuilder["__jazzSqlType"];
+export type ColumnBuilderOptional<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzOptional"];
-export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderReferences<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzReferences"];
-export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderHasDefault<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzHasDefault"];
-export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
+export type ColumnBuilderValue<TBuilder extends AnyColumnDefinition> = TBuilder["__jazzValue"];
 
 /** Input values are explicit so even same-shape transforms retain their contract. */
-export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderInitValue<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzInitValue"];
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {

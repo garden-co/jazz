@@ -139,14 +139,19 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<string, Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>> | undefined>
+  Record<
+    string,
+    Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>> | undefined
+  >
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn">>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>>,
   excludedColumns: readonly string[] = [],
   stored?: Readonly<Record<string, unknown>>,
+  appValues?: ReadonlyMap<string, unknown>,
+  partialColumns?: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   if (!transforms) return row;
   const source =
@@ -160,7 +165,11 @@ export function applyColumnTransforms(
       continue;
     }
     const transform = transforms[column]!;
-    row[column] = transform.from(row[column], dependencyContext(transform, source));
+    if (!transform.computed)
+      row[column] =
+        appValues?.has(column) && (!partialColumns || !Object.hasOwn(partialColumns, column))
+          ? appValues.get(column)
+          : transform.from(row[column], dependencyContext(transform, source));
   }
   return row;
 }

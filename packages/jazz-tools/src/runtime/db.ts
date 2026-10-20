@@ -64,6 +64,7 @@ import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./wr
 import { writeRow } from "./write-row.js";
 import {
   columnTransformDependencies,
+  computedColumnValues,
   dependencyContext,
   storedDependencyValues,
   type ColumnTransform,
@@ -1017,23 +1018,36 @@ function prepareTransformRead<T>(
     let visibleTransforms: ColumnTransformMap | undefined;
     let dependencies: Set<string> | undefined;
     let hidden: string[] | undefined;
+    let computed: string[] | undefined;
+    const addDependency = (dependency: string) => {
+      if (transforms?.[dependency]?.computed) return;
+      (dependencies ??= new Set()).add(dependency);
+      if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
+        if (physical === select) physical = [...select];
+        physical.push(dependency);
+        (hidden ??= []).push(dependency);
+      }
+      if (Object.hasOwn(partial, dependency)) {
+        if (partial === partialSelect) partial = { ...partialSelect };
+        delete partial[dependency];
+      }
+    };
+    if (transforms && select.some((column) => transforms[column]?.computed))
+      physical = select.filter((column) => !transforms[column]?.computed);
     if (transforms)
       for (const column of selectAll ? Object.keys(transforms) : select) {
         if (!Object.hasOwn(transforms, column)) continue;
         (visibleTransforms ??= {})[column] = transforms[column]!;
-        for (const dependency of transforms[column]!.dependsOn ?? []) {
-          (dependencies ??= new Set()).add(dependency);
-          if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
-            if (physical === select) physical = [...select];
-            physical.push(dependency);
-            (hidden ??= []).push(dependency);
-          }
-          if (Object.hasOwn(partial, dependency)) {
-            if (partial === partialSelect) partial = { ...partialSelect };
-            delete partial[dependency];
-          }
+        if (transforms[column]!.computed) {
+          (computed ??= []).push(column);
+          for (const dependency of columnTransformDependencies(transforms).byColumn.get(column) ??
+            [])
+            addDependency(dependency);
+        } else {
+          for (const dependency of transforms[column]!.dependsOn ?? []) addDependency(dependency);
         }
       }
+    if (!selectAll && !physical.length) physical = ["id"];
     let preparedIncludes = includes;
     const finishIncludes: Array<
       [string, (row: Record<string, unknown>) => Record<string, unknown>]
@@ -1070,9 +1084,20 @@ function prepareTransformRead<T>(
               const stored = visibleTransforms
                 ? storedDependencyValues(dependencyColumns, row)
                 : undefined;
+              const appValues = computed
+                ? computedColumnValues(transforms!, computed, stored!)
+                : undefined;
               const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
               if (visibleTransforms)
-                applyColumnTransforms(result, visibleTransforms, excluded, stored);
+                applyColumnTransforms(
+                  result,
+                  visibleTransforms,
+                  excluded,
+                  stored,
+                  appValues,
+                  hasPartial ? partialSelect : undefined,
+                );
+              if (computed) for (const column of computed) result[column] = appValues!.get(column);
               for (const [name, finish] of finishIncludes) {
                 const value = result[name];
                 if (Array.isArray(value))
@@ -1148,7 +1173,14 @@ function transformOutputColumns(
     return row;
   }
 
-  return applyColumnTransforms(row as Record<string, unknown>, source._columnTransforms);
+  const record = row as Record<string, unknown>;
+  const computed = columnTransformDependencies(source._columnTransforms).computedColumns;
+  const appValues = computed.length
+    ? computedColumnValues(source._columnTransforms, computed, record)
+    : undefined;
+  applyColumnTransforms(record, source._columnTransforms, [], undefined, appValues);
+  for (const column of computed) record[column] = appValues!.get(column);
+  return record;
 }
 
 function transformInputColumns(
@@ -1166,6 +1198,8 @@ function transformInputColumns(
   let hasTransform = false;
   let hasDependencies = false;
   for (const column in record) {
+    if (Object.hasOwn(record, column) && transforms[column]?.computed)
+      throw new TypeError(`Computed field "${column}" is read-only.`);
     if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
     const transform = transforms[column];
     if (transform) {
@@ -1233,6 +1267,8 @@ function missingWriteDependencies(
   const { byColumn } = columnTransformDependencies(table._columnTransforms);
   let missing: Set<string> | undefined;
   for (const column of Object.keys(data)) {
+    if (table._columnTransforms[column]?.computed)
+      throw new TypeError(`Computed field "${column}" is read-only.`);
     if (data[column] === undefined) continue;
     for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
       if (dependency !== "id" || id === undefined) {
@@ -1321,7 +1357,7 @@ function reserveRowId(): string {
 function hasDependentTransforms(table: TableProxy<any, any>): boolean {
   return (
     !!table._columnTransforms &&
-    columnTransformDependencies(table._columnTransforms).columns.length > 0
+    columnTransformDependencies(table._columnTransforms).hasWriteDependencies
   );
 }
 
