@@ -72,3 +72,21 @@ result.object = { score: 1 };
 result.object.score = 1;
 // @ts-expect-error inferred computed arrays are read-only
 result.list.push(1);
+
+s.definePermissions(app, ({ policy }) => {
+  policy.items.allowRead.where((row) => {
+    // @ts-expect-error computed values are not stored permission row references
+    String(row.priority);
+    return policy.items.exists.where({ id: row.id, score: row.score });
+  });
+  policy.items.allowUpdate.whereOld((row) => {
+    // @ts-expect-error computed values are not stored permission row references
+    String(row.priority);
+    return policy.items.exists.where({ score: row.score });
+  });
+  policy.items.where((row) => {
+    // @ts-expect-error computed values are not stored permission row references
+    String(row.priority);
+    return { score: row.score };
+  });
+});

@@ -1,9 +1,64 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { defineMigration, schema as s } from "../../src/index.js";
+import { defineMigration, schema as s, type RowRefValue } from "../../src/index.js";
 
 type Priority = "low" | "medium" | "high";
 
 describe("virtual computed columns", () => {
+  it("rejects computed permission row references for actions and relation callbacks", () => {
+    const app = s.defineApp({
+      items: s.computed(s.table({ score: s.int() }, {}), {
+        priority: { dependsOn: ["score"], compute: (row) => (row.score >= 8 ? "high" : "low") },
+      }),
+    });
+    for (const action of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"] as const) {
+      expect(() =>
+        s.definePermissions(app, ({ policy }) => {
+          policy.items[action].where((row) =>
+            policy.items.exists.where({
+              score: (row as unknown as { priority: RowRefValue }).priority,
+            }),
+          );
+        }),
+      ).toThrow(/computed field "priority".*permission/i);
+    }
+    for (const method of ["whereOld", "whereNew"] as const) {
+      expect(() =>
+        s.definePermissions(app, ({ policy }) => {
+          policy.items.allowUpdate[method]((row) =>
+            policy.items.exists.where({
+              score: (row as unknown as { priority: RowRefValue }).priority,
+            }),
+          );
+        }),
+      ).toThrow(/computed field "priority".*permission/i);
+    }
+    expect(() =>
+      s.definePermissions(app, ({ policy }) => {
+        const relation = policy.items.where((row) => ({
+          score: (row as unknown as { priority: RowRefValue }).priority,
+        }));
+        policy.items.allowRead.where(policy.exists(relation));
+      }),
+    ).toThrow(/computed field "priority".*permission/i);
+  });
+
+  it("keeps stored permission references available when another table computes the same name", () => {
+    const app = s.defineApp({
+      items: s.computed(s.table({ score: s.int() }, {}), {
+        priority: { dependsOn: ["score"], compute: (row) => row.score },
+      }),
+      stored: s.table({ priority: s.int() }, {}),
+    });
+    const permissions = s.definePermissions(app, ({ policy }) => {
+      policy.items.allowRead.where((row) => policy.items.exists.where({ score: row.score }));
+      policy.stored.allowRead.where((row) =>
+        policy.stored.exists.where({ priority: row.priority }),
+      );
+    });
+    expect(permissions.items?.select?.using).toMatchObject({ type: "Exists", table: "items" });
+    expect(permissions.stored?.select?.using).toMatchObject({ type: "Exists", table: "stored" });
+  });
+
   it("validates declarations and leaves the original table unchanged", () => {
     const base = s.table({ score: s.int() }, {});
     const computed = s.computed(base, {
