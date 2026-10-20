@@ -576,18 +576,11 @@ fn convert_table(
     }
 
     let mut converted = CoreTableSchema::new(name.as_str(), columns);
-    for (column, target) in &table.synthetic_references_v1 {
-        if !matches!(column.as_str(), "$createdBy.account" | "$updatedBy.account") {
-            return Err(err(
-                format!(
-                    "$.{}.synthetic_references_v1.{}",
-                    name.as_str(),
-                    column.as_str()
-                ),
-                "synthetic references require $createdBy.account or $updatedBy.account",
-            ));
-        }
-        references.insert(column.as_str().to_owned(), target.as_str().to_owned());
+    if !table.synthetic_references_v1.is_empty() {
+        return Err(err(
+            format!("$.{}.synthetic_references_v1", name.as_str()),
+            "Synthetic account references are not supported. Use a stored UUID owner column.",
+        ));
     }
     converted.branch_by = table
         .branch_by
@@ -3613,118 +3606,28 @@ mod tests {
         );
     }
 
-    /// Alice's creator/updater relationships compile through trusted provenance,
-    /// without adding user-controlled cells. A compiler-level test is needed to
-    /// exercise both inheritance and same-commit reference validation directly.
+    /// Mallory's synthetic references must reject before catalogue publication,
+    /// whether supplied as a Rust schema or raw JSON. This lower-level boundary
+    /// test is needed because unsupported schemas cannot reach row operations.
     #[test]
-    fn synthetic_account_references_v1_compile_without_stored_columns() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("accounts")
-                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
-            )
-            .table(
-                TableSchema::builder("projects")
-                    .column("name", ColumnType::Text)
-                    .synthetic_reference_v1("$createdBy.account", "accounts")
-                    .synthetic_reference_v1("$updatedBy.account", "accounts")
-                    .policies(TablePolicies::new().with_select(PolicyExpr::inherits(
-                        Operation::Select,
-                        "$createdBy.account",
-                    ))),
-            )
-            .table(
-                TableSchema::builder("roots")
-                    .fk_column("accountId", "accounts")
-                    .column("identifier", ColumnType::Uuid)
-                    .policies(TablePolicies::new().with_insert(
-                        PolicyExpr::exists_including_created(
-                            "projects",
-                            PolicyExpr::and(vec![
-                                PolicyExpr::eq_session(
-                                    "id",
-                                    vec!["__jazz_outer_row".into(), "identifier".into()],
-                                ),
-                                PolicyExpr::eq_session(
-                                    "$createdBy.account",
-                                    vec!["__jazz_outer_row".into(), "accountId".into()],
-                                ),
-                            ]),
-                        ),
-                    )),
-            )
-            .build();
-        let compiled =
-            convert_public_schema(&schema).expect("synthetic account reference compiles");
-        let projects = compiled
-            .tables
-            .iter()
-            .find(|table| table.name == "projects")
-            .unwrap();
-        assert_eq!(projects.columns.len(), 1);
-        assert_eq!(projects.references["$createdBy.account"], "accounts");
-        assert_eq!(projects.references["$updatedBy.account"], "accounts");
-    }
-
-    /// Mallory cannot turn a text/timestamp/unknown provenance field into a UUID
-    /// reference. Public schema admission is tested here before any query runs.
-    #[test]
-    fn synthetic_account_references_v1_reject_invalid_paths_and_targets() {
+    fn synthetic_account_references_reject_at_schema_admission() {
         for column in [
+            "$createdBy.account",
+            "$updatedBy.account",
             "$createdBy",
             "$createdAt",
-            "$createdBy.identity.subject",
             "$missing.account",
         ] {
             let schema = SchemaBuilder::new()
                 .table(TableSchema::builder("accounts"))
                 .table(TableSchema::builder("projects").synthetic_reference_v1(column, "accounts"))
                 .build();
-            assert!(
-                convert_public_schema(&schema)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("synthetic references require")
-            );
+            let error = convert_public_schema(&schema).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
+            let json = serde_json::to_value(&schema).expect("schema JSON");
+            let error = serde_json::from_value::<Schema>(json).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
         }
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("projects")
-                    .synthetic_reference_v1("$createdBy.account", "missing"),
-            )
-            .build();
-        assert!(
-            convert_public_schema(&schema)
-                .unwrap_err()
-                .to_string()
-                .contains("does not exist")
-        );
-    }
-
-    /// Alice's version 1 schema wire representation and cross-runtime hash must
-    /// stay stable. Byte-level admission is intentionally tested below node APIs.
-    #[test]
-    fn synthetic_account_references_v1_wire_and_hash_fixture() {
-        let table = TableSchema::builder("projects")
-            .synthetic_reference_v1("$updatedBy.account", "accounts")
-            .synthetic_reference_v1("$createdBy.account", "accounts")
-            .build();
-        assert_eq!(
-            serde_json::to_string(&table).unwrap(),
-            r#"{"synthetic_references_v1":{"$createdBy.account":"accounts","$updatedBy.account":"accounts"},"columns":[]}"#
-        );
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("accounts"))
-            .table(
-                TableSchema::builder("projects")
-                    .synthetic_reference_v1("$createdBy.account", "accounts")
-                    .synthetic_reference_v1("$updatedBy.account", "accounts"),
-            )
-            .build();
-        assert_eq!(
-            crate::model::public_schema::SchemaHash::compute(&schema).to_hex(),
-            "09c26732b35bfa0537d12b1c6330d138df049c400550370f49a263d31f00ba4f"
-        );
     }
 
     #[test]

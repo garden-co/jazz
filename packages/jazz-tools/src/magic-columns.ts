@@ -55,6 +55,14 @@ export function isProvenanceAccountColumn(column: string): column is ProvenanceA
   return PROVENANCE_ACCOUNT_COLUMNS.includes(column as ProvenanceAccountColumn);
 }
 
+/** Unsupported metadata must fail before schema hashing or catalogue publication. */
+export function assertNoSyntheticReferences(tableName: string, references: unknown): void {
+  if (references !== undefined && references !== null && Object.keys(references).length > 0)
+    throw new Error(
+      `Synthetic account references on "${tableName}" are not supported. Use a stored UUID owner column.`,
+    );
+}
+
 type RejectedPermissionIntrospectionColumn =
   (typeof REJECTED_PERMISSION_INTROSPECTION_COLUMNS)[number];
 export type ProvenanceMagicColumn = (typeof PROVENANCE_MAGIC_COLUMNS)[number];

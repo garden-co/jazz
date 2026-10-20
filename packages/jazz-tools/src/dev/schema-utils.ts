@@ -1,3 +1,4 @@
+import { assertNoSyntheticReferences } from "../magic-columns.js";
 import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-metadata.js";
 import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
@@ -64,17 +65,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     writer.stringBytes(tableName);
     writer.byte(0);
     hashColumns(writer, table.columns);
-    if (Object.keys(table.synthetic_references_v1 ?? {}).length) {
-      writer.stringBytes("synthetic_references_v1\0");
-      writer.stringBytes(
-        JSON.stringify(
-          Object.entries(table.synthetic_references_v1!).sort(([a], [b]) =>
-            compareCodePoints(a, b),
-          ),
-        ),
-      );
-      writer.byte(0);
-    }
+    assertNoSyntheticReferences(tableName, table.synthetic_references_v1);
 
     if (table.indexed_columns) {
       writer.byte(1);

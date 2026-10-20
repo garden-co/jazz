@@ -525,7 +525,20 @@ fn corrupt_catalogue_entry(entry: &CatalogueEntry, error: impl Into<String>) -> 
     }
 }
 
-fn schema_entry(app_id: AppId, schema: Schema, published_at: u64) -> (SchemaHash, CatalogueEntry) {
+fn schema_entry(
+    app_id: AppId,
+    schema: Schema,
+    published_at: u64,
+) -> Result<(SchemaHash, CatalogueEntry), CatalogueError> {
+    if let Some((table, _)) = schema
+        .iter()
+        .find(|(_, table)| !table.synthetic_references_v1.is_empty())
+    {
+        return Err(CatalogueError::WriteError(format!(
+            "Synthetic account references on {} are not supported. Use a stored UUID owner column.",
+            table.as_str(),
+        )));
+    }
     let hash = SchemaHash::compute(&schema);
     let mut metadata = catalogue_metadata(app_id, ObjectType::CatalogueSchema);
     metadata.insert(MetadataKey::SchemaHash.to_string(), hash.to_string());
@@ -533,14 +546,14 @@ fn schema_entry(app_id: AppId, schema: Schema, published_at: u64) -> (SchemaHash
         MetadataKey::PublishedAt.to_string(),
         published_at.to_string(),
     );
-    (
+    Ok((
         hash,
         CatalogueEntry {
             object_id: hash.to_object_id(),
             metadata,
             content: encode_schema(&schema),
         },
-    )
+    ))
 }
 
 fn lens_entry(app_id: AppId, lens: &Lens) -> CatalogueEntry {
@@ -647,7 +660,7 @@ impl CatalogueStore for StoredCatalogue {
     #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
-        let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
+        let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at)?;
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
@@ -885,7 +898,7 @@ mod tests {
 
         let app_id = jazz::tools::AppId::from_name("empty-schema-catalogue");
         let schema = SchemaBuilder::new().build();
-        let (hash, entry) = super::schema_entry(app_id, schema.clone(), 42);
+        let (hash, entry) = super::schema_entry(app_id, schema.clone(), 42).expect("schema entry");
         let mut storage = CatalogueMemoryStorage::new();
         storage.upsert_catalogue_entry(&entry).unwrap();
         let index = super::CatalogueIndex::from_storage(&storage, app_id).unwrap();
@@ -904,6 +917,43 @@ mod tests {
                 Err(super::CatalogueError::DecodeError { .. })
             ));
         }
+    }
+
+    /// Mallory's unsupported schema must fail before any catalogue entry is
+    /// written. This boundary test covers embedded publication without a query
+    /// engine, including the storage scan used when the catalogue is reopened.
+    #[test]
+    fn synthetic_references_reject_before_catalogue_write() {
+        use jazz::tools::public_schema::TableSchema;
+
+        let app_id = jazz::tools::AppId::from_name("unsupported-synthetic-references");
+        let store = StoredCatalogue::new(app_id, None, Box::new(CatalogueMemoryStorage::new()))
+            .expect("catalogue");
+        for column in ["$createdBy.account", "$updatedBy.account"] {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("accounts"))
+                .table(TableSchema::builder("projects").synthetic_reference_v1(column, "accounts"))
+                .build();
+            assert!(matches!(
+                store.publish_schema(schema),
+                Err(super::CatalogueError::WriteError(message))
+                    if message.contains("not supported")
+            ));
+            let storage = store.storage.lock().expect("storage lock");
+            assert!(
+                storage
+                    .scan_catalogue_entries()
+                    .expect("catalogue entries")
+                    .is_empty()
+            );
+            assert!(super::CatalogueIndex::from_storage(storage.as_ref(), app_id).is_ok());
+        }
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("projects"))
+            .build();
+        store
+            .publish_schema(schema)
+            .expect("ordinary schema still publishes");
     }
 
     #[test]

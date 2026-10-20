@@ -353,10 +353,29 @@ impl RowDescriptor {
     }
 }
 
+fn reject_synthetic_references<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, TableName>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let references = BTreeMap::<String, TableName>::deserialize(deserializer)?;
+    if !references.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Synthetic account references are not supported. Use a stored UUID owner column.",
+        ));
+    }
+    Ok(references)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
-    /// Version 1 references from system-provided account UUID fields, without stored cells.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    /// Reserved metadata: nonempty synthetic references are rejected at admission.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        deserialize_with = "reject_synthetic_references"
+    )]
     pub synthetic_references_v1: BTreeMap<String, TableName>,
     /// Row structure definition.
     pub columns: RowDescriptor,

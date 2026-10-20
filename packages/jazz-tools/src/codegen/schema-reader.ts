@@ -26,7 +26,7 @@ import { analyzeRelations } from "./relation-analyzer.js";
 import { mapPolicyExpr, type PolicyLeafMappers } from "../policy-expr-map.js";
 import { toValue } from "../runtime/value-converter.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
-import { isProvenanceAccountColumn } from "../magic-columns.js";
+import { assertNoSyntheticReferences, isProvenanceAccountColumn } from "../magic-columns.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -185,6 +185,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   const tableNames = new Set<string>();
 
   for (const table of schema.tables) {
+    assertNoSyntheticReferences(table.name, table.syntheticReferencesV1);
     assertSchemaNameAllowed(table.name);
     if (tableNames.has(table.name)) {
       throw new Error(

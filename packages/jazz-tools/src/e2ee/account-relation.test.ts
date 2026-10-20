@@ -1,6 +1,8 @@
 import { expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { e2eeAccountRelation } from "./account-relation.js";
+import { schemaToWasm } from "../codegen/schema-reader.js";
+import { structuralSchemaHash } from "../dev/schema-utils.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { translateQuery } from "../runtime/query-adapter.js";
 import { definePermissions } from "../permissions/index.js";
@@ -59,6 +61,27 @@ it("also rejects provenance relationships declared with the generic relationship
     }),
   ).toThrow(/not supported.*stored UUID/);
 });
+
+it.each(["$createdBy.account", "$updatedBy.account"])(
+  "rejects raw synthetic reference metadata for %s without a relationship declaration",
+  (column) => {
+    const references = { [column]: "accounts" };
+    const raw = {
+      accounts: { columns: [] },
+      projects: { columns: [], synthetic_references_v1: references },
+    };
+    expect(() => analyzeRelations(raw)).toThrow(/not supported.*stored UUID/);
+    expect(() => structuralSchemaHash(raw)).toThrow(/not supported.*stored UUID/);
+    expect(() =>
+      schemaToWasm({
+        tables: [
+          { name: "accounts", columns: [] },
+          { name: "projects", columns: [], syntheticReferencesV1: references },
+        ],
+      }),
+    ).toThrow(/not supported.*stored UUID/);
+  },
+);
 
 it.each([false, true])(
   "compiles creator-owned space policies with derived permissions %s",
