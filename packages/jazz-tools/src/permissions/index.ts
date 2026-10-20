@@ -7,6 +7,7 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { TableMetaOf } from "../typed-app.js";
+import type { ColumnTransformMap, ColumnTransformRegistry } from "../runtime/column-transforms.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
@@ -42,7 +43,11 @@ type QueryBuilderFor<TApp extends AppLike, K extends TableKey<TApp>> = Extract<
   TApp[K],
   QueryBuilderLike
 >;
-type RowFor<QB> = QB extends { _rowType: infer R } ? R : never;
+type RowFor<QB> = QB extends { _rowType: infer R }
+  ? [TableMetaOf<QB>] extends [never]
+    ? R
+    : Pick<R, Extract<keyof WhereFor<QB>, keyof R>>
+  : never;
 type WhereFor<QB> = QB extends { where(input: infer W): unknown } ? W : never;
 
 type RelationNamesFor<QB> = [TableMetaOf<QB>] extends [never]
@@ -213,6 +218,7 @@ interface RelationFilterEntry {
 }
 
 interface RelationExprState {
+  columnTransformsByTable?: ColumnTransformRegistry;
   kind: "table" | "recursive" | "union";
   outputTable: string;
   base: RelExpr;
@@ -301,7 +307,10 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.kind === "union") {
       throw new Error("where(...) does not support union(...) relations in MVP.");
     }
-    const where = resolveRelationWhereInput(input);
+    const where = resolveRelationWhereInput(
+      input,
+      this.state.columnTransformsByTable?.[this.state.outputTable],
+    );
     const filters = [...this.state.filters, ...extractRelationFilters(where, this.state)];
     return new PermissionRelationBuilder(
       {
@@ -525,6 +534,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
+        columnTransformsByTable: this.state.columnTransformsByTable,
         outputTable: this.state.outputTable,
         base: {
           Gather: {
@@ -592,6 +602,7 @@ class PermissionRelationBuilder implements PermissionRelation {
         edge_filters,
       },
       this.relations,
+      this.state.columnTransformsByTable,
     );
   }
 
@@ -617,6 +628,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     private readonly rootTable: string,
     private readonly args: ReachableRelationArgs,
     private readonly relations: Map<string, Relation[]>,
+    private readonly columnTransformsByTable?: ColumnTransformRegistry,
   ) {}
 
   seeded_by(
@@ -726,6 +738,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
+        columnTransformsByTable: this.columnTransformsByTable,
         outputTable: this.rootTable,
         base: applyRelFilter(joined, correlated),
         initialScope: this.rootTable,
@@ -912,6 +925,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
     private readonly table: string,
     private readonly hasTypeColumn: boolean,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
+    private readonly columnTransforms?: ColumnTransformMap,
   ) {}
 
   where(
@@ -919,7 +933,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): Rule;
   where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   where(input: unknown, ..._guard: unknown[]): Rule {
-    const condition = resolveWhereInput(input, this.hasTypeColumn);
+    const condition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -943,7 +957,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereOld(input: unknown, ..._guard: unknown[]): this {
-    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn);
+    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     this.registerBuilder();
     return this;
   }
@@ -953,7 +967,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereNew(input: unknown, ..._guard: unknown[]): this {
-    this.newCondition = resolveWhereInput(input, this.hasTypeColumn);
+    this.newCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     this.registerBuilder();
     return this;
   }
@@ -1013,6 +1027,12 @@ export function definePermissions<TApp extends AppLike>(
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const tablesWithTypeColumn = collectTablesWithTypeColumn(app);
   const relationsByTable = collectRelationsByTable(app);
+  const columnTransformsByTable: ColumnTransformRegistry = Object.create(null);
+  for (const table of tableNames) {
+    const transforms = (app as Record<string, { _columnTransforms?: ColumnTransformMap }>)[table]
+      ?._columnTransforms;
+    if (transforms) columnTransformsByTable[table] = transforms;
+  }
   const rules: RuleLike[] = [];
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
@@ -1023,7 +1043,13 @@ export function definePermissions<TApp extends AppLike>(
     rules.push(ruleLike);
   };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable, tablesWithTypeColumn, collectRule),
+    policy: buildPolicyContext(
+      tableNames,
+      relationsByTable,
+      tablesWithTypeColumn,
+      collectRule,
+      columnTransformsByTable,
+    ),
     anyOf,
     allOf,
     raw: rawPermissionExpression,
@@ -1097,6 +1123,7 @@ function buildPolicyContext(
   relationsByTable: Map<string, Relation[]>,
   tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
+  columnTransformsByTable: ColumnTransformRegistry,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
@@ -1105,6 +1132,7 @@ function buildPolicyContext(
       relationsByTable,
       tablesWithTypeColumn.has(table),
       collectRule,
+      columnTransformsByTable,
     );
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition =>
@@ -1122,7 +1150,9 @@ function buildTablePolicyBuilder(
   relationsByTable: Map<string, Relation[]>,
   hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
+  columnTransformsByTable: ColumnTransformRegistry,
 ): Record<string, unknown> {
+  const columnTransforms = columnTransformsByTable[table];
   const registerRule = (rule: Rule): Rule => {
     collectRule(rule);
     return rule;
@@ -1133,7 +1163,7 @@ function buildTablePolicyBuilder(
   ): ActionBuilder<unknown, unknown> => {
     const builder: ActionBuilder<unknown, unknown> = {
       where: ((input: unknown) => {
-        const condition = resolveWhereInput(input, hasTypeColumn);
+        const condition = resolveWhereInput(input, hasTypeColumn, columnTransforms);
         return registerRule(
           clause === "using"
             ? { table, action, using: condition }
@@ -1148,9 +1178,9 @@ function buildTablePolicyBuilder(
   const read = actionBuilder("read", "using");
   const insert = actionBuilder("insert", "withCheck");
   const del = actionBuilder("delete", "using");
-  const relation = () => createTableRelation(table, relationsByTable);
+  const relation = () => createTableRelation(table, relationsByTable, columnTransformsByTable);
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
-    new UpdateRuleBuilder(table, hasTypeColumn, collectRule);
+    new UpdateRuleBuilder(table, hasTypeColumn, collectRule, columnTransforms);
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -1198,10 +1228,12 @@ function buildTablePolicyBuilder(
 function createTableRelation(
   table: string,
   relationsByTable: Map<string, Relation[]>,
+  columnTransformsByTable: ColumnTransformRegistry,
 ): PermissionRelation {
   return new PermissionRelationBuilder(
     {
       kind: "table",
+      columnTransformsByTable,
       outputTable: table,
       base: {
         TableScan: {
@@ -1240,6 +1272,7 @@ function createUnionRelation(
   return new PermissionRelationBuilder(
     {
       kind: "union",
+      columnTransformsByTable: firstState.columnTransformsByTable,
       outputTable: firstState.outputTable,
       base: {
         Union: {
@@ -1282,7 +1315,7 @@ function buildGatherSeedState(
   const joins = [...state.joins];
   const filters = [...state.filters];
   collectQualifiedWhere(
-    resolveRelationWhereInput(start),
+    resolveRelationWhereInput(start, state.columnTransformsByTable?.[state.outputTable]),
     state.outputTable,
     currentRelationScope(state),
     state.kind,
@@ -1466,9 +1499,12 @@ function isRecursiveCurrentFilter(raw: unknown, token: RecursiveCurrentValue): b
   return keys.length === 1 && keys[0] === "eq" && raw.eq === token;
 }
 
-function resolveRelationWhereInput(input: unknown): Record<string, unknown> {
+function resolveRelationWhereInput(
+  input: unknown,
+  columnTransforms?: ColumnTransformMap,
+): Record<string, unknown> {
   if (typeof input === "function") {
-    return resolveRelationWhereInput(input(createRowContext()));
+    return resolveRelationWhereInput(input(createRowContext(columnTransforms)), columnTransforms);
   }
   return normalizeWhereObject(input);
 }
@@ -1970,10 +2006,16 @@ function normalizeSessionPath(path: string | string[]): string[] {
   return parts.map((part) => part.trim()).filter((part) => part.length > 0);
 }
 
-function createRowContext(): RowContext<Record<string, unknown>> {
+function createRowContext(
+  columnTransforms?: ColumnTransformMap,
+): RowContext<Record<string, unknown>> {
   return new Proxy({} as RowContext<Record<string, unknown>>, {
     get(_target, prop) {
       if (typeof prop === "string") {
+        if (columnTransforms?.[prop]?.computed)
+          throw new TypeError(
+            `Computed field "${prop}" cannot be referenced in permission policies.`,
+          );
         return {
           __jazzPermissionKind: "row-ref",
           column: prop,
@@ -1996,10 +2038,14 @@ function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<s
   return input;
 }
 
-function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
+function resolveWhereInput(
+  input: unknown,
+  hasTypeColumn: boolean,
+  columnTransforms?: ColumnTransformMap,
+): Condition {
   if (typeof input === "function") {
-    const result = input(createRowContext());
-    return resolveWhereInput(result, hasTypeColumn);
+    const result = input(createRowContext(columnTransforms));
+    return resolveWhereInput(result, hasTypeColumn, columnTransforms);
   }
   if (isPolicyExpr(input) || isAllowedRelationCondition(input)) {
     return input;
@@ -2017,7 +2063,9 @@ function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
     return brandPermissionExpression({
       __jazzPermissionKind: "compound",
       op: input.op,
-      conditions: input.conditions.map((condition) => resolveWhereInput(condition, hasTypeColumn)),
+      conditions: input.conditions.map((condition) =>
+        resolveWhereInput(condition, hasTypeColumn, columnTransforms),
+      ),
     });
   }
   if (isPlainObject(input)) {
