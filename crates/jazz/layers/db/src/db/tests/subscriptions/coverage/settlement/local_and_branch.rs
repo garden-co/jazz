@@ -209,11 +209,30 @@ fn subscription_executes_its_selected_authorization_mode() {
     );
 }
 
+/// Alice's deleted todo remains readable through both client-local and trusted
+/// include-deleted subscriptions, while ordinary reads exclude it.
 #[test]
-fn include_deleted_fails_closed_on_live_subscription_apis() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+fn include_deleted_subscriptions_return_deleted_rows_on_both_public_apis() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x36; 16]);
+    let db = open_db(0x36, alice, &schema);
+    let row_id = row(0x36);
+    db.insert(
+        "todos",
+        cells("deleted todo", false, alice),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row_id, Default::default()).unwrap();
+    let prepared_query = prepared(&db, &Query::from("todos"));
+    assert!(
+        block_on(db.all(&prepared_query, ReadOpts::default()))
+            .unwrap()
+            .is_empty()
+    );
     let opts = ReadOpts {
         read_view: crate::protocol::ReadViewSpec {
             include_deleted: true,
@@ -221,14 +240,18 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
         },
         ..ReadOpts::default()
     };
+    let expected = block_on(db.all(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(row_ids(&expected), vec![row_id]);
+    assert!(expected[0].is_deleted());
 
-    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
-        db.subscribe(&prepared_query, opts.clone()),
-    )));
-    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
-        db.subscribe_for_identity(&prepared_query, opts.clone(), db.identity.author),
-    )));
-
-    let rows = doctest_support::block_on(db.all(&prepared_query, opts)).unwrap();
-    assert!(rows.is_empty());
+    let mut client = block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
+    let mut trusted = block_on(db.subscribe_for_identity(&prepared_query, opts, alice)).unwrap();
+    for subscription in [&mut client, &mut trusted] {
+        let rows = opened_rows(block_on(subscription.next_raw()).unwrap());
+        assert_eq!(row_ids(&rows), vec![row_id]);
+        assert_eq!(
+            rows[0].cell(&schema.tables()[0], "title"),
+            Some(Value::String("deleted todo".to_owned()))
+        );
+    }
 }

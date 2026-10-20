@@ -743,15 +743,6 @@ pub(super) fn global_subscribe_opts() -> ReadOpts {
     }
 }
 
-pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error.message.contains("include_deleted"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
 pub(super) fn assert_subscribe_rejected_unsupported_shape_capability_detail(
     message: SyncMessage,
     expected_subscription: SubscriptionKey,

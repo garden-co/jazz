@@ -172,10 +172,19 @@ where
         table: TableSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let deleted_field_idx = current_row_fields(&table).len();
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
+                // Version metadata can precede the deletion marker. Resolve its
+                // stored name instead of assuming the ordinary row's field count.
+                let deleted_field_idx = record
+                    .descriptor()
+                    .fields()
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some("__jazz_deleted"))
+                    .ok_or(Error::InvalidStoredValue(
+                        "include-deleted query result is missing its deletion marker",
+                    ))?;
                 let deleted = record.get_bool(deleted_field_idx)?;
                 let row = decode_current_row(&table, record)?;
                 let row = self.materialize_current_row(&table, row)?;
