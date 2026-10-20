@@ -1074,8 +1074,8 @@ where
     }
 
     /// Decode one exact covered source fact into its descriptor-bound runtime
-    /// tuple. Deletion witnesses are validated but intentionally contribute no
-    /// tuple: their absence retracts a previously installed content carrier.
+    /// tuple. Ordinary reads omit deleted images; include-deleted reads retain
+    /// the exact image admitted by the authority.
     async fn covered_input_runtime_record(
         &mut self,
         input: &SupportingRow,
@@ -1089,7 +1089,7 @@ where
             .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.is_deleted() {
+        if version.is_deleted() && !read_view.include_deleted {
             return Ok(None);
         }
         let row = self

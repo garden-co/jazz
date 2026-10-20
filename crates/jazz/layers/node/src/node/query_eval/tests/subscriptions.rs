@@ -188,6 +188,7 @@ fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let read_view = ReadViewSpec {
+        include_deleted: false,
         source: ReadViewSourceSpec::Snapshot {
             snapshot: SnapshotRef {
                 owner: node.node_uuid,

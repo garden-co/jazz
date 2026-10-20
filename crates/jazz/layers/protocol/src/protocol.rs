@@ -3458,6 +3458,9 @@ fn default_register_shape_tier() -> DurabilityTier {
 pub struct ReadViewSpec {
     /// Which branch/snapshot family this read observes.
     pub source: ReadViewSourceSpec,
+    /// Include deleted root rows in reads and subscription coverage.
+    #[serde(default)]
+    pub include_deleted: bool,
 }
 
 impl ReadViewSpec {
@@ -3470,6 +3473,7 @@ impl ReadViewSpec {
     pub fn branch_view(head: BranchSelector, base: Option<BranchViewBase>) -> Self {
         Self {
             source: ReadViewSourceSpec::BranchView { head, base },
+            include_deleted: false,
         }
     }
 }
@@ -3505,7 +3509,7 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = canonical_register_shape_options_v2_bytes(&canonical);
+        let bytes = canonical_register_shape_options_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
@@ -3518,10 +3522,15 @@ impl ReadViewKey {
 const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
 const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
 
-fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+fn canonical_register_shape_options_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
-    bytes.push(READ_VIEW_KEY_CODEC_VERSION);
+    // Preserve existing durable keys; only the new visibility uses JRVK v3.
+    bytes.push(if options.read_view.include_deleted {
+        3
+    } else {
+        READ_VIEW_KEY_CODEC_VERSION
+    });
     bytes.push(match options.tier {
         DurabilityTier::None => 0,
         DurabilityTier::Local => 1,
@@ -3532,6 +3541,9 @@ fn canonical_register_shape_options_v2_bytes(options: &RegisterShapeOptions) -> 
         BindingSource::RelayAuthoritySession => 1,
     });
     put_read_view_source(&mut bytes, &options.read_view.source);
+    if options.read_view.include_deleted {
+        bytes.push(1);
+    }
     bytes
 }
 
@@ -7699,7 +7711,7 @@ mod tests {
             binding_source: BindingSource::RelayAuthoritySession,
         };
         assert_eq!(
-            hex::encode(canonical_register_shape_options_v2_bytes(&options)),
+            hex::encode(canonical_register_shape_options_bytes(&options)),
             "4a52564b0202010101000000060000006272616e63681200000001070101010101010101010101010101010100"
         );
         assert_eq!(
@@ -7708,17 +7720,46 @@ mod tests {
         );
     }
 
-    /// Alice's v5 registration encodes tier, source, and binding ownership only.
+    /// Alice's v6 registration includes root deletion visibility.
     /// This low-level byte fixture pins the wire layout independently of serde round trips.
     #[test]
-    fn wire_v5_registration_options_bytes() {
+    fn wire_v6_registration_options_bytes() {
         let options = RegisterShapeOptions::default();
         let bytes = postcard::to_allocvec(&options).unwrap();
-        assert_eq!(hex::encode(&bytes), "020000");
+        assert_eq!(hex::encode(&bytes), "02000000");
         assert_eq!(
             postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
             options
         );
+    }
+
+    /// Internal encoding receipt: Alice's deleted-row coverage must have its
+    /// own durable identity without changing Bob's existing ordinary-read keys.
+    #[test]
+    fn include_deleted_registration_encoding_and_identity() {
+        let ordinary = RegisterShapeOptions::default();
+        let options = RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
+            ..ordinary.clone()
+        };
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "02000100");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
+        );
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_bytes(&ordinary)),
+            "4a52564b02020000"
+        );
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_bytes(&options)),
+            "4a52564b0302000001"
+        );
+        assert_ne!(ordinary.read_view_key(), options.read_view_key());
     }
 
     #[test]
@@ -7733,6 +7774,7 @@ mod tests {
         };
         let options = |snapshot| RegisterShapeOptions {
             read_view: ReadViewSpec {
+                include_deleted: false,
                 source: ReadViewSourceSpec::Snapshot { snapshot },
             },
             ..RegisterShapeOptions::default()
@@ -7740,8 +7782,8 @@ mod tests {
 
         let ordered = options(snapshot(vec![dot_a, dot_b]));
         let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
-        let ordered_bytes = canonical_register_shape_options_v2_bytes(&ordered);
-        let equivalent_bytes = canonical_register_shape_options_v2_bytes(&permuted_and_duplicated);
+        let ordered_bytes = canonical_register_shape_options_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_bytes(&permuted_and_duplicated);
 
         assert_eq!(ordered_bytes, equivalent_bytes);
         assert_eq!(

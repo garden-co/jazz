@@ -215,7 +215,10 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);
     let opts = ReadOpts {
-        include_deleted: true,
+        read_view: crate::protocol::ReadViewSpec {
+            include_deleted: true,
+            ..Default::default()
+        },
         ..ReadOpts::default()
     };
 

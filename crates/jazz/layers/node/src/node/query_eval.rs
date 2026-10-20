@@ -371,11 +371,10 @@ where
             .map_err(|report| query_capability_error(&report))?
             .into_iter()
             .filter(|source_request| {
-                source_request.visibility == RowVisibility::Visible
-                    && matches!(
-                        request.reads.primary.sources.get(&source_request.source),
-                        Some(SourceExpr::SettledBindingView { .. })
-                    )
+                matches!(
+                    request.reads.primary.sources.get(&source_request.source),
+                    Some(SourceExpr::SettledBindingView { .. })
+                )
             })
             .map(|source_request| source_request.source.table)
             .collect::<BTreeSet<_>>();
@@ -1540,7 +1539,11 @@ where
         } else {
             (shape, binding)
         };
-        let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let mut input_shape = if read_view.include_deleted {
+            self.normalized_include_deleted_row_set_shape(shape, binding)?
+        } else {
+            self.normalized_row_set_shape(shape, binding)?
+        };
         let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
             // A cold receiver is compiled before RegisterShape is processed.
             // Its exact requested shape already identifies the input window;
@@ -1833,9 +1836,6 @@ where
         for source_request in query_program_source_requests(request)
             .map_err(|report| query_capability_error(&report))?
         {
-            if source_request.visibility != RowVisibility::Visible {
-                continue;
-            }
             let Some(expression) = request.reads.primary.sources.get(&source_request.source) else {
                 continue;
             };

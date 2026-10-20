@@ -59,7 +59,6 @@ where
     ///     &query,
     ///     ReadOpts {
     ///         tier: jazz::db::ReadTier::LocalOnly,
-    ///         include_deleted: false,
     ///         ..ReadOpts::default()
     ///     },
     /// ))?;
@@ -288,10 +287,8 @@ where
         };
         let mut node = prepared.scoped_node(&mut node, author.unwrap_or(self.identity.author))?;
         if let Some(open_tx_id) = open_tx_id {
-            opts.read_view = ReadViewSpec {
-                source: ReadViewSourceSpec::Snapshot {
-                    snapshot: node.open_transaction_snapshot(open_tx_id)?.into(),
-                },
+            opts.read_view.source = ReadViewSourceSpec::Snapshot {
+                snapshot: node.open_transaction_snapshot(open_tx_id)?.into(),
             };
         }
         if opts.tier == ReadTier::LocalOnly {

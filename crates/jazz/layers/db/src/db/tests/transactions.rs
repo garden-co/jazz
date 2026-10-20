@@ -2216,7 +2216,10 @@ fn exclusive_crud_preserves_explicit_updated_at() {
     let rows = block_on(db.all(
         &query,
         ReadOpts {
-            include_deleted: true,
+            read_view: crate::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
             ..Default::default()
         },
     ))
@@ -2830,7 +2833,10 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         doctest_support::block_on(db.all(
             &query,
             ReadOpts {
-                include_deleted: true,
+                read_view: crate::protocol::ReadViewSpec {
+                    include_deleted: true,
+                    ..Default::default()
+                },
                 ..ReadOpts::default()
             },
         ))

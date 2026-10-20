@@ -3371,8 +3371,6 @@ pub enum ReadTier {
 pub struct ReadOpts {
     /// Read semantics; execution resolves coverage durability separately.
     pub tier: ReadTier,
-    /// Include current rows whose deletion winner is `Deleted`.
-    pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
@@ -3385,7 +3383,6 @@ impl Default for ReadOpts {
     fn default() -> Self {
         Self {
             tier: ReadTier::LocalFirst,
-            include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
         }
@@ -3403,7 +3400,7 @@ impl ReadOpts {
 
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
-        self.read_view = ReadViewSpec::branch_view(head, base);
+        self.read_view.source = ReadViewSourceSpec::BranchView { head, base };
         self
     }
 }
@@ -3537,8 +3534,8 @@ fn remote_subscription_tier(
     tier.max(upstream_durability_floor)
 }
 
-fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.read_view.is_default() {
+fn ensure_current_read_source(opts: &ReadOpts) -> Result<(), Error> {
+    if matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
         return Ok(());
     }
     Err(Error::new(
@@ -3563,12 +3560,6 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.include_deleted {
-        return Err(Error::new(
-            ErrorCode::Query,
-            "live subscriptions do not support include_deleted yet",
-        ));
-    }
     ensure_supported_read_view(opts)
 }
 

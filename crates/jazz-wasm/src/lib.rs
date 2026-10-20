@@ -2900,7 +2900,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         opts.tier = read_tier_from_str(&tier)?;
     }
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
-        opts.include_deleted = include_deleted;
+        opts.read_view.include_deleted = include_deleted;
     }
     if let Some(timeout_ms) = optional_wait_ms_prop(&value, "first_load_remote_wait_ms")? {
         opts.first_load = local_first_server_wait(&opts, timeout_ms);

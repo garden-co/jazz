@@ -453,15 +453,8 @@ where
         };
         let pending_overlay = pending_current.is_some();
         let source = pending_current.as_ref().unwrap_or(source);
-        let (covered_input_source, covered_input_descriptor) =
-            if request.visibility == RowVisibility::Visible {
-                (
-                    self.covered_input_sources.get(&request.source).cloned(),
-                    self.covered_input_descriptors.get(&request.source).cloned(),
-                )
-            } else {
-                (None, None)
-            };
+        let covered_input_source = self.covered_input_sources.get(&request.source).cloned();
+        let covered_input_descriptor = self.covered_input_descriptors.get(&request.source).cloned();
         if covered_input_source.is_some() != covered_input_descriptor.is_some() {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
@@ -494,9 +487,6 @@ where
             // The compiler created this source map only for an exact
             // authority-covered occurrence. The explicit map, rather than
             // the source expression's spelling, is the capability.
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(request, SourceGap::Coverage));
-            }
             let table = self
                 .node
                 .table_in_schema(&request.source.table, self.read_view.read_schema)
@@ -1634,19 +1624,41 @@ where
                 BTreeMap::new(),
                 BTreeSet::new(),
             )
-        } else if request.visibility == RowVisibility::IncludeDeleted
-            && (self.needs_projected_current_source(&request.source.table)
-                || self.excludes_below_pending(request))
-        {
-            let tier = graph_tier.expect("visible current source has a tier");
-            let base = self
-                .projected_include_deleted_current_source_graph(request, &table, tier)
-                .await?;
+        } else if request.visibility == RowVisibility::IncludeDeleted {
+            let tier = graph_tier.expect("current source has a tier");
+            let (mut fields, metadata) =
+                current_source_projection(&table, &request.requirements, None);
+            fields.push(ProjectField::named("__jazz_deleted"));
+            let needs_settle_position =
+                metadata.contains_key(&SourceMetadataRequirement::SettlePosition);
+            let base = if self.needs_projected_current_source(&request.source.table)
+                || self.excludes_below_pending(request)
+            {
+                self.projected_include_deleted_current_source_graph(
+                    request,
+                    &table,
+                    tier,
+                    needs_settle_position,
+                )
+                .await?
+            } else {
+                include_deleted_current_graph(&table, tier, needs_settle_position)
+            }
+            .project_fields(fields);
+            let descriptor =
+                self.node
+                    .database
+                    .graph_output_descriptor(&base)
+                    .map_err(|error| {
+                        source_resolution_error_from_policy_proof(request, error.into())
+                    })?;
+            let output_fields = descriptor_field_names(&descriptor)
+                .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
             // The policy proof carries the binding routes it depends on; they
             // must reach the deletion witness, or a shared graph would hand
             // one binding's authorized deletions to every binding.
             let (graph, routing_fields) = match &authorization {
-                SourceAuthorizationRequest::System => (base.clone(), BTreeSet::new()),
+                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1681,69 +1693,6 @@ where
                         );
                         request
                     });
-                    let mut output_fields = current_row_fields(&table);
-                    output_fields.push("__jazz_deleted".to_owned());
-                    let filtered = self
-                        .node
-                        .compose_policy_filtered_current_source_graph(
-                            policy_request,
-                            base.clone(),
-                            &output_fields,
-                        )
-                        .map_err(|error| {
-                            source_resolution_error_from_policy_proof(request, error)
-                        })?;
-                    (filtered.graph, filtered.route_fields)
-                }
-            };
-            (
-                graph,
-                include_deleted_current_row_descriptor(&table),
-                BTreeMap::new(),
-                routing_fields,
-            )
-        } else if request.visibility == RowVisibility::IncludeDeleted {
-            let tier = graph_tier.expect("visible current source has a tier");
-            let base = include_deleted_current_graph(&table, tier);
-            // The policy proof carries the binding routes it depends on; they
-            // must reach the deletion witness, or a shared graph would hand
-            // one binding's authorized deletions to every binding.
-            let (graph, routing_fields) = match &authorization {
-                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
-                SourceAuthorizationRequest::PolicyFiltered {
-                    permission_subject,
-                    plan,
-                }
-                | SourceAuthorizationRequest::PolicyProof {
-                    permission_subject,
-                    plan,
-                } => {
-                    if plan.protected_source.table != table.name
-                        || plan.role != PolicyDecisionRole::Read
-                        || plan.protected_row_field != "row_uuid"
-                    {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
-                    }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_for_include_deleted(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            tier,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        );
-                    let policy_request = policy_request.map(|mut request| {
-                        request.reads.primary = policy_read_view_projected_through(
-                            &request.reads.primary,
-                            self.read_view,
-                        );
-                        request
-                    });
-                    let mut output_fields = current_row_fields(&table);
-                    output_fields.push("__jazz_deleted".to_owned());
                     let filtered = self
                         .node
                         .compose_policy_filtered_current_source_graph(
@@ -1757,12 +1706,7 @@ where
                     (filtered.graph, filtered.route_fields)
                 }
             };
-            (
-                graph,
-                include_deleted_current_row_descriptor(&table),
-                BTreeMap::new(),
-                routing_fields,
-            )
+            (graph, descriptor, metadata, routing_fields)
         } else {
             let tier = graph_tier.expect("visible current source has a tier");
             let selected_base = if receiver_local_overlay {
@@ -2984,10 +2928,7 @@ where
         let Some(tier) = graph_tier else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
-        if request.visibility != RowVisibility::Visible
-            || history_position.is_some()
-            || open_tx_overlay.is_some()
-        {
+        if history_position.is_some() || open_tx_overlay.is_some() {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
         if self.needs_projected_current_source(&request.source.table) {
@@ -4092,14 +4033,22 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         tier: DurabilityTier,
+        include_settle_position: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let mut fields = storage_to_canonical_current_source_fields(table, true, false);
-        fields.push(ProjectField::named("_deletion"));
         let content = self
-            .projected_content_current_source_graph(request, table, tier, false, false)
-            .await?
-            .project_fields(fields);
-        Ok(include_deleted_from_images(table, content))
+            .projected_content_current_source_graph(
+                request,
+                table,
+                tier,
+                include_settle_position,
+                false,
+            )
+            .await?;
+        Ok(include_deleted_from_images(
+            table,
+            content,
+            include_settle_position,
+        ))
     }
 
     pub fn can_use_bounded_historical_source(&self, table: &str) -> bool {
@@ -4502,28 +4451,15 @@ pub(super) fn with_requested_author_paths(
     ))
 }
 
-fn resolved_current_source_graph<S>(
-    node: &mut NodeState<S>,
+/// Shared output projection for current row images, regardless of deletion visibility.
+fn current_source_projection(
     table: &TableSchema,
-    tier: DurabilityTier,
     requirements: &SourceRequirements,
-    authorization: &SourceAuthorizationRequest,
-    policy_schema: SchemaVersionId,
-    policy_read_view: Option<&ReadView<RequestedSourceStage>>,
     branch_witness_field: Option<&str>,
-    selected_base: Option<GraphBuilder>,
-) -> Result<
-    (
-        GraphBuilder,
-        RecordDescriptor,
-        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
-        BTreeSet<String>,
-    ),
-    Error,
->
-where
-    S: OrderedKvStorage,
-{
+) -> (
+    Vec<ProjectField>,
+    BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+) {
     let mut fields = canonical_current_source_fields(table, false);
     for requirement in &requirements.metadata {
         if let SourceMetadataRequirement::AuthorPath(name) = requirement {
@@ -4617,6 +4553,37 @@ where
             );
         }
     }
+
+    (fields, metadata)
+}
+
+fn resolved_current_source_graph<S>(
+    node: &mut NodeState<S>,
+    table: &TableSchema,
+    tier: DurabilityTier,
+    requirements: &SourceRequirements,
+    authorization: &SourceAuthorizationRequest,
+    policy_schema: SchemaVersionId,
+    policy_read_view: Option<&ReadView<RequestedSourceStage>>,
+    branch_witness_field: Option<&str>,
+    selected_base: Option<GraphBuilder>,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+        BTreeSet<String>,
+    ),
+    Error,
+>
+where
+    S: OrderedKvStorage,
+{
+    let (mut fields, metadata) =
+        current_source_projection(table, requirements, branch_witness_field);
+    let needs_version_witnesses =
+        metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses);
+    let needs_settle_position = metadata.contains_key(&SourceMetadataRequirement::SettlePosition);
 
     // The current graph below carries storage cells, not materialized public
     // values. In particular JSON has a distinct internal cell descriptor.
@@ -6769,48 +6736,15 @@ fn include_deleted_branch_graph(
     Ok(GraphBuilder::union([undeleted, deleted]))
 }
 
-fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
-    let user_fields = table
-        .columns
-        .iter()
-        .map(|column| user_column_field(&column.name))
-        .collect::<Vec<_>>();
-    let mut content_storage_fields = vec![
-        "row_uuid".to_owned(),
-        "schema_version".to_owned(),
-        "authored_columns".to_owned(),
-    ];
-    content_storage_fields.extend(user_fields.iter().cloned());
-    content_storage_fields.extend([
-        "created_by".to_owned(),
-        "created_at".to_owned(),
-        "updated_by".to_owned(),
-        "updated_at".to_owned(),
-        "tx_time".to_owned(),
-        "tx_node_id".to_owned(),
-        "_deletion".to_owned(),
-    ]);
-    let normalize_content_fields = |graph: GraphBuilder| {
-        graph.project_fields(
-            ["row_uuid".to_owned()]
-                .into_iter()
-                .chain(user_fields.iter().cloned())
-                .map(ProjectField::named)
-                .chain([
-                    ProjectField::renamed("created_by", "$createdBy"),
-                    ProjectField::renamed("created_at", "$createdAt"),
-                    ProjectField::renamed("updated_by", "$updatedBy"),
-                    ProjectField::renamed("updated_at", "$updatedAt"),
-                    ProjectField::named("tx_time"),
-                    ProjectField::named("tx_node_id"),
-                    ProjectField::named("_deletion"),
-                ]),
-        )
-    };
-    let global = normalize_content_fields(
-        GraphBuilder::table(global_current_table_name(&table.name))
-            .project(content_storage_fields.clone()),
-    );
+fn include_deleted_current_graph(
+    table: &TableSchema,
+    tier: DurabilityTier,
+    include_settle_position: bool,
+) -> GraphBuilder {
+    let mut fields = global_current_storage_fields(table, true, include_settle_position);
+    fields.push("_deletion".to_owned());
+    let global =
+        GraphBuilder::table(global_current_table_name(&table.name)).project(fields.clone());
     // The winning image carries its own deletion state and provenance: a
     // deleted row reports the deleting write as its last update.
     let current = if tier == DurabilityTier::Global {
@@ -6819,26 +6753,26 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
         GraphBuilder::arg_max_by(
             GraphBuilder::union([
                 global,
-                normalize_content_fields(
-                    GraphBuilder::table(ahead_current_table_name(&table.name))
-                        .project(content_storage_fields),
-                ),
+                GraphBuilder::table(ahead_current_table_name(&table.name)).project(fields),
             ]),
             ["row_uuid"],
             ["tx_time", "tx_node_id"],
         )
     };
-    include_deleted_from_images(table, current)
+    include_deleted_from_images(table, current, include_settle_position)
 }
 
-/// Split winning row images into the IncludeDeleted carrier: every current
-/// row field plus `__jazz_deleted` derived from the image's `_deletion` cell.
-fn include_deleted_from_images(table: &TableSchema, current: GraphBuilder) -> GraphBuilder {
+/// Normalize winning row images without dropping their version metadata.
+/// The deletion marker travels with the content through policy authorization.
+fn include_deleted_from_images(
+    table: &TableSchema,
+    current: GraphBuilder,
+    include_settle_position: bool,
+) -> GraphBuilder {
     let with_flag = |graph: GraphBuilder, deleted: bool| {
         graph.project_fields(
-            current_row_fields(table)
+            storage_to_canonical_current_source_fields(table, true, include_settle_position)
                 .into_iter()
-                .map(ProjectField::named)
                 .chain([ProjectField::literal(
                     "__jazz_deleted",
                     Value::Bool(deleted),

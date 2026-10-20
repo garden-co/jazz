@@ -739,7 +739,6 @@ pub(super) fn event_settled(event: &SubscriptionEvent) -> bool {
 pub(super) fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: crate::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

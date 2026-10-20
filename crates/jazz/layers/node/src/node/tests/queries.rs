@@ -999,6 +999,7 @@ fn local_mask_choice_counts_only_the_read_branch_pending_rows() {
             .unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let read_view = crate::protocol::ReadViewSpec {
+            include_deleted: false,
             source: crate::protocol::ReadViewSourceSpec::BranchView {
                 head: main.clone(),
                 base: None,
@@ -1963,6 +1964,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
     let values = vec![Value::String("match".to_owned())];
     let branch_opts = crate::protocol::RegisterShapeOptions {
         read_view: crate::protocol::ReadViewSpec {
+            include_deleted: false,
             source: crate::protocol::ReadViewSourceSpec::BranchView {
                 head: branch_selector(0x44),
                 base: None,
@@ -3635,6 +3637,7 @@ fn include_deleted_reachable_indexed_step_over_branch_view_masks_base() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let read_view = crate::protocol::ReadViewSpec {
+        include_deleted: false,
         source: crate::protocol::ReadViewSourceSpec::BranchView {
             head: draft,
             base: Some(crate::protocol::BranchViewBase::Current(main)),

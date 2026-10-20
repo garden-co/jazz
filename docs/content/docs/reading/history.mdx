@@ -89,8 +89,7 @@ const versions = await db.all(history.includeDeleted());
 ```
 
 Deletion-only and restore-only events do not add content versions. Restoring with
-replacement content does. `.includeDeleted()` is currently supported for one-shot
-reads, not subscriptions.
+replacement content does.
 
 ## Branches
 

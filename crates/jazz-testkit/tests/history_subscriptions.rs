@@ -1184,7 +1184,10 @@ async fn history_include_deleted_uses_current_row_permissions() {
             settled(&bob, tx).await;
             let opts = jazz::db::ReadOpts {
                 tier: ReadTier::LocalOnly,
-                include_deleted: true,
+                read_view: jazz::protocol::ReadViewSpec {
+                    include_deleted: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             settled(&bob, bob.delete("tasks", row).unwrap()).await;
@@ -1543,6 +1546,131 @@ async fn local_first_history_subscription_restores_versions() {
                 restored.added.iter().map(|row| &row.id).collect::<Vec<_>>(),
                 initial.added.iter().map(|row| &row.id).collect::<Vec<_>>()
             );
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice's remote subscription receives Bob's deleted row content through the
+/// normal server protocol; the public Rust API retains it with include_deleted.
+/// bob -> delete -> server -> fresh alice subscription
+#[tokio::test(flavor = "current_thread")]
+async fn include_deleted_subscription_fetches_current_content() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
+                .allow_all()
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (row, _, tx) = bob
+                .insert("tasks", row_input!("title" => "retained"))
+                .unwrap();
+            settled(&bob, tx).await;
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-deleted")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let query = Query::from("tasks")
+                .filter(eq(
+                    col("id"),
+                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
+                ))
+                .select(["title"]);
+            let mut stream = alice
+                .subscribe_with_opts(
+                    query,
+                    jazz::db::ReadOpts {
+                        tier: jazz::db::ReadTier::Remote,
+                        read_view: jazz::protocol::ReadViewSpec {
+                            include_deleted: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let added = next(&mut stream).await.added;
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].row.get("title"),
+                Some(&Value::Text("retained".into()))
+            );
+            drop(stream);
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
+
+/// Alice receives only Bob's readable deleted task; retaining version metadata
+/// must not let the unreadable task bypass the server's read policy.
+/// bob -> delete visible and hidden tasks -> server policy -> alice
+#[tokio::test(flavor = "current_thread")]
+async fn include_deleted_subscription_respects_read_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("visible", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Cmp {
+                                    column: "visible".into(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(Value::Boolean(true)),
+                                })
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            for (title, visible) in [("readable", true), ("hidden", false)] {
+                let (row, _, tx) = bob
+                    .insert("tasks", row_input!("title" => title, "visible" => visible))
+                    .unwrap();
+                settled(&bob, tx).await;
+                settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            }
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-deleted-policy")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let mut stream = alice
+                .subscribe_with_opts(
+                    Query::from("tasks").select(["title"]),
+                    jazz::db::ReadOpts {
+                        tier: ReadTier::Remote,
+                        read_view: jazz::protocol::ReadViewSpec {
+                            include_deleted: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let added = next(&mut stream).await.added;
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].row.get("title"),
+                Some(&Value::Text("readable".into()))
+            );
+            drop(stream);
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
         })

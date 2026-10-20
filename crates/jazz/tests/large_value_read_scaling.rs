@@ -111,7 +111,6 @@ fn insert_file(db: &Db, id: RowUuid, name: &str, notes: &str, bytes: &[u8]) {
 fn opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }
