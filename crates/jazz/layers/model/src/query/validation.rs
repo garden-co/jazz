@@ -496,9 +496,6 @@ fn validate_history_query(
     {
         return Err(unsupported("aggregates over history metadata"));
     }
-    if !history.source_table().branch_by.is_empty() {
-        return Err(unsupported("branched tables"));
-    }
     if query.flat_join.is_none() && query.primary_key_operands().is_none() {
         return Err(unsupported(
             "history without an id equality or IN constraint",
@@ -515,7 +512,7 @@ fn validate_history_query(
         return Err(unsupported("ordering by $transactionId"));
     }
     // This is a query-local descriptor, never a writable catalogue table.
-    let table = TableSchema::new(query.table.clone(), history.columns().iter().cloned());
+    let table = history.table_schema();
     let mut schema = schema.clone();
     schema.tables.push(table);
     validate_query_canonical_parts_as(query, &schema, role)
@@ -1156,18 +1153,11 @@ fn validate_query_canonical_parts_as(
         let mut virtual_schema = schema.clone();
         for name in &history_names {
             let base = crate::schema::history::history_source_table(&name).unwrap();
-            let source = schema_table(schema, base)
-                .map_err(|_| QueryError::UnknownTable(name.clone()))?;
-            if !source.branch_by.is_empty() {
-                return Err(QueryError::UnsupportedRelationQuery(
-                    "Reading branched tables is not supported in history queries yet".into(),
-                ));
-            }
+            let source =
+                schema_table(schema, base).map_err(|_| QueryError::UnknownTable(name.clone()))?;
             if name != &query.table {
                 let history = crate::schema::history::HistoryRelationSchema::new(source);
-                virtual_schema
-                    .tables
-                    .push(TableSchema::new(name, history.columns().iter().cloned()));
+                virtual_schema.tables.push(history.table_schema());
             }
         }
         if history_names.contains(&query.table) {

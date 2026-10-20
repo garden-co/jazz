@@ -367,7 +367,7 @@ function normalizeBranchSelector(
   input: Branch,
   scope: "table" | "schema",
 ): BranchSelector {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) throw new Error(`Unknown table "${tableName}".`);
   const tableColumns = table.branchBy ?? [];
   const expected =

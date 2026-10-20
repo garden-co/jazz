@@ -87,6 +87,13 @@ impl<'a> HistoryRelationSchema<'a> {
         }
     }
 
+    /// Query-only table shape, retaining branch identity for version witnesses.
+    pub fn table_schema(&self) -> TableSchema {
+        let mut table = TableSchema::new(self.name.clone(), self.columns.iter().cloned());
+        table.branch_by = self.source_table.branch_by.clone();
+        table
+    }
+
     /// Fully qualified virtual relation name.
     pub fn name(&self) -> &str {
         &self.name

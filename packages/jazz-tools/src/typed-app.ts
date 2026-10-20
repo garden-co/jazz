@@ -1585,11 +1585,11 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
   $acceptedAt: Date;
 };
 
-/** Read-only query over accepted content versions.
- * Local-first reads return retained history and fetch missing versions upstream;
- * remote reads wait for the authority-confirmed query result.
+/**
+ * Query previous values of a table's rows.
+ * Only includes authority-confirmed versions.
  * Bound the query with an exact row ID or an explicit `id.in` list;
- * joins, transaction-ID predicates and branched tables are not supported yet.
+ * joins and transaction-ID predicates are not supported.
  */
 export interface HistoryQuery<
   TRow extends { id: string },

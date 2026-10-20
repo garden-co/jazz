@@ -1122,7 +1122,7 @@ where
                 // require this transaction, while other siblings remain private.
                 tx_versions_cache
                     .entry(tx_id)
-                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
+                    .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id))
                     .extend(versions.into_iter().filter(|version| !version.is_deleted()));
                 wanted_add_rows_by_tx
                     .entry(tx_id)
@@ -1175,7 +1175,7 @@ where
             }
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(*tx_id));
             // These checks only need content-witness presence, not a selected
             // version. Index once rather than decoding row identities while
             // scanning the transaction twice for every requested row. Keep
@@ -1574,7 +1574,7 @@ where
                 .collect::<BTreeSet<_>>();
             let tx_versions = tx_versions_cache
                 .entry(tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id));
             if winners.iter().any(|(_, _, winner, _)| {
                 !maintained_view_tx_versions_contain_winner(tx_versions, winner)
             }) {

@@ -125,6 +125,13 @@ pub(super) fn query_read_set_for_read_view(
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
+    if matches!(
+        &read_view.source,
+        ReadViewSourceSpec::BranchView { base: Some(_), .. }
+    ) && all_sources(shape).any(|source| crate::schema::history::is_history_table(&source.table))
+    {
+        return Err(history::unsupported("history with a branch base"));
+    }
     // All receiver programs, including aggregates, consume the authority's
     // exact source closure. Aggregate results are computed by the ordinary
     // local graph; they are not a separate authority-provided result payload.
@@ -170,7 +177,11 @@ pub(super) fn query_read_set_for_read_view(
                     let table = schema
                         .tables
                         .iter()
-                        .find(|table| table.name == source.table)
+                        .find(|table| {
+                            table.name
+                                == crate::schema::history::history_source_table(&source.table)
+                                    .unwrap_or(&source.table)
+                        })
                         .ok_or(Error::InvalidStoredValue(
                             "branch view source table missing",
                         ))?;

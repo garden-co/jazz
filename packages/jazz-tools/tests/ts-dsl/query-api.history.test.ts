@@ -896,3 +896,146 @@ describe("TS Query API upstream history", () => {
     expect(await reader.all(query(), { tier: "remote" })).toEqual([]);
   });
 });
+
+describe("TS Query API branch history", () => {
+  const branches = s.defineApp({
+    notes: s
+      .table({ branch: s.string(), title: s.string(), done: s.boolean() }, {})
+      .branchBy("branch"),
+  });
+  const branchPermissions = s.definePermissions(branches, ({ policy }) => {
+    policy.notes.allowRead.where({ done: false });
+    policy.notes.allowInsert.always();
+    policy.notes.allowUpdate.always();
+    policy.notes.allowDelete.always();
+  });
+  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let writer: Db;
+  let reader: Db;
+  let id: string;
+  let stop: (() => void) | undefined;
+
+  beforeEach(async () => {
+    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: branches,
+      permissions: branchPermissions,
+    });
+    writer = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    id = crypto.randomUUID();
+    for (const branch of ["main", "draft"]) {
+      await writer
+        .insert(branches.notes, { branch, title: `${branch} first`, done: false }, { id, branch })
+        .wait({ tier: "global" });
+    }
+    await writer
+      .update(branches.notes, id, { title: "draft second" }, { branch: "draft" })
+      .wait({ tier: "global" });
+    reader = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+  });
+
+  afterEach(async () => {
+    stop?.();
+    stop = undefined;
+    try {
+      await reader?.shutdown();
+      await writer?.shutdown();
+    } finally {
+      await server?.stop();
+    }
+  });
+
+  function query() {
+    return branches.$history.notes.where({ id }).orderBy("$acceptedAt").select("title");
+  }
+  const draftVersions = () => [
+    { id, title: "draft first" },
+    { id, title: "draft second" },
+  ];
+
+  it("reads only the selected branch's locally retained versions", async () => {
+    expect(await writer.all(query(), { branch: "draft", firstLoadRemoteWaitMs: 0 })).toEqual(
+      draftVersions(),
+    );
+    expect(await writer.all(query(), { branch: "main", firstLoadRemoteWaitMs: 0 })).toEqual([
+      { id, title: "main first" },
+    ]);
+  });
+
+  it("fetches remote branch history without mixing cached sibling versions", async () => {
+    expect(await reader.all(query(), { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "main first" },
+    ]);
+    expect(await reader.all(query(), { branch: "draft", tier: "remote" })).toEqual(draftVersions());
+    expect(await reader.all(query(), { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "main first" },
+    ]);
+  });
+
+  it.each(["local-first", "remote"] as const)(
+    "subscribes to accepted versions in one branch with %s reads",
+    async (tier) => {
+      let latest: { id: string; title: string }[] | undefined;
+      let failure: Error | undefined;
+      stop = reader.subscribe(
+        query(),
+        {
+          onUpdate: (rows) => {
+            latest = rows;
+          },
+          onError: (error) => {
+            failure = error;
+          },
+        },
+        { branch: "draft", tier },
+      );
+      const observed = () => {
+        if (failure) throw failure;
+        return latest;
+      };
+      await expect.poll(observed).toEqual(draftVersions());
+      await writer
+        .update(branches.notes, id, { title: "main second" }, { branch: "main" })
+        .wait({ tier: "global" });
+      await writer
+        .update(branches.notes, id, { title: "draft third" }, { branch: "draft" })
+        .wait({ tier: "global" });
+      await expect.poll(observed).toEqual([...draftVersions(), { id, title: "draft third" }]);
+    },
+  );
+
+  it("authorizes history against the selected branch's current row", async () => {
+    await writer
+      .update(branches.notes, id, { done: true }, { branch: "draft" })
+      .wait({ tier: "global" });
+    expect(await reader.all(query(), { branch: "draft", tier: "remote" })).toEqual([]);
+    expect(await reader.all(query(), { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "main first" },
+    ]);
+  });
+
+  it("includeDeleted reads deleted history from only the selected branch", async () => {
+    await writer.delete(branches.notes, id, { branch: "draft" }).wait({ tier: "global" });
+    expect(await writer.all(query(), { branch: "draft", firstLoadRemoteWaitMs: 0 })).toEqual([]);
+    expect(
+      await writer.all(query().includeDeleted(), { branch: "draft", firstLoadRemoteWaitMs: 0 }),
+    ).toEqual(draftVersions());
+  });
+
+  it("rejects history with an inherited branch base", async () => {
+    await expect(writer.all(query(), { branch: "draft", base: "main" })).rejects.toMatchObject({
+      message:
+        "Query: unsupported relation query: Reading history with a branch base is not supported in history queries yet",
+      code: "query",
+    });
+  });
+});

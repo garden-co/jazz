@@ -574,6 +574,7 @@ where
         identity: AuthorSubject,
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
             shape,
@@ -581,7 +582,7 @@ where
             tier,
             identity,
             CurrentQueryProgramOutput::AppRows,
-            &ReadViewSpec::default(),
+            read_view,
             settled_binding_view,
             authorization_mode,
         )?;
@@ -1777,6 +1778,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::TrustedServing,
+            &ReadViewSpec::default(),
             None,
         )
         .await
@@ -1799,6 +1801,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::ClientLocal,
+            &ReadViewSpec::default(),
             None,
         )
         .await
@@ -2028,12 +2031,14 @@ where
             identity,
             true,
             authorization_mode,
+            &ReadViewSpec::default(),
             None,
         )
         .await
     }
 
-    async fn query_rows_with_options_for_identity(
+    #[doc(hidden)]
+    pub async fn query_rows_with_options_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2042,6 +2047,7 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
         mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let phase_started = profile.as_ref().map(|_| Instant::now());
@@ -2053,7 +2059,7 @@ where
                     tier,
                     identity,
                     authorization_mode,
-                    &ReadViewSpec::default(),
+                    read_view,
                 )
                 .await?;
             let query = shape.query();
@@ -2061,13 +2067,15 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
-        if authorization_mode == QueryAuthorizationMode::TrustedServing
+        if read_view.is_default()
+            && authorization_mode == QueryAuthorizationMode::TrustedServing
             && tier == DurabilityTier::Global
             && let Some(rows) = self.try_uuid_page_probe(shape, binding, identity).await?
         {
             return Ok(rows);
         }
-        if authorization_mode == QueryAuthorizationMode::TrustedServing
+        if read_view.is_default()
+            && authorization_mode == QueryAuthorizationMode::TrustedServing
             && tier == DurabilityTier::Global
             && let Some(rows) = self
                 .try_ordered_page_probe(shape, binding, identity)
@@ -2077,14 +2085,7 @@ where
         }
         let client_settled_binding_view = (authorization_mode
             == QueryAuthorizationMode::ClientLocal)
-            .then(|| {
-                self.client_settled_binding_view_for_query(
-                    shape,
-                    binding,
-                    tier,
-                    &ReadViewSpec::default(),
-                )
-            })
+            .then(|| self.client_settled_binding_view_for_query(shape, binding, tier, read_view))
             .flatten();
         let settled_binding_view = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => {
@@ -2157,7 +2158,7 @@ where
                 tier,
                 identity,
                 CurrentQueryProgramOutput::AppRows,
-                &ReadViewSpec::default(),
+                read_view,
                 settled_binding_view,
                 authorization_mode,
             )?;
@@ -2172,7 +2173,7 @@ where
                     request,
                     access_paths,
                     shape.schema_version(),
-                    &ReadViewSpec::default(),
+                    read_view,
                     authority_result_key,
                 )
                 .await?
@@ -2189,6 +2190,7 @@ where
                 identity,
                 settled_binding_view,
                 authorization_mode,
+                read_view,
             )
             .await?
         };
@@ -2412,6 +2414,7 @@ where
                 identity,
                 false,
                 QueryAuthorizationMode::TrustedServing,
+                &ReadViewSpec::default(),
                 Some(&mut profile),
             )
             .await?;

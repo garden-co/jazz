@@ -1147,6 +1147,23 @@ impl MaintainedSubscriptionView {
         versions
     }
 
+    /// Translate logical query sources to authored table names at publication.
+    /// Internal witness indexes retain their logical source identities.
+    pub(super) fn publication_versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+        self.versions_by_tx(tx_id)
+            .into_iter()
+            .map(|mut version| {
+                if let Some(name) = self
+                    .witness_table_names
+                    .get(&(version.table().to_owned(), version.schema_version_alias()))
+                {
+                    version.table = name.clone().into();
+                }
+                version
+            })
+            .collect()
+    }
+
     #[doc(hidden)]
     pub fn acknowledged_supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
         self.supporting.acknowledged_rows()

@@ -46,6 +46,16 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             } => *permission_subject,
             _ => return Err(unsupported("history as policy evidence")),
         };
+        let branch = match self.read_view.sources.get(&request.source) {
+            Some(SourceExpr::BranchView {
+                head, base: None, ..
+            }) => head.clone(),
+            Some(SourceExpr::BranchView { base: Some(_), .. }) => {
+                return Err(unsupported("history with a branch base"));
+            }
+            _ => BranchKey::default(),
+        };
+        let branch_witness = !base_table.branch_by.is_empty();
         let local_first = matches!(self.read_view.sources.get(&request.source),
             Some(SourceExpr::WithOverlays { overlays, .. })
                 if overlays.entries == [OverlayRef::PendingLocal]);
@@ -91,6 +101,17 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     &ReadViewSpec::default(),
                     QueryAuthorizationMode::TrustedServing,
                 )?;
+            // Reuse the already-resolved branch expression. Reconstructing a
+            // selector from this table's key would lose other schema branches.
+            if let Some(source @ SourceExpr::BranchView { .. }) =
+                self.read_view.sources.get(&request.source)
+            {
+                visibility_request
+                    .reads
+                    .primary
+                    .sources
+                    .insert(root_source_id(base_name), source.clone());
+            }
             // Reuse ordinary deleted-row visibility and policy evaluation for the
             // current-row gate; historical content eligibility remains unchanged.
             if request.visibility == RowVisibility::IncludeDeleted {
@@ -127,9 +148,28 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         let history_source = self.node.physical_history_branch_source_graph(
             schema_version,
             base_name,
-            &BranchKey::default(),
+            if covered.is_some() && branch_witness {
+                None
+            } else {
+                Some(&branch)
+            },
         )?;
-        let history = GraphBuilder::lookup(history_source, authorized, ["row_uuid"])
+        // Covered inputs carry exact supplying branches. Probe those branch/row
+        // prefixes directly; a remote receiver must not reopen sibling branches.
+        let (authorized, lookup_fields) = if let Some(covered) = &covered
+            && branch_witness
+        {
+            (
+                covered.clone().project_fields([
+                    ProjectField::renamed("supplying_branch_key", "branch_key"),
+                    ProjectField::named("row_uuid"),
+                ]),
+                vec!["branch_key", "row_uuid"],
+            )
+        } else {
+            (authorized, vec!["row_uuid"])
+        };
+        let history = GraphBuilder::lookup(history_source, authorized, lookup_fields)
             .ok_or(Error::InvalidStoredValue(
                 "history lookup requires a physical source",
             ))?
@@ -137,11 +177,17 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
         let history_fields = descriptor_field_names(&history_descriptor)?;
         let history = if let Some(covered) = covered {
+            let mut left_keys = vec!["row_uuid", "tx_time", "tx_node_id"];
+            let mut right_keys = left_keys.clone();
+            if branch_witness {
+                left_keys.push("branch_key");
+                right_keys.push("supplying_branch_key");
+            }
             GraphBuilder::join(
                 history,
-                covered.project(["row_uuid", "tx_time", "tx_node_id"]),
-                ["row_uuid", "tx_time", "tx_node_id"],
-                ["row_uuid", "tx_time", "tx_node_id"],
+                covered.project(right_keys.clone()),
+                left_keys,
+                right_keys,
             )
             .project_fields(
                 history_fields
@@ -151,18 +197,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         } else {
             history
         };
-        // Complete received images may omit authored-column metadata. Preserve
-        // that representation; only an explicit deletion-only image is excluded.
-        let history = history.filter(PredicateExpr::Or(vec![
-            PredicateExpr::is_null("authored_columns"),
-            PredicateExpr::Neq {
-                field: "authored_columns".to_owned(),
-                value: Value::Nullable(Some(Box::new(Value::Array(vec![Value::U64(
-                    DELETION_COLUMN_ID.0,
-                )]))))
-                .into(),
-            },
-        ]));
+        let history = history.filter(self.content_version_predicate(schema_version, &base_table)?);
 
         // Metadata lookups are keyed by versions already selected under the
         // exact row prefix; neither transaction nor node tables are scanned.
@@ -268,6 +303,9 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 ProjectField::named("transaction_node"),
             ]);
             if needs_version_witnesses {
+                if branch_witness {
+                    fields.push(ProjectField::named("branch_key"));
+                }
                 fields.extend([
                     ProjectField::named("schema_version"),
                     ProjectField::named("authored_columns"),
@@ -308,7 +346,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     schema_version_field: "schema_version".to_owned(),
                     tx_time_field: "tx_time".to_owned(),
                     tx_node_field: "tx_node_id".to_owned(),
-                    branch_or_prefix_field: None,
+                    branch_or_prefix_field: branch_witness.then(|| "branch_key".to_owned()),
                 },
             );
         }
@@ -346,5 +384,44 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             deletion_register: None,
             authorized_deletion_preimage: None,
         })
+    }
+
+    /// Keep content images while excluding deletion-only writes, including
+    /// branch coordinates automatically authored with a deletion event.
+    fn content_version_predicate(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &TableSchema,
+    ) -> Result<PredicateExpr, Error> {
+        // Branch coordinates are automatically authored even by deletion-only
+        // writes. They identify the image; they do not make it a content version.
+        let mut deletion_only_sets = vec![BTreeSet::from([DELETION_COLUMN_ID])];
+        if !table.branch_by.is_empty() {
+            let mut names = table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
+            names.insert(DELETION_COLUMN_NAME.to_owned());
+            if let Some(ids) = self.node.authored_column_ids_for_names(
+                schema_version,
+                &table.name,
+                Some(&names),
+            )? {
+                deletion_only_sets.push(ids);
+            }
+        }
+        // Complete received images may omit authored-column metadata.
+        Ok(PredicateExpr::Or(vec![
+            PredicateExpr::is_null("authored_columns"),
+            PredicateExpr::And(
+                deletion_only_sets
+                    .into_iter()
+                    .map(|ids| PredicateExpr::Neq {
+                        field: "authored_columns".to_owned(),
+                        value: Value::Nullable(Some(Box::new(Value::Array(
+                            ids.into_iter().map(|id| Value::U64(id.0)).collect(),
+                        ))))
+                        .into(),
+                    })
+                    .collect(),
+            ),
+        ]))
     }
 }

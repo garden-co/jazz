@@ -522,6 +522,17 @@ where
         }
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+        if decoded.uses_history()
+            && matches!(
+                &opts.read_view.source,
+                ReadViewSourceSpec::BranchView { base: Some(_), .. }
+            )
+        {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "unsupported relation query: Reading history with a branch base is not supported in history queries yet",
+            ));
+        }
         let is_relation = decoded.relation.is_some();
         if open_tx.is_some() && is_relation {
             return Err(Error::new(
@@ -564,7 +575,7 @@ where
             && author.is_none()
             && prepared.shape().query().array_subqueries.is_empty()
             && coverage_tier >= DurabilityTier::Global
-            && opts.read_view.is_default()
+            && (opts.read_view.is_default() || prepared.shape().query().uses_history())
             && !opts.include_deleted;
         if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
@@ -1030,6 +1041,22 @@ where
         let mut node = prepared.scoped_node(&mut node, author)?;
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
+            if prepared.shape.query().uses_history() {
+                return node
+                    .query_rows_with_options_for_identity(
+                        &prepared.shape,
+                        &prepared.binding,
+                        tier,
+                        None,
+                        author,
+                        opts.include_deleted,
+                        authorization_mode,
+                        &opts.read_view,
+                        None,
+                    )
+                    .await
+                    .map_err(Into::into);
+            }
             if opts.include_deleted {
                 return Err(Error::new(
                     ErrorCode::Query,

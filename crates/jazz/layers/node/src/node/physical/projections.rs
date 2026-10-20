@@ -336,14 +336,16 @@ where
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
-        branch_key: &BranchKey,
+        branch_key: Option<&BranchKey>,
     ) -> Result<GraphBuilder, Error> {
         self.physical_history_source_graph_with_scan(
             schema_version,
             logical_table,
-            Some(groove::ivm::StaticScanSpec::Prefix(vec![
-                Value::Bytes(branch_key.canonical_bytes()).into(),
-            ])),
+            branch_key.map(|branch_key| {
+                groove::ivm::StaticScanSpec::Prefix(vec![
+                    Value::Bytes(branch_key.canonical_bytes()).into(),
+                ])
+            }),
         )
     }
 
