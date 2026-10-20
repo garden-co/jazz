@@ -137,8 +137,8 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
   if (
-    occurrenceKey.length === 25 &&
-    occurrenceKey[0] === 1 &&
+    occurrenceKey.length === 26 &&
+    occurrenceKey[0] === 2 &&
     occurrenceKey.subarray(17).every((byte) => byte === 0)
   )
     return sourceId;
@@ -4925,8 +4925,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("materializes typed-occurrence resets instead of collapsing them in the packed path", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
-      const bytes = new Uint8Array(51);
-      bytes[0] = 1;
+      const bytes = new Uint8Array(52);
+      bytes[0] = 2;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -4957,8 +4957,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:01"),
-      expect.stringContaining("result:01"),
+      expect.stringContaining("result:02"),
+      expect.stringContaining("result:02"),
     ]);
     runtime.close();
   });
@@ -7180,7 +7180,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const rowId = new Uint8Array(16).fill(7);
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
-    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 1);
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
     key[0] = 2;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
@@ -7208,8 +7208,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const first = decodeSubscriptionDelta(initial, testSchema);
   const firstDelta = runtimeDeltaChanges(first);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:01"),
-    expect.stringContaining("result:01"),
+    expect.stringContaining("result:02"),
+    expect.stringContaining("result:02"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
@@ -7535,7 +7535,7 @@ function writeTeamGatherBatches(
 
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
-  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 1);
+  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
   key[0] = 2;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);

@@ -1518,11 +1518,17 @@ async fn local_first_history_subscription_restores_versions() {
                     .len(),
                 2
             );
+            // A cached opening does not mean the upstream subscription is ready.
+            // Wait for its first answer before Bob starts the live mutations.
             let mut stream = alice
-                .subscribe_with_read_tier(history(row).select(["title"]), ReadTier::LocalFirst)
+                .subscribe_local_first(history(row).select(["title"]), Duration::from_secs(10))
                 .await
                 .unwrap();
             let initial = next(&mut stream).await;
+            assert!(
+                !initial.pending,
+                "upstream subscription is ready before deletion"
+            );
             assert_eq!(initial.added.len(), 2);
             assert_ne!(initial.added[0].id, initial.added[1].id);
             settled(&bob, bob.delete("tasks", row).unwrap()).await;

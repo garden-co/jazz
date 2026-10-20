@@ -2000,23 +2000,21 @@ fn lowered_aggregate_terminals(
         .cloned()
         .collect::<BTreeSet<_>>();
     let aggregate_descriptor = aggregate_app_row_descriptor(plan, source)?;
-    let aggregate_graph = if root_route_fields.is_empty() {
-        graph
-    } else {
-        graph.project_fields(
-            aggregate_descriptor
-                .fields()
-                .iter()
-                .map(|field| {
-                    ProjectField::named_with_identity(
-                        field.name.as_ref().expect("aggregate carrier"),
-                        field.identity.clone().expect("aggregate identity"),
-                    )
-                })
-                .chain(root_route_fields.iter().map(ProjectField::named))
-                .collect::<Vec<_>>(),
-        )
-    };
+    // Grouping assigns carrier identities. Restore the compiled output identities
+    // even when there are no binding routes to carry.
+    let aggregate_graph = graph.project_fields(
+        aggregate_descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                ProjectField::named_with_identity(
+                    field.name.as_ref().expect("aggregate carrier"),
+                    field.identity.clone().expect("aggregate identity"),
+                )
+            })
+            .chain(root_route_fields.iter().map(ProjectField::named))
+            .collect::<Vec<_>>(),
+    );
     if request.output.app_rows.is_some() && !authority_publishes_covered_inputs {
         let aggregate_schema = aggregate_result_schema(plan, source, root_route_fields.clone())?;
         terminals.push(LoweredTerminal {

@@ -2819,14 +2819,17 @@ where
         access_path: SourceAccessPath,
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
-            path @ (SourceAccessPath::PrimaryKey(_) | SourceAccessPath::Lookup(_)) => {
-                if self.count_access_path_metrics {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                }
-                selected_visible_current_primary_key_graph(table, tier, &path)
-                    .map(Some)
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))
-            }
+            path @ (SourceAccessPath::PrimaryKey(_) | SourceAccessPath::Lookup(_)) => self
+                .projected_content_current_source_graph_with_access_path(
+                    request,
+                    table,
+                    tier,
+                    true,
+                    true,
+                    Some(path),
+                )
+                .await
+                .map(Some),
             SourceAccessPath::PrimaryKeyPage { cap } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
@@ -3635,6 +3638,26 @@ where
         include_global_time: bool,
         exclude_deleted: bool,
     ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
+        let access_path = self.access_paths.get(&request.source).cloned();
+        self.projected_content_current_source_graph_with_access_path(
+            request,
+            read_table,
+            tier,
+            include_global_time,
+            exclude_deleted,
+            access_path,
+        )
+    }
+
+    fn projected_content_current_source_graph_with_access_path<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        read_table: &'a TableSchema,
+        tier: DurabilityTier,
+        include_global_time: bool,
+        exclude_deleted: bool,
+        access_path: Option<SourceAccessPath>,
+    ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
             let mut fields = global_current_storage_fields(read_table, true, include_global_time);
             // Unfiltered callers receive the image's deletion cell.
@@ -3648,7 +3671,7 @@ where
             // Global and Ahead candidates before their compatibility boundary.
             if tier == DurabilityTier::Global {
                 let projection_target = self.current_projection_target(request, read_table)?;
-                let content = match self.access_paths.get(&request.source).cloned() {
+                let content = match access_path {
                     Some(SourceAccessPath::Lookup(lookup)) => {
                         if self.count_access_path_metrics {
                             self.node.query_engine_read_metrics.source_primary_key_scans +=
@@ -3775,7 +3798,6 @@ where
                         .map_err(Error::Groove)
                 })
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let access_path = self.access_paths.get(&request.source).cloned();
             let global = match &access_path {
                 Some(SourceAccessPath::Lookup(lookup)) => {
                     if self.count_access_path_metrics {
@@ -4139,58 +4161,6 @@ fn content_version_current_source_graph(
         ["tx_time", "tx_node_id"],
     )
     .project(fields)
-}
-
-fn selected_visible_current_primary_key_graph(
-    table: &TableSchema,
-    tier: DurabilityTier,
-    path: &SourceAccessPath,
-) -> Result<GraphBuilder, Error> {
-    let user_fields = table
-        .columns
-        .iter()
-        .map(|column| user_column_field(&column.name))
-        .collect::<Vec<_>>();
-    let mut content_fields = vec![
-        "row_uuid".to_owned(),
-        "schema_version".to_owned(),
-        "authored_columns".to_owned(),
-    ];
-    content_fields.extend(user_fields.iter().cloned());
-    content_fields.extend([
-        "created_by".to_owned(),
-        "created_at".to_owned(),
-        "updated_by".to_owned(),
-        "updated_at".to_owned(),
-        "tx_time".to_owned(),
-        "tx_node_id".to_owned(),
-    ]);
-    let scan = |name: String| match path {
-        SourceAccessPath::PrimaryKey(prefix) => Ok(GraphBuilder::table_scan(
-            name,
-            static_scan_for_prefix(prefix.clone(), 1),
-        )),
-        SourceAccessPath::Lookup(lookup) => apply_source_lookup(GraphBuilder::table(name), lookup),
-        _ => unreachable!("primary-key source requires a primary-key access path"),
-    };
-    let mut image_fields = content_fields.clone();
-    image_fields.push("_deletion".to_owned());
-    let current = if tier == DurabilityTier::Global {
-        scan(global_current_table_name(&table.name))?.project(image_fields)
-    } else {
-        GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                scan(global_current_table_name(&table.name))?.project(image_fields.clone()),
-                scan(ahead_current_table_name(&table.name))?.project(image_fields.clone()),
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(image_fields)
-    };
-    Ok(current
-        .filter(not_deleted_predicate())
-        .project(content_fields))
 }
 
 /// How a branch-view source reads each of its branch layers.
@@ -5125,6 +5095,16 @@ where
         allow_local: bool,
         allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
+        // An arm's predicates do not constrain the other arms sharing its
+        // source. This applies to one-shot reads as well as maintained proofs.
+        if input
+            .shape
+            .nodes
+            .values()
+            .any(|node| matches!(node, RowSetExpr::Union { .. }))
+        {
+            return Ok(BTreeMap::new());
+        }
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
         // source's own Filter -> Source pipeline.  Inspecting every normalized
@@ -5572,6 +5552,12 @@ where
     ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
+        // Top-level filters describe only the first authorization arm when
+        // policy branches are present. Even a false first arm cannot bound
+        // the shared source to an empty ID set.
+        if !query.policy_branches.is_empty() {
+            return Ok(access_paths);
+        }
         let equalities = root_literal_equalities(query, binding)?;
         self.table_in_schema(&query.table, shape.schema_version())?;
         // Policy-bearing roots take the point path too (#3511). The point
@@ -7162,15 +7148,12 @@ fn single_root_join_source<'a>(
 
 impl From<SourceResolutionError> for Error {
     fn from(error: SourceResolutionError) -> Self {
-        Error::QueryCapability(format!(
-            "{:?}",
-            CapabilityReport {
-                gaps: vec![query_engine::UnsupportedReason::Source(error.gap)],
-                explain: query_engine::ExplainPlan {
-                    read: vec![format!("failed source request: {:#?}", error.request)],
-                    ..query_engine::ExplainPlan::default()
-                },
-            }
-        ))
+        query_capability_error(&CapabilityReport {
+            gaps: vec![query_engine::UnsupportedReason::Source(error.gap)],
+            explain: query_engine::ExplainPlan {
+                read: vec![format!("failed source request: {:#?}", error.request)],
+                ..query_engine::ExplainPlan::default()
+            },
+        })
     }
 }

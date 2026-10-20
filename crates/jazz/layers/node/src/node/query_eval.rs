@@ -1897,12 +1897,23 @@ where
                 graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
             }
             if shared.descriptor != descriptor {
-                graph = graph.project(
-                    descriptor
-                        .fields()
-                        .iter()
-                        .map(|field| field.name.clone().expect("covered input fields are named")),
-                );
+                // Select compiler-owned carriers while preserving their logical
+                // identities. An app column named `created_by` must not shadow
+                // the provenance carrier with that stored name.
+                graph = graph.project_fields(descriptor.fields().iter().map(|field| {
+                    ProjectField {
+                        expression: groove::ivm::ProjectExpr::Field(
+                            groove::ivm::FieldRef::stored_name(
+                                field.name.clone().expect("covered input fields are named"),
+                            ),
+                        ),
+                        output_name: field.name.clone().expect("covered input fields are named"),
+                        output_identity: field
+                            .identity
+                            .clone()
+                            .expect("covered input fields have identities"),
+                    }
+                }));
             }
             runtime_sources.insert(occurrence.clone(), graph);
             runtime_source_descriptors.insert(occurrence, descriptor);
@@ -2063,8 +2074,7 @@ where
                 )
                 .await?;
             let query = shape.query();
-            self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            self.finalize_query_rows(query, shape.schema_version(), &mut rows, None)?;
             return Ok(rows);
         }
         if read_view.is_default()
@@ -2311,18 +2321,15 @@ where
         )))
     }
 
-    /// Materialize one-shot current rows and expose the canonical public
-    /// result. Passing no profile keeps the ordinary read path clock-free.
-    fn materialize_and_finalize_query_rows(
+    /// Decode and normalize rows while retaining ordering fields. Sorting and
+    /// public projection belong to the caller's finalization boundary.
+    fn materialize_query_rows(
         &mut self,
         query: &crate::query::Query,
-        schema_version: SchemaVersionId,
         table_schema: &TableSchema,
         app_output: &AppRowSchema,
         deltas: &RecordDeltas,
-        mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let phase_started = profile.as_ref().map(|_| Instant::now());
         let mut rows = if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(query, app_output, deltas)?
         } else if query.flat_join.is_some() {
@@ -2375,24 +2382,51 @@ where
         {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
+        Ok(rows)
+    }
+
+    /// Materialize one-shot current rows and expose the canonical public
+    /// result. Passing no profile keeps the ordinary read path clock-free.
+    fn materialize_and_finalize_query_rows(
+        &mut self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        table_schema: &TableSchema,
+        app_output: &AppRowSchema,
+        deltas: &RecordDeltas,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        let mut rows = self.materialize_query_rows(query, table_schema, app_output, deltas)?;
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.decode_materialize = started.elapsed();
         }
 
+        self.finalize_query_rows(query, schema_version, &mut rows, profile)?;
+        Ok(rows)
+    }
+
+    fn finalize_query_rows(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut Vec<CurrentRow>,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<(), Error> {
         let phase_started = profile.as_ref().map(|_| Instant::now());
-        self.finish_engine_query_rows_in_schema(query, schema_version, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, schema_version, rows)?;
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.finish_rows = started.elapsed();
         }
 
         let phase_started = profile.as_ref().map(|_| Instant::now());
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, schema_version, &mut rows)?;
+            self.apply_projection_in_schema(query, schema_version, rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.apply_projection = started.elapsed();
         }
-        Ok(rows)
+        Ok(())
     }
 
     async fn query_rows_with_options_for_identity_profiled(
@@ -2824,13 +2858,11 @@ where
             .await
             .map_err(Error::Groove)?;
         if query.uses_history() {
-            self.materialize_and_finalize_query_rows(
+            self.materialize_query_rows(
                 query,
-                lowered_shape.schema_version(),
                 &table,
                 &materialization_app_row_schema(None, Some(&program))?,
                 &deltas,
-                None,
             )
         } else if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(

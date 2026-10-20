@@ -7902,7 +7902,8 @@ fn history_query_reads_versions_metadata_and_projection() {
     let projected = read(&query.clone().select(["title"]));
     assert_eq!(projected.len(), 3);
     assert_eq!(
-        projected[1], projected[2],
+        projected[1].cell(&schema.tables()[0], "title"),
+        projected[2].cell(&schema.tables()[0], "title"),
         "equal projections retain both versions"
     );
     assert!(
@@ -8083,10 +8084,10 @@ fn history_query_excludes_pending_and_deletion_only_versions() {
     );
 }
 
-/// Alice can read an empty local history on a partial node, while unbounded
-/// execution and deferred capabilities still fail explicitly.
+/// Alice can query and subscribe to filtered local history on a partial node,
+/// while unbounded reads and relationship includes still fail explicitly.
 #[test]
-fn history_query_rejects_unbounded_reads_and_deferred_modes() {
+fn history_query_supports_bounded_local_reads_and_rejects_unbounded_reads_and_includes() {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text)),
@@ -8104,20 +8105,42 @@ fn history_query_rejects_unbounded_reads_and_deferred_modes() {
     let query = Query::from("history.tasks").filter(eq(col("id"), lit(Value::Uuid(row(0x75).0))));
     let prepared = db.prepare_query(&query).unwrap();
     assert!(db.read(&prepared).unwrap().is_empty());
-    for unsupported in [
-        Query::from("history.tasks"),
-        query.clone().filter(eq(col("title"), lit("anything"))),
-        query.clone().include("owner"),
+    let filtered = db
+        .prepare_query(&query.clone().filter(eq(col("title"), lit("anything"))))
+        .unwrap();
+    assert!(db.read(&filtered).unwrap().is_empty());
+    let mut subscription = block_on(db.subscribe(
+        &filtered,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected an empty local history snapshot");
+    };
+    assert!(reset);
+    assert!(added.is_empty() && updated.is_empty() && removed.is_empty());
+    for (unsupported, message) in [
+        (
+            Query::from("history.tasks"),
+            "unsupported relation query: Reading history without an id equality or IN constraint is not supported in history queries yet",
+        ),
+        (
+            query.clone().include("owner"),
+            "unsupported relation query: Reading joins or relationships is not supported in history queries yet",
+        ),
     ] {
         let error = db.prepare_query(&unsupported).unwrap_err();
         assert_eq!(error.code, ErrorCode::Query);
-        assert!(error.message.contains("not supported"), "{error}");
+        assert_eq!(error.message, message);
     }
-    let result = block_on(db.subscribe(&prepared, ReadOpts::default()));
-    let error = match result {
-        Ok(_) => panic!("client-local history without serving authorization must be rejected"),
-        Err(error) => error,
-    };
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(error.message.contains("client-local history"));
 }
