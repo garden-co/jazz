@@ -56,6 +56,20 @@ impl QueryProgramTemplateCache {
         self.physical.clear();
     }
 
+    /// Retire logical families while leaving bounded, source-free physical
+    /// compiler products available for later promotions.
+    #[doc(hidden)]
+    pub fn clear_logical_templates(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Physical compiler work across logical-family retirement.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn physical_template_counters(&self) -> (u64, u64) {
+        self.physical.counters()
+    }
+
     fn typed_program(&mut self, mut program: QueryProgram) -> QueryProgram {
         let mut graphs = program
             .lowered

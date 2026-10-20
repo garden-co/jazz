@@ -4068,3 +4068,70 @@ fn literal_query_families_keep_values_out_of_the_reusable_program() {
     assert!(read(&mut core, "missing").is_empty());
     assert_eq!(read(&mut core, "open"), vec![first]);
 }
+
+/// Alice closes each peer query after probing two different prepared bindings.
+/// Logical families and live ownership retire, but source-free physical
+/// compiler products may survive. New probes, writes and claims must still
+/// produce current rows; activating a denying policy removes all visibility.
+/// The physical counter is needed because row results alone cannot distinguish
+/// reuse from recompiling every reclaimed family.
+#[test]
+fn reclaimed_peer_shapes_reuse_only_unbound_query_templates() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xe4), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xe5), schema);
+    let (first, second, alice_tenant) = seed_access_path_docs(&mut writer, &mut core);
+    let alice = user(0xe6);
+    let bob = user(0xb2);
+    core.set_test_provider_claims(alice, BTreeMap::from([
+        ("tenant".to_owned(), Value::Uuid(alice_tenant.test_uuid())),
+    ]));
+    let read = |core: &mut NodeState, status: &str| {
+        let shape = Query::from("docs")
+            .filter(eq(col("status"), crate::query::param("wanted")))
+            .validate(&core.catalogue.schema).unwrap();
+        core.register_shape_for_peer_with_options(
+            7, shape.shape_id(), crate::protocol::ShapeAst::from_validated(&shape),
+            crate::protocol::RegisterShapeOptions::default(),
+        ).unwrap();
+        let warm = shape.bind(BTreeMap::from([
+            ("wanted".to_owned(), Value::String("never-present".to_owned())),
+        ])).unwrap();
+        assert!(core.query_rows_for_link(&shape, &warm, DurabilityTier::Global, alice).unwrap().is_empty());
+        let binding = shape.bind(BTreeMap::from([
+            ("wanted".to_owned(), Value::String(status.to_owned())),
+        ])).unwrap();
+        let rows = core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, alice)
+            .unwrap().into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+        core.release_shape_for_peer(7, shape.shape_id());
+        assert!(!core.query.registered_shapes.contains_key(&shape.shape_id()),
+            "the optimisation must not retain a live peer shape");
+        rows
+    };
+    assert_eq!(read(&mut core, "open"), vec![first]);
+    let (compiled, before) = core.query.query_program_templates.physical_template_counters();
+    assert!(compiled > 0, "the fixture must exercise physical template compilation");
+    assert!(read(&mut core, "closed").is_empty());
+    assert!(core.query.query_program_templates.physical_template_counters().1 > before,
+        "physical compiler products must be reused after logical families retire");
+    assert!(read(&mut core, "missing").is_empty());
+    assert_eq!(read(&mut core, "open"), vec![first]);
+    commit_mergeable_global(
+        &mut writer, &mut core,
+        MergeableCommit::new("docs", first, 12)
+            .cells(access_path_doc_cells(alice_tenant, "closed", "updated")),
+    );
+    assert!(read(&mut core, "open").is_empty());
+    assert_eq!(read(&mut core, "closed"), vec![first]);
+    core.set_test_provider_claims(alice, BTreeMap::from([
+        ("tenant".to_owned(), Value::Uuid(bob.test_uuid())),
+    ]));
+    assert_eq!(read(&mut core, "closed"), vec![second]);
+    assert!(read(&mut core, "open").is_empty());
+    let denied = policy_indexed_access_path_schema(PublicPolicyExpr::False);
+    assert_eq!(denied.version_id(), core.catalogue.active_schema.schema);
+    core.install_active_schema(ActiveSchema::new(
+        CurrentWriteSchema { revision: 1, schema: denied.version_id() }, denied,
+    ).unwrap());
+    assert!(read(&mut core, "closed").is_empty());
+}
