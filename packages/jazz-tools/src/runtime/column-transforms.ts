@@ -1,6 +1,7 @@
 export interface ColumnTransform {
   /** Internal marker: a virtual field has no stored input or writable output. */
   readonly computed?: true;
+  readonly rowColumns?: readonly string[];
   readonly dependsOn?: readonly string[];
   from(value: unknown, dependencies: Readonly<Record<string, unknown>>): unknown;
   to(value: unknown, dependencies: Readonly<Record<string, unknown>>): unknown;
@@ -14,7 +15,6 @@ type DependencyTransforms = Readonly<
 type DependencyPlan = {
   columns: readonly string[];
   byColumn: ReadonlyMap<string, readonly string[]>;
-  readByColumn: ReadonlyMap<string, readonly string[]>;
   hasWriteDependencies: boolean;
   computedColumns: readonly string[];
 };
@@ -51,31 +51,10 @@ export function columnTransformDependencies(transforms: DependencyTransforms): D
     return result;
   };
   for (const column of Object.keys(transforms)) visit(column);
-  // Computed fields consume app values; stored transforms consume raw dependencies,
-  // so their dependency transforms must not extend the physical read projection.
   const computedColumns = Object.keys(transforms).filter((column) => transforms[column]!.computed);
-  const readByColumn = new Map<string, readonly string[]>();
-  const visitRead = (column: string): readonly string[] => {
-    const previous = readByColumn.get(column);
-    if (previous) return previous;
-    const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
-    const closure = new Set<string>();
-    for (const dependency of transform?.dependsOn ?? []) {
-      if (transform?.computed) {
-        for (const stored of visitRead(dependency)) closure.add(stored);
-        if (Object.hasOwn(transforms, dependency) && transforms[dependency]?.computed) continue;
-      }
-      closure.add(dependency);
-    }
-    const result = [...closure];
-    readByColumn.set(column, result);
-    return result;
-  };
-  for (const column of computedColumns) visitRead(column);
   const plan = {
     columns: [...columns],
     byColumn,
-    readByColumn,
     hasWriteDependencies: Object.values(transforms).some(
       (transform) => !transform.computed && !!transform.dependsOn?.length,
     ),
@@ -116,7 +95,7 @@ export function validateTransformDependencies(
     string,
     {
       _transform?: Pick<ColumnTransform, "dependsOn">;
-      _computed?: Pick<ColumnTransform, "dependsOn">;
+      _computed?: unknown;
     }
   >,
 ): void {
@@ -127,7 +106,7 @@ export function validateTransformDependencies(
     if (visiting.has(column)) throw new Error(`Cyclic transform dependency at "${column}".`);
     visiting.add(column);
     const definition = columns[column];
-    const dependencies = (definition?._computed ?? definition?._transform)?.dependsOn ?? [];
+    const dependencies = definition?._transform?.dependsOn ?? [];
     if (
       !Array.isArray(dependencies) ||
       dependencies.some((dependency) => typeof dependency !== "string")
@@ -149,25 +128,105 @@ export function validateTransformDependencies(
   for (const column of Object.keys(columns)) visit(column);
 }
 
+/** Private retry signal: a computation needs a complete stored column. */
+export class MissingComputedDependency extends Error {
+  constructor(column: string) {
+    super(`Computed dependency "${column}" is unavailable.`);
+  }
+}
+
+/** Observations belong to one read/subscription, never another session or branch. */
+export class ComputedReadState {
+  private readonly dependencies = new Map<ColumnTransform, Set<string>>();
+  version = 0;
+
+  observe(transform: ColumnTransform, column: string): void {
+    let columns = this.dependencies.get(transform);
+    if (!columns) this.dependencies.set(transform, (columns = new Set()));
+    if (!columns.has(column)) {
+      columns.add(column);
+      this.version++;
+    }
+  }
+
+  storedColumns(transforms: ColumnTransformMap, requested: string): ReadonlySet<string> {
+    const columns = new Set<string>();
+    const visited = new Set<string>();
+    const visit = (column: string) => {
+      if (visited.has(column)) return;
+      visited.add(column);
+      const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
+      if (transform?.computed) {
+        for (const dependency of this.dependencies.get(transform) ?? []) visit(dependency);
+      } else {
+        columns.add(column);
+        // Stored transforms consume decoded stored context, not sibling app values.
+        for (const dependency of transform?.dependsOn ?? []) columns.add(dependency);
+      }
+    };
+    visit(requested);
+    return columns;
+  }
+}
+
 /** Resolve app-facing values once, without evaluating hidden stored dependencies as outputs. */
 export function computedColumnValues(
   transforms: ColumnTransformMap,
   requested: readonly string[],
   stored: Readonly<Record<string, unknown>>,
+  state?: ComputedReadState,
+  partial?: Readonly<Record<string, unknown>>,
 ): ReadonlyMap<string, unknown> {
   const values = new Map<string, unknown>();
+  const visiting = new Set<string>();
+  let missing: MissingComputedDependency | undefined;
+  const requireStored = (column: string): unknown => {
+    if (!Object.hasOwn(stored, column) || (partial && Object.hasOwn(partial, column))) {
+      missing = new MissingComputedDependency(column);
+      throw missing;
+    }
+    return stored[column];
+  };
   const resolve = (column: string): unknown => {
     if (values.has(column)) return values.get(column);
+    if (visiting.has(column)) throw new Error(`Cyclic computed dependency at "${column}".`);
+    visiting.add(column);
     const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
     let value: unknown;
     if (transform?.computed) {
-      const dependencies: Record<string, unknown> = {};
-      for (const dependency of transform.dependsOn ?? [])
-        Object.defineProperty(dependencies, dependency, {
-          value: resolve(dependency),
-          enumerable: true,
-        });
-      value = transform.from(undefined, Object.freeze(dependencies));
+      const keys = transform.rowColumns ?? [];
+      const readonly = () => {
+        throw new TypeError("Computed callback rows are read-only.");
+      };
+      const read = (key: string) => {
+        if (!keys.includes(key) && !(Object.hasOwn(transforms, key) && transforms[key]?.computed)) {
+          // Honour ordinary object operations, while stored prototype-named
+          // columns still take precedence over Object.prototype.
+          if (Object.hasOwn(Object.prototype, key)) return Reflect.get(Object.prototype, key);
+          if (key === "toJSON") return undefined;
+          throw new Error(`Unknown computed dependency "${key}".`);
+        }
+        state?.observe(transform, key);
+        return resolve(key);
+      };
+      const row = new Proxy(Object.create(null) as Record<string, unknown>, {
+        get: (_target, key) => (typeof key === "string" ? read(key) : undefined),
+        has: (_target, key) => typeof key === "string" && keys.includes(key),
+        ownKeys: () => [...keys],
+        getOwnPropertyDescriptor: (_target, key) =>
+          typeof key === "string" && keys.includes(key)
+            ? { configurable: true, enumerable: true, get: () => read(key) }
+            : undefined,
+        set: readonly,
+        deleteProperty: readonly,
+        defineProperty: readonly,
+        setPrototypeOf: readonly,
+        preventExtensions: readonly,
+      });
+      value = transform.from(undefined, row);
+      // A returned row must not retain a live proxy after evaluation has finished.
+      if (value === row) value = { ...row };
+      if (missing) throw missing;
       if (
         value &&
         (typeof value === "object" || typeof value === "function") &&
@@ -176,12 +235,13 @@ export function computedColumnValues(
       )
         throw new TypeError(`Computed field "${column}" must return synchronously.`);
     } else {
-      if (!Object.hasOwn(stored, column))
-        throw new Error(`Computed dependency "${column}" is unavailable.`);
+      const storedValue = requireStored(column);
+      for (const dependency of transform?.dependsOn ?? []) requireStored(dependency);
       value = transform
-        ? transform.from(stored[column], dependencyContext(transform, stored))
-        : stored[column];
+        ? transform.from(storedValue, dependencyContext(transform, stored))
+        : storedValue;
     }
+    visiting.delete(column);
     values.set(column, value);
     return value;
   };

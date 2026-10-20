@@ -224,7 +224,7 @@ export function hasExternalProvenanceNameAllowance(column: {
 /** A client-side, read-only field with no stored column. */
 export interface ComputedColumn<Value = unknown> {
   readonly _computed: {
-    readonly dependsOn: readonly string[];
+    readonly rowColumns: readonly string[];
     readonly compute: (row: Readonly<Record<string, unknown>>) => Value;
   };
   readonly _transform?: never;

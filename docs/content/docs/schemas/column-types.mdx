@@ -105,20 +105,24 @@ A combined write cannot convert `price` if its new dependency value is supplied 
 
 ## Computed Columns
 
-Use `s.computed(table, fields)` to add values derived from other fields when a row is read. A computed field has no stored column and is read-only. Keep `.transform({ from, to })` for converting a stored, writable column between the database and your app.
+Use `s.computed(callback)` in `s.table`'s second argument, alongside relationships, to derive values when a row is read. A computed field has no stored column and is read-only. Keep `.transform({ from, to })` for converting a stored, writable column between the database and your app.
 
-Declare the stored table first so TypeScript can infer each callback's dependency types:
+TypeScript infers the callback's row type from the columns in the first argument:
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/computed-columns.ts#computed-columns-ts
 </include>
 
-The callback above receives a read-only `{ score: number }`. It can access only the names in `dependsOn`. The returned row has a read-only `priority` property; computed object and array values also have read-only result types. This is a TypeScript contract, not a deep runtime freeze.
+The callback above receives a read-only row with `id`, `title` and `score`. The returned row has a read-only `priority` property; computed object and array values also have read-only result types. This is a TypeScript contract, not a deep runtime freeze.
 
-The call returns a new table definition; the original `tasks` is unchanged. Dependencies may name `id`, stored columns, or computed fields added by an earlier `s.computed` call. They receive app-facing values, after any stored column transforms. A stored column transform cannot depend on a virtual field.
+Computed fields receive app-facing values, after any stored column transforms. To build on an earlier computed field, pass the earlier table's `.columns` to another `s.table` declaration; callbacks infer those existing fields too. A stored column transform cannot depend on a virtual field.
 
-Computed callbacks run synchronously in the TypeScript client and must not mutate their inputs. Selecting a computed field automatically fetches its dependencies, including their own stored transform contexts. Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows, relationship hops and subscriptions use the same preparation; a dependency-only update recomputes the result without writing a computed value.
+Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or retain the proxy for later use. Unknown fields and dependency cycles fail when evaluated.
 
-Reads use complete dependency values. To return a partial value alongside a computed field, pass the partial projection first and the computed field name afterwards, for example `app.tasks.select({ title: { from: 0, to: 10 } }, "priority")`. A computation depending on `title` still receives the complete title. This can require loading a large text, JSON or byte value, so declare only the dependencies you need. Streaming and partial edits to stored dependencies remain available.
+Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows and relationship hops use the same preparation. Subscriptions retain the dependencies they observe and expand their native selection when a callback takes a new branch. A dependency-only update recomputes the result without writing a computed value.
 
-Computed fields cannot be inserted, updated, filtered, sorted, indexed, used as relationship keys or used for branching. Filter and sort by stored columns. Permission callbacks expose only stored column references; computed fields cannot be referenced in a permission row context. Computed declarations do not change the structural schema hash, migrations or permission rules; the ordinary permissions on their dependencies still apply. They add client-side fetching, decoding and callback work when requested. Tables without transforms or computed fields retain the ordinary read and write path.
+Reads use complete dependency values. To return a partial value alongside a computed field, pass the partial projection first and the computed field name afterwards, for example `app.tasks.select({ title: { from: 0, to: 10 } }, "priority")`. A computation accessing `title` still receives the complete title. Accessing a large text, JSON or byte value can therefore load the entire value. Streaming and partial edits to stored dependencies remain available.
+
+Computed fields cannot be inserted, updated, filtered, sorted, indexed, used as relationship keys or used for branching. Filter and sort by stored columns. Permission callbacks expose only stored column references; computed fields cannot be referenced in a permission row context. Computed declarations do not change the structural schema hash, migrations or permission rules; the ordinary permissions on their dependencies still apply.
+
+Computed fields add proxy and callback work when requested. Accessing fields already selected needs no extra read. Missing fields can require several reads as successive dependencies are discovered; each retry batches missing fields across rows. Subscriptions may also need replacement native subscriptions while discovering dependencies. Access only the fields you need, especially for large values or remote reads. Tables without transforms or computed fields retain the ordinary read and write path.

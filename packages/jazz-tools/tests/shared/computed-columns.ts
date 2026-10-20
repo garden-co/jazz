@@ -317,6 +317,35 @@ export function testComputedColumns(create: () => Promise<Db>) {
       ).resolves.toEqual({ id: row.id, constant: 42, identity: row.id });
     });
 
+    it("retains the selected branch across dependency discovery and preserves null", async () => {
+      const models = s.defineApp({
+        rows: s
+          .table(
+            { score: s.int().optional(), branch: s.string() },
+            { value: s.computed((row) => row.score ?? -1) },
+          )
+          .branchBy("branch"),
+      });
+      const db = await open();
+      const { value: row } = db.insert(
+        models.rows,
+        { score: null, branch: "main" },
+        { branch: "main" },
+      );
+      await db
+        .update(models.rows, row.id, { score: 20 }, { branch: "draft", base: "main" })
+        .wait({ tier: "local" });
+      const selected = models.rows.where({ id: row.id }).select("value");
+      await expect(db.one(selected, { branch: "draft", base: "main" })).resolves.toEqual({
+        id: row.id,
+        value: 20,
+      });
+      await expect(db.one(selected, { branch: "main" })).resolves.toEqual({
+        id: row.id,
+        value: -1,
+      });
+    });
+
     it("rejects writes and stored queries for computed fields even through unsafe inputs", async () => {
       const db = await open();
       const { value: row } = db.insert(app.items, {});

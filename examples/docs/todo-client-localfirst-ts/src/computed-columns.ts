@@ -3,14 +3,14 @@ import { schema as s } from "jazz-tools";
 
 type Priority = "low" | "medium" | "high";
 
-const tasks = s.table({ title: s.string(), score: s.int() }, {});
-
-const tasksWithPriority = s.computed(tasks, {
-  priority: {
-    dependsOn: ["score"],
-    compute: (row): Priority => (row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low"),
+const tasks = s.table(
+  { title: s.string(), score: s.int() },
+  {
+    priority: s.computed(
+      (row): Priority => (row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low"),
+    ),
   },
-});
+);
 
-export const app = s.defineApp({ tasks: tasksWithPriority });
+export const app = s.defineApp({ tasks });
 // #endregion computed-columns-ts

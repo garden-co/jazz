@@ -3,7 +3,12 @@ import {
   columnTransformDependencies,
   validateTransformDependencies,
 } from "./runtime/column-transforms.js";
-import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
+import type {
+  Relationships,
+  ForwardRelationship,
+  ReverseRelationship,
+  Relationship,
+} from "./relationships.js";
 import type {
   AnyColumnDefinition,
   ComputedColumn,
@@ -184,17 +189,30 @@ type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> 
 };
 export function defineTable<
   const TColumns extends TableDefinition,
-  const TRelations extends Relationships,
+  const TFields extends Record<
+    string,
+    Relationship | ComputedField<ComputedRow<TColumns>, unknown>
+  >,
 >(
   columns: TColumns & ValidateTransformContexts<TColumns>,
-  relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
-): DefinedTable<TColumns, TRelations> {
-  if (!relations || typeof relations !== "object" || Array.isArray(relations))
+  fields: TFields,
+  ..._validation: [TFields] extends [
+    ValidateLocalRelations<TColumns, TableRelations<TFields>> & {
+      [K in keyof TFields]: K extends keyof TColumns | "id" ? never : TFields[K];
+    },
+  ]
+    ? []
+    : [invalidFields: never]
+): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>> {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields))
     throw new Error(
-      "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
+      "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",
     );
+  let completeColumns: Record<string, AnyColumnDefinition> = columns;
+  const relations: Relationships = {};
   const targets = new Map<string, string>();
-  for (const [name, relation] of Object.entries(relations)) {
+  for (const [name, relation] of Object.entries(fields)) {
+    const computed = relation && typeof relation === "object" && "_computed" in relation;
     if (
       !name ||
       ["__proto__", "constructor", "prototype"].includes(name) ||
@@ -202,8 +220,22 @@ export function defineTable<
       name === "id" ||
       Object.hasOwn(columns, name)
     )
-      throw new Error(`Relationship "${name}" collides with a column.`);
+      throw new Error(
+        `${computed ? "Computed field" : "Relationship"} "${name}" collides with a column.`,
+      );
+    if (computed) {
+      assertUserTableColumnNameAllowed(name);
+      if (completeColumns === columns) completeColumns = { ...columns };
+      completeColumns[name] = {
+        _computed: {
+          ...relation._computed,
+          rowColumns: Object.freeze(["id", ...Object.keys(columns)]),
+        },
+      } as ComputedColumn;
+      continue;
+    }
     assertRelationshipDeclaration(relation, name);
+    relations[name] = relation;
     if (relation.kind === "forward") {
       const previous = targets.get(relation.column);
       if (previous && previous !== relation.table)
@@ -238,55 +270,38 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable<TColumns, TRelations>(columns, relations);
+  return new DefinedTable(
+    completeColumns as TColumns & ComputedColumns<TFields>,
+    relations as TableRelations<TFields>,
+  );
 }
 
 type ComputedRow<C extends TableDefinition> = { readonly id: string } & {
   readonly [K in keyof C & string]: ReturnedColumnValue<C[K]>;
 };
-type ComputedField<R, D extends readonly (keyof R & string)[]> = {
-  readonly dependsOn: D;
-  readonly compute: (row: Readonly<Pick<R, D[number]>>) => unknown;
+export type ComputedField<R, V> = {
+  readonly _computed: {
+    readonly compute: (row: Readonly<R>) => V;
+  };
 };
-type ComputedColumns<F> = {
-  [K in keyof F]: F[K] extends { compute: (...args: never[]) => infer V }
-    ? ComputedColumn<V>
-    : never;
-};
+type ComputedColumns<F> = [F] extends [never]
+  ? {}
+  : {
+      [K in keyof F as F[K] extends ComputedField<never, unknown>
+        ? K
+        : never]: F[K] extends ComputedField<never, infer V> ? ComputedColumn<V> : never;
+    };
+type TableRelations<F> = [F] extends [never]
+  ? never
+  : {
+      [K in keyof F as F[K] extends Relationship ? K : never]: Extract<F[K], Relationship>;
+    };
 
-/** Add virtual, read-only fields using the table's app-facing dependency types. */
-export function defineComputed<
-  C extends TableDefinition,
-  R extends Relationships,
-  const D extends Record<string, readonly (keyof ComputedRow<C> & string)[]>,
-  F extends { [K in keyof D]: ComputedField<ComputedRow<C>, D[K]> },
->(
-  table: DefinedTable<C, R>,
-  fields: F & { [K in keyof D]: ComputedField<ComputedRow<C>, D[K]> },
-): DefinedTable<C & ComputedColumns<F>, R> {
-  const columns: Record<string, AnyColumnDefinition> = { ...table.columns };
-  for (const [name, field] of Object.entries(fields)) {
-    if (Object.hasOwn(columns, name) || Object.hasOwn(table.relations, name) || name === "id")
-      throw new Error(`Computed field "${name}" collides with a column or relationship.`);
-    assertUserTableColumnNameAllowed(name);
-    if (!field || typeof field.compute !== "function" || !Array.isArray(field.dependsOn))
-      throw new TypeError(
-        `Computed field "${name}" requires dependsOn and a synchronous compute callback.`,
-      );
-    columns[name] = {
-      _computed: Object.freeze({
-        dependsOn: Object.freeze([...field.dependsOn]),
-        compute: field.compute,
-      }),
-    } as ComputedColumn;
-  }
-  return new DefinedTable(
-    columns as C & ComputedColumns<F>,
-    table.relations,
-    table.indexedColumns,
-    table.branchColumns,
-    table.compositeIndexes,
-  );
+/** Declare a virtual, read-only field in s.table's second argument. */
+export function defineComputed<R, V>(compute: (row: Readonly<R>) => V): ComputedField<R, V> {
+  if (typeof compute !== "function")
+    throw new TypeError("s.computed(...) requires a synchronous callback.");
+  return Object.freeze({ _computed: Object.freeze({ compute }) });
 }
 
 type StoredDependencyValue<C extends AnyColumnDefinition> =
@@ -1903,7 +1918,7 @@ function columnTransformsForTable(
     if (isComputedColumn(builder)) {
       transforms[columnName] = {
         computed: true,
-        dependsOn: builder._computed.dependsOn,
+        rowColumns: builder._computed.rowColumns,
         from: (_value, dependencies) => builder._computed.compute(dependencies),
         to: () => {
           throw new TypeError(`Computed field "${columnName}" is read-only.`);

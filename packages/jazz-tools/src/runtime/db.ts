@@ -63,6 +63,8 @@ import {
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
 import { writeRow } from "./write-row.js";
 import {
+  ComputedReadState,
+  MissingComputedDependency,
   columnTransformDependencies,
   computedColumnValues,
   dependencyContext,
@@ -983,6 +985,7 @@ function prepareTransformRead<T>(
   query: QueryBuilder<T>,
   built: NormalizedBuiltQuery,
   outputTable: string,
+  computedState?: ComputedReadState,
 ) {
   const outputTransforms = resolveOutputColumnTransforms(query, built.table, outputTable);
   const outputIncludes =
@@ -996,6 +999,8 @@ function prepareTransformRead<T>(
       built.select,
     );
     return {
+      computedState: undefined,
+      version: 0,
       physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
       transform: Object.keys(built.partialSelect).length
         ? (row: WasmRow) => applyPartialValueSelections(decode(row), built.partialSelect)
@@ -1039,10 +1044,9 @@ function prepareTransformRead<T>(
         if (!Object.hasOwn(transforms, column)) continue;
         (visibleTransforms ??= {})[column] = transforms[column]!;
         if (transforms[column]!.computed) {
+          computedState ??= new ComputedReadState();
           (computed ??= []).push(column);
-          for (const dependency of columnTransformDependencies(transforms).readByColumn.get(
-            column,
-          ) ?? [])
+          for (const dependency of computedState.storedColumns(transforms, column))
             addDependency(dependency);
         } else {
           for (const dependency of transforms[column]!.dependsOn ?? []) addDependency(dependency);
@@ -1082,11 +1086,13 @@ function prepareTransformRead<T>(
       finish:
         visibleTransforms || hasPartial || finishIncludes.length
           ? (row: Record<string, unknown>): Record<string, unknown> => {
-              const stored = visibleTransforms
-                ? storedDependencyValues(dependencyColumns, row)
-                : undefined;
+              const stored = computed
+                ? { ...row }
+                : visibleTransforms
+                  ? storedDependencyValues(dependencyColumns, row)
+                  : undefined;
               const appValues = computed
-                ? computedColumnValues(transforms!, computed, stored!)
+                ? computedColumnValues(transforms!, computed, stored!, computedState, partial)
                 : undefined;
               const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
               if (visibleTransforms)
@@ -1123,6 +1129,8 @@ function prepareTransformRead<T>(
     relations,
   );
   return {
+    computedState,
+    version: computedState?.version ?? 0,
     physical:
       prepared.select === built.select &&
       prepared.partialSelect === built.partialSelect &&
@@ -1138,6 +1146,35 @@ function prepareTransformRead<T>(
       ? (row: WasmRow) => prepared.finish!(decode(row)) as T
       : (decode as (row: WasmRow) => T),
   };
+}
+
+/** Retry only computations that discovered a missing field, preserving the caller's read scope. */
+async function finishComputedRead<T>(
+  query: QueryBuilder<T>,
+  built: NormalizedBuiltQuery,
+  outputTable: string,
+  prepared: ReturnType<typeof prepareTransformRead<T>>,
+  rows: WasmRow[],
+  read: (physical: NormalizedBuiltQuery) => Promise<WasmRow[]>,
+): Promise<T[]> {
+  for (;;) {
+    const results: T[] = [];
+    let missing: MissingComputedDependency | undefined;
+    // Visit every root before retrying so different rows' branches share a lookup.
+    for (const row of rows) {
+      try {
+        results.push(prepared.transform(row));
+      } catch (error) {
+        if (!(error instanceof MissingComputedDependency)) throw error;
+        missing = error;
+      }
+    }
+    if (!missing) return results;
+    if (!prepared.computedState || prepared.computedState.version === prepared.version)
+      throw missing;
+    prepared = prepareTransformRead(query, built, outputTable, prepared.computedState);
+    rows = await read(prepared.physical);
+  }
 }
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
@@ -1993,7 +2030,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       },
       this.context?.readSession,
     );
-    return rows.map(prepared.transform);
+    if (!prepared.computedState) return rows.map(prepared.transform);
+    return finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+      client.queryInternal(
+        translateQuery(builderJson, planningSchema, physical),
+        { ...queryOptions, openTransactionId },
+        this.context?.readSession,
+      ),
+    );
   }
 
   /**
@@ -3206,7 +3250,14 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    return rows.map(prepared.transform);
+    if (!prepared.computedState) return rows.map(prepared.transform);
+    return finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+      client.queryInternal(
+        translateQuery(builderJson, planningSchema, physical),
+        queryOptions,
+        context?.readSession,
+      ),
+    );
   }
 
   /**
@@ -3303,9 +3354,8 @@ export class Db {
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const prepared = prepareTransformRead(query, builtQuery, outputTable);
-    const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
-    const transform = prepared.transform;
+    let prepared = prepareTransformRead(query, builtQuery, outputTable);
+    let wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
@@ -3408,8 +3458,33 @@ export class Db {
     };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       if (unsubscribed || terminalized || activeSubscription === null) return;
-      const typedDelta = manager.handleDelta(delta, transform);
-      deliver(typedDelta);
+      try {
+        deliver(manager.handleDelta(delta, prepared.transform));
+      } catch (error) {
+        if (
+          !(error instanceof MissingComputedDependency) ||
+          !prepared.computedState ||
+          prepared.computedState.version === prepared.version
+        )
+          throw error;
+        prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+        wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+        retireNativeSubscription(activeSubscription);
+        const replacement = createSubscriptionGeneration();
+        manager.clear();
+        bufferedDeltas.length = 0;
+        this.unregisterActiveQuerySubscriptionTrace(traceId);
+        traceId = this.registerActiveQuerySubscriptionTrace(
+          wasmQuery,
+          builtQuery.table,
+          queryOptions,
+        );
+        // Native initial snapshots may arrive synchronously. Defer the next
+        // generation to avoid recursive installation as new inputs are found.
+        queueMicrotask(() => {
+          if (!this.shutdownPromise) startNativeSubscription(replacement);
+        });
+      }
     };
     const startNativeSubscription = (
       subscription: NativeSubscription,
@@ -3481,7 +3556,7 @@ export class Db {
         ? null
         : subscription;
     };
-    const traceId = this.registerActiveQuerySubscriptionTrace(
+    let traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
       builtQuery.table,
       queryOptions,
