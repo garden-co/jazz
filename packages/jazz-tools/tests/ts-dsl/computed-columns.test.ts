@@ -6,9 +6,10 @@ type Priority = "low" | "medium" | "high";
 describe("virtual computed columns", () => {
   it("rejects computed permission row references for actions and relation callbacks", () => {
     const app = s.defineApp({
-      items: s.computed(s.table({ score: s.int() }, {}), {
-        priority: { dependsOn: ["score"], compute: (row) => (row.score >= 8 ? "high" : "low") },
-      }),
+      items: s.table(
+        { score: s.int() },
+        { priority: s.computed((row) => (row.score >= 8 ? "high" : "low")) },
+      ),
     });
     for (const action of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"] as const) {
       expect(() =>
@@ -44,9 +45,7 @@ describe("virtual computed columns", () => {
 
   it("keeps stored permission references available when another table computes the same name", () => {
     const app = s.defineApp({
-      items: s.computed(s.table({ score: s.int() }, {}), {
-        priority: { dependsOn: ["score"], compute: (row) => row.score },
-      }),
+      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
       stored: s.table({ priority: s.int() }, {}),
     });
     const permissions = s.definePermissions(app, ({ policy }) => {
@@ -61,28 +60,18 @@ describe("virtual computed columns", () => {
 
   it("validates declarations and leaves the original table unchanged", () => {
     const base = s.table({ score: s.int() }, {});
-    const computed = s.computed(base, {
-      doubled: { dependsOn: ["score"], compute: (row) => row.score * 2 },
+    const computed = s.table(base.columns, {
+      ...base.relations,
+      doubled: s.computed((row) => row.score * 2),
     });
     expect(Object.keys(base.columns)).toEqual(["score"]);
     expect(Object.keys(computed.columns)).toEqual(["score", "doubled"]);
     const migration = defineMigration({ from: { items: base }, to: { items: computed } });
     expect(migration.forward).toEqual([]);
-    expect(() => s.computed(base, { score: { dependsOn: [], compute: () => 1 } })).toThrow(
+    expect(() => s.table(base.columns, { score: s.computed(() => 1) } as never)).toThrow(
       /collides/,
     );
-    expect(() =>
-      s.computed(base, { invalid: { dependsOn: ["missing"], compute: () => 1 } } as never),
-    ).toThrow(/unknown/);
-    expect(() =>
-      s.computed(base, { invalid: { dependsOn: ["invalid"], compute: () => 1 } } as never),
-    ).toThrow(/itself/);
-    expect(() =>
-      s.computed(base, {
-        a: { dependsOn: ["b"], compute: () => 1 },
-        b: { dependsOn: ["a"], compute: () => 1 },
-      } as never),
-    ).toThrow(/cyclic/i);
+    expect(() => s.computed(null as never)).toThrow(/callback/);
     expect(() => computed.indexOnly(["doubled"] as never)).toThrow(/unknown column/);
     expect(() => computed.branchBy("doubled" as never)).toThrow(/unknown column/);
     expect(() =>
@@ -102,25 +91,21 @@ describe("virtual computed columns", () => {
 
   it("keeps transforms stored and writable while computed fields are virtual and read-only", () => {
     const app = s.defineApp({
-      items: s.computed(
-        s.table(
-          {
-            score: s.int(),
-            storedPriority: s.int().transform<Priority>({
-              from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-              to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-            }),
-          },
-          {},
-        ),
+      items: s.table(
         {
-          priority: {
-            dependsOn: ["score"],
-            compute: (row): Priority => {
-              expectTypeOf(row).toEqualTypeOf<Readonly<{ score: number }>>();
-              return row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low";
-            },
-          },
+          score: s.int(),
+          storedPriority: s.int().transform<Priority>({
+            from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+            to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+          }),
+        },
+        {
+          priority: s.computed((row): Priority => {
+            expectTypeOf(row.score).toEqualTypeOf<number>();
+            expectTypeOf(row.storedPriority).toEqualTypeOf<Priority>();
+            expectTypeOf(row.id).toEqualTypeOf<string>();
+            return row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low";
+          }),
         },
       ),
     });

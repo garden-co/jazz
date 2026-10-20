@@ -19,10 +19,10 @@ it.each(["constant", "identity"] as const)(
   "uses an ID-only physical projection when selecting only the %s computed field",
   async (column) => {
     const app = s.defineApp({
-      rows: s.computed(s.table({ large: s.bytes() }, {}), {
-        constant: { dependsOn: [], compute: () => "constant" },
-        identity: { dependsOn: ["id"], compute: (row) => row.id },
-      }),
+      rows: s.table(
+        { large: s.bytes() },
+        { constant: s.computed(() => "constant"), identity: s.computed((row) => row.id) },
+      ),
       parents: s.table({ targetId: s.uuid() }, { target: s.rel("rows", "targetId") }),
     });
     const source = new ProjectionSource();
@@ -67,30 +67,28 @@ it.each(["constant", "identity"] as const)(
 );
 
 it("fetches only the stored inputs of callbacks evaluated by a computed read", async () => {
+  const base = s.table(
+    {
+      amount: s.int().transform({
+        dependsOn: ["text"],
+        from: (value, context: Readonly<{ text: string }>) => value + context.text.length,
+        to: (value: number) => value,
+      }),
+      text: s.string().transform({
+        dependsOn: ["large"],
+        from: (value, context: Readonly<{ large: Uint8Array }>) =>
+          `${value}:${context.large.length}`,
+        to: (value: string) => value,
+      }),
+      large: s.bytes(),
+    },
+    { derived: s.computed((row) => row.amount) },
+  );
   const app = s.defineApp({
-    rows: s.computed(
-      s.computed(
-        s.table(
-          {
-            amount: s.int().transform({
-              dependsOn: ["text"],
-              from: (value, context: Readonly<{ text: string }>) => value + context.text.length,
-              to: (value: number) => value,
-            }),
-            text: s.string().transform({
-              dependsOn: ["large"],
-              from: (value, context: Readonly<{ large: Uint8Array }>) =>
-                `${value}:${context.large.length}`,
-              to: (value: string) => value,
-            }),
-            large: s.bytes(),
-          },
-          {},
-        ),
-        { derived: { dependsOn: ["amount"], compute: (row) => row.amount } },
-      ),
-      { nested: { dependsOn: ["derived"], compute: (row) => `value:${row.derived}` } },
-    ),
+    rows: s.table(base.columns, {
+      ...base.relations,
+      nested: s.computed((row) => `value:${row.derived}`),
+    }),
   });
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -123,6 +121,42 @@ it("fetches only the stored inputs of callbacks evaluated by a computed read", a
       text: "raw:3",
     });
     expect(selectedColumns()).toEqual(["amount", "large", "text"]);
+  } finally {
+    vi.restoreAllMocks();
+    await db.shutdown();
+  }
+});
+
+it("reuses available inputs and batches missing dependencies without whole-row reads", async () => {
+  const app = s.defineApp({
+    rows: s.table(
+      { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
+      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+    ),
+  });
+  const source = new ProjectionSource();
+  const db = await createAccountDbWithRuntimeSource(
+    await localAccountConfig(`computed-lazy-${crypto.randomUUID()}`),
+    source,
+  );
+  try {
+    db.insert(app.rows, { useLeft: true, left: 10, right: 20, large: new Uint8Array([1]) });
+    db.insert(app.rows, { useLeft: false, left: 30, right: 40, large: new Uint8Array([2]) });
+    const query = vi.spyOn(source.client, "queryInternal");
+    const results = await db.all(app.rows.select("useLeft", "left", "right", "value"));
+    expect(results.map((row) => row.value).sort()).toEqual([10, 40]);
+    expect(query).toHaveBeenCalledTimes(1);
+    query.mockClear();
+    expect((await db.all(app.rows.select("value"))).map((row) => row.value).sort()).toEqual([
+      10, 40,
+    ]);
+    expect(query).toHaveBeenCalledTimes(3);
+    const selections = query.mock.calls.map(([json]) =>
+      (JSON.parse(json).select_columns as { column: string }[])
+        .map((column) => column.column)
+        .sort(),
+    );
+    expect(selections).toEqual([["id"], ["useLeft"], ["left", "right", "useLeft"]]);
   } finally {
     vi.restoreAllMocks();
     await db.shutdown();
