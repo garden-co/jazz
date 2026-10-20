@@ -17,6 +17,9 @@ extern "C" {
  */
 uint16_t jazz_native_relay_abi_version(void);
 
+/* Optional foreground capture support; existing ABI 2 commands are unchanged. */
+bool jazz_native_relay_supports_snapshot_capture(void);
+
 typedef struct jazz_native_relay_bytes {
   uint8_t *data;
   size_t len;
