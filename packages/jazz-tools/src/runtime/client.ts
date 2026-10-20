@@ -1,4 +1,5 @@
 import { runtimeRandomBytes } from "./runtime-entropy.js";
+import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
  * JazzClient - High-level TypeScript client for Jazz.
  *
@@ -156,6 +157,8 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** Capture behind earlier owner operations without waiting for server acceptance. */
+  captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
   readCanEstablishAbsence?(sessionJson?: string, transaction?: OpenTransactionId): boolean;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
@@ -428,7 +431,7 @@ export interface BranchSelector {
 /** A live or application-resolved frozen base underneath a branch head. */
 export type BranchViewBase =
   | { kind: "current"; branch: BranchSelector }
-  | { kind: "snapshot"; branch: BranchSelector; snapshot: unknown };
+  | { kind: "snapshot"; branch: BranchSelector; snapshot: SnapshotRef };
 
 /** User-facing head-over-base branch view. */
 export interface BranchView {
@@ -1067,6 +1070,11 @@ export class JazzClient {
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, runtimeOptions);
+  }
+
+  captureSnapshot(): Promise<SnapshotRef> {
+    if (!this.runtime.captureSnapshot) return Promise.reject(new UnsupportedSnapshotError());
+    return this.runtime.captureSnapshot();
   }
 
   beginTransaction(

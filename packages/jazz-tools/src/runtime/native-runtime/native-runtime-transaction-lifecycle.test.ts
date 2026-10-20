@@ -8,6 +8,7 @@ import {
 } from "./native-codec.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { parseSnapshotRef, UnsupportedSnapshotError } from "../snapshot-ref.js";
 import {
   createOpenTransactionId,
   type TxId,
@@ -142,6 +143,41 @@ function fakeWrite() {
     writeState: () => ({}),
   };
 }
+
+it("reports unsupported snapshot capture on older runtimes", async () => {
+  const runtime = new NativeRuntimeAdapter(
+    { openMemory: () => fakeDb({ tick: () => undefined }) } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  await expect(runtime.captureSnapshot()).rejects.toBeInstanceOf(UnsupportedSnapshotError);
+  await runtime.close();
+});
+
+it("polls ordered snapshot capture and releases its native observation", async () => {
+  const reference = parseSnapshotRef("jazz-snapshot-v1:" + "00".repeat(36));
+  let polls = 0;
+  const cancel = vi.fn();
+  const captureSnapshot = vi.fn(() => ({
+    poll: () => (++polls === 1 ? null : new TextEncoder().encode(reference)),
+    cancel,
+  }));
+  const runtime = new NativeRuntimeAdapter(
+    { openMemory: () => fakeDb({ tick: () => undefined, captureSnapshot }) } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  await expect(runtime.captureSnapshot()).resolves.toBe(reference);
+  expect(captureSnapshot).toHaveBeenCalledOnce();
+  expect(cancel).toHaveBeenCalledOnce();
+  await runtime.close();
+});
 
 it("quiesces foreground mutation admission before capturing its final HLC", async () => {
   const insert = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));

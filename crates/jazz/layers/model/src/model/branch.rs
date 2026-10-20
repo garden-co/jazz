@@ -10,6 +10,9 @@ use crate::ids::NodeUuid;
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{Snapshot, TxId};
 
+mod snapshot_ref;
+pub use snapshot_ref::SnapshotRefFormatError;
+
 /// Canonical named values for one schema-wide branch selector.
 #[derive(
     Clone,
@@ -314,9 +317,7 @@ pub enum BranchViewBase {
 }
 
 /// Dotted snapshot ref used by historic read views.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct SnapshotRef {
     /// Node that owns the local snapshot prefix.
     pub owner: NodeUuid,

@@ -1823,6 +1823,20 @@ impl WasmDb {
         Ok(self.open_inner()?.request_permission_advice(action))
     }
 
+    /// Capture through the same ordered owner queue as local mutations.
+    #[wasm_bindgen(js_name = captureSnapshot)]
+    pub fn capture_snapshot(&self) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let captured = inner.db.enqueue_capture_snapshot();
+        wasm_read_or_pending(Box::pin(async move {
+            let snapshot = captured
+                .await
+                .map_err(|_| JsValue::from_str("snapshot capture was cancelled"))?
+                .map_err(to_js_error)?;
+            Ok(snapshot.to_persisted().into_bytes())
+        }))
+    }
+
     #[wasm_bindgen(js_name = waitForPendingWrites)]
     pub fn wait_for_pending_writes(&self, tier: String) -> js_sys::Promise {
         let inner = match self.open_inner() {
