@@ -396,6 +396,58 @@ export function testComputedColumns(create: () => Promise<Db>) {
       }
     });
 
+    it("supports row enumeration, JSON serialisation and returning a materialised row", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          json: s.computed((row) => JSON.stringify(row)),
+          copy: s.computed((row) => row),
+          keys: s.computed((row) => Object.keys(row).sort()),
+          tag: s.computed((row) => row.toString()),
+        }),
+      });
+      const db = await open();
+      const { value: row } = db.insert(models.rows, {});
+      const expected = { id: row.id, score: 5, text: "hello" };
+      const result = await db.one(models.rows.select("json", "copy", "keys", "tag"));
+      expect(JSON.parse(result!.json)).toEqual(expected);
+      expect(result!.copy).toEqual(expected);
+      expect(result!.keys).toEqual(["id", "score", "text"]);
+      expect(result!.tag).toBe("[object Object]");
+    });
+
+    it("recomputes hidden included dependencies and stops when unsubscribed", async () => {
+      const db = await open();
+      const { value: row } = db.insert(app.items, {});
+      const { value: basket } = db.insert(app.baskets, { itemId: row.id });
+      let next: ((value: unknown) => void) | undefined;
+      const events: unknown[] = [];
+      const waitFor = (value: string) =>
+        new Promise<void>((resolve) => {
+          next = (event) => {
+            if (event === value) resolve();
+          };
+        });
+      const initial = waitFor("low");
+      const stop = db.subscribe(
+        app.baskets.where({ id: basket.id }).include({ item: app.items.select("priority") }),
+        (rows) => {
+          events.push(rows);
+          next?.(rows[0]?.item?.priority);
+        },
+      );
+      try {
+        await initial;
+        const updated = waitFor("high");
+        await db.update(app.items, row.id, { score: 9 }).wait({ tier: "local" });
+        await updated;
+      } finally {
+        stop();
+      }
+      const count = events.length;
+      await db.update(app.items, row.id, { score: 1 }).wait({ tier: "local" });
+      expect(events).toHaveLength(count);
+    });
+
     it("rejects unknown dependencies, cycles, mutations and asynchronous callbacks at evaluation", async () => {
       const db = await open();
       const safe = s.defineApp({ rows: stored });
