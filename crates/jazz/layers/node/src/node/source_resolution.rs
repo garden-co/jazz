@@ -556,7 +556,7 @@ where
         let content = self
             .winning_versions(table, VersionVisibility::Tier(tier))
             .await?;
-        self.project_version_winners(table, read_schema_version, &read_table, content)
+        self.project_version_winners(table, read_schema_version, &read_table, content, false)
     }
 
     pub(super) async fn projected_historical_current_rows(
@@ -571,7 +571,7 @@ where
         let content = self
             .winning_versions(table, VersionVisibility::GlobalAt(position))
             .await?;
-        self.project_version_winners(table, read_schema_version, &read_table, content)
+        self.project_version_winners(table, read_schema_version, &read_table, content, false)
     }
 
     pub(super) async fn projected_snapshot_current_rows(
@@ -579,6 +579,7 @@ where
         table: &str,
         read_schema_version: SchemaVersionId,
         snapshot: &Snapshot,
+        include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_table = self
             .table_in_schema_ref(table, read_schema_version)?
@@ -586,7 +587,13 @@ where
         let content = self
             .winning_versions(table, VersionVisibility::Snapshot(snapshot))
             .await?;
-        self.project_version_winners(table, read_schema_version, &read_table, content)
+        self.project_version_winners(
+            table,
+            read_schema_version,
+            &read_table,
+            content,
+            include_deleted,
+        )
     }
 
     /// Each row's latest version in `table` among those `visibility` admits.
@@ -663,21 +670,22 @@ where
     }
 
     /// Project each row's winning version into `read_schema_version`,
-    /// dropping deleted rows and rows that migrate to another table.
+    /// dropping rows that migrate to another table and, unless requested, deleted rows.
     fn project_version_winners(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
         read_table: &TableSchema,
         content: BTreeMap<RowUuid, VersionRow>,
+        include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let deletions = deletion_marker_winners(&content);
         let mut rows = Vec::new();
         for (row_uuid, content) in content {
-            if deletions
+            let deleted = deletions
                 .get(&row_uuid)
-                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
-            {
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted));
+            if deleted && !include_deleted {
                 continue;
             }
             let Some(cells) = self.project_version_cells(table, read_schema_version, &content)?
@@ -688,7 +696,7 @@ where
             match current_row_from_materialized_cells_with_layer_provenance(
                 read_table, &content, &content, updated, &cells,
             ) {
-                Ok(row) => rows.push(row),
+                Ok(row) => rows.push(if deleted { row.into_deleted() } else { row }),
                 Err(error) if is_unrepresentable_enum_projection(&error) => {}
                 Err(error) => return Err(error),
             }

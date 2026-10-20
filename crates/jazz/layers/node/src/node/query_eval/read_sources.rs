@@ -631,6 +631,8 @@ where
                 schema_version_alias,
                 "inline-current",
                 &request.requirements,
+                None,
+                RowVisibility::Visible,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
@@ -691,17 +693,17 @@ where
                         permission_subject,
                         plan,
                     } => {
-                        let policy_request = self
-                            .node
-                            .table_read_policy_authorization_request_for_include_deleted(
-                                self.read_view.policy_schema,
-                                &table.name,
-                                *permission_subject,
-                                tier,
-                                plan.binding_source_shape.clone(),
-                                plan.binding_user_params.clone(),
-                                plan.binding_claim_params.clone(),
-                            );
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            ParamBindingMode::InlineAllReachableSeeds,
+                            tier,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                            RowVisibility::IncludeDeleted,
+                        );
                         let policy_request = policy_request.map(|mut request| {
                             request.reads.primary = policy_read_view_projected_through(
                                 &request.reads.primary,
@@ -954,13 +956,14 @@ where
                     .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let (opening, opening_descriptor, opening_metadata) =
-                    inline_current_graph_with_source_metadata_and_branch_witness(
+                    inline_current_graph_with_source_metadata(
                         &table,
                         frozen_base_rows,
                         schema_version_alias,
                         "frozen-branch-base",
                         &request.requirements,
                         branch_witness_field.map(|field| (field, frozen_base_key)),
+                        RowVisibility::Visible,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 if descriptor != opening_descriptor || metadata != opening_metadata {
@@ -984,13 +987,14 @@ where
                     ])
                 } else {
                     let (frozen_base_deletions, deletion_descriptor, deletion_metadata) =
-                        inline_current_graph_with_source_metadata_and_branch_witness(
+                        inline_current_graph_with_source_metadata(
                             &table,
                             frozen_base_deleted_rows,
                             schema_version_alias,
                             "frozen-branch-base-deletions",
                             &request.requirements,
                             branch_witness_field.map(|field| (field, frozen_base_key)),
+                            RowVisibility::Visible,
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                     if descriptor != deletion_descriptor || metadata != deletion_metadata {
@@ -1040,6 +1044,7 @@ where
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
+                            RowVisibility::Visible,
                         );
                         let policy_request = policy_request.map(|mut request| {
                             request.reads.primary = policy_read_view_projected_through(
@@ -1146,6 +1151,8 @@ where
                     schema_version_alias,
                     "branch-view",
                     &request.requirements,
+                    None,
+                    RowVisibility::Visible,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             };
@@ -1179,6 +1186,7 @@ where
                         plan.binding_source_shape.clone(),
                         plan.binding_user_params.clone(),
                         plan.binding_claim_params.clone(),
+                        RowVisibility::Visible,
                     );
                     let policy_request = policy_request.map(|mut request| {
                         request.reads.primary = policy_read_view_projected_through(
@@ -1255,18 +1263,16 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(snapshot) = snapshot {
-            if request.visibility != RowVisibility::Visible {
-                return Err(source_resolution_error(
-                    request,
-                    SourceGap::HistoricalStorageCut,
-                ));
-            }
+            // Transaction hydration uses the frozen cut with the same visibility
+            // as the read, including tombstones when explicitly requested.
+            let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             let rows = self
                 .node
                 .projected_snapshot_current_rows(
                     &request.source.table,
                     self.read_view.read_schema,
                     &snapshot,
+                    include_deleted,
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
@@ -1281,6 +1287,8 @@ where
                 schema_version_alias,
                 "snapshot",
                 &request.requirements,
+                None,
+                request.visibility,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             snapshot_content_version = request
@@ -1315,11 +1323,12 @@ where
                             SourceGap::HistoricalStorageCut,
                         ));
                     }
-                    let param_binding_mode = if plan.binding_source_shape.is_some() {
-                        ParamBindingMode::RetainAllParams
-                    } else {
-                        ParamBindingMode::InlineAllReachableSeeds
-                    };
+                    let param_binding_mode =
+                        if !include_deleted && plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
                     let policy_request = self.node.table_read_policy_authorization_request(
                         self.read_view.policy_schema,
                         &table.name,
@@ -1329,6 +1338,7 @@ where
                         plan.binding_source_shape.clone(),
                         plan.binding_user_params.clone(),
                         plan.binding_claim_params.clone(),
+                        request.visibility,
                     );
                     let policy_request = policy_request.map(|mut request| {
                         request.reads.primary = policy_read_view_projected_through(
@@ -1383,46 +1393,21 @@ where
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let (base, descriptor, metadata) = if include_deleted {
-                let rows = rows
-                    .into_iter()
-                    .map(|row| {
-                        let deleted = row.is_deleted();
-                        (row, deleted)
-                    })
-                    .collect();
-                let schema_version_alias = self
-                    .node
-                    .ensure_schema_version_alias(self.read_view.read_schema)
-                    .await
-                    .map_err(|_| {
-                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?;
-                inline_snapshot_include_deleted_current_graph_with_source_metadata(
-                    &table,
-                    rows,
-                    schema_version_alias,
-                    "open-transaction",
-                    &request.requirements,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
-            } else {
-                let schema_version_alias = self
-                    .node
-                    .ensure_schema_version_alias(self.read_view.read_schema)
-                    .await
-                    .map_err(|_| {
-                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?;
-                inline_current_graph_with_source_metadata(
-                    &table,
-                    rows,
-                    schema_version_alias,
-                    "open-transaction",
-                    &request.requirements,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
-            };
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .await
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
+            let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &table,
+                rows,
+                schema_version_alias,
+                "open-transaction",
+                &request.requirements,
+                None,
+                request.visibility,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             // An open transaction is a snapshot plus its staged overlay, not
             // an authorization result. Filter the effective rows through the
             // same identity-bound read policy as an ordinary trusted-serving
@@ -1445,34 +1430,23 @@ where
                     {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
-                    let policy_request = if include_deleted {
-                        self.node
-                            .table_read_policy_authorization_request_for_include_deleted(
-                                self.read_view.policy_schema,
-                                &table.name,
-                                *permission_subject,
-                                DurabilityTier::Global,
-                                plan.binding_source_shape.clone(),
-                                plan.binding_user_params.clone(),
-                                plan.binding_claim_params.clone(),
-                            )
-                    } else {
-                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                    let param_binding_mode =
+                        if !include_deleted && plan.binding_source_shape.is_some() {
                             ParamBindingMode::RetainAllParams
                         } else {
                             ParamBindingMode::InlineAllReachableSeeds
                         };
-                        self.node.table_read_policy_authorization_request(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            param_binding_mode,
-                            DurabilityTier::Global,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        )
-                    };
+                    let policy_request = self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        param_binding_mode,
+                        DurabilityTier::Global,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                        request.visibility,
+                    );
                     let policy_request = policy_request.map(|mut request| {
                         request.reads.primary = policy_read_view_projected_through(
                             &request.reads.primary,
@@ -1583,6 +1557,7 @@ where
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
+                            RowVisibility::Visible,
                         );
                         let policy_request = policy_request.map(|mut request| {
                             request.reads.primary = policy_read_view_projected_through(
@@ -1673,17 +1648,17 @@ where
                     {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
-                    let policy_request = self
-                        .node
-                        .table_read_policy_authorization_request_for_include_deleted(
-                            self.read_view.policy_schema,
-                            &table.name,
-                            *permission_subject,
-                            tier,
-                            plan.binding_source_shape.clone(),
-                            plan.binding_user_params.clone(),
-                            plan.binding_claim_params.clone(),
-                        );
+                    let policy_request = self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        ParamBindingMode::InlineAllReachableSeeds,
+                        tier,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                        RowVisibility::IncludeDeleted,
+                    );
                     // Use the same projected read view as dependency preparation:
                     // an old-schema reader still evaluates the current policy.
                     let policy_request = policy_request.map(|mut request| {
@@ -1766,8 +1741,8 @@ where
                 (graph, descriptor, metadata)
             };
         let deletion_register = if snapshot_source {
-            // The snapshot is immutable and already excludes rows whose
-            // deletion winner is visible at its cut. It cannot later need a
+            // The snapshot fixes content and deletion visibility at its cut.
+            // It cannot later need a
             // replacement/deletion transition sidecar.
             None
         } else {
@@ -2106,6 +2081,7 @@ where
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
+                            RowVisibility::Visible,
                         );
                         let policy_request = policy_request.map(|mut request| {
                             request.reads.primary = policy_read_view_projected_through(
@@ -2214,6 +2190,8 @@ where
             schema_version_alias,
             "inline-current",
             &request.requirements,
+            None,
+            RowVisibility::Visible,
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
@@ -2563,6 +2541,7 @@ where
                     binding_source_shape,
                     binding_user_params,
                     binding_claim_params,
+                    RowVisibility::Visible,
                 )
             }
             SourceExpr::VisibleCurrent { .. }
@@ -2570,34 +2549,24 @@ where
             | SourceExpr::SettledBindingView { .. }
             | SourceExpr::WithOverlays { .. } => {
                 let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
-                if request.visibility == RowVisibility::IncludeDeleted {
-                    self.node
-                        .table_read_policy_authorization_request_for_include_deleted(
-                            self.read_view.policy_schema,
-                            &request.source.table,
-                            *permission_subject,
-                            tier,
-                            binding_source_shape,
-                            binding_user_params,
-                            binding_claim_params,
-                        )
+                let param_binding_mode = if request.visibility == RowVisibility::Visible
+                    && binding_source_shape.is_some()
+                {
+                    ParamBindingMode::RetainAllParams
                 } else {
-                    let param_binding_mode = if binding_source_shape.is_some() {
-                        ParamBindingMode::RetainAllParams
-                    } else {
-                        ParamBindingMode::InlineAllReachableSeeds
-                    };
-                    self.node.table_read_policy_authorization_request(
-                        self.read_view.policy_schema,
-                        &request.source.table,
-                        *permission_subject,
-                        param_binding_mode,
-                        tier,
-                        binding_source_shape,
-                        binding_user_params,
-                        binding_claim_params,
-                    )
-                }
+                    ParamBindingMode::InlineAllReachableSeeds
+                };
+                self.node.table_read_policy_authorization_request(
+                    self.read_view.policy_schema,
+                    &request.source.table,
+                    *permission_subject,
+                    param_binding_mode,
+                    tier,
+                    binding_source_shape,
+                    binding_user_params,
+                    binding_claim_params,
+                    request.visibility,
+                )
             }
             _ => return Ok(None),
         };
@@ -2984,6 +2953,8 @@ where
             schema_version_alias,
             "historical",
             &request.requirements,
+            None,
+            RowVisibility::Visible,
         )
         .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
         Ok(CurrentSourceGraph {
@@ -4652,6 +4623,7 @@ where
                 binding_source_shape.clone(),
                 binding_user_params.clone(),
                 binding_claim_params,
+                RowVisibility::Visible,
             );
             let policy_request = policy_request.map(|mut request| {
                 if let Some(read_view) = policy_read_view {
@@ -6258,30 +6230,6 @@ fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<Gr
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
-pub(super) fn inline_current_graph_with_source_metadata(
-    table: &TableSchema,
-    rows: Vec<CurrentRow>,
-    schema_version_alias: SchemaVersionAlias,
-    coverage: &str,
-    requirements: &SourceRequirements,
-) -> Result<
-    (
-        GraphBuilder,
-        RecordDescriptor,
-        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
-    ),
-    Error,
-> {
-    inline_current_graph_with_source_metadata_and_branch_witness(
-        table,
-        rows,
-        schema_version_alias,
-        coverage,
-        requirements,
-        None,
-    )
-}
-
 #[cfg(test)]
 pub(super) fn inline_current_graph_with_source_metadata_for_test(
     table: &TableSchema,
@@ -6303,16 +6251,21 @@ pub(super) fn inline_current_graph_with_source_metadata_for_test(
         schema_version_alias,
         coverage,
         requirements,
+        None,
+        RowVisibility::Visible,
     )
 }
 
-fn inline_current_graph_with_source_metadata_and_branch_witness(
+// Visibility determines the descriptor even when there are no rows. Deleted
+// state itself belongs to CurrentRow; it is not supplied separately by callers.
+pub(super) fn inline_current_graph_with_source_metadata(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
     schema_version_alias: SchemaVersionAlias,
     coverage: &str,
     requirements: &SourceRequirements,
     branch_witness: Option<(&str, &BranchKey)>,
+    visibility: RowVisibility,
 ) -> Result<
     (
         GraphBuilder,
@@ -6321,22 +6274,25 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     ),
     Error,
 > {
+    let include_deleted = visibility == RowVisibility::IncludeDeleted;
     let metadata = inline_source_metadata(requirements, branch_witness.map(|(field, _)| field));
-    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
         table,
         &metadata,
         branch_witness.is_some(),
+        include_deleted,
     );
     let records = rows
         .iter()
         .map(|row| {
-            inline_current_record_with_source_metadata(
+            inline_current_record_with_source_metadata_and_deletion(
                 table,
                 &descriptor,
                 row,
                 schema_version_alias,
                 coverage,
                 branch_witness,
+                include_deleted.then_some(row.is_deleted()),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -6415,25 +6371,6 @@ pub(super) fn inline_source_metadata(
         }
     }
     metadata
-}
-
-fn inline_current_record_with_source_metadata(
-    table: &TableSchema,
-    descriptor: &RecordDescriptor,
-    row: &CurrentRow,
-    schema_version_alias: SchemaVersionAlias,
-    coverage: &str,
-    branch_witness: Option<(&str, &BranchKey)>,
-) -> Result<Vec<u8>, Error> {
-    inline_current_record_with_source_metadata_and_deletion(
-        table,
-        descriptor,
-        row,
-        schema_version_alias,
-        coverage,
-        branch_witness,
-        None,
-    )
 }
 
 /// Preserve the supplying physical branch in covered version witnesses, even
@@ -6624,45 +6561,6 @@ fn inline_current_record_for_output(
         })
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(output.create(&fitted)?)
-}
-
-fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
-    table: &TableSchema,
-    rows: Vec<(CurrentRow, bool)>,
-    schema_version_alias: SchemaVersionAlias,
-    coverage: &str,
-    requirements: &SourceRequirements,
-) -> Result<
-    (
-        GraphBuilder,
-        RecordDescriptor,
-        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
-    ),
-    Error,
-> {
-    let metadata = inline_source_metadata(requirements, None);
-    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
-        table, &metadata, false, true,
-    );
-    let records = rows
-        .iter()
-        .map(|(row, deleted)| {
-            inline_current_record_with_source_metadata_and_deletion(
-                table,
-                &descriptor,
-                row,
-                schema_version_alias,
-                coverage,
-                None,
-                Some(*deleted),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
-        descriptor,
-        metadata,
-    ))
 }
 
 fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
