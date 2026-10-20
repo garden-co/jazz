@@ -1040,8 +1040,9 @@ function prepareTransformRead<T>(
         (visibleTransforms ??= {})[column] = transforms[column]!;
         if (transforms[column]!.computed) {
           (computed ??= []).push(column);
-          for (const dependency of columnTransformDependencies(transforms).byColumn.get(column) ??
-            [])
+          for (const dependency of columnTransformDependencies(transforms).readByColumn.get(
+            column,
+          ) ?? [])
             addDependency(dependency);
         } else {
           for (const dependency of transforms[column]!.dependsOn ?? []) addDependency(dependency);

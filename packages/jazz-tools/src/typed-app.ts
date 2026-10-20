@@ -1327,8 +1327,9 @@ export class TypedTableQueryBuilder<
     const clone = this._clone<TInclude, NewSelection, TRequired>();
     const first = selection[0];
     if (typeof first === "object" && first !== null) {
+      const transforms = this._outputColumnTransforms();
       for (const column of Object.keys(first))
-        if (this._columnTransforms?.[column]?.computed)
+        if (transforms?.[column]?.computed)
           throw new TypeError(`Computed field "${column}" cannot have a stored partial selection.`);
     }
     clone._select =
@@ -1364,7 +1365,7 @@ export class TypedTableQueryBuilder<
     column: TableOrderableFromMeta<TMeta>,
     direction: "asc" | "desc" = "asc",
   ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    if (this._columnTransforms?.[column as string]?.computed)
+    if (this._outputColumnTransforms()?.[column as string]?.computed)
       throw new TypeError(
         `Computed field "${String(column)}" cannot be ordered in a stored query.`,
       );
@@ -1559,11 +1560,23 @@ export class TypedTableQueryBuilder<
     return clone;
   }
 
+  private _outputColumnTransforms(): ColumnTransformMap | undefined {
+    if (!this._hops.length || !this._columnTransformsByTable) return this._columnTransforms;
+    let table: string = this._table;
+    for (const hop of this._hops) {
+      const relation = this._schema[table]?.relations?.[hop];
+      if (!relation) throw new Error(`Unknown relation "${hop}" on table "${table}"`);
+      table = relation.table;
+    }
+    return this._columnTransformsByTable[table];
+  }
+
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
     const tableSchema = this._schema[this._table];
+    const transforms = this._outputColumnTransforms();
     for (const [key, value] of Object.entries(conditions)) {
-      if (this._columnTransforms?.[key]?.computed)
+      if (transforms?.[key]?.computed)
         throw new TypeError(`Computed field "${key}" cannot be filtered in a stored query.`);
       if (value === undefined) continue;
       const declaredColumn = tableSchema?.columns.find((column) => column.name === key);
@@ -1884,7 +1897,7 @@ function columnTransformsForTable(
   }
 
   const columnsDefinition = unwrapTableDefinition(definition);
-  const transforms: ColumnTransformMap = {};
+  const transforms: ColumnTransformMap = Object.create(null);
   validateTransformDependencies(columnsDefinition);
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     if (isComputedColumn(builder)) {
@@ -1916,7 +1929,7 @@ function columnTransformsForSchema(
   let registry: ColumnTransformRegistry | undefined;
   for (const [tableName, tableDefinition] of Object.entries(definition)) {
     const transforms = columnTransformsForTable(tableDefinition);
-    if (transforms) (registry ??= {})[tableName] = transforms;
+    if (transforms) (registry ??= Object.create(null))[tableName] = transforms;
   }
   return registry;
 }

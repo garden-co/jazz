@@ -14,6 +14,7 @@ type DependencyTransforms = Readonly<
 type DependencyPlan = {
   columns: readonly string[];
   byColumn: ReadonlyMap<string, readonly string[]>;
+  readByColumn: ReadonlyMap<string, readonly string[]>;
   hasWriteDependencies: boolean;
   computedColumns: readonly string[];
 };
@@ -50,13 +51,35 @@ export function columnTransformDependencies(transforms: DependencyTransforms): D
     return result;
   };
   for (const column of Object.keys(transforms)) visit(column);
+  // Computed fields consume app values; stored transforms consume raw dependencies,
+  // so their dependency transforms must not extend the physical read projection.
+  const computedColumns = Object.keys(transforms).filter((column) => transforms[column]!.computed);
+  const readByColumn = new Map<string, readonly string[]>();
+  const visitRead = (column: string): readonly string[] => {
+    const previous = readByColumn.get(column);
+    if (previous) return previous;
+    const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
+    const closure = new Set<string>();
+    for (const dependency of transform?.dependsOn ?? []) {
+      if (transform?.computed) {
+        for (const stored of visitRead(dependency)) closure.add(stored);
+        if (Object.hasOwn(transforms, dependency) && transforms[dependency]?.computed) continue;
+      }
+      closure.add(dependency);
+    }
+    const result = [...closure];
+    readByColumn.set(column, result);
+    return result;
+  };
+  for (const column of computedColumns) visitRead(column);
   const plan = {
     columns: [...columns],
     byColumn,
+    readByColumn,
     hasWriteDependencies: Object.values(transforms).some(
       (transform) => !transform.computed && !!transform.dependsOn?.length,
     ),
-    computedColumns: Object.keys(transforms).filter((column) => transforms[column]!.computed),
+    computedColumns,
   };
   dependencyPlans.set(transforms, plan);
   return plan;
@@ -135,7 +158,7 @@ export function computedColumnValues(
   const values = new Map<string, unknown>();
   const resolve = (column: string): unknown => {
     if (values.has(column)) return values.get(column);
-    const transform = transforms[column];
+    const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
     let value: unknown;
     if (transform?.computed) {
       const dependencies: Record<string, unknown> = {};
