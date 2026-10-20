@@ -96,6 +96,85 @@ export function testComputedColumns(create: () => Promise<Db>) {
       ).resolves.toEqual({ id: item.id, priority: "high" });
     });
 
+    it("validates stored output columns against the destination after relationship hops", async () => {
+      const models = s.defineApp({
+        sources: s.computed(
+          s.table({ targetId: s.uuid() }, { target: s.rel("targets", "targetId") }),
+          {
+            rank: { dependsOn: [], compute: () => 0 },
+            title: { dependsOn: [], compute: () => "source" },
+          },
+        ),
+        targets: s.computed(
+          s.table(
+            { rank: s.int(), title: s.string() },
+            { sources: s.reverse("sources", "target") },
+          ),
+          { label: { dependsOn: ["title"], compute: (row) => row.title.toUpperCase() } },
+        ),
+      });
+      const db = await open();
+      const { value: target } = db.insert(models.targets, { rank: 7, title: "target" });
+      const { value: source } = db.insert(models.sources, { targetId: target.id });
+      const hopped = models.sources.where({ id: source.id }).hopTo("target");
+
+      expect(() => hopped.where({ rank: 7 })).not.toThrow();
+      await expect(db.one(hopped.orderBy("rank").select("rank"))).resolves.toEqual({
+        id: target.id,
+        rank: 7,
+      });
+      await expect(db.one(hopped.select({ title: { from: 0, to: 3 } }))).resolves.toEqual({
+        id: target.id,
+        title: "tar",
+      });
+      const roundTrip = hopped.hopTo("sources").hopTo("target");
+      await expect(db.one(roundTrip.orderBy("rank").select("rank"))).resolves.toEqual({
+        id: target.id,
+        rank: 7,
+      });
+      expect(() => hopped.orderBy("label" as never)).toThrow(/cannot be ordered/);
+      expect(() => hopped.where({ label: "TARGET" } as never)).toThrow(/cannot be filtered/);
+      expect(() => hopped.select({ label: { from: 0, to: 3 } } as never)).toThrow(
+        /cannot have a stored partial selection/,
+      );
+    });
+
+    it.each(["constructor", "toString", "valueOf"] as const)(
+      "reads and writes a stored %s dependency without using inherited transforms",
+      async (column) => {
+        const models = s.defineApp({
+          rows: s.computed(
+            s.table({ constructor: s.string(), toString: s.string(), valueOf: s.string() }, {}),
+            {
+              computedValue: { dependsOn: [column], compute: (row) => row[column].toUpperCase() },
+            },
+          ),
+        });
+        const db = await open();
+        const { value: row } = db.insert(models.rows, {
+          constructor: "constructor",
+          toString: "toString",
+          valueOf: "valueOf",
+        });
+        expect(row.computedValue).toBe(column.toUpperCase());
+        await expect(db.one(models.rows.select("computedValue"))).resolves.toEqual({
+          id: row.id,
+          computedValue: column.toUpperCase(),
+        });
+        await db
+          .update(models.rows, row.id, {
+            constructor: "updated",
+            toString: "updated",
+            valueOf: "updated",
+          })
+          .wait({ tier: "local" });
+        await expect(db.one(models.rows.select("computedValue"))).resolves.toEqual({
+          id: row.id,
+          computedValue: "UPDATED",
+        });
+      },
+    );
+
     it("uses app-facing transformed dependencies and stored contexts independently", async () => {
       const base = s.table(
         {
