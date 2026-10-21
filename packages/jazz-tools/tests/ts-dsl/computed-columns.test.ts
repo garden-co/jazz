@@ -91,6 +91,22 @@ describe("virtual computed columns", () => {
     });
   });
 
+  it("checks composed permission relations again for each owning table", () => {
+    const app = s.defineApp({
+      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+      stored: s.table({ priority: s.int() }, {}),
+    });
+    const compile = (includeComputedOwner: boolean) =>
+      s.definePermissions(app, ({ policy, anyOf }) => {
+        const matching = policy.stored.where((row) => ({ priority: row.priority }));
+        const composed = anyOf([policy.exists(policy.union([matching, matching]))]);
+        policy.stored.allowRead.where(composed);
+        if (includeComputedOwner) policy.items.allowRead.where(composed);
+      });
+    expect(compile(false).stored?.select?.using).toMatchObject({ type: "ExistsRel" });
+    expect(() => compile(true)).toThrow(/computed field "priority".*permission/i);
+  });
+
   it("validates declarations and leaves the original table unchanged", () => {
     const base = s.table({ score: s.int() }, {});
     const computed = s.table(base.columns, {
