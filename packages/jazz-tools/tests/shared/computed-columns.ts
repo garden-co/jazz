@@ -135,6 +135,32 @@ export function testComputedColumns(create: () => Promise<Db>) {
       );
     });
 
+    it("uses the gathered output table for stored and computed query guards", async () => {
+      const models = s.defineApp({
+        sources: s.table(
+          { targetId: s.uuid() },
+          { target: s.rel("targets", "targetId"), rank: s.computed(() => 0) },
+        ),
+        targets: s.table(
+          { rank: s.int(), nextId: s.uuid().optional() },
+          { next: s.rel("targets", "nextId"), doubled: s.computed((row) => row.rank * 2) },
+        ),
+      });
+      const db = await open();
+      const { value: target } = db.insert(models.targets, { rank: 7, nextId: null });
+      const { value: source } = db.insert(models.sources, { targetId: target.id });
+      const hopped = models.sources.where({ id: source.id }).hopTo("target");
+      const gathered = hopped.gather({
+        step: ({ current }) => models.targets.where({ id: current }).hopTo("next"),
+        maxDepth: 1,
+      });
+      await expect(
+        db.one(gathered.where({ rank: 7 }).orderBy("rank").select("doubled")),
+      ).resolves.toEqual({ id: target.id, doubled: 14 });
+      expect(() => gathered.where({ doubled: 14 } as never)).toThrow(/cannot be filtered/);
+      expect(() => gathered.orderBy("doubled" as never)).toThrow(/cannot be ordered/);
+    });
+
     it.each(["constructor", "toString", "valueOf"] as const)(
       "reads and writes a stored %s dependency without using inherited transforms",
       async (column) => {
@@ -422,6 +448,88 @@ export function testComputedColumns(create: () => Promise<Db>) {
         id: row.id,
         parsed: "plain text",
       });
+    });
+
+    it("retries missing dependencies when the callback wraps errors", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          parsed: s.computed((row): unknown => {
+            try {
+              return JSON.parse(row.text);
+            } catch (cause) {
+              throw new Error("Invalid JSON", { cause });
+            }
+          }),
+        }),
+      });
+      const safe = s.defineApp({ rows: stored });
+      const db = await open();
+      const { value: row } = db.insert(safe.rows, { text: '{"valid":true}' });
+      await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
+        id: row.id,
+        parsed: { valid: true },
+      });
+      await db.update(safe.rows, row.id, { text: "bad" }).wait({ tier: "local" });
+      await expect(db.one(models.rows.select("parsed"))).rejects.toThrow("Invalid JSON");
+    });
+
+    it("preserves caught transform errors across repeated and separate computed reads", async () => {
+      const readFailure = (row: { readonly data: unknown }) => {
+        try {
+          return row.data;
+        } catch (error) {
+          return error instanceof SyntaxError ? "invalid JSON" : String(error);
+        }
+      };
+      const models = s.defineApp({
+        rows: s.table(
+          {
+            data: s.string().transform({
+              from: (value): unknown => JSON.parse(value),
+              to: (value: unknown) => JSON.stringify(value) ?? "null",
+            }),
+          },
+          {
+            first: s.computed(readFailure),
+            second: s.computed(readFailure),
+            repeated: s.computed((row) => [readFailure(row), readFailure(row)]),
+          },
+        ),
+      });
+      const safe = s.defineApp({ rows: s.table({ data: s.string() }, {}) });
+      const db = await open();
+      const { value: row } = db.insert(safe.rows, { data: "bad" });
+      for (const selected of [
+        models.rows.select("first", "second", "repeated"),
+        models.rows.select("repeated", "second", "first"),
+      ]) {
+        await expect(db.one(selected)).resolves.toEqual({
+          id: row.id,
+          first: "invalid JSON",
+          second: "invalid JSON",
+          repeated: ["invalid JSON", "invalid JSON"],
+        });
+      }
+    });
+
+    it("contains rejected async callbacks in the read error channel", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          missing: s.computed(async (row) => row.score),
+          failing: s.computed(async () => {
+            throw new Error("async callback failure");
+          }),
+        }),
+      });
+      const safe = s.defineApp({ rows: stored });
+      const db = await open();
+      db.insert(safe.rows, {});
+      for (const column of ["missing", "failing"] as const) {
+        await expect(db.one(models.rows.select(column))).rejects.toThrow(/synchronously/);
+      }
+      // Let rejected callback promises settle; the test runner fails on unhandled rejections.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await expect(db.one(safe.rows.select("score"))).resolves.toMatchObject({ score: 5 });
     });
 
     it("discovers conditional dependencies and observes their later updates", async () => {

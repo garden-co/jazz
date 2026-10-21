@@ -58,6 +58,39 @@ describe("virtual computed columns", () => {
     expect(permissions.stored?.select?.using).toMatchObject({ type: "Exists", table: "stored" });
   });
 
+  it("rejects computed outer references in permission relation callbacks", () => {
+    const app = s.defineApp({
+      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+      stored: s.table({ priority: s.int() }, {}),
+    });
+    for (const action of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"] as const) {
+      expect(() =>
+        s.definePermissions(app, ({ policy }) => {
+          policy.items[action].where(
+            policy.exists(policy.stored.where((row) => ({ priority: row.priority }))),
+          );
+        }),
+      ).toThrow(/computed field "priority".*permission/i);
+    }
+  });
+
+  it("allows stored outer references when the permission relation computes the same name", () => {
+    const app = s.defineApp({
+      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+      stored: s.table({ priority: s.int() }, {}),
+    });
+    const permissions = s.definePermissions(app, ({ policy }) => {
+      const matching = policy.items.where((row: Record<string, RowRefValue>) => ({
+        score: row.priority,
+      }));
+      policy.stored.allowRead.where(policy.exists(matching));
+    });
+    expect(permissions.stored?.select?.using).toMatchObject({
+      type: "ExistsRel",
+      rel: { Filter: { predicate: { Cmp: { right: { OuterColumn: { column: "priority" } } } } } },
+    });
+  });
+
   it("validates declarations and leaves the original table unchanged", () => {
     const base = s.table({ score: s.int() }, {});
     const computed = s.table(base.columns, {
