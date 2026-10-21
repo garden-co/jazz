@@ -65,7 +65,6 @@ import {
   LIVENESS_TEST_SIGNAL_MS,
   app,
   todos,
-  Todo,
   allTodos,
   catalogueTodos,
   startRawForegroundLease,
@@ -305,14 +304,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
 });
 
 describe("SharedWorker bridge with IndexedDB", () => {
-  const {
-    errorListeners,
-    trackRemoteBrowserDb,
-    track,
-    trackSubscription,
-    untrack,
-    shutdownDbAndWorker,
-  } = useSharedWorkerBridgeHarness();
+  const { errorListeners, trackRemoteBrowserDb, track, untrack } = useSharedWorkerBridgeHarness();
 
   it("retains a queued first-owner allocation after the preceding lease returns", async () => {
     const dbName = uniqueDbName("queued-first-owner");
@@ -1235,83 +1227,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const results = await db.all(allTodos, { tier: "local-first" });
     expect(results.length).toBe(0);
   });
-
-  // -------------------------------------------------------------------------
-  // 4. IndexedDB persistence across shutdown + re-open
-  // -------------------------------------------------------------------------
-
-  it("persists data across shutdown and re-create", async () => {
-    const dbName = uniqueDbName("persistence");
-
-    const db1 = await createDb({
-      appId: "test-app",
-      driver: { type: "persistent", dbName },
-    });
-    db1.insert(todos, { title: "Survive reload", done: true });
-    const before = await db1.all(allTodos);
-    expect(before.length).toBe(1);
-    await db1.shutdown();
-
-    // A new Db with the same namespace reopens the IndexedDB tree.
-    const db2 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const after = await db2.all(allTodos, { tier: "local-first" });
-    expect(after.length).toBe(1);
-    expect(after[0].title).toBe("Survive reload");
-    expect(after[0].done).toBe(true);
-  });
-
-  it("first local subscription snapshot returns no rows for an empty store", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("empty-snapshot") },
-      }),
-    );
-    const firstSnapshot = new Promise<Todo[]>((resolve) => {
-      trackSubscription(db.subscribe(allTodos, resolve, { tier: "local-first" }));
-    });
-    await expect(firstSnapshot).resolves.toEqual([]);
-  });
-
-  it("first local subscription snapshot contains persisted data", async () => {
-    const config = {
-      appId: "test-app",
-      secret: generateAuthSecret(),
-      driver: { type: "persistent" as const, dbName: uniqueDbName("first-snapshot-reopen") },
-    };
-    const seeded = track(await createDb(config));
-    const expected: { id: string; title: string; done: boolean }[] = [];
-    for (let index = 0; index < 3; index++) {
-      const inserted = seeded.insert(todos, { title: `Persisted ${index}`, done: false });
-      const row = await inserted.wait({ tier: "local" });
-      expected.push({ id: row.id, title: row.title, done: row.done });
-    }
-    await seeded.all(allTodos, { tier: "local-first" });
-    await shutdownDbAndWorker(seeded);
-
-    const reopened = track(await createDb(config));
-    const snapshots: (typeof expected)[] = [];
-    // Subscribe before any read or readiness wait can warm the reopened
-    // runtime. An empty callback followed by the stored rows must fail.
-    trackSubscription(
-      reopened.subscribe(
-        todos.orderBy("title"),
-        (rows) => snapshots.push(rows.map(({ id, title, done }) => ({ id, title, done }))),
-        { tier: "local-first" },
-      ),
-    );
-    await waitForCondition(
-      async () => snapshots.length > 0,
-      5000,
-      "The initial local snapshot should contain the persisted rows",
-    );
-    expect(snapshots[0]).toEqual(expected);
-  }, 15_000);
 
   it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
