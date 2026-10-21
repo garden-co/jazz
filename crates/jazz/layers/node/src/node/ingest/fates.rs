@@ -1038,7 +1038,7 @@ where
             && let Fate::Rejected(reason) = &tx.fate
         {
             let rejected_tx_values =
-                rejected_transaction_values(tx.node_alias, &tx.tx, reason.clone())?;
+                rejected_transaction_values(&self.authors, tx.node_alias, &tx.tx, reason.clone())?;
             batch.insert("jazz_rejected_transactions", rejected_tx_values.clone());
             let rejected_tx_table = self
                 .catalogue
@@ -1049,8 +1049,9 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "missing rejected transaction table",
                 ))?;
-            let rejected_tx_record =
-                owned_record_from_storage_values(&rejected_tx_table, rejected_tx_values)?;
+            let rejected_tx_record = self.authors.resolve_owned(
+                &owned_record_from_storage_values(&rejected_tx_table, rejected_tx_values)?,
+            )?;
             let mut rejected_versions = Vec::new();
             for version in &rejected {
                 let schema_version = self
