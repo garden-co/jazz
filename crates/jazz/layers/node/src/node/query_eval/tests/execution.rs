@@ -1479,7 +1479,7 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
             .unwrap_err()
             .to_string(),
         "Reading `resources` through a recursive traversal of `teamTeamMemberships` is not \
-         supported in exclusive transactions yet"
+         supported in serializable transactions yet"
     );
     node.abandon_tx(exclusive).unwrap();
 

@@ -142,7 +142,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           // A serializable read of deleted rows with related rows cannot be
           // recorded precisely, so it is rejected (garden-co/jazz#3694).
           await expect(deletedRead).rejects.toThrow(
-            "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+            "Reading deleted `todos` rows together with `users` is not supported in serializable transactions yet",
           );
         } else {
           const deleted = await deletedRead;
@@ -192,7 +192,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
               .include({ assignees: app.users.select("id", "name") }),
           ),
         ).rejects.toThrow(
-          "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+          "Reading deleted `todos` rows together with `users` is not supported in serializable transactions yet",
         );
       } finally {
         tx.rollback();

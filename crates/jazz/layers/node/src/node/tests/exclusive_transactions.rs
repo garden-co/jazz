@@ -3133,7 +3133,7 @@ fn assert_exclusive_read_unsupported(
     };
     assert_eq!(
         error.to_string(),
-        format!("Reading {pattern} is not supported in exclusive transactions yet")
+        format!("Reading {pattern} is not supported in serializable transactions yet")
     );
 }
 

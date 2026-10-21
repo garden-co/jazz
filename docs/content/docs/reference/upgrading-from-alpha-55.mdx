@@ -308,6 +308,8 @@ there is no alias for the old names.
 | Rust `ExclusiveTxRef`                | Rust `SerializableTxRef`                   |
 
 The transaction `kind` on mutation-error events and transaction records is now `"serializable"`.
+Reads that serializable transactions can't run yet now fail with `Reading <pattern> is not supported
+in serializable transactions yet`.
 TypeScript flags the old method and type names. Plain JavaScript does not, so search for
 `exclusive` in your code. Check retry logic that compares error codes in particular: code that
 looks for `"exclusive_conflict"` stops matching and would no longer retry a conflict.

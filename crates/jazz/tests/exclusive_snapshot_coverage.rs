@@ -1319,7 +1319,7 @@ fn exclusive_read_through_a_flat_join_is_unsupported() {
     };
     assert!(
         error.to_string().contains(
-            "Reading a flat join of `invites` with `members` is not supported in exclusive \
+            "Reading a flat join of `invites` with `members` is not supported in serializable \
              transactions yet"
         ),
         "{error}"
