@@ -618,10 +618,14 @@ typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
 `ResultKey`. All ResultKeys use one encoding:
 `2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
-(position:u32be | label_length:u32be | label:utf8)* | has_transaction:u8 |
-[tx_time:u64be | tx_node:16]`, where source position zero is the root and joined
-sources are positions one through `joined_count`. The transaction flag is 0
-for current results and 1 for a history root. Other flag values are malformed.
+(position:u32be | label_length:u32be | label:utf8)* |
+(has_transaction:u8 [tx_time:u64be | tx_node:16]) × (1 + joined_count)`, where
+source position zero is the root and joined sources are positions one through
+`joined_count`. There is one transaction flag per source position, written in
+position order (root first, then each joined source). A flag is 0 for a current
+source and 1 for a history source version, which is then followed by that
+version's `tx_time` and `tx_node`; the root and any joined source may each be
+history versions. Other flag values are malformed.
 Ordinary results carry zero joined rows and arms; ordinary joins carry zero
 arms; union occurrences carry their ordered arm records. Empty,
 duplicate-position, or out-of-range discriminators are malformed. Previous
