@@ -267,10 +267,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 input.id = None;
             }
         }
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
+        self.query.clear_prepared_query_plans();
         self.query.local_availability_authorities.remove(scope);
         Ok(())
     }

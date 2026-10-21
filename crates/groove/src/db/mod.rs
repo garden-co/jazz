@@ -1459,8 +1459,8 @@ pub struct Database {
     storage_read_metrics: Rc<ReadMetricsSink>,
     /// Dense record descriptors are invariant for one table variant. Keep the
     /// interned handles beside the database schema so scans do not rebuild and
-    /// re-hash the same logical field list once per stored row.
-    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>>,
+    /// re-hash the same field list once per stored row.
+    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, RecordDescriptor>>>,
     next_publication_id: u64,
     immutable_batch_owner: Rc<()>,
     /// Rotated whenever physical record admission can change. Batches may be
@@ -1504,17 +1504,7 @@ pub struct Database {
 #[derive(Clone)]
 pub struct RuntimeRegistryCheckpoint {
     ivm_runtime: IvmRuntime,
-    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>,
-}
-
-/// How one table variant's stored rows relate to its logical records.
-#[derive(Clone, Debug)]
-pub(crate) struct StoredRecordCodec {
-    /// The descriptor of the logical record.
-    pub(crate) logical: RecordDescriptor,
-    /// Rebuilds stored rows, which hold dictionary codes, as logical records.
-    /// `None` when the table interns nothing and stored bytes are logical.
-    pub(crate) transcoder: Option<Rc<records::RecordTranscoder>>,
+    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, RecordDescriptor>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

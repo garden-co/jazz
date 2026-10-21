@@ -5,7 +5,26 @@ use super::*;
 /// A predicate reads fields, not necessarily a materialized intermediate row.
 /// Implementations retain the same typed comparison and SQL-null semantics.
 pub(super) trait PredicateRecord: Copy {
-    fn value(self, field: &str) -> Result<Value, IvmRuntimeError>;
+    /// The field's value as the record holds it, plus the field's declared
+    /// type when that type contains an interned column (whose value is then
+    /// a dictionary code, not the value it stands for).
+    fn stored_value(self, field: &str) -> Result<(Value, Option<ValueType>), IvmRuntimeError>;
+
+    /// Whether the field's declared type contains an interned column.
+    fn is_interned(self, field: &str) -> Result<bool, IvmRuntimeError> {
+        Ok(self.stored_value(field)?.1.is_some())
+    }
+
+    /// The field's value. A dictionary code is not a value a predicate may
+    /// compare, so reading an interned field fails closed here; predicates
+    /// read through [`ResolvingRecord`], which resolves codes.
+    fn value(self, field: &str) -> Result<Value, IvmRuntimeError> {
+        match self.stored_value(field)? {
+            (value, None) => Ok(value),
+            (_, Some(_)) => Err(IvmRuntimeError::UnresolvedDictionaryCode(field.to_owned())),
+        }
+    }
+
     fn literal_ordering(
         self,
         field: &str,
@@ -14,10 +33,24 @@ pub(super) trait PredicateRecord: Copy {
 }
 
 impl PredicateRecord for BorrowedRecord<'_> {
-    fn value(self, field: &str) -> Result<Value, IvmRuntimeError> {
+    fn stored_value(self, field: &str) -> Result<(Value, Option<ValueType>), IvmRuntimeError> {
         let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
             .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
-        self.get_idx(index).map_err(Into::into)
+        let value = self.get_idx(index)?;
+        let descriptor = self.descriptor();
+        let value_type = &descriptor.fields()[index].value_type;
+        Ok((
+            value,
+            value_type.contains_interned().then(|| value_type.clone()),
+        ))
+    }
+
+    fn is_interned(self, field: &str) -> Result<bool, IvmRuntimeError> {
+        let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
+            .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
+        Ok(self.descriptor().fields()[index]
+            .value_type
+            .contains_interned())
     }
 
     fn literal_ordering(
@@ -28,6 +61,90 @@ impl PredicateRecord for BorrowedRecord<'_> {
         let index = super::record_projection::resolve_field_name(&self.descriptor(), field)
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
         record_field_literal_ordering(self, index, value)
+    }
+}
+
+/// A predicate's view of a record whose interned fields read as the values
+/// their codes stand for, resolved through the node's dictionaries. Codes
+/// are resolved per field read, only for the fields a predicate inspects.
+#[derive(Clone, Copy)]
+pub(super) struct ResolvingRecord<'a, R> {
+    record: R,
+    dictionaries: &'a crate::dictionary::SharedDictionaries,
+}
+
+impl<'a, R: PredicateRecord> ResolvingRecord<'a, R> {
+    pub(super) fn new(record: R, dictionaries: &'a crate::dictionary::SharedDictionaries) -> Self {
+        Self {
+            record,
+            dictionaries,
+        }
+    }
+}
+
+impl<R: PredicateRecord> PredicateRecord for ResolvingRecord<'_, R> {
+    fn stored_value(self, field: &str) -> Result<(Value, Option<ValueType>), IvmRuntimeError> {
+        self.record.stored_value(field)
+    }
+
+    fn value(self, field: &str) -> Result<Value, IvmRuntimeError> {
+        match self.record.stored_value(field)? {
+            (value, None) => Ok(value),
+            (value, Some(value_type)) => {
+                resolve_interned_value(value, &value_type, self.dictionaries)
+            }
+        }
+    }
+
+    fn literal_ordering(
+        self,
+        field: &str,
+        value: &LiteralValue,
+    ) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
+        if !self.record.is_interned(field)? {
+            return self.record.literal_ordering(field, value);
+        }
+        // Resolve the code and compare the value through the typed fast
+        // path, which is also the only comparison records support.
+        let (code, value_type) = self.record.stored_value(field)?;
+        let value_type = value_type.expect("interned field reports its type");
+        let resolved = resolve_interned_value(code, &value_type, self.dictionaries)?;
+        let descriptor = RecordDescriptor::new([("value", value_type.logical())]);
+        let raw = descriptor.create(&[resolved])?;
+        record_field_literal_ordering(BorrowedRecord::new(&raw, &descriptor), 0, value)
+    }
+
+    fn is_interned(self, field: &str) -> Result<bool, IvmRuntimeError> {
+        self.record.is_interned(field)
+    }
+}
+
+/// `value`, read from a field of type `value_type`, with every dictionary
+/// code replaced by the value it stands for. `value_type` places an interned
+/// type at top level or under `Nullable`s (see
+/// [`crate::schema::DatabaseSchema::validate_interned_columns`]).
+pub(super) fn resolve_interned_value(
+    value: Value,
+    value_type: &ValueType,
+    dictionaries: &crate::dictionary::SharedDictionaries,
+) -> Result<Value, IvmRuntimeError> {
+    match (value_type, value) {
+        (ValueType::Nullable(inner), Value::Nullable(Some(value))) => Ok(Value::Nullable(Some(
+            Box::new(resolve_interned_value(*value, inner, dictionaries)?),
+        ))),
+        (ValueType::Nullable(_), value @ Value::Nullable(None)) => Ok(value),
+        (value_type, value) => match (value_type.as_interned(), value) {
+            (None, value) => Ok(value),
+            (Some((dictionary, logical)), Value::U32(code)) => {
+                let dictionaries = dictionaries.borrow();
+                let bytes = dictionaries.decode(dictionary, code)?;
+                Ok(records::decode_single_field_value(bytes, logical)?)
+            }
+            (Some(_), _) => Err(records::Error::TypeMismatch {
+                expected: value_type.clone(),
+            }
+            .into()),
+        },
     }
 }
 

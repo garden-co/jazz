@@ -120,6 +120,7 @@ where
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
         let row = VersionRow::from_wire_with_schema_version(
+            &self.authors,
             table, version, authored, tx_node_alias, schema_alias, tx_time, seq,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
         )?;
@@ -270,7 +271,16 @@ where
             let incoming = versions.iter().enumerate()
                 .map(|(index, version)| (view_version_key_for_ingest(version), index))
                 .collect::<BTreeMap<_, _>>();
-            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+            // A released list belongs to a complete settled transaction: the
+            // incoming payload already covers every row it holds.
+            let stored_versions = match stored_tx.as_ref() {
+                Some(stored) => self
+                    .query_listed_versions_for_tx(tx.tx_id, stored)
+                    .await?
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            for stored in stored_versions {
                 update_current_indexes |= self
                     .ahead_current_keys
                     .contains_key(&self.ahead_overlay_key(&stored)?);
@@ -303,7 +313,7 @@ where
                 provenance: contribution_merge,
             }
         };
-        stage_transaction_record(
+        self.stage_tx_record(
             batch,
             write,
             tx_node_alias,
@@ -341,6 +351,7 @@ where
                 _ => GlobalTime(0),
             };
             let stored = VersionRow::from_wire_with_schema_version(
+                &self.authors,
                 &table_schema,
                 &version,
                 authored_column_ids,
@@ -735,6 +746,7 @@ where
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
         stage_transaction_record(
+            &self.authors,
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,

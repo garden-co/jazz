@@ -1887,7 +1887,16 @@ where
                             let unit = if let Some(unit) = staged {
                                 unit
                             } else {
-                                self.node.lock().await.commit_unit_for(tx_id).await?
+                                match self.node.lock().await.commit_unit_for(tx_id).await {
+                                    Ok(unit) => unit,
+                                    // Settled since it was queued: the
+                                    // authority already holds it and fate
+                                    // cleanup drops it from the outbox.
+                                    Err(crate::node::Error::TransactionVersionsReleased(_)) => {
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                }
                             };
                             if let std::collections::btree_map::Entry::Vacant(entry) =
                                 large_value_uploads.entry(tx_id)
@@ -2394,9 +2403,14 @@ where
                         Ok::<bool, Error>(false)
                     })
                     .await?;
-                    if outbound_stop {
-                        return Ok(true);
-                    }
+                    // A full send queue must not block receiving the fates and
+                    // credits that release its capacity. Defer further outbound
+                    // work only after applying the available inbound messages.
+                    // Inbound handlers must tolerate pending (and partly applied)
+                    // subscription commands. Each inbound-triggered tick may retry
+                    // the blocked outbound prefix: rebuilding it preserves order
+                    // after inbound fates change the outbox. With no inbound
+                    // progress, backpressure schedules only a deferred retry.
                     let mut applied = false;
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
@@ -3386,7 +3400,7 @@ where
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
                     }
-                    Ok::<bool, Error>(deferred_stop)
+                    Ok::<bool, Error>(outbound_stop || deferred_stop)
                 })
                 .await?;
                 if stop {

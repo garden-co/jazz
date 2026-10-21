@@ -18,7 +18,7 @@ Invariant digest:
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
-- `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v2`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the u32 big-endian UTF-8 logical-family length followed by the logical-family UTF-8 bytes then the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. Missing, malformed, old (`class-cf-v1`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
+- `INV-STORAGE-35`: Jazz's epoch-1 class-CF view MUST admit only marker key `groove-storage-layout` with value `class-cf-v3`, use the specified ordered logical-family classifier and physical class names, and frame mapped keys as the logical family's class table id (u32 big-endian, at most 2^24-1) followed by the logical key, except that the `indices` class (whose only logical family is `indices`) stores logical keys unframed. The id is derived from the family name alone: a per-table family `jazz_physical_{id}_{history|global_current|ahead_current|rejected_versions}` carries its catalogue physical table id (at most 2^24-257), each fixed Jazz system family has a static id above that range, and an operation on any other mapped family fails closed before storage access. Missing, malformed, old (`class-cf-v1`, `class-cf-v2`), or future markers in a nonempty mapped/class store fail closed before logical access; no legacy migration or fallback exists within epoch 1.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -347,7 +347,7 @@ close-time memtable flush is performance maintenance, not a second commit.
 
 ### Jazz class-CF layout (epoch 1)
 
-Jazz uses the `JazzClassV2` view above the ordered-KV adapter to keep the
+Jazz uses the `JazzClassV3` view above the ordered-KV adapter to keep the
 logical table name at the Groove boundary while grouping known Jazz logical
 families into a small, fixed set of physical families. This is a durable
 layout, not a RocksDB-only tuning: the same keys are stored in SQLite's `kv`
@@ -355,17 +355,19 @@ table and are the bytes that a future logical export/import must preserve.
 
 The class-layout marker is exactly one entry in
 `__groove_class_meta`: key ASCII `groove-storage-layout`, value ASCII
-`class-cf-v2`. A fresh store may create precisely that entry. Every other
-marker value (including `class-cf-v0`, the retired `class-cf-v1`, `class-cf-v3`,
-a prefix/suffix, or empty bytes) is invalid. `class-cf-v1` (alpha.59 and
-before) differed only by framing `indices` keys like every other class. A missing marker is valid only when no classifier-matching
+`class-cf-v3`. A fresh store may create precisely that entry. Every other
+marker value (including `class-cf-v0`, the retired `class-cf-v1` and
+`class-cf-v2`, `class-cf-v4`, a prefix/suffix, or empty bytes) is invalid.
+`class-cf-v1` (alpha.59 and before) also framed `indices` keys like every other
+class; `class-cf-v1` and `class-cf-v2` framed every other mapped key with the
+u32 length and UTF-8 bytes of its logical family name instead of a table id. A missing marker is valid only when no classifier-matching
 legacy logical family exists and every class family is empty; otherwise open
 fails closed before a logical read or write. This deliberately rejects even an
 empty legacy logical family, because its existence proves the store was opened
 under a different physical layout. Epoch 1 has no legacy-layout migration or
 dual read.
 
-The classifier runs in this exact precedence order. `JazzClassV2` maps every
+The classifier runs in this exact precedence order. `JazzClassV3` maps every
 classified logical family; it has no caller-selected subset or alternate
 interpretation under the same marker. Unclassified names remain their own
 physical family with their unmodified keys. V1 requires the adapter to
@@ -384,20 +386,52 @@ empty class store is not a legacy logical-family store.
 | starts `jazz_`                                                                                              | `__groove_class_meta`           |
 
 For a mapped logical family `L` and its logical key `K`, the physical key is
-exactly `u32be(len(utf8(L))) | utf8(L) | K`, except in `__groove_class_indices`:
-its classifier admits only the one logical family `indices`, so its physical
-key is exactly `K` (the frame would add 11 bytes to every index entry without
-separating anything). `len` is the UTF-8 byte length,
-not Unicode scalar or UTF-16 length, and `L` is admitted by the portable
-column-family-name rules before this framing. There is no tag, separator,
-escaping, checksum, or second table prefix. Prefix/range scans frame their
-logical boundary the same way and strip exactly `4 + len(utf8(L))` bytes (zero
-for `indices`) after the physical adapter returns a key. Thus two logical families cannot alias even
-when one name is a prefix of the other. The exact marker, classifier, order,
-and key grammar are part of epoch 1 (`INV-STORAGE-35`); changing any requires
-a new storage epoch rather than a fallback decoder. The layout validates a
-logical family against the portable no-NUL/`u16::MAX` UTF-8 bound before it
-calculates the framing length on every mapped operation.
+exactly `u32be(id(L)) | K`, except in `__groove_class_indices`: its classifier
+admits only the one logical family `indices`, so its physical key is exactly
+`K`. `id(L)` is the class table id of `L`, at most `2^24 - 1`, so the first
+byte of every framed key is `0x00` and no framed key in `__groove_class_meta`
+can equal or prefix the marker key. There is no tag,
+separator, escaping, checksum, or second table prefix. Prefix/range scans
+frame their logical boundary the same way and strip exactly 4 bytes (zero for
+`indices`) after the physical adapter returns a key, so two logical families
+cannot alias even when one name is a prefix of the other. The layout validates
+a logical family against the portable no-NUL/`u16::MAX` UTF-8 bound on every
+mapped operation.
+
+Class table ids are derived from the family name, so the layout stores no id
+registry and every family's keys are framed the same way before and after its
+first write. A per-table family is spelled exactly
+`jazz_physical_{id}_{suffix}` with `id` in unsigned decimal (no sign, no
+leading zero except `0` itself) and `suffix` one of `history`,
+`global_current`, `ahead_current`, or `rejected_versions`; its class table id
+is the catalogue physical table id `id`, which Jazz allocates at schema ingest
+and refuses above `2^24 - 257`. The four suffixes land in four different
+classes, so one catalogue id never frames two families of one class. The
+fixed Jazz system families have static ids above every catalogue id:
+
+| family                            | id           |
+| --------------------------------- | ------------ |
+| `jazz_nodes`                      | `0x00FFFF01` |
+| `jazz_schema_versions`            | `0x00FFFF02` |
+| `jazz_catalogue`                  | `0x00FFFF03` |
+| `jazz_transactions`               | `0x00FFFF04` |
+| `jazz_pending_transactions`       | `0x00FFFF05` |
+| `jazz_tx_provenance`              | `0x00FFFF06` |
+| `jazz_tx_touched_rows`            | `0x00FFFF07` |
+| `jazz_rejected_transactions`      | `0x00FFFF08` |
+| `jazz_history_horizon`            | `0x00FFFF09` |
+| `jazz_authority_policy_bindings`  | `0x00FFFF0A` |
+| `jazz_subscription_watermarks_v1` | `0x00FFFF0B` |
+| `jazz_local_row_availability_v1`  | `0x00FFFF0C` |
+| `jazz_superseded_writes_v1`       | `0x00FFFF0D` |
+| `jazz_global_changes`             | `0x00FFFF0E` |
+
+Any other classified family (for example a name with a different suffix, a
+padded id, or an id above the catalogue range) has no class table id: every
+read, scan, write, or compare on it fails closed with `InvalidStorageLayout`
+before storage access. The exact marker, classifier, order, key grammar, and id
+assignment are part of epoch 1 (`INV-STORAGE-35`); changing any requires a new
+storage epoch rather than a fallback decoder.
 
 SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
 `user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
@@ -822,14 +856,39 @@ the next publication. Opening loads each declared dictionary into memory and
 refuses (`DictionaryError::InvalidDictionary`) a key that is not 4 bytes, a
 gap in the codes, a value that is not canonical, and a repeated value.
 
-Interned columns are storage-only. `TableSchema::record_schema` and
-`record_schema_for_variant` return the **logical** descriptor (each interned
-field has its logical type); `storage_record_schema*` return the physical one.
-Every point, scan and index read, every old row of a write's delta, and every
-IVM table source resolves codes before a caller or operator sees the record,
-so queries, policies and the wire only ever see values. A descriptor carrying
-an interned type cannot be encoded as a persisted or wire descriptor
-(`records::Error::InternedTypeNotEncodable`).
+A code is the column's value inside the node. `TableSchema::record_schema`
+and `record_schema_for_variant` return the stored descriptor, interned types
+included, and there is no second logical descriptor: point, scan and index
+reads, the old rows of a write's delta, IVM table sources, arrangements and
+subscription outputs all carry codes, and a write must already carry codes.
+Committing a row whose code its dictionary does not hold is refused
+(`DictionaryError::UnknownCode`). `Database::dictionaries()` returns the
+node's `Dictionaries`: `intern` and `resolve` convert one value, and
+`intern_record` and `resolve_record` convert a whole record between its
+stored form and its resolved form (each interned field replaced by its
+logical type).
+
+Operators work on codes and resolve one only where they need the value:
+
+- Equality filters, `IsNull` and record-field projections (for example
+  `author.name`) read through the dictionary; a projection that keeps the
+  whole interned field keeps its code and its interned type.
+- Joins, semi-joins and anti-joins compare codes, so both keys must be
+  interned into the same dictionary. Joining an interned key with a plain
+  one, ordering by an interned field (`ArgMax`, `ArgMin`, `TopBy` order or
+  tie columns), and aggregates other than `Count` over one are refused
+  (`IvmRuntimeError::UnsupportedInternedOperand`): codes are allocated in
+  first-seen order, not value order.
+- A predicate that reads an interned field without the dictionaries fails
+  closed (`IvmRuntimeError::UnresolvedDictionaryCode`) rather than compare a
+  code with a value.
+
+Codes are node-local, so a row leaves the node resolved: egress calls
+`resolve_record` before a row reaches the wire or a client, and ingress
+interns incoming values with `intern` or `intern_record`. A persisted
+node-local descriptor may carry an interned type (`DESCRIPTOR_NODE_INTERNED`,
+the dictionary name and the logical type as its one child); the wire refuses
+one (`records::Error::InternedTypeNotEncodable`).
 
 Schema admission refuses (`InternedColumnError`) an interned column in a
 primary key, an index or a foreign key, in a direct record store, nested

@@ -31,7 +31,7 @@ fn compact_storage_raw_entries(
 }
 
 /// The stored bytes of `field` in one raw row of `table`, located through the
-/// table's physical (storage) record descriptor.
+/// table's record descriptor, which is also its stored layout.
 fn compact_storage_field_bytes(
     storage_table: &groove::schema::TableSchema,
     value: &[u8],
@@ -39,8 +39,8 @@ fn compact_storage_field_bytes(
 ) -> Vec<u8> {
     let (tag, payload) = groove::records::split_variant_record(value).unwrap();
     let descriptor = storage_table
-        .storage_record_schema_for_variant(tag)
-        .expect("stored variant has a storage descriptor");
+        .record_schema_for_variant(tag)
+        .expect("stored variant has a descriptor");
     let index = descriptor.field_index(field).unwrap();
     payload[descriptor.field_span(payload, index).unwrap()].to_vec()
 }

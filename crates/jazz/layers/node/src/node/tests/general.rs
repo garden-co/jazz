@@ -1381,9 +1381,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             tx_node_alias: NodeAlias(u32::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
             tx_time: TxTime::from(u64::from(seed) + 30),
-            created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
+            created_by: AuthorCode(u32::from(seed) + 2),
             created_at: TxTime::from_physical_ms(u64::from(seed) + 40).unwrap(),
-            updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
+            updated_by: AuthorCode(u32::from(seed) + 3),
             updated_at: TxTime::from_physical_ms(u64::from(seed) + 50).unwrap(),
             cells: table
                 .columns
@@ -1514,9 +1514,9 @@ fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
     let stored = node.query_transaction(tx).unwrap().unwrap();
     assert_eq!(stored.tx.made_by, expected_row_author);
     assert_eq!(stored.tx.permission_subject, Some(AuthorSubject::SYSTEM));
-    let version = node.query_versions_for_tx(tx).unwrap().remove(0);
-    assert_eq!(version.created_by(), expected_row_author);
-    assert_eq!(version.updated_by(), expected_row_author);
+    let version = node.stored_versions_for_tx_for_test(tx).unwrap().remove(0);
+    assert_eq!(node.authors.subject(version.created_by()).unwrap(), expected_row_author);
+    assert_eq!(node.authors.subject(version.updated_by()).unwrap(), expected_row_author);
     assert_eq!(
         node.visible_current_cells("todos", row)
             .unwrap()
@@ -1598,7 +1598,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                         .cells(title_cells("corrupt authored ids")),
                 )
                 .unwrap();
-            let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+            let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
 
             // Remove the valid derived carrier first, then replace only the
             // immutable persisted history row with malformed raw bytes.
@@ -1655,7 +1655,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
         }
 
         let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
-        let corrupted = reopened.query_versions_for_tx(tx_id).unwrap().remove(0);
+        let corrupted = reopened.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
         let mut ahead = reopened.database.open_batch();
         assert!(reopened
             .write_ahead_current_insert(&mut ahead, &corrupted)
@@ -1690,9 +1690,12 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
         let alias = node.query_transaction(tx_id).unwrap().unwrap().node_alias;
         crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
             .unwrap()
-            .iter()
-            .map(|(table, branch, row)| (table, branch.to_vec(), row))
-            .collect::<Vec<_>>()
+            .map(|listed| {
+                listed
+                    .iter()
+                    .map(|(table, branch, row)| (table, branch.to_vec(), row))
+                    .collect::<Vec<_>>()
+            })
     };
     let tx_id = node
         .commit_mergeable_settled(
@@ -1701,12 +1704,70 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
         .unwrap();
     assert!(node.tx_touched_dirty.is_empty());
     let expected = vec![(table_id, BranchKey::default().canonical_bytes(), row(3))];
-    assert_eq!(listed(&mut node, tx_id), expected);
+    assert_eq!(listed(&mut node, tx_id), Some(expected));
+    assert_eq!(node.query_versions_for_tx(tx_id).unwrap().len(), 1);
 
+    // Acceptance at a seq settles the complete mergeable transaction: the
+    // batch that moves its post-image to the seq also releases its list.
     node.finalize_local_mergeable_commit_settled(tx_id).unwrap();
     assert!(node.tx_touched_dirty.is_empty());
-    assert_eq!(listed(&mut node, tx_id), expected);
-    assert_eq!(node.query_versions_for_tx(tx_id).unwrap().len(), 1);
+    assert_eq!(listed(&mut node, tx_id), None);
+    assert!(matches!(
+        crate::local_executor::block_on(node.query_versions_for_tx(tx_id)),
+        Err(Error::TransactionVersionsReleased(id)) if id == tx_id
+    ));
+    assert_eq!(node.stored_versions_for_tx_for_test(tx_id).unwrap().len(), 1);
+}
+
+/// Actors: a node commits one row and accepts it at a seq; it reopens cold.
+///
+/// Settlement releases the transaction's touched-rows list (SPEC 2 §2.8), and
+/// the settled version stays one exact `(table, row, tx)` point read away,
+/// also with the version cache empty after reopen. White-box: the list is
+/// node-local storage that no public API exposes.
+#[test]
+fn a_settled_mergeable_transaction_is_read_by_exact_row_after_its_list_is_released() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(4), 10).cells(title_cells("released")),
+            )
+            .unwrap();
+        node.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+        tx_id
+    };
+    let mut node = open_node_at(&temp_dir, schema);
+    let stored = node.query_transaction(tx_id).unwrap().unwrap();
+    assert!(stored.releases_touched_rows());
+    assert!(
+        node.database
+            .primary_key_scan_raw(TX_TOUCHED_ROWS_TABLE, &[])
+            .unwrap()
+            .is_empty(),
+        "no touched-rows list survives settlement"
+    );
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let version = crate::local_executor::block_on(node.query_tx_version_at(
+        tx_id,
+        &stored,
+        table_id,
+        &BranchKey::default().canonical_bytes(),
+        row(4),
+    ))
+    .unwrap()
+    .expect("the settled version is one point read away");
+    assert_eq!(version.row_uuid(), row(4));
+    assert_eq!(version.seq().unwrap(), stored.global_time.unwrap());
+    assert_eq!(
+        crate::local_executor::block_on(node.tx_versions_for_witness(tx_id, "todos", row(4)))
+            .unwrap(),
+        vec![version]
+    );
 }
 
 #[test]
@@ -1723,7 +1784,7 @@ fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_tran
             MergeableCommit::new("todos", row(5), 10).cells(title_cells("listed")),
         )
         .unwrap();
-    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
     let alias = version.tx_node_alias();
     let table_id = node
         .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
@@ -1771,6 +1832,7 @@ fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_tran
     assert_eq!(
         crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
             .unwrap()
+            .expect("the list is written without its transaction record")
             .iter()
             .map(|(table, branch, row)| (table, branch.to_vec(), row))
             .collect::<Vec<_>>(),
@@ -1798,8 +1860,8 @@ fn history_images_always_store_updated_by() {
                     .cells(title_cells("own author")),
             )
             .unwrap();
-        let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
-        assert_eq!(version.updated_by(), alice);
+        let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
+        assert_eq!(node.authors.subject(version.updated_by()).unwrap(), alice);
         let table_id = node
             .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
             .unwrap();
@@ -1813,7 +1875,7 @@ fn history_images_always_store_updated_by() {
                 .record()
                 .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
                 .unwrap(),
-            row_author_value(alice).unwrap(),
+            Value::U32(node.authors.existing_code(alice).unwrap().0),
             "the transaction's own author is stored in the image"
         );
         let (_, written) = node.version_storage_write_binding(&version).unwrap();
@@ -1822,14 +1884,14 @@ fn history_images_always_store_updated_by() {
                 .record()
                 .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
                 .unwrap(),
-            row_author_value(alice).unwrap()
+            Value::U32(node.authors.existing_code(alice).unwrap().0)
         );
     }
     // A cold reopen reads the author from the image itself.
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
     let versions = reopened.query_table_versions("todos").unwrap();
     assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].updated_by(), alice);
+    assert_eq!(reopened.authors.subject(versions[0].updated_by()).unwrap(), alice);
 }
 
 #[test]
@@ -2075,7 +2137,7 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
 
     let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
     assert!(!stored_parent.is_partial);
-    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
+    assert_eq!(reader.stored_versions_for_tx_for_test(parent).unwrap().len(), 2);
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }
 /// Keeps the active query claim scope opaque and deterministic, and restores

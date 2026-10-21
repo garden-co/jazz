@@ -1289,14 +1289,16 @@ impl TickEvaluator<'_> {
                 input,
                 batch.projection.as_deref(),
                 false,
+                Some(self.dictionaries),
             ),
             OpType::Filter(filter) => {
                 let mut deltas = Vec::new();
                 let result = input.iter().try_for_each(|delta| {
-                    if filter
-                        .predicate
-                        .matches(delta.borrowed(&batch.input.descriptor), filter.comparison)?
-                    {
+                    if filter.predicate.matches(
+                        delta.borrowed(&batch.input.descriptor),
+                        filter.comparison,
+                        self.dictionaries,
+                    )? {
                         deltas.push(delta.clone());
                     }
                     Ok::<_, IvmRuntimeError>(())
@@ -1489,7 +1491,13 @@ impl TickEvaluator<'_> {
             if !identity.projected {
                 return encoded_identity_key_part(descriptor, record, &windows.identity);
             }
-            match project_window_record(graph, &identity.chain, descriptor, record)? {
+            match project_window_record(
+                graph,
+                &identity.chain,
+                descriptor,
+                record,
+                self.dictionaries,
+            )? {
                 Some((output, projected)) => {
                     encoded_identity_key_part(output, &projected, &identity.fields)
                 }
@@ -1555,6 +1563,7 @@ impl TickEvaluator<'_> {
                     &identity.chain,
                     descriptor,
                     &entry.0,
+                    self.dictionaries,
                 )? {
                     WindowReach::Yes => true,
                     WindowReach::No => false,
@@ -2123,7 +2132,11 @@ impl TickEvaluator<'_> {
                 inputs.set_chunk_scope(None);
                 let matches = match result? {
                     Some(matches) => matches,
-                    None => filter.predicate.matches(record, filter.comparison)?,
+                    None => {
+                        filter
+                            .predicate
+                            .matches(record, filter.comparison, self.dictionaries)?
+                    }
                 };
                 if matches {
                     deltas.push(delta.clone());
@@ -2138,7 +2151,7 @@ impl TickEvaluator<'_> {
             filter.predicate.referenced_fields(&mut referenced);
             let materialized = self.materialize_indirect_fields(input, &referenced)?;
             if Arc::ptr_eq(&materialized, input) {
-                return NodeState::update_filter(filter, output_desc, input);
+                return NodeState::update_filter(filter, output_desc, input, self.dictionaries);
             }
             // Materialization only serves the predicate. Emit the rows as they
             // arrived, so downstream keys (TopBy root identity, #3309) see the
@@ -2146,10 +2159,11 @@ impl TickEvaluator<'_> {
             // values for every output anyway.
             let mut deltas = Vec::new();
             for (delta, loaded) in input.deltas.iter().zip(&materialized.deltas) {
-                if filter
-                    .predicate
-                    .matches(loaded.borrowed(&materialized.descriptor), filter.comparison)?
-                {
+                if filter.predicate.matches(
+                    loaded.borrowed(&materialized.descriptor),
+                    filter.comparison,
+                    self.dictionaries,
+                )? {
                     deltas.push(delta.clone());
                 }
             }
@@ -2177,6 +2191,7 @@ impl TickEvaluator<'_> {
             input,
             raw_projection.as_deref(),
             false,
+            Some(self.dictionaries),
         );
         #[cfg(feature = "cold-settle-attribution")]
         if let Ok(output) = &result {

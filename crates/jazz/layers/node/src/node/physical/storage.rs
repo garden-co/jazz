@@ -952,7 +952,7 @@ where
                     PhysicalWriteField::UpdatedAtMillis => {
                         Value::U48(version.updated_at().physical_ms())
                     }
-                    PhysicalWriteField::UpdatedBy => row_author_value(version.updated_by())?,
+                    PhysicalWriteField::UpdatedBy => Value::U32(version.updated_by().0),
                     PhysicalWriteField::GlobalTime => {
                         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0))))
                     }

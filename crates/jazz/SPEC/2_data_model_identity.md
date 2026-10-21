@@ -305,9 +305,11 @@ global-current record per row with `global_time` (the row's seq) and index
 ordinary nullable cell. No row state carries a timestamp used for merging.
 The history images of one transaction are found through that transaction's
 `jazz_tx_touched_rows` list (§2.8), not through an index: fate replay, relay
-forwarding and materialization read the listed `(table, branch, row)` keys at
+forwarding and settlement read the listed `(table, branch, row)` keys at
 the transaction's seq (from its `jazz_transactions` record) and its
-`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. "The row at seq `S`" and "the row's writes after `S`" are a point read
+`(tx_time, tx_node_id)`, or at `seq = 0` while it has no accepted fate. Once
+the list is released at settlement (§2.8), every reader already knows the row
+it wants (a result member, a witness, a resent copy) and reads that one key. "The row at seq `S`" and "the row's writes after `S`" are a point read
 and a range read of history (SPEC 4 §4.6). Recovery takes the transaction-clock
 high-water mark from the last `jazz_transactions` key. Every history image,
 global-current record and ahead-overlay record stores all four provenance
@@ -325,8 +327,12 @@ dictionaries", codec family `groove.dictionary.v1`): each stores a 4-byte code
 into the node-local `authors` dictionary, whose entries are the canonical
 `RowAuthor` record bytes, so an image spends 5 bytes on its two authors
 however long they are (the 1-byte nullable `updated_by` that omitted the
-transaction's own author is gone with them). Every read, IVM source, query,
-policy and the wire see the full `RowAuthor`; codes never leave the node. It has no `parents`, no
+transaction's own author is gone with them). Inside the node the code is
+the author: reads, IVM sources, queries and policies carry codes, and a policy
+or projection that needs the author's fields (`$createdBy.account`) resolves
+the code through the dictionary. Codes never leave the node: wire versions,
+query results and every public row carry the full `RowAuthor`, resolved at
+that egress. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
@@ -459,7 +465,8 @@ rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorS
 - `made_by` (here and in `jazz_rejected_transactions`) is an interned column:
   the record stores a 4-byte code into the node-local `authors` Groove
   dictionary (`groove.dictionary.v1`), whose entry is the canonical
-  `RowAuthor` record bytes. Groove allocates the code and writes a new entry
+  `RowAuthor` record bytes. The node interns the author when it writes the
+  record; Groove allocates the code and writes a new entry
   in the same storage write as the first record that uses it; an entry never
   changes, and a code without an entry is corrupt storage, refused at open.
   Every read sees the full author, and codes never leave the node: receipts
@@ -525,6 +532,25 @@ rejection deletes the list together with the rejected images. It costs about
 transaction's versions, which reads every listed row anyway, so pending
 history stays findable by transaction until its fate arrives without a
 per-version index.
+
+The list is released, that is deleted, by the node batch whose staged
+`jazz_transactions` record shows a complete mergeable transaction accepted at
+a seq (`kind = Mergeable`, `fate = Accepted`, `global_time` set, view-scoped
+flag clear), provided every listed row is on the default branch. Nothing
+re-sequences, rejects or completes such a transaction, so nothing needs to
+enumerate its versions: a later reader knows the row it wants and reads the
+exact key `(default branch, row, seq, tx_time, tx_node_id)` in the physical
+table it names, and a resent or re-delivered copy is compared row for row at
+the copy's coordinates, its write count already checked against the stored
+record. Asking to list a released transaction's versions is an error
+(`TransactionVersionsReleased`), never an empty answer. Exclusive transactions
+keep the list (complete exclusive payloads list every write), as do
+view-scoped ones (later fragments extend and settle the rows already held) and
+any transaction with a row on another branch (a point read needs the branch).
+A history write after the release comes from a re-ingest of the complete
+payload, which marks every row again, so the release check always sees the
+whole row set and writes no partial list. Releasing changes no record layout:
+a store whose settled transactions still have lists reads them as before.
 
 The pending record's four evidence slots hold exclusive read evidence in the
 `jazz.exclusive-read-evidence.v2` family, and only while it can still be

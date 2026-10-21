@@ -265,6 +265,10 @@ pub fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcar
     })
 }
 
+/// Second half of row egress. The node has already resolved interned author
+/// codes (`AuthorCodes::resolve_record`, and `refuse_codes` rejects any that
+/// remain), so the records reaching this point carry no interned types.
+///
 /// The host binding knows no `U48`: provenance timestamps (`$createdAt`,
 /// `$updatedAt`) are stored and queried as `U48` milliseconds and widen to
 /// `U64` here, at egress, including inside nested records and arrays (an
