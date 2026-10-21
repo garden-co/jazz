@@ -1173,6 +1173,31 @@ struct QueryServing {
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
 }
 
+impl QueryServing {
+    /// Invalidate compiler output and its admission proofs while retaining
+    /// prepared shape plans and policy authorization state.
+    fn clear_compiled_query_programs(&mut self) {
+        self.compiled_query_program_cache.clear();
+        self.query_program_templates.clear();
+        self.supported_query_program_requests.clear();
+    }
+
+    /// Prepared plans and the programs derived from them share an invalidation
+    /// boundary when their sources or the underlying runtime are retired.
+    fn clear_prepared_query_plans(&mut self) {
+        self.query_shape_cache.clear();
+        self.clear_compiled_query_programs();
+    }
+
+    /// Retire authorization requests together with their lowered graphs and
+    /// temporary replacements when the policy context changes.
+    fn clear_policy_authorization(&mut self) {
+        self.read_policy_authorization_request_cache.clear();
+        self.policy_authorization_graph_cache.clear();
+        self.policy_authorization_graph_replacements.clear();
+    }
+}
+
 /// Compiler-owned description of the root window stage represented by a
 /// retained receiver input page. The page is *already the output* of this
 /// stage; a compatible local lowering applies only its requested subwindow
