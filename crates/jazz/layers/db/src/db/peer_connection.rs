@@ -2403,9 +2403,9 @@ where
                         Ok::<bool, Error>(false)
                     })
                     .await?;
-                    if outbound_stop {
-                        return Ok(true);
-                    }
+                    // A full send queue must not block receiving the fates and
+                    // credits that release its capacity. Defer further outbound
+                    // work only after applying the available inbound messages.
                     let mut applied = false;
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
@@ -3395,7 +3395,7 @@ where
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
                     }
-                    Ok::<bool, Error>(deferred_stop)
+                    Ok::<bool, Error>(outbound_stop || deferred_stop)
                 })
                 .await?;
                 if stop {

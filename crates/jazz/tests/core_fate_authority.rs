@@ -175,6 +175,55 @@ fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     .collect()
 }
 
+/// Alice's upload backlog must keep consuming Core's fates and returned credits
+/// when the bounded outbound queue fills, so every write can settle globally.
+///
+/// Alice --fill upload queue--> Core --fates/credits--> Alice --remaining writes--> Core
+#[test]
+fn upstream_write_backpressure_keeps_receiving_fates_and_credits() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+        schema.clone(),
+        identity(0xc0, AuthorSubject::SYSTEM),
+    ))
+    .unwrap();
+    let alice = open_db(0xa1, author(0xa1), &schema);
+    let wire = QueuedWireTransport::default();
+    let session = connect_client_to_core(&mut core, &alice, &wire, author(0xa1));
+
+    // Exceed both the logical queue and the initial physical-frame allowance
+    // before returning any peer credit. Small rows exercise the same flow
+    // control as a large fixture without depending on Linux TCP buffer sizes.
+    let count = 2 * jazz::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES;
+    let writes = (0..count)
+        .map(|index| {
+            block_on(alice.insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(format!("write {index}"))),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]),
+                Default::default(),
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..count {
+        pump_client_core(&alice, &wire, &mut core, session);
+        if writes
+            .iter()
+            .all(|write| block_on(write.wait(DurabilityTier::Global)).is_ok())
+        {
+            return;
+        }
+    }
+    for (index, write) in writes.iter().enumerate() {
+        block_on(write.wait(DurabilityTier::Global))
+            .unwrap_or_else(|error| panic!("write {index} did not settle: {error}"));
+    }
+}
+
 /// Alice's complete write reaches Global durability and Bob's maintained view.
 /// Bob subscribes → core settles opening → Alice uploads → core publishes to Bob.
 #[test]
