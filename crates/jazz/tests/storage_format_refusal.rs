@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 const DICTIONARY_V1: &str = "groove.dictionary.v1";
 const DURABLE_INDEX_V2: &str = "groove.durable-index.v2";
+const KEY_FREE_ROWS_V1: &str = "groove.key-free-rows.v1";
 const TRANSACTION_RECORD: &str = "jazz.transaction-record.v1";
 const ROW_HISTORY: &str = "jazz.history-version-current.v4";
 const DURABILITY_V2: &str = "jazz.transaction-durability.v2";
@@ -49,6 +50,9 @@ fn assert_legacy_profile_refused(
     old: &groove::storage::StorageCodecProfile,
 ) {
     let mut expected_missing = vec!["jazz.node-storage.v2"];
+    if !old.codec_ids().any(|id| id == KEY_FREE_ROWS_V1) {
+        expected_missing.insert(0, KEY_FREE_ROWS_V1);
+    }
     if !old.codec_ids().any(|id| id == DURABLE_INDEX_V2) {
         expected_missing.insert(0, DURABLE_INDEX_V2);
     }
@@ -86,6 +90,7 @@ fn alpha54_missing() -> Vec<String> {
     vec![
         DICTIONARY_V1.to_owned(),
         DURABLE_INDEX_V2.to_owned(),
+        KEY_FREE_ROWS_V1.to_owned(),
         "groove.large-value.v2".to_owned(),
         "groove.ordered-chunk-storage.v2".to_owned(),
         "jazz.node-storage.v2".to_owned(),
@@ -191,7 +196,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 
 /// A published alpha.54 client root (DAG layout) is refused at open with the
 /// typed `UnsupportedStorageCodecs` error naming the dictionary,
-/// durable-index and node-storage families it lacks, instead of opening and failing later with a record decode error.
+/// durable-index, key-free-rows and node-storage families it lacks, instead of opening and failing later with a record decode error.
 ///
 /// Actors: `alice` upgrades her native app from alpha.54 over the same
 /// data directory.
@@ -200,6 +205,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                               missing [groove.dictionary.v1,
 ///                                                        groove.durable-index.v2,
+///                                                        groove.key-free-rows.v1,
 ///                                                        jazz.node-storage.v2]
 /// ```
 #[test]
@@ -302,6 +308,7 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
 /// dave's pre-index-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                              missing [groove.dictionary.v1,
 ///                                                       groove.durable-index.v2,
+///                                                       groove.key-free-rows.v1,
 ///                                                       jazz.node-storage.v2]
 /// ```
 #[test]
@@ -338,6 +345,7 @@ fn linear_history_root_without_the_durable_index_family_is_refused() {
 /// ```text
 /// erin's pre-durability-v2 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                                  missing [groove.dictionary.v1,
+///                                                           groove.key-free-rows.v1,
 ///                                                           jazz.node-storage.v2]
 /// ```
 #[test]
@@ -500,7 +508,7 @@ fn node_root_without_the_dictionary_family_is_refused() {
     let families = notes_schema().column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let pre_dictionary_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
-        .with_additional_codecs([DURABLE_INDEX_V2, "jazz.node-storage.v2"])
+        .with_additional_codecs([DURABLE_INDEX_V2, KEY_FREE_ROWS_V1, "jazz.node-storage.v2"])
         .expect("pre-dictionary node profile");
     drop(
         jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
@@ -523,6 +531,52 @@ fn node_root_without_the_dictionary_family_is_refused() {
         }
         Err(other) => panic!("expected a typed format refusal, got {other}"),
         Ok(()) => panic!("a root without the dictionary family must not open"),
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
+}
+
+/// A node root written before key-free rows (no `groove.key-free-rows.v1`) is
+/// refused at manifest admission, naming only that family, before any row is
+/// decoded: its stored values still carry the primary-key columns, which the
+/// current layout reads back from the storage key, so every field after them
+/// would be misread. The SQLite file is left byte-for-byte unchanged.
+///
+/// Actors: `grace` upgrades a client whose store holds full stored records.
+///
+/// ```text
+/// grace's full-record root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                                missing [groove.key-free-rows.v1]
+/// ```
+#[test]
+fn node_root_without_key_free_rows_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let full_record_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs([DICTIONARY_V1, DURABLE_INDEX_V2, "jazz.node-storage.v2"])
+        .expect("full-record node profile");
+    drop(
+        jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+            &path,
+            &refs,
+            jazz_storage_sqlite::Durability::FullSync,
+            &full_record_profile,
+        )
+        .expect("full-record profile root"),
+    );
+    let before = std::fs::read(&path).unwrap();
+    match open_sqlite(&path) {
+        Err(StorageError::UnsupportedStorageCodecs {
+            epoch: 1,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(missing, vec![KEY_FREE_ROWS_V1.to_owned()]);
+            assert!(unknown.is_empty());
+        }
+        Err(other) => panic!("expected a typed format refusal, got {other}"),
+        Ok(()) => panic!("a root without key-free rows must not open"),
     }
     assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
 }

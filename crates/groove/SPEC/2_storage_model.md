@@ -174,7 +174,10 @@ a Groove-only root uses exactly the mandatory Groove base. Groove also owns
 `groove.durable-index.v2` (§2.5, "Durable index layout"), which is not in the
 mandatory base: a root that declares schema indexes composes it into its
 profile (Jazz node roots do), so a root written by an earlier index layout is
-refused at manifest admission. Omission, addition,
+refused at manifest admission. Likewise `groove.key-free-rows.v1` (§2.3) marks
+roots whose table rows leave the primary-key fields out of the stored value;
+Jazz node roots compose it, so a root written with full stored records is
+refused before any row is read. Omission, addition,
 duplication, or substitution of a codec ID is invalid for the selected profile
 even when the rest of the manifest is canonical. The manifest envelope is the
 root boundary rather than an entry in its own registry. Adding an authoritative
@@ -690,9 +693,11 @@ followed by the physical record without the primary-key fields
 point, scan and index read, every old row of a write's delta, and every IVM
 table, index, lookup and recursion source decodes the key and puts the key
 fields back at their declared positions, so callers only ever see the full
-logical record (`TableSchema::stored_record_layout`). A stored row whose key
-does not decode as exactly the primary key is refused
-(`Error::InvalidDirectRecordStoreKey`). Direct record stores are unchanged.
+logical record (`records::KeyFreeLayout`, from `TableSchema::key_free_layout`).
+A stored row whose key does not decode as exactly the primary key is refused
+(`Error::InvalidDirectRecordStoreKey`). Direct record stores are unchanged. A
+root in this layout declares codec family `groove.key-free-rows.v1` in its
+storage manifest when its owner composes it (Jazz node roots do).
 
 Primary keys are encoded separately from record values by an
 **order-preserving** scheme. As a result, lexicographic byte order matches

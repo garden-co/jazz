@@ -578,6 +578,45 @@
       ]
     },
     {
+      "id": "groove.key-free-rows.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### 2.3 Tables"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/tests/stored_rows.rs",
+        "anchor": "fn stored_rows_leave_out_primary_key_columns_and_reads_restore_them"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn node_root_without_key_free_rows_is_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/tests/stored_rows.rs",
+          "anchor": "fn variant_rows_leave_out_their_key_field"
+        },
+        {
+          "path": "crates/groove/tests/stored_rows.rs",
+          "anchor": "fn a_stored_row_under_a_malformed_key_is_refused"
+        },
+        {
+          "path": "crates/jazz-storage-rocksdb/tests/plain_row_receipt.rs",
+          "anchor": "fn epoch_1_table_row_bytes_and_order_survive_a_fresh_rocksdb_open"
+        },
+        {
+          "path": "crates/jazz-storage-sqlite/tests/ordered_kv.rs",
+          "anchor": "fn epoch_1_table_row_bytes_and_order_survive_a_fresh_sqlite_open"
+        },
+        {
+          "path": "dev/proofs/row-value-tightening-storage-compatibility.md",
+          "anchor": "## 1. No primary-key copies in stored row values (Groove)"
+        }
+      ]
+    },
+    {
       "id": "jazz.idb-page.v1",
       "boundary": "durable-storage",
       "spec": {

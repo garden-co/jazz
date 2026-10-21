@@ -7,11 +7,11 @@ requires exactly one Jazz-owned format marker in addition to Groove's base:
 `groove.large-value.v2`, `groove.ordered-chunk-storage.v2`, and
 `groove.ordered-kv.v1`.
 
-| Root                | Jazz marker                 | Additional Groove families                        |
-| ------------------- | --------------------------- | ------------------------------------------------- |
-| Client, relay, Core | `jazz.node-storage.v2`      | `groove.dictionary.v1`, `groove.durable-index.v2` |
-| Server catalogue    | `jazz.catalogue-storage.v1` | None                                              |
-| Account registry    | `jazz.account-storage.v1`   | None                                              |
+| Root                | Jazz marker                 | Additional Groove families                                                   |
+| ------------------- | --------------------------- | ---------------------------------------------------------------------------- |
+| Client, relay, Core | `jazz.node-storage.v2`      | `groove.dictionary.v1`, `groove.durable-index.v2`, `groove.key-free-rows.v1` |
+| Server catalogue    | `jazz.catalogue-storage.v1` | None                                                                         |
+| Account registry    | `jazz.account-storage.v1`   | None                                                                         |
 
 Node format v2 covers branch keys, catalogue state, linear row history
 (including union row cases, SPEC 10 §10.3), transactions (including the
@@ -34,6 +34,11 @@ in history, global-current and ahead-current rows) holds a 4-byte code into
 one node-local `authors` dictionary; reads, queries, policies and the wire see
 full authors. A node root without it is refused with `missing:
 ["groove.dictionary.v1"]` (`node_root_without_the_dictionary_family_is_refused`).
+`groove.key-free-rows.v1` is Groove's key-free row layout (Groove SPEC 2 §2.3):
+every stored table row leaves out its primary-key columns, which its storage
+key holds, and reads put them back from the key. A node root written with full
+stored records is refused with `missing: ["groove.key-free-rows.v1"]`
+(`node_root_without_key_free_rows_is_refused`).
 
 Individual byte families keep their named receipts in
 `persistent_codec_family_registry.json`; only entries with `profile` are
@@ -44,7 +49,7 @@ manifest members. This separates encoding documentation from root admission.
 `storage_codec_profile::tests::root_profiles_have_pinned_manifest_bytes`
 pins all three exact `JSM1` manifests (memory adapter version 1, no parameters):
 
-- node: `37a0adcfdbfb471db9c872d57ee9e1798799519ed83a4a74ccf31c5ea30de1cd`
+- node: `b899b2a46e65a9d6ef8f7658b5fc79829f690fa85f6569ce8507982798d06084`
 - catalogue: `92b82965f6a8d36cd85299b6f8c1af345ddec20b52f09b24b27cdde68cc792db`
 - account: `815ca7a4044e7888ff605cc7a7f7ed00c5e8f36b9bfdd7c9f131e8cdc9008e1b`
 

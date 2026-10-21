@@ -69,6 +69,10 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   // admission instead of decoding full authors as dictionary codes.
   "groove.dictionary.v1",
   "groove.durable-index.v2",
+  // Key-free rows: stored table rows leave out their primary-key columns,
+  // which the row key holds. A root written with full stored records lacks
+  // this family and is refused before any row is misread.
+  "groove.key-free-rows.v1",
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",
   "groove.ordered-kv.v1",

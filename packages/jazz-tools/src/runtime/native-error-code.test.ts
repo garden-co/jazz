@@ -118,6 +118,7 @@ function unpackPublishedAlpha54Root(): { dir: string; root: string } {
 const ALPHA54_MISSING = [
   "groove.dictionary.v1",
   "groove.durable-index.v2",
+  "groove.key-free-rows.v1",
   "groove.large-value.v2",
   "groove.ordered-chunk-storage.v2",
   "jazz.node-storage.v2",

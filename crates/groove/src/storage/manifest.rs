@@ -50,6 +50,17 @@ pub const GROOVE_DURABLE_INDEX_V2_CODEC: &str = "groove.durable-index.v2";
 /// dictionary carry it; such a root composes it into its profile.
 pub const GROOVE_DICTIONARY_V1_CODEC: &str = "groove.dictionary.v1";
 
+/// Key-free table rows: a table row with a primary key is stored under its
+/// encoded key, and its stored value is the variant tag plus the record
+/// without the primary-key fields, which reads rebuild from the key (SPEC 2
+/// §2.3). Tables without a primary key store the whole
+/// record.
+///
+/// A root written before key-free rows stores every field in the value and
+/// would be misread field by field, so a root that composes this codec into
+/// its profile refuses such a root at manifest admission.
+pub const GROOVE_KEY_FREE_ROWS_V1_CODEC: &str = "groove.key-free-rows.v1";
+
 /// A closed, deterministic set of persistent payload codecs required by one
 /// storage root.
 ///

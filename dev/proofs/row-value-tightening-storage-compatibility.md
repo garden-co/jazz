@@ -10,8 +10,10 @@ This PR regenerates its own fixtures, with Anselm's OK, in a separate commit
 storage corpus (logical pack, SQLite image and RocksDB archive, with their
 digests) and the browser IndexedDB corpus. The inline transaction-record byte
 pins in `crates/jazz/layers/node/src/node/codec.rs` move with the code
-change. No storage, wire or package version changes; the single storage
-version bump for alpha.60 is done by track F.
+change. No wire or package version changes; the single storage version bump
+for alpha.60 is done by track F. The key-free layout does get its own manifest
+marker, `groove.key-free-rows.v1` (see "Format marker" below), because it
+changes how every stored row is read.
 
 ## 1. No primary-key copies in stored row values (Groove)
 
@@ -30,7 +32,8 @@ and recursion sources. A stored row whose key does not decode as exactly the
 table's primary key is refused with `InvalidDirectRecordStoreKey`
 (`IvmRuntimeError::InvalidStoredRowKey` inside IVM) rather than given made-up
 key columns. Tables without a primary key are unchanged. Interned columns keep
-working: the transcoder handles both mappings in one pass.
+their codes in stored rows and in the rebuilt record alike; the rebuild only
+copies field bytes and encodes the key parts (`records::KeyFreeLayout`).
 
 This applies to every Groove table with a primary key, so it covers every
 Jazz node-root table: history, global and ahead current, rejected versions,
@@ -72,20 +75,33 @@ encoding of base and authored columns, which is unchanged, and a stored value
 never leaves the node. The wire fixtures (`wire_message_frames_v6.json`,
 `large_json_wire_v1.json`) pass unchanged.
 
+## Format marker
+
+Jazz node roots compose Groove's `groove.key-free-rows.v1` into their storage
+codec profile (`JAZZ_NODE_STORAGE_CODECS`), next to `groove.dictionary.v1` and
+`groove.durable-index.v2`. A node root whose manifest lacks it stores full
+records, and opening it with this build fails at manifest admission with
+`UnsupportedStorageCodecs { missing: ["groove.key-free-rows.v1"] }` before any
+row is decoded (`node_root_without_key_free_rows_is_refused` in
+`crates/jazz/tests/storage_format_refusal.rs`; the browser root's required
+codec list in `indexeddb-page-store.ts` carries it too). The node manifest
+receipt moves accordingly (`root_profiles_have_pinned_manifest_bytes`). Server
+catalogue and account roots use raw ordered KV and do not carry it.
+
 ## Upgrade path
 
 None. alpha.60 is a coordinated breaking release: a node root written by an
 earlier release is refused by the storage codec profile before any of these
 decoders runs (it lacks `groove.dictionary.v1`, see
-`tx-record-v2-storage-compatibility.md`). Only unreleased main builds ever
-wrote the old forms together with that profile, so no released root is
-affected. Track F's version bump makes the refusal explicit for those
-unreleased roots as well.
+`tx-record-v2-storage-compatibility.md`, and `groove.key-free-rows.v1`). Roots
+written by unreleased main builds with full stored records lack
+`groove.key-free-rows.v1` and are refused the same way.
 
 ## Downgrade to alpha.59
 
 As for the transaction record v2: alpha.59 refuses a root written by this
-build at manifest admission, before decoding any row.
+build at manifest admission, before decoding any row; it does not know
+`groove.key-free-rows.v1`.
 
 ## Measured size
 

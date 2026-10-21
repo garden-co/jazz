@@ -14,9 +14,15 @@ use crate::groove::storage::{Error, StorageCodecProfile};
 /// `authors` dictionary instead of the full author. A node root written before
 /// interned author columns lacks it and is refused with
 /// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
+///
+/// `groove.key-free-rows.v1`: every stored table row leaves out its
+/// primary-key columns, which its storage key holds (history, current,
+/// transaction and touched-rows records alike). A node root written with
+/// full stored records lacks it and is refused the same way.
 pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &[
     crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
     crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
+    crate::groove::storage::GROOVE_KEY_FREE_ROWS_V1_CODEC,
     "jazz.node-storage.v2",
 ];
 /// Format owned by the independent server catalogue.
@@ -59,7 +65,7 @@ mod tests {
     #[test]
     fn root_profiles_have_pinned_manifest_bytes() {
         for (profile, expected) in [
-            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x06\x14groove.dictionary.v1\x17groove.durable-index.v2\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x00".as_slice()),
+            (node_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x07\x14groove.dictionary.v1\x17groove.durable-index.v2\x17groove.key-free-rows.v1\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x14jazz.node-storage.v2\x00".as_slice()),
             (catalogue_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x19jazz.catalogue-storage.v1\x00".as_slice()),
             (account_storage_codec_profile().unwrap(), b"JSM1\x00\x01\x00\x01\x06memory\x04\x15groove.large-value.v2\x1fgroove.ordered-chunk-storage.v2\x14groove.ordered-kv.v1\x17jazz.account-storage.v1\x00".as_slice()),
         ] {
@@ -79,6 +85,7 @@ mod tests {
             .with_additional_codecs([
                 crate::groove::storage::GROOVE_DICTIONARY_V1_CODEC,
                 crate::groove::storage::GROOVE_DURABLE_INDEX_V2_CODEC,
+                crate::groove::storage::GROOVE_KEY_FREE_ROWS_V1_CODEC,
                 "jazz.node-storage.v1",
             ])
             .unwrap();
