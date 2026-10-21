@@ -1119,3 +1119,114 @@ describe("TS Query API private draft branch history", () => {
     ]);
   });
 });
+
+describe("TS Query API branch history with relational read policies", () => {
+  const projectsApp = s.defineApp({
+    projects: s
+      .table(
+        { branch: s.string(), name: s.string() },
+        { notesViaProject: s.reverse("notes", "project") },
+      )
+      .branchBy("branch"),
+    notes: s
+      .table(
+        { branch: s.string(), project_id: s.uuid(), title: s.string() },
+        { project: s.rel("projects", "project_id") },
+      )
+      .branchBy("branch"),
+  });
+  const projectPermissions = s.definePermissions(
+    projectsApp,
+    ({ policy, anyOf, isCreator, allowedTo }) => {
+      policy.projects.allowRead.where(isCreator);
+      policy.projects.allowInsert.always();
+      // The writer creates the notes; bob reads them only through his project.
+      policy.notes.allowRead.where(anyOf([allowedTo.read("project"), isCreator]));
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.always();
+    },
+  );
+  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let writer: Db;
+  let bob: Db;
+  let eve: Db;
+  let id: string;
+
+  beforeEach(async () => {
+    server = await startLocalJazzServer({
+      allowLocalFirstAuth: true,
+      inMemory: true,
+    });
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: projectsApp,
+      permissions: projectPermissions,
+    });
+    writer = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    bob = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    eve = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    const projectId = crypto.randomUUID();
+    id = crypto.randomUUID();
+    for (const branch of ["main", "draft"]) {
+      await bob
+        .insert(projectsApp.projects, { branch, name: "p" }, { id: projectId, branch })
+        .wait({ tier: "global" });
+      await writer
+        .insert(
+          projectsApp.notes,
+          { branch, project_id: projectId, title: `${branch} first` },
+          { id, branch },
+        )
+        .wait({ tier: "global" });
+    }
+    await writer
+      .update(projectsApp.notes, id, { title: "draft second" }, { branch: "draft" })
+      .wait({ tier: "global" });
+  });
+
+  afterEach(async () => {
+    try {
+      await eve?.shutdown();
+      await bob?.shutdown();
+      await writer?.shutdown();
+    } finally {
+      await server?.stop();
+    }
+  });
+
+  function query() {
+    return projectsApp.$history.notes.where({ id }).orderBy("$acceptedAt").select("title");
+  }
+
+  it("checks policy evidence from another branched table in the selected branch", async () => {
+    expect(
+      await bob.all(projectsApp.notes.where({ id }).select("title"), {
+        branch: "draft",
+        tier: "remote",
+      }),
+    ).toEqual([{ id, title: "draft second" }]);
+    expect(await bob.all(query(), { branch: "draft", tier: "remote" })).toEqual([
+      { id, title: "draft first" },
+      { id, title: "draft second" },
+    ]);
+    expect(await bob.all(query(), { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "main first" },
+    ]);
+  });
+
+  it("hides branch history from a reader without access to the related row", async () => {
+    expect(await eve.all(query(), { branch: "draft", tier: "remote" })).toEqual([]);
+    expect(await eve.all(query(), { branch: "main", tier: "remote" })).toEqual([]);
+  });
+});

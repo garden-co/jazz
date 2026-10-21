@@ -101,11 +101,29 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                     &ReadViewSpec::default(),
                     QueryAuthorizationMode::TrustedServing,
                 )?;
-            // Reuse the already-resolved branch expression. Reconstructing a
-            // selector from this table's key would lose other schema branches.
+            // A branch read authorizes against the branch's current rows, so
+            // the policy's evidence (`allowedTo.read`, `exists`) over other
+            // branched tables must read that branch too, not the default key.
+            // The root then reuses its already-resolved branch expression.
             if let Some(source @ SourceExpr::BranchView { .. }) =
                 self.read_view.sources.get(&request.source)
             {
+                let head_values = self
+                    .read_view
+                    .sources
+                    .values()
+                    .filter_map(|source| match source {
+                        SourceExpr::BranchView { head, .. } => Some(head.values.iter().cloned()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<BTreeMap<_, _>>();
+                branch_read_view_from_heads(
+                    &mut visibility_request.reads.primary,
+                    schema,
+                    &head_values,
+                    tier,
+                )?;
                 visibility_request
                     .reads
                     .primary
