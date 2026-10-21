@@ -26,6 +26,12 @@ export interface AccountSnapshot {
   readonly error: Error | undefined;
 }
 
+/** @internal Host-owned persistence of actual account-selection transitions. */
+export interface AccountSelectionDurability {
+  selectionChanged(account: AccountHandle | undefined): void;
+  settle(retry: boolean): Promise<void>;
+}
+
 /** @internal Enrollment boundary implemented by first-party account adapters. */
 export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
@@ -70,6 +76,7 @@ export class AccountManager<Auth> {
   constructor(
     private readonly enrollment: AccountEnrollment<Auth>,
     initialAccount?: AccountHandle,
+    private readonly selectionDurability?: AccountSelectionDurability,
   ) {
     if (initialAccount)
       this.snapshot = Object.freeze({
@@ -81,6 +88,11 @@ export class AccountManager<Auth> {
 
   readonly getSnapshot = (): AccountSnapshot => this.snapshot;
   readonly subscribe = this.listeners.subscribe;
+
+  /** @internal Await host persistence before opening the selected account's client. */
+  settleSelection(retry = false): Promise<void> {
+    return this.selectionDurability?.settle(retry) ?? Promise.resolve();
+  }
 
   /** @internal Surface host storage failure without changing the selected account. */
   reportPersistenceError(cause: unknown): void {
@@ -236,7 +248,15 @@ export class AccountManager<Auth> {
   }
 
   private publish(snapshot: AccountSnapshot): void {
+    const previousAccount = this.snapshot.account;
     this.snapshot = Object.freeze(snapshot);
+    if (snapshot.account !== previousAccount) {
+      try {
+        this.selectionDurability?.selectionChanged(snapshot.account);
+      } catch (error) {
+        console.error("Account state observer failed", error);
+      }
+    }
     this.listeners.notify();
   }
 }
