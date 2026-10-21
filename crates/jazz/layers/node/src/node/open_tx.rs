@@ -565,17 +565,20 @@ where
             if let Some(cells) = cells
                 && (!deleted || include_deleted)
             {
-                let snapshot_projection = snapshot_provenance.as_ref().map(|(created, updated)| {
-                    (
-                        RowProvenance {
-                            created_by: created.created_by(),
-                            created_at: created.created_at().physical_ms(),
-                            updated_by: updated.updated_by(),
-                            updated_at: updated.updated_at().physical_ms(),
-                        },
-                        (updated.tx_time(), updated.tx_node_alias()),
-                    )
-                });
+                let snapshot_projection = snapshot_provenance
+                    .as_ref()
+                    .map(|(created, updated)| -> Result<_, Error> {
+                        Ok((
+                            RowProvenance {
+                                created_by: self.authors.subject(created.created_by())?,
+                                created_at: created.created_at().physical_ms(),
+                                updated_by: self.authors.subject(updated.updated_by())?,
+                                updated_at: updated.updated_at().physical_ms(),
+                            },
+                            (updated.tx_time(), updated.tx_node_alias()),
+                        ))
+                    })
+                    .transpose()?;
                 let mut provenance = snapshot_projection.map(|(provenance, _)| provenance);
                 for write in &pending_writes {
                     let Some(now_ms) = write.now_ms else {
@@ -1412,7 +1415,13 @@ where
                 })?;
             let (created_by, created_at) = snapshot_content
                 .as_ref()
-                .map(|version| (version.created_by(), version.created_at()))
+                .map(|version| -> Result<_, Error> {
+                    Ok((
+                        self.authors.subject(version.created_by())?,
+                        version.created_at(),
+                    ))
+                })
+                .transpose()?
                 .unwrap_or((made_by, provenance_at));
             versions.push(VersionRecord::encode(
                 table_schema,

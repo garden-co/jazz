@@ -191,64 +191,46 @@ impl NodeState {
         )
     }
 
-    /// Group stored rows of `table` into logical table deltas, one per
-    /// variant. Each variant layout is resolved once for the batch. Every IVM
-    /// source that reads base rows from storage comes through here, so a
-    /// table's interned columns are resolved to their values (through
-    /// `dictionaries`) before any operator sees a record; tables without
-    /// interned columns keep their stored bytes as they are.
+    /// Group stored rows of `table` into table deltas, one per variant. Each
+    /// variant layout is resolved once for the batch. Every IVM source that
+    /// reads base rows from storage comes through here. Stored bytes are the
+    /// records operators see: interned columns keep their codes.
     pub(super) fn group_source_rows<'a>(
         table: &crate::schema::TableSchema,
-        dictionaries: &crate::dictionary::SharedDictionaries,
         rows: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-        let mut grouped =
-            HashMap::<u32, (TableDelta, Option<crate::records::RecordTranscoder>)>::default();
-        let mut registry = None;
+        let mut grouped = HashMap::<u32, TableDelta>::default();
         for stored in rows {
             let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let (group, transcoder) = match grouped.entry(variant_tag) {
+            let group = match grouped.entry(variant_tag) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let storage = table
-                        .storage_record_schema_for_variant(variant_tag)
-                        .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                            table: table.name.clone(),
-                            version: u64::from(variant_tag),
-                        })?;
-                    let transcoder = crate::records::RecordTranscoder::new(storage)?;
-                    let descriptor = transcoder
-                        .as_ref()
-                        .map_or(storage, crate::records::RecordTranscoder::logical);
-                    entry.insert((
-                        TableDelta {
-                            table: table.name.clone(),
-                            variant_tag,
-                            descriptor,
-                            deltas: Vec::new(),
-                        },
-                        transcoder,
-                    ))
+                    let descriptor =
+                        table
+                            .record_schema_for_variant(variant_tag)
+                            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                                table: table.name.clone(),
+                                version: u64::from(variant_tag),
+                            })?;
+                    entry.insert(TableDelta {
+                        table: table.name.clone(),
+                        variant_tag,
+                        descriptor,
+                        deltas: Vec::new(),
+                    })
                 }
             };
-            let record = match transcoder {
-                Some(transcoder) => {
-                    let registry = registry.get_or_insert_with(|| dictionaries.borrow());
-                    Bytes::from(crate::dictionary::transcode_to_logical(
-                        transcoder, registry, payload,
-                    )?)
-                }
-                None => Bytes::copy_from_slice(payload),
-            };
-            group.deltas.push(RecordDelta { record, weight: 1 });
+            group.deltas.push(RecordDelta {
+                record: Bytes::copy_from_slice(payload),
+                weight: 1,
+            });
         }
-        Ok(grouped.into_values().map(|(delta, _)| delta).collect())
+        Ok(grouped.into_values().collect())
     }
 
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
-        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -261,7 +243,6 @@ impl NodeState {
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
         let table_deltas = Self::group_source_rows(
             table_schema,
-            dictionaries,
             inputs
                 .rows(request)?
                 .iter()
@@ -279,7 +260,6 @@ impl NodeState {
     pub(super) fn update_index_source_from_inputs(
         input: &IndexSourceOp,
         schema: &DatabaseSchema,
-        dictionaries: &crate::dictionary::SharedDictionaries,
         variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         inputs: &mut super::evaluation_session::EvaluationInputs,
@@ -294,7 +274,6 @@ impl NodeState {
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
             let table_deltas = Self::group_source_rows(
                 table_schema,
-                dictionaries,
                 rows.iter().map(|(_, stored)| stored.as_slice()),
             )?;
             return Self::update_table_source(
@@ -406,6 +385,7 @@ impl NodeState {
                             },
                             raw_projection.as_deref(),
                             *omit_unrepresentable_enum_rows,
+                            None,
                         )?;
                         &projected.deltas
                     }
@@ -426,6 +406,7 @@ impl NodeState {
                                 deltas: delta.deltas.clone(),
                             },
                             raw_projection.as_deref(),
+                            None,
                         )?;
                         &projected.deltas
                     }
@@ -644,11 +625,16 @@ impl NodeState {
         filter: &FilterOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
+        dictionaries: &crate::dictionary::SharedDictionaries,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let predicate = &filter.predicate;
         let mut deltas = Vec::new();
         for delta in &input.deltas {
-            if predicate.matches(delta.borrowed(&input.descriptor), filter.comparison)? {
+            if predicate.matches(
+                delta.borrowed(&input.descriptor),
+                filter.comparison,
+                dictionaries,
+            )? {
                 deltas.push(delta.clone());
             }
         }
@@ -664,6 +650,7 @@ impl NodeState {
         input: &RecordDeltas,
         raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
+        dictionaries: Option<&crate::dictionary::SharedDictionaries>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         Self::update_map_project_slice(
             project,
@@ -672,6 +659,7 @@ impl NodeState {
             &input.deltas,
             raw_projection,
             omit_unrepresentable_enum_rows,
+            dictionaries,
         )
     }
 
@@ -682,6 +670,7 @@ impl NodeState {
         input: &[RecordDelta],
         raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
+        dictionaries: Option<&crate::dictionary::SharedDictionaries>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if raw_projection.is_some_and(|plan| plan.reuses_input) {
             return Ok(RecordDeltas {
@@ -711,6 +700,7 @@ impl NodeState {
                 raw_projection,
                 omit_unrepresentable_enum_rows,
                 &mut output,
+                dictionaries,
             )? {
                 spans.push((span, delta.weight));
             }
@@ -731,6 +721,7 @@ impl NodeState {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn project_row_into(
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
@@ -739,6 +730,7 @@ impl NodeState {
         raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
         output: &mut BytesMut,
+        dictionaries: Option<&crate::dictionary::SharedDictionaries>,
     ) -> Result<Option<std::ops::Range<usize>>, IvmRuntimeError> {
         let span = if let Some(fields) = raw_projection {
             let start = output.len();
@@ -754,6 +746,7 @@ impl NodeState {
                         output_desc,
                         &input_desc,
                         raw,
+                        dictionaries,
                     )?;
                     let encoded = encode_projection_field_value(output_desc, index, value)?;
                     output.extend_from_slice(&encoded);
@@ -779,6 +772,7 @@ impl NodeState {
                 output_desc,
                 &input_desc,
                 raw,
+                dictionaries,
             ) {
                 Ok(record) => record,
                 Err(
@@ -800,9 +794,16 @@ impl NodeState {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
         raw_projection: Option<&PreparedProjection>,
+        dictionaries: Option<&crate::dictionary::SharedDictionaries>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let payloads =
-            Self::update_map_project(project, payload_desc, input, raw_projection, false)?;
+        let payloads = Self::update_map_project(
+            project,
+            payload_desc,
+            input,
+            raw_projection,
+            false,
+            dictionaries,
+        )?;
         let mut deltas = Vec::with_capacity(payloads.deltas.len());
         for payload in payloads.deltas {
             let value = Value::Enum(EnumValue::new(

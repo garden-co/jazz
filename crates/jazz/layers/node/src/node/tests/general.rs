@@ -1381,9 +1381,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             tx_node_alias: NodeAlias(u64::from(seed) + 10),
             schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
             tx_time: TxTime::from(u64::from(seed) + 30),
-            created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
+            created_by: AuthorCode(u32::from(seed) + 2),
             created_at: TxTime::from(u64::from(seed) + 40),
-            updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
+            updated_by: AuthorCode(u32::from(seed) + 3),
             updated_at: TxTime::from(u64::from(seed) + 50),
             cells: table
                 .columns
@@ -1515,8 +1515,8 @@ fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
     assert_eq!(stored.tx.made_by, expected_row_author);
     assert_eq!(stored.tx.permission_subject, Some(AuthorSubject::SYSTEM));
     let version = node.stored_versions_for_tx_for_test(tx).unwrap().remove(0);
-    assert_eq!(version.created_by(), expected_row_author);
-    assert_eq!(version.updated_by(), expected_row_author);
+    assert_eq!(node.authors.subject(version.created_by()).unwrap(), expected_row_author);
+    assert_eq!(node.authors.subject(version.updated_by()).unwrap(), expected_row_author);
     assert_eq!(
         node.visible_current_cells("todos", row)
             .unwrap()
@@ -1861,7 +1861,7 @@ fn history_images_always_store_updated_by() {
             )
             .unwrap();
         let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
-        assert_eq!(version.updated_by(), alice);
+        assert_eq!(node.authors.subject(version.updated_by()).unwrap(), alice);
         let table_id = node
             .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
             .unwrap();
@@ -1875,7 +1875,7 @@ fn history_images_always_store_updated_by() {
                 .record()
                 .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
                 .unwrap(),
-            row_author_value(alice).unwrap(),
+            Value::U32(node.authors.existing_code(alice).unwrap().0),
             "the transaction's own author is stored in the image"
         );
         let (_, written) = node.version_storage_write_binding(&version).unwrap();
@@ -1884,14 +1884,14 @@ fn history_images_always_store_updated_by() {
                 .record()
                 .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
                 .unwrap(),
-            row_author_value(alice).unwrap()
+            Value::U32(node.authors.existing_code(alice).unwrap().0)
         );
     }
     // A cold reopen reads the author from the image itself.
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
     let versions = reopened.query_table_versions("todos").unwrap();
     assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].updated_by(), alice);
+    assert_eq!(reopened.authors.subject(versions[0].updated_by()).unwrap(), alice);
 }
 
 #[test]
