@@ -3871,7 +3871,7 @@ impl PublicQueryDecoder {
                 .map(Some);
         }
         let value = match column {
-            "$deletedAt" => match row
+            name if name == "$deletedAt" || name.starts_with("$deletedBy") => match row
                 .raw_field(column)
                 .or_else(|| row.raw_field(&crate::schema::app_storage_column_name(column)))
             {

@@ -2286,48 +2286,97 @@ where
                         source_resolution_error(request, SourceGap::LocalAvailabilityInput)
                     })?;
             }
-            if requests_deleted_at(request) {
+            if let Some(column) = requested_deletion_column(request) {
                 if request.visibility != RowVisibility::IncludeDeleted {
-                    return Err(QueryError::UnsupportedRelationQuery(
-                        "Reading $deletedAt requires includeDeleted".to_owned(),
-                    )
+                    return Err(QueryError::UnsupportedRelationQuery(format!(
+                        "Reading {column} requires includeDeleted"
+                    ))
                     .into());
                 }
-                resolved.graph = with_deleted_at(resolved.graph, &resolved.row_shape.descriptor)?;
-                resolved.row_shape.descriptor = self
+                resolved.graph = with_deletion_metadata(
+                    resolved.graph,
+                    &resolved.row_shape.descriptor,
+                    request,
+                )?;
+                let descriptor = self
                     .node
                     .database
                     .graph_output_descriptor(&resolved.graph)?;
+                (
+                    resolved.graph,
+                    resolved.row_shape.descriptor,
+                    resolved.row_shape.metadata,
+                ) = with_requested_author_paths(
+                    resolved.graph,
+                    descriptor,
+                    resolved.row_shape.metadata,
+                    &request.requirements,
+                )?;
             }
             Ok(resolved)
         })
     }
 }
 
-pub(super) fn requests_deleted_at(request: &SourceRequest) -> bool {
-    request
-        .requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::DeletedAt)
+pub(super) fn requested_deletion_column(request: &SourceRequest) -> Option<&'static str> {
+    deletion_metadata_columns(request)
+        .next()
+        .map(|(name, _, _)| name)
 }
 
-/// Deletion visibility and provenance belong to the same resolved winner.
-/// Keep this derived value out of stored rows and wildcard projections.
-pub(super) fn deleted_at_projection(source: Option<&str>) -> ProjectField {
-    let mut field = match source {
-        Some(source) => ProjectField::nullable(source, user_column_field("$deletedAt")),
-        None => ProjectField::null_typed(
-            user_column_field("$deletedAt"),
-            ValueType::Nullable(Box::new(ValueType::U64)),
+fn deletion_metadata_columns(
+    request: &SourceRequest,
+) -> impl Iterator<Item = (&'static str, &'static str, ValueType)> + '_ {
+    [
+        (
+            SourceMetadataRequirement::DeletedAt,
+            "$deletedAt",
+            "$updatedAt",
+            ValueType::U64,
         ),
-    };
-    field.output_identity = records::FieldIdentity::Name("$deletedAt".to_owned());
-    field
+        (
+            SourceMetadataRequirement::DeletedBy,
+            "$deletedBy",
+            "$updatedBy",
+            RowAuthor::value_type(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(requirement, name, source, ty)| {
+        request
+            .requirements
+            .metadata
+            .contains(&requirement)
+            .then_some((name, source, ty))
+    })
 }
 
-pub(super) fn with_deleted_at(
+/// Both fields come from the same deletion winner and remain opt-in.
+pub(super) fn deletion_metadata_projections(
+    request: &SourceRequest,
+    source_prefix: Option<&str>,
+) -> Vec<ProjectField> {
+    deletion_metadata_columns(request)
+        .map(|(name, source, ty)| {
+            let mut field = match source_prefix {
+                Some(prefix) => {
+                    ProjectField::nullable(format!("{prefix}{source}"), user_column_field(name))
+                }
+                None => ProjectField::null_typed(
+                    user_column_field(name),
+                    ValueType::Nullable(Box::new(ty)),
+                ),
+            };
+            field.output_identity = records::FieldIdentity::Name(name.to_owned());
+            field
+        })
+        .collect()
+}
+
+pub(super) fn with_deletion_metadata(
     graph: GraphBuilder,
     descriptor: &RecordDescriptor,
+    request: &SourceRequest,
 ) -> Result<GraphBuilder, Error> {
     let fields = descriptor.fields();
     let project = |deleted: bool| {
@@ -2340,7 +2389,10 @@ pub(super) fn with_deleted_at(
                 output_name: field.name.clone().expect("named source field"),
                 output_identity: field.identity.clone().expect("source identity"),
             })
-            .chain([deleted_at_projection(deleted.then_some("$updatedAt"))])
+            .chain(deletion_metadata_projections(
+                request,
+                deleted.then_some(""),
+            ))
             .collect::<Vec<_>>()
     };
     Ok(GraphBuilder::union([
@@ -4447,7 +4499,14 @@ pub(super) fn with_requested_author_paths(
         .iter()
         .filter_map(|requirement| match requirement {
             SourceMetadataRequirement::AuthorPath(name) if !metadata.contains_key(requirement) => {
-                Some(name.clone())
+                Some((requirement.clone(), name.clone()))
+            }
+            // Deletion metadata is added after ordinary source preparation.
+            SourceMetadataRequirement::DeletionAuthorPath(name)
+                if !metadata.contains_key(requirement)
+                    && descriptor.field_index("$deletedBy").is_some() =>
+            {
+                Some((requirement.clone(), name.clone()))
             }
             _ => None,
         })
@@ -4456,11 +4515,18 @@ pub(super) fn with_requested_author_paths(
         return Ok((graph, descriptor, metadata));
     }
     let mut fields = descriptor.fields().to_vec();
-    let mut projection = descriptor_field_names(&descriptor)?
-        .into_iter()
-        .map(ProjectField::named)
+    let mut projection = descriptor
+        .fields()
+        .iter()
+        .map(|field| ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(
+                field.name.clone().expect("named source field"),
+            )),
+            output_name: field.name.clone().expect("named source field"),
+            output_identity: field.identity.clone().expect("source identity"),
+        })
         .collect::<Vec<_>>();
-    for name in missing {
+    for (requirement, name) in missing {
         let (root, path) = AuthorSubject::metadata_path(&name).expect("validated author path");
         projection.push(ProjectField::record_field(
             root,
@@ -4474,7 +4540,7 @@ pub(super) fn with_requested_author_paths(
                 .clone(),
         ));
         metadata.insert(
-            SourceMetadataRequirement::AuthorPath(name.clone()),
+            requirement,
             SourceMetadataFields::Provenance { field: name },
         );
     }

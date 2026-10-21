@@ -24,12 +24,12 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         let base_name = crate::schema::history::history_source_table(&request.source.table)
             .ok_or_else(|| unsupported("unknown history source"))?;
         let base_table = self.node.table_in_schema(base_name, schema_version)?;
-        if read_sources::requests_deleted_at(request)
+        if let Some(column) = read_sources::requested_deletion_column(request)
             && request.visibility != RowVisibility::IncludeDeleted
         {
-            return Err(QueryError::UnsupportedRelationQuery(
-                "Reading $deletedAt requires includeDeleted".to_owned(),
-            )
+            return Err(QueryError::UnsupportedRelationQuery(format!(
+                "Reading {column} requires includeDeleted"
+            ))
             .into());
         }
         let path = self
@@ -347,8 +347,8 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .project_fields(projection(false)),
         ]);
         let (graph, deletion_register, authorized_deletion_preimage) =
-            if read_sources::requests_deleted_at(request) {
-                // A historical version's own $updatedAt cannot supply $deletedAt, because
+            if read_sources::requested_deletion_column(request).is_some() {
+                // A historical version's provenance cannot supply deletion metadata, because
                 // deletion state depends on the current state of the row.
                 // There are two sources for that state:
                 // - With upstream coverage: this information is already available
@@ -439,7 +439,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 };
                 let descriptor = self.node.database.graph_output_descriptor(&graph)?;
                 let fields = descriptor.fields();
-                let deleted = deleted.project(["row_uuid", "$updatedAt"]);
+                let deleted = deleted.project(["row_uuid", "$updatedAt", "$updatedBy"]);
                 let live = GraphBuilder::anti_join(
                     graph.clone(),
                     deleted.clone(),
@@ -455,7 +455,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                                 field.identity.clone().expect("history identity"),
                             )
                         })
-                        .chain([read_sources::deleted_at_projection(None)]),
+                        .chain(read_sources::deletion_metadata_projections(request, None)),
                 );
                 let deleted = GraphBuilder::join(graph, deleted, ["row_uuid"], ["row_uuid"])
                     .project_fields(
@@ -471,9 +471,10 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                                     field.identity.clone().expect("history identity"),
                                 )
                             })
-                            .chain([read_sources::deleted_at_projection(Some(
-                                "right.$updatedAt",
-                            ))]),
+                            .chain(read_sources::deletion_metadata_projections(
+                                request,
+                                Some("right."),
+                            )),
                     );
                 (GraphBuilder::union([live, deleted]), register, preimage)
             } else {

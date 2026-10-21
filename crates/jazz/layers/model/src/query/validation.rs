@@ -1568,7 +1568,7 @@ fn flat_join_filter_schema(
             format!("{scope}.id"),
             ColumnType::Uuid,
         ));
-        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt", "$deletedAt"] {
+        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt", "$deletedAt", "$deletedBy"] {
             columns.push(JazzColumnSchema::new(
                 format!("{scope}.{magic}"),
                 executable_magic_column_type(magic)?

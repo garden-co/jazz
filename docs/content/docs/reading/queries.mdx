@@ -210,23 +210,22 @@ views without storing duplicate ownership fields.
 See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
 magic columns.
 
-### Deletion timestamp
+### Deletion metadata columns
 
-After `.includeDeleted()`, you can select, filter, and sort by `$deletedAt`.
-It returns the winning deletion's authored timestamp as a `Date`, or `null`
-for live and restored rows. It is omitted from wildcard results.
+After `.includeDeleted()`, you can select, filter, and sort by `$deletedAt` and `$deletedBy`.
+They return the winning deletion's authored timestamp as a `Date` and author as a `RowAuthor`, or `null` for live and restored rows.
 
 ```ts
 const deletedTasks = await db.all(
   app.tasks
     .includeDeleted()
     .where({ $deletedAt: { isNull: false } })
-    .select("title", "$deletedAt"),
+    .select("title", "$deletedAt", "$deletedBy"),
 );
 ```
 
 For [history rows](/docs/reading/history#deleted-rows), every version shares
-the logical row's current deletion timestamp.
+the logical row's current deletion timestamp and author.
 
 ## Framework hooks
 

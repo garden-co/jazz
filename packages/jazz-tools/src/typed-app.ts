@@ -23,6 +23,7 @@ import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
+  type RowAuthor,
   type NoExplicitIdColumn,
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
@@ -701,20 +702,27 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
   _serializeRelation(): unknown;
 };
 
-type ProvenanceMagicColumns = {
-  $createdBy: import("./magic-columns.js").RowAuthor;
-  $createdAt: Date;
-  $updatedBy: import("./magic-columns.js").RowAuthor;
-  $updatedAt: Date;
-  "$createdBy.account": string;
-  "$createdBy.identity": import("./magic-columns.js").RowAuthor["identity"];
-  "$createdBy.identity.issuer": string;
-  "$createdBy.identity.subject": string;
-  "$updatedBy.account": string;
-  "$updatedBy.identity": import("./magic-columns.js").RowAuthor["identity"];
-  "$updatedBy.identity.issuer": string;
-  "$updatedBy.identity.subject": string;
+type AuthorFields = {
+  "": RowAuthor;
+  ".account": RowAuthor["account"];
+  ".identity": RowAuthor["identity"];
+  ".identity.issuer": RowAuthor["identity"]["issuer"];
+  ".identity.subject": RowAuthor["identity"]["subject"];
 };
+
+type AuthorColumns<Prefix extends string> = {
+  [K in keyof AuthorFields as `${Prefix}${K}`]: AuthorFields[K];
+};
+
+type NullableColumns<T> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type ProvenanceMagicColumns = {
+  $createdAt: Date;
+  $updatedAt: Date;
+} & AuthorColumns<"$createdBy"> &
+  AuthorColumns<"$updatedBy">;
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
@@ -731,17 +739,26 @@ export type TableSelected<
   TSelection extends TableSelectableColumn<TSchema, TTable> = BaseColumnName<TSchema, TTable>,
 > = SelectedRow<TableRow<TSchema, TTable>, TSelection>;
 
-type DeletedColumn<TDeleted extends boolean> = TDeleted extends true ? "$deletedAt" : never;
+type DeletionMagicColumns = {
+  $deletedAt: Date | null;
+} & NullableColumns<AuthorColumns<"$deletedBy">>;
+type DeletedColumn<TDeleted extends boolean> = TDeleted extends true
+  ? keyof DeletionMagicColumns
+  : never;
 type DeletedWhere<TDeleted extends boolean> = TDeleted extends true
-  ? { $deletedAt?: TimestampWhere<true> }
+  ? {
+      [K in keyof DeletionMagicColumns]?: K extends "$deletedAt"
+        ? TimestampWhere<true>
+        : WhereEqNe<NonNullable<DeletionMagicColumns[K]>, true>;
+    }
   : {};
 
 /** Shared projection typing for ordinary and history rows. */
 type SelectedRow<TRow, TSelection> = Simplify<
   ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
     Pick<
-      ProvenanceMagicColumns & { $deletedAt: Date | null },
-      Extract<TSelection, ProvenanceMagicColumn | "$deletedAt">
+      ProvenanceMagicColumns & DeletionMagicColumns,
+      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
     >
 >;
 
@@ -1629,8 +1646,11 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
 export interface HistoryQuery<
   TRow extends { id: string },
   TWhere,
-  TSelection extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "$deletedAt" | "*" =
-    keyof HistoryRow<TRow>,
+  TSelection extends
+    | keyof HistoryRow<TRow>
+    | ProvenanceMagicColumn
+    | keyof DeletionMagicColumns
+    | "*" = keyof HistoryRow<TRow>,
   TDeleted extends boolean = false,
 > extends QueryBuilder<SelectedRow<HistoryRow<TRow>, TSelection>> {
   where(

@@ -452,10 +452,23 @@ fn collect_value_requirements(
 }
 
 fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
-    if field == "$deletedAt" {
+    if field.starts_with("$deletedBy.")
+        && crate::ids::AuthorSubject::metadata_type(&field).is_some()
+    {
         requirements
             .metadata
-            .insert(SourceMetadataRequirement::DeletedAt);
+            .insert(SourceMetadataRequirement::DeletedBy);
+        requirements
+            .metadata
+            .insert(SourceMetadataRequirement::DeletionAuthorPath(field));
+        return;
+    }
+    if matches!(field.as_str(), "$deletedAt" | "$deletedBy") {
+        requirements.metadata.insert(if field == "$deletedAt" {
+            SourceMetadataRequirement::DeletedAt
+        } else {
+            SourceMetadataRequirement::DeletedBy
+        });
         return;
     }
     if let Some((root, _)) = crate::ids::AuthorSubject::metadata_path(&field) {

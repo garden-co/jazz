@@ -641,7 +641,7 @@ impl AuthorSubject {
     /// as provider claims or user-defined columns.
     pub fn metadata_path(column: &str) -> Option<(&str, &'static [&'static str])> {
         let (root, path) = column.split_once('.')?;
-        if !matches!(root, "$createdBy" | "$updatedBy") {
+        if !matches!(root, "$createdBy" | "$updatedBy" | "$deletedBy") {
             return None;
         }
         let path: &'static [&'static str] = match path {
@@ -657,19 +657,24 @@ impl AuthorSubject {
     /// Declared native type for an author root or an explicit nested field.
     pub fn metadata_type(column: &str) -> Option<&'static crate::groove::records::ValueType> {
         use crate::groove::records::ValueType;
+        let (root, path) = if matches!(column, "$createdBy" | "$updatedBy" | "$deletedBy") {
+            (column, &[][..])
+        } else {
+            Self::metadata_path(column)?
+        };
         static AUTHOR: std::sync::OnceLock<ValueType> = std::sync::OnceLock::new();
         let mut ty = AUTHOR.get_or_init(RowAuthor::value_type);
-        if matches!(column, "$createdBy" | "$updatedBy") {
-            return Some(ty);
-        }
-        let (_, path) = Self::metadata_path(column)?;
         for name in path {
             let ValueType::Record(record) = ty else {
                 return None;
             };
             ty = &record.fields().get(record.field_index(name)?)?.value_type;
         }
-        Some(ty)
+        if root == "$deletedBy" {
+            Some(internment::Intern::new(ValueType::Nullable(Box::new(ty.clone()))).as_ref())
+        } else {
+            Some(ty)
+        }
     }
 
     /// Structured native author value; intern handles are never serialized.

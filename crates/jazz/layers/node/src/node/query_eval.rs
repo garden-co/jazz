@@ -5187,7 +5187,8 @@ fn normalize_public_current_rows(
                 .iter()
                 .flatten()
                 .filter(|column| {
-                    *column == "$deletedAt" || AuthorSubject::metadata_path(column).is_some()
+                    (column.as_str() == "$deletedAt" || column.starts_with("$deletedBy"))
+                        || AuthorSubject::metadata_path(column).is_some()
                 })
                 .cloned(),
         )

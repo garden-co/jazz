@@ -4893,7 +4893,7 @@ function outputColumnsForTable(
         ? ({
             name: columnName,
             column_type: magicType,
-            nullable: columnName === "$deletedAt",
+            nullable: columnName === "$deletedAt" || columnName.startsWith("$deletedBy"),
           } satisfies ColumnDescriptor)
         : undefined;
     })

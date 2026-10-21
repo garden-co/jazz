@@ -108,6 +108,10 @@ pub enum SourceMetadataRequirement {
     AuthorPath(String),
     /// Expose the current winning deletion's authored timestamp.
     DeletedAt,
+    /// Authorship of the winning deletion, or null for live rows.
+    DeletedBy,
+    /// Nullable nested field of the winning deletion author.
+    DeletionAuthorPath(String),
 }
 
 /// Public field requirement for a source.

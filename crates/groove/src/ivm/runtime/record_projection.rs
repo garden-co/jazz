@@ -726,7 +726,12 @@ pub(super) fn project_descriptor(
                 ProjectExpr::RecordField { source, path } => {
                     let index = resolve_field_ref(input, source)?;
                     let mut ty = input.fields()[index].value_type.clone();
+                    let mut nullable = false;
                     for name in path {
+                        while let ValueType::Nullable(inner) = ty {
+                            nullable = true;
+                            ty = *inner;
+                        }
                         let ValueType::Record(record) = ty else {
                             return Err(IvmRuntimeError::UnsupportedOperator);
                         };
@@ -735,7 +740,11 @@ pub(super) fn project_descriptor(
                             .ok_or(IvmRuntimeError::UnsupportedOperator)?;
                         ty = record.fields()[index].value_type.clone();
                     }
-                    ty
+                    if nullable && !matches!(ty, ValueType::Nullable(_)) {
+                        ValueType::Nullable(Box::new(ty))
+                    } else {
+                        ty
+                    }
                 }
                 ProjectExpr::Field(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -1406,13 +1415,25 @@ pub(super) fn project_field_value(
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
             let mut value = resolved(source)?;
+            let mut nullable = false;
             for name in path {
+                while let Value::Nullable(inner) = value {
+                    nullable = true;
+                    let Some(inner) = inner else {
+                        return Ok(Value::Nullable(None));
+                    };
+                    value = *inner;
+                }
                 let Value::Record(record) = value else {
                     return Err(IvmRuntimeError::UnsupportedOperator);
                 };
                 value = record.get(name)?;
             }
-            value
+            if nullable && !matches!(value, Value::Nullable(_)) {
+                Value::Nullable(Some(Box::new(value)))
+            } else {
+                value
+            }
         }
         ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => value.to_value(),
         ProjectExpr::Null(_) => Value::Nullable(None),
@@ -1767,6 +1788,10 @@ pub(super) fn raw_projection_fields(
                     let mut steps = vec![(*input_desc, source_idx)];
                     let mut value_type = &input_desc.fields()[source_idx].value_type;
                     for name in path {
+                        // Nullable parents need null propagation rather than a raw byte copy.
+                        if matches!(value_type, ValueType::Nullable(_)) {
+                            return Ok(RawProjectionField::Evaluate);
+                        }
                         let ValueType::Record(descriptor) = value_type else {
                             return Err(IvmRuntimeError::UnsupportedOperator);
                         };

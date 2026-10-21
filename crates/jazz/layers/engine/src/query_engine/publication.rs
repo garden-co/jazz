@@ -33,10 +33,9 @@ impl CurrentRowResultVisibility {
     /// field guessed by a consumer. Explicit application outputs bypass this.
     pub fn current_row_metadata(name: &str) -> Self {
         match name {
-            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" | "$deletedAt" => {
-                Self::PublicProvenance
-            }
-            name if crate::ids::AuthorSubject::metadata_path(name).is_some() => {
+            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" | "$deletedAt"
+            | "$deletedBy" => Self::PublicProvenance,
+            name if crate::ids::AuthorSubject::metadata_type(name).is_some() => {
                 Self::PublicProvenance
             }
             _ => Self::HiddenMetadata,
