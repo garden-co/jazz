@@ -100,8 +100,14 @@ offline use, see the
 
 ## Try it with two accounts
 
-Run `pnpm dev` and open the URL Vite prints in two independent browser profiles,
-or a normal and private window. Two tabs in the same profile share an account.
+Run `pnpm dev` and open Vite's `localhost` URL in two independent, regular browser
+profiles. Two tabs in the same profile share an account.
+
+A normal and private window can also work for a temporary two-account test, if
+the browser allows the required storage APIs in private mode. Crypto is available
+on localhost, but private-session storage is temporary: closing the private
+session discards its local account and encryption keys. Use regular profiles for
+the persistence check below.
 
 1. In the first profile, click **New chat** and send a message.
 2. Copy the second profile's **account ID** into the first profile's
