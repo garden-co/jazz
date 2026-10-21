@@ -1,6 +1,7 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { formatUuid, parseUuid } from "../uuid.js";
+import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
@@ -242,6 +243,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -2112,6 +2114,18 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
       request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
+    );
+  }
+
+  captureSnapshot(): Promise<SnapshotRef> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.captureSnapshot();
+    if (this.closed)
+      return Promise.reject(new Error("Cannot capture a snapshot: native runtime is closed"));
+    if (!this.db.captureSnapshot) return Promise.reject(new UnsupportedSnapshotError());
+    const captured = this.db.captureSnapshot();
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(captured).then((bytes) =>
+      parseSnapshotRef(textDecoder.decode(bytes)),
     );
   }
 

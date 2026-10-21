@@ -1,5 +1,6 @@
 import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
+import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
 import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
 // The foreground command vocabulary is owned by jazz-rn. This module is
@@ -97,6 +98,20 @@ export class NativeForegroundDb {
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
+  }
+
+  captureSnapshot(): Uint8Array | { poll(): Uint8Array | null; cancel(): void } {
+    this.assertOpen();
+    if (this.runtime.supportsSnapshotCapture !== true) {
+      throw new UnsupportedSnapshotError(
+        "Capturing snapshots requires a newer Jazz native build; rebuild the native app to use captureSnapshot()",
+      );
+    }
+    const response = this.execute({ type: "captureSnapshot" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type === "rows") return response.rows;
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("captureSnapshot", response.type);
   }
 
   // The shared mutation adapter needs one exact local row, without coverage

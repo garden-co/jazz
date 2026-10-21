@@ -661,6 +661,34 @@ where
         self.node.node.lock().await.tx_time_high_water()
     }
 
+    /// Capture the local read frontier after already-admitted owner operations.
+    ///
+    /// This does not wait for server acceptance, retain history, or include
+    /// writes staged in an uncommitted transaction. Reads using the reference
+    /// still require ordinary authorization and history coverage.
+    pub fn enqueue_capture_snapshot(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<crate::protocol::SnapshotRef, Error>> {
+        // Reservation runs synchronously at mutation admission. Bound the
+        // owner prefix now: later queued writes may already reserve clocks
+        // before this observation reaches the front of the owner queue.
+        let local_base = self.node.tx_time_reservation_clock.get();
+        let admitted = self.node.ensure_mutation_admission_open();
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_read_after_mutations(None, async move {
+            admitted?;
+            let mut snapshot = db.node.node.lock().await.capture_branch_snapshot().await?;
+            snapshot.local_base = local_base;
+            // Rust callers may also perform a synchronous direct mutation
+            // before this queued observation is driven. Such a later owner
+            // transaction must not re-enter the cut through explicit dots.
+            snapshot
+                .dots
+                .retain(|dot| dot.node != snapshot.owner || dot.time <= local_base);
+            Ok(snapshot)
+        })
+    }
+
     /// Seed a foreground runtime from the durable lease owner's last confirmed
     /// high-water mark before it mints any transaction identities.
     #[doc(hidden)]

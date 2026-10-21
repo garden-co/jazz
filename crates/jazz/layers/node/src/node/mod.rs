@@ -3388,6 +3388,11 @@ pub enum Error {
     /// Historical read must be evaluated by a history-complete server.
     #[error("historical read requires server evaluation")]
     HistoricalReadRequiresServer,
+    /// A frozen branch's exact history cannot be certified on this runtime.
+    #[error(
+        "Snapshot history is unavailable on this runtime; restore it on the originating store or a complete-history authority"
+    )]
+    SnapshotHistoryUnavailable,
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,

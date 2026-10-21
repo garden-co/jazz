@@ -21,11 +21,12 @@ mod common;
 
 use jazz::db::{
     CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts,
-    RemoteLinkHint, SerializedReadResult, WireTransportAdapter, block_on,
+    RemoteLinkHint, SerializedReadResult, SubscriptionEvent, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::serving::{
@@ -503,6 +504,154 @@ fn invite_query(code: &str) -> Query {
 
 const OWNER: usize = 0;
 const BACKEND: usize = 1;
+
+/// Alice captures her partial client's view after Core accepts her write and
+/// a receipt advances her known authority cut without making history complete.
+/// Her frozen base remains readable at the nonzero settled cut and keeps
+/// Original after she changes the live base to Changed. Bob's partial store
+/// must still refuse Alice's cut even after receiving the authority frontier.
+///
+/// alice --Original--> core --accepted/receipt--> alice --capture
+/// alice --Changed---> core ------------> alice
+/// alice: frozen = Original, live = Changed
+#[test]
+fn captured_branch_snapshot_remains_readable_after_server_settlement() {
+    use jazz::tools::test_support::AllowAll;
+
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id"),
+            )
+            .table(TableSchemaBuilder::new("audit").column("note", ColumnType::Text))
+            .allow_all()
+            .build(),
+    );
+    let selector = |byte| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let base = selector(0xd1);
+    let head = selector(0xd2);
+    let title =
+        |value: &str| BTreeMap::from([("title".to_owned(), Value::String(value.to_owned()))]);
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+
+    let net = Net::with_schema(schema.clone(), &[0x0a, 0x0b]);
+    let alice = net.db(OWNER);
+    let inserted = block_on(alice.insert(
+        "todos",
+        title("Original"),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    net.settle(OWNER, inserted.mergeable_tx_id()).unwrap();
+    net.unrelated_receipt(OWNER);
+    let query = alice.prepare_query(&alice.table("todos")).unwrap();
+    let live = ReadOpts::default().branch_view(base.clone(), None);
+    let observed = net.drive(alice.all(&query, live.clone())).unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].cell(table, "title"),
+        Some(Value::String("Original".into()))
+    );
+
+    let snapshot = net
+        .drive(alice.enqueue_capture_snapshot())
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.global_base > jazz::time::GlobalTime::default());
+    assert!(
+        snapshot.dots.is_empty(),
+        "the captured write has already settled"
+    );
+    let snapshot = SnapshotRef::from_persisted(&snapshot.to_persisted()).unwrap();
+    let frozen = ReadOpts::default().branch_view(
+        head.clone(),
+        Some(BranchViewBase::snapshot(base.clone(), snapshot)),
+    );
+    let captured = net.drive(alice.all(&query, frozen.clone())).unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].cell(table, "title"),
+        Some(Value::String("Original".into()))
+    );
+    let mut subscription = net.drive(alice.subscribe(&query, frozen.clone())).unwrap();
+    assert!(matches!(
+        net.drive(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: true, ref added, .. }
+            if added.len() == 1
+                && added[0].cell(table, "title") == Some(Value::String("Original".into()))
+    ));
+
+    net.unrelated_receipt(BACKEND);
+    let bob = net.db(BACKEND);
+    let bob_query = bob.prepare_query(&bob.table("todos")).unwrap();
+    let error = net.drive(bob.all(&bob_query, frozen.clone())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Snapshot history is unavailable")
+    );
+
+    let changed = block_on(alice.update(
+        "todos",
+        inserted.row_uuid(),
+        title("Changed"),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: base.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    net.settle(OWNER, changed.mergeable_tx_id()).unwrap();
+    // Authority settlement can publish another reset. Every delivered row
+    // must still have the captured value, and sync must not reject the watch.
+    while let Some(event) = subscription.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => {
+                assert!(removed.is_empty());
+                for row in added.iter().chain(&updated) {
+                    assert_eq!(row.row_uuid(), inserted.row_uuid());
+                    assert_eq!(
+                        row.cell(table, "title"),
+                        Some(Value::String("Original".into()))
+                    );
+                }
+            }
+            event => panic!("the captured subscription must stay available: {event:?}"),
+        }
+    }
+    let current = net.drive(alice.all(&query, live)).unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(
+        current[0].cell(table, "title"),
+        Some(Value::String("Changed".into()))
+    );
+    let captured = net.drive(alice.all(&query, frozen)).unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].cell(table, "title"),
+        Some(Value::String("Original".into()))
+    );
+}
 
 /// A backend that never received an invite still sees it: the exclusive read
 /// hydrates at its snapshot even though the cut already covers the invite.

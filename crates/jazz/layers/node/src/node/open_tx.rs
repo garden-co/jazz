@@ -261,24 +261,7 @@ where
         let provisional_author = RowAuthor::from_session(provisional_author, self.node_uuid)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .as_author_subject();
-        let local_base = self.tx_time_high_water();
-        // Every time applied past the frontier was recorded with its
-        // transaction, so the base names them without a scan (#3390).
-        let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
-        for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            match self.clock.frontier_dots.get(&global_time) {
-                Some(tx_ids) => dots.extend(tx_ids.iter().copied()),
-                None => dots.extend(self.transaction_ids_for_global_time(global_time).await?),
-            }
-        }
-        dots.extend(self.pending_foreign_transaction_ids().await?);
-        let base_snapshot = Snapshot::exclusive_base(
-            self.node_uuid,
-            self.clock.committed_global_time,
-            local_base,
-            dots,
-        )
-        .map_err(Error::InvalidStoredValue)?;
+        let base_snapshot = self.capture_snapshot().await?;
         self.open_tx.open_transactions.insert(
             id,
             OpenTransaction {
@@ -296,6 +279,98 @@ where
                 user_metadata_json: None,
             },
         );
+        Ok(())
+    }
+
+    /// Capture the current local frontier without opening a transaction.
+    /// Locally committed pending writes are included; staged writes are not.
+    pub async fn capture_snapshot(&mut self) -> Result<Snapshot, Error> {
+        self.require_catalogue_ready()?;
+        let local_base = self.tx_time_high_water();
+        // Every time applied past the frontier was recorded with its
+        // transaction, so the base names them without a scan (#3390).
+        let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
+        for global_time in self.clock.applied_global_times_after_frontier.clone() {
+            match self.clock.frontier_dots.get(&global_time) {
+                Some(tx_ids) => dots.extend(tx_ids.iter().copied()),
+                None => dots.extend(self.transaction_ids_for_global_time(global_time).await?),
+            }
+        }
+        dots.extend(self.pending_foreign_transaction_ids().await?);
+        Snapshot::exclusive_base(
+            self.node_uuid,
+            self.clock.committed_global_time,
+            local_base,
+            dots,
+        )
+        .map_err(Error::InvalidStoredValue)
+    }
+
+    /// Application captures also witness each unsequenced transaction. Unlike
+    /// an open transaction, a persisted reference must detect a pending write
+    /// subsequently rejected or absent on the runtime restoring it. This scans
+    /// only the unsequenced index bucket, proportional to the captured frontier;
+    /// settled history is never enumerated.
+    pub async fn capture_branch_snapshot(&mut self) -> Result<crate::protocol::SnapshotRef, Error> {
+        let mut snapshot = self.capture_snapshot().await?;
+        for raw in self
+            .database
+            .index_scan_raw(
+                "jazz_transactions",
+                "by_global_time",
+                &[Value::Nullable(None)],
+            )
+            .await?
+        {
+            let record = raw.record();
+            if matches!(fate_from_encoded_fields(record)?, Fate::Rejected(_)) {
+                continue;
+            }
+            let node = self
+                .node_for_alias(NodeAlias(
+                    record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
+                ))
+                .ok_or(Error::InvalidStoredValue(
+                    "snapshot transaction node alias must exist",
+                ))?;
+            snapshot.dots.push(TxId::new(
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                node,
+            ));
+        }
+        snapshot.dots.sort_unstable();
+        snapshot.dots.dedup();
+        Ok(snapshot.into())
+    }
+
+    /// The originating store can reconstruct its captured local view after
+    /// authority receipts advance the settled cut. A partial foreign store
+    /// cannot certify that cut or the owner's prefix merely by holding a row;
+    /// it needs complete history or the ordinary authority-covered source path.
+    pub(super) async fn ensure_frozen_snapshot_available(
+        &mut self,
+        snapshot: &crate::protocol::SnapshotRef,
+    ) -> Result<(), Error> {
+        if snapshot.global_base > self.clock.committed_global_time
+            || (!self.history_complete
+                && snapshot.owner != self.node_uuid
+                && (snapshot.global_base != GlobalTime::default() || snapshot.dots.is_empty()))
+        {
+            return Err(Error::SnapshotHistoryUnavailable);
+        }
+        for dot in &snapshot.dots {
+            let Some(stored) = self.query_transaction(*dot).await? else {
+                return Err(Error::SnapshotHistoryUnavailable);
+            };
+            if stored.is_partial
+                || matches!(stored.fate, Fate::Rejected(_))
+                || (!self.history_complete
+                    && snapshot.owner != self.node_uuid
+                    && stored.global_time.is_some())
+            {
+                return Err(Error::SnapshotHistoryUnavailable);
+            }
+        }
         Ok(())
     }
 
