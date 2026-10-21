@@ -290,6 +290,8 @@ pub enum SourceGap {
     HistoricalStorageCut,
     /// Snapshot source includes local overlays or dots not yet represented.
     SnapshotRef,
+    /// Required frozen branch history is missing, rejected, or not complete here.
+    SnapshotHistoryUnavailable,
     /// Schema/lens fanout or projection cannot yet be represented.
     SchemaProjection,
     /// Branch overlay source cannot yet be represented.
