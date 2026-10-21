@@ -710,7 +710,8 @@ impl MaintainedSubscriptionView {
             .to_owned()
             .into();
         Ok(SupportingRow {
-            is_current: !crate::schema::history::is_history_table(&source.table),
+            is_current: !crate::schema::history::is_history_table(&source.table)
+                || WitnessLayer::of(row) == WitnessLayer::Deletion,
             physical_table,
             version_table,
             row: row.row_uuid(),
@@ -3178,7 +3179,7 @@ fn decode_typed_version_witness(
     // History sources retain packed provenance timestamps; current sources
     // expose Unix milliseconds. Both witnesses reconstruct the authored image.
     let provenance_time = |value, message| {
-        if crate::schema::history::is_history_table(&table.name) {
+        if crate::schema::history::is_history_table(&table.name) && layer == WitnessLayer::Content {
             Ok(TxTime(value))
         } else {
             TxTime::from_physical_ms(value).map_err(|_| super::Error::InvalidStoredValue(message))

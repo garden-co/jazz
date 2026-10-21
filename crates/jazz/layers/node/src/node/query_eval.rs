@@ -1866,7 +1866,17 @@ where
                 .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
-            occurrences.push((source_request.source, descriptor));
+            let mut fields = descriptor.fields().to_vec();
+            if source_request.visibility == RowVisibility::IncludeDeleted {
+                fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
+            }
+            if crate::schema::history::is_history_table(&source_request.source.table) {
+                fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
+            }
+            occurrences.push((
+                source_request.source,
+                RecordDescriptor::new_with_fields(fields),
+            ));
         }
         for (table_name, metadata) in table_metadata {
             let stored_name =
@@ -1877,6 +1887,7 @@ where
                     &table, &metadata,
                 );
             let mut fields = descriptor.fields().to_vec();
+            fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
             fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
             let descriptor = RecordDescriptor::new_with_fields(fields);
             let id = self.database.allocate_input_source(descriptor.clone());
@@ -5154,29 +5165,33 @@ fn normalize_public_current_rows(
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
-    let columns =
-        table
-            .columns
-            .iter()
-            // Normalize only columns retained by the terminal projection. Missing
-            // unselected metadata must not be recreated as application cells.
-            .filter(|column| {
-                query.aggregate.is_some()
-                    || query.select.as_ref().is_none_or(|selected| {
-                        selected.contains(&column.name)
-                            || query
-                                .order_by
-                                .iter()
-                                .any(|order| order.column == column.name)
-                    })
-            })
-            .map(|column| column.name.clone())
-            .chain(
-                query.select.iter().flatten().filter_map(|column| {
-                    AuthorSubject::metadata_path(column).map(|_| column.clone())
-                }),
-            )
-            .collect::<Vec<_>>();
+    let columns = table
+        .columns
+        .iter()
+        // Normalize only columns retained by the terminal projection. Missing
+        // unselected metadata must not be recreated as application cells.
+        .filter(|column| {
+            query.aggregate.is_some()
+                || query.select.as_ref().is_none_or(|selected| {
+                    selected.contains(&column.name)
+                        || query
+                            .order_by
+                            .iter()
+                            .any(|order| order.column == column.name)
+                })
+        })
+        .map(|column| column.name.clone())
+        .chain(
+            query
+                .select
+                .iter()
+                .flatten()
+                .filter(|column| {
+                    *column == "$deletedAt" || AuthorSubject::metadata_path(column).is_some()
+                })
+                .cloned(),
+        )
+        .collect::<Vec<_>>();
     for row in rows {
         *row = if let Some(aggregate) = &query.aggregate {
             // A grouped source and an aggregate result may share a public name.
@@ -5244,7 +5259,7 @@ fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::Co
         return Some(ty);
     }
     match column {
-        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
+        "$createdAt" | "$updatedAt" | "$deletedAt" => Some(&groove::schema::ColumnType::U64),
         _ => None,
     }
 }

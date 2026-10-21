@@ -1124,6 +1124,9 @@ pub(super) fn operand_column_type(
             ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => RowAuthor::value_type(),
         }));
     }
+    if column == "$deletedAt" {
+        return Ok(Some(ColumnType::Nullable(Box::new(ColumnType::U64))));
+    }
     if column == "id" {
         return Ok(Some(ColumnType::Uuid));
     }

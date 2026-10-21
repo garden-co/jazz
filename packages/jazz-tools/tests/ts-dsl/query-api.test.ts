@@ -374,6 +374,61 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("projects the deletion timestamp only when requested", async () => {
+      const project = await insertProject(db, "deleted timestamp");
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id })
+        .select("name", "$deletedAt");
+      expectTypeOf((await readAll(query))[0]!.$deletedAt).toEqualTypeOf<Date | null>();
+      expect(await readAll(query)).toEqual([
+        { id: project.id, name: "deleted timestamp", $deletedAt: null },
+      ]);
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db.delete(app.projects, project.id, { updatedAt: deletedAt.getTime() });
+      expect(await readAll(query)).toEqual([
+        { id: project.id, name: "deleted timestamp", $deletedAt: deletedAt },
+      ]);
+      expect(await readAll(app.projects.includeDeleted().where({ id: project.id }))).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ $deletedAt: expect.anything() })]),
+      );
+    });
+
+    it("clears the deletion timestamp after restoration", async () => {
+      const project = await insertProject(db, "restored timestamp");
+      await db.delete(app.projects, project.id);
+      await db.restore(app.projects, project.id, { name: "restored timestamp" });
+      const query = app.projects.includeDeleted().where({ id: project.id }).select("$deletedAt");
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedAt: null }]);
+    });
+
+    it("filters deleted rows by their deletion timestamp", async () => {
+      const project = await insertProject(db, "timestamp filter");
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db.delete(app.projects, project.id, { updatedAt: deletedAt.getTime() });
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id, $deletedAt: { gte: deletedAt } })
+        .orderBy("$deletedAt")
+        .select("$deletedAt");
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedAt: deletedAt }]);
+      expect(await readAll(query.where({ $deletedAt: { isNull: true } }))).toEqual([]);
+      const wildcard = await readAll(
+        app.projects.includeDeleted().where({ id: project.id, $deletedAt: deletedAt }),
+      );
+      expect(wildcard).toHaveLength(1);
+      expect(wildcard[0]).not.toHaveProperty("$deletedAt");
+    });
+
+    it("rejects deletion timestamps without includeDeleted", async () => {
+      await insertProject(db, "metadata validation");
+      // @ts-expect-error Deletion metadata requires includeDeleted.
+      const query = app.projects.select("$deletedAt");
+      await expect(readAll(query)).rejects.toMatchObject({
+        message: "Query: unsupported relation query: Reading $deletedAt requires includeDeleted",
+      });
+    });
+
     it("can read deleted rows with includeDeleted", async () => {
       const project = insertProject(db, "Deleted Project");
       db.delete(app.projects, project.id);

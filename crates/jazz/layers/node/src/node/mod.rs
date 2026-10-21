@@ -1884,6 +1884,12 @@ impl CurrentRow {
                         match public_name
                             .or_else(|| Self::physical_application_name(field).map(str::to_owned))
                         {
+                            Some(output_name) if output_name == "$deletedAt" => {
+                                CurrentRowPublicationField::ResultField {
+                                    name: output_name,
+                                    visibility: CurrentRowResultVisibility::PublicProvenance,
+                                }
+                            }
                             Some(output_name) => {
                                 CurrentRowPublicationField::UnresolvedSourceCell { output_name }
                             }
@@ -2308,6 +2314,21 @@ impl CurrentRow {
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         for column in columns {
+            if column == "$deletedAt" {
+                if let Some(value) = self
+                    .raw_field(column)
+                    .or_else(|| self.raw_field(&user_column_field(column)))
+                {
+                    descriptor_fields.push(records::DescriptorField::new(
+                        column.clone(),
+                        records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+                    ));
+                    values.push(value);
+                    binding_fields.push(CurrentRowBindingRole::LogicalField);
+                    binding_field_names.push(None);
+                }
+                continue;
+            }
             if AuthorSubject::metadata_path(column).is_none() {
                 continue;
             }

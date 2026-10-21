@@ -255,6 +255,85 @@ describe("TS Query API history", () => {
     expect(await db.all(query, { tier: "remote" })).toEqual([]);
   });
 
+  it.each(["local-first", "remote"] as const)(
+    "exposes the current deletion timestamp on every history version (%s)",
+    async (tier) => {
+      const note = await insertNote("first");
+      await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
+      const query = app.$history.notes
+        .includeDeleted()
+        .where({ id: note.id })
+        .orderBy("$acceptedAt")
+        .select("title", "$deletedAt");
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db
+        .delete(app.notes, note.id, { updatedAt: deletedAt.getTime() })
+        .wait({ tier: "global" });
+      expect(await db.all(query, { tier })).toEqual([
+        { id: note.id, title: "first", $deletedAt: deletedAt },
+        { id: note.id, title: "second", $deletedAt: deletedAt },
+      ]);
+      await db
+        .restore(app.notes, note.id, { title: "restored", done: false })
+        .wait({ tier: "global" });
+      expect((await db.all(query, { tier })).map((row) => row.$deletedAt)).toEqual([
+        null,
+        null,
+        null,
+      ]);
+    },
+  );
+
+  it.each(["current", "history"] as const)(
+    "updates %s deletion timestamps in subscriptions",
+    async (source) => {
+      const note = await insertNote("watched");
+      const query =
+        source === "current"
+          ? app.notes.includeDeleted().where({ id: note.id }).select("title", "$deletedAt")
+          : app.$history.notes
+              .includeDeleted()
+              .where({ id: note.id })
+              .orderBy("$acceptedAt")
+              .select("title", "$deletedAt");
+      const latest = watch(query);
+      await expect.poll(latest).toEqual([{ id: note.id, title: "watched", $deletedAt: null }]);
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db
+        .delete(app.notes, note.id, { updatedAt: deletedAt.getTime() })
+        .wait({ tier: "global" });
+      await expect.poll(latest).toEqual([{ id: note.id, title: "watched", $deletedAt: deletedAt }]);
+      await db
+        .restore(app.notes, note.id, { title: "restored", done: false })
+        .wait({ tier: "global" });
+      await expect.poll(latest).toEqual(
+        source === "current"
+          ? [{ id: note.id, title: "restored", $deletedAt: null }]
+          : [
+              { id: note.id, title: "watched", $deletedAt: null },
+              { id: note.id, title: "restored", $deletedAt: null },
+            ],
+      );
+    },
+  );
+
+  it("filters history subscription membership by the deletion timestamp", async () => {
+    const note = await insertNote("retained");
+    const query = app.$history.notes
+      .includeDeleted()
+      .where({ id: note.id, $deletedAt: { isNull: false } })
+      .select("title");
+    const latest = watch(query);
+    await expect.poll(latest).toEqual([]);
+    await db.delete(app.notes, note.id).wait({ tier: "global" });
+    await expect.poll(latest).toEqual([{ id: note.id, title: "retained" }]);
+    expect(await db.all(query, { tier: "remote" })).toEqual(latest());
+    await db
+      .restore(app.notes, note.id, { title: "restored", done: false })
+      .wait({ tier: "global" });
+    await expect.poll(latest).toEqual([]);
+  });
+
   it("includeDeleted returns content versions of a deleted row", async () => {
     const note = await insertNote("first");
     await db.update(app.notes, note.id, { title: "second" }).wait({ tier: "global" });
@@ -1020,6 +1099,24 @@ describe("TS Query API branch history", () => {
     expect(await reader.all(query(), { branch: "draft", tier: "remote" })).toEqual([]);
     expect(await reader.all(query(), { branch: "main", tier: "remote" })).toEqual([
       { id, title: "main first" },
+    ]);
+  });
+
+  it("fetches the deletion timestamp for only the selected branch", async () => {
+    const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+    await writer
+      .delete(branches.notes, id, { branch: "draft", updatedAt: deletedAt.getTime() })
+      .wait({ tier: "global" });
+    const history = branches.$history.notes
+      .includeDeleted()
+      .where({ id })
+      .orderBy("$acceptedAt")
+      .select("title", "$deletedAt");
+    expect(await reader.all(history, { branch: "draft", tier: "remote" })).toEqual(
+      draftVersions().map((row) => ({ ...row, $deletedAt: deletedAt })),
+    );
+    expect(await reader.all(history, { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "main first", $deletedAt: null },
     ]);
   });
 

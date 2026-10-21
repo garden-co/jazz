@@ -1568,7 +1568,7 @@ fn flat_join_filter_schema(
             format!("{scope}.id"),
             ColumnType::Uuid,
         ));
-        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
+        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt", "$deletedAt"] {
             columns.push(JazzColumnSchema::new(
                 format!("{scope}.{magic}"),
                 executable_magic_column_type(magic)?
@@ -2047,6 +2047,10 @@ fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnTy
     }
     match column {
         "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
+        "$deletedAt" => {
+            static TYPE: std::sync::LazyLock<ColumnType> = std::sync::LazyLock::new(|| ColumnType::Nullable(Box::new(ColumnType::U64)));
+            Ok(Some(&TYPE))
+        }
         _ => Ok(None),
     }
 }

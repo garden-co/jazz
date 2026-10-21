@@ -99,7 +99,7 @@ export function magicColumnType(column: string): ColumnType | undefined {
   if (column === "$createdBy" || column === "$updatedBy") {
     return authorColumnType();
   }
-  if (column === "$createdAt" || column === "$updatedAt") {
+  if (column === "$createdAt" || column === "$updatedAt" || column === "$deletedAt") {
     return { type: "Timestamp" };
   }
   const [root, ...path] = column.split(".");

@@ -452,6 +452,12 @@ fn collect_value_requirements(
 }
 
 fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
+    if field == "$deletedAt" {
+        requirements
+            .metadata
+            .insert(SourceMetadataRequirement::DeletedAt);
+        return;
+    }
     if let Some((root, _)) = crate::ids::AuthorSubject::metadata_path(&field) {
         requirements
             .metadata

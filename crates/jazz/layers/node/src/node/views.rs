@@ -1186,10 +1186,24 @@ where
                 .filter(|version| !version.is_deleted())
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
+            let deletion_coordinates = tx_versions
+                .iter()
+                .filter(|version| version.is_deleted())
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
                 let coordinate = (entry_table.clone(), *row_uuid);
-                if content_coordinates.contains(&coordinate) {
+                // Supporting membership can name a deletion register alone.
+                // Only an actual result member requires a content witness.
+                if content_coordinates.contains(&coordinate)
+                    || (deletion_coordinates.contains(&coordinate)
+                        && !result_add_coordinates.contains(&(
+                            entry_table.as_str(),
+                            *row_uuid,
+                            *tx_id,
+                        )))
+                {
                     continue;
                 }
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);

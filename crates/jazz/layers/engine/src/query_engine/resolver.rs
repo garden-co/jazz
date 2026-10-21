@@ -106,6 +106,8 @@ pub enum SourceMetadataRequirement {
     Provenance(ProvenanceField),
     /// Project one nested structured-author field only when requested.
     AuthorPath(String),
+    /// Expose the current winning deletion's authored timestamp.
+    DeletedAt,
 }
 
 /// Public field requirement for a source.

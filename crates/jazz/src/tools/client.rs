@@ -3196,11 +3196,11 @@ fn normalize_public_subscription_value(
             Ok(())
         }
         (CoreValueType::U64, CoreValue::U64(_timestamp))
-            if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
+            if matches!(field_name, Some("$createdAt" | "$updatedAt" | "$deletedAt")) =>
         {
             Ok(())
         }
-        (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt")) => {
+        (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt" | "$deletedAt")) => {
             Err(JazzError::Query(format!(
                 "subscription provenance field {} is not a u64 timestamp",
                 field_name.expect("matched provenance field")
@@ -3871,6 +3871,17 @@ impl PublicQueryDecoder {
                 .map(Some);
         }
         let value = match column {
+            "$deletedAt" => match row
+                .raw_field(column)
+                .or_else(|| row.raw_field(&crate::schema::app_storage_column_name(column)))
+            {
+                Some(CoreValue::Nullable(Some(value))) => match *value {
+                    CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
+                    value => core_to_public_value(value)?,
+                },
+                Some(value) => core_to_public_value(value)?,
+                None => return Ok(None),
+            },
             "$canRead" => {
                 return Err(JazzError::Query(format!(
                     "permission introspection column {column} requires unified policy lowering"

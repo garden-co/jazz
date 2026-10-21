@@ -2286,9 +2286,72 @@ where
                         source_resolution_error(request, SourceGap::LocalAvailabilityInput)
                     })?;
             }
+            if requests_deleted_at(request) {
+                if request.visibility != RowVisibility::IncludeDeleted {
+                    return Err(QueryError::UnsupportedRelationQuery(
+                        "Reading $deletedAt requires includeDeleted".to_owned(),
+                    )
+                    .into());
+                }
+                resolved.graph = with_deleted_at(resolved.graph, &resolved.row_shape.descriptor)?;
+                resolved.row_shape.descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&resolved.graph)?;
+            }
             Ok(resolved)
         })
     }
+}
+
+pub(super) fn requests_deleted_at(request: &SourceRequest) -> bool {
+    request
+        .requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::DeletedAt)
+}
+
+/// Deletion visibility and provenance belong to the same resolved winner.
+/// Keep this derived value out of stored rows and wildcard projections.
+pub(super) fn deleted_at_projection(source: Option<&str>) -> ProjectField {
+    let mut field = match source {
+        Some(source) => ProjectField::nullable(source, user_column_field("$deletedAt")),
+        None => ProjectField::null_typed(
+            user_column_field("$deletedAt"),
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+    };
+    field.output_identity = records::FieldIdentity::Name("$deletedAt".to_owned());
+    field
+}
+
+pub(super) fn with_deleted_at(
+    graph: GraphBuilder,
+    descriptor: &RecordDescriptor,
+) -> Result<GraphBuilder, Error> {
+    let fields = descriptor.fields();
+    let project = |deleted: bool| {
+        fields
+            .iter()
+            .map(|field| ProjectField {
+                expression: groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(
+                    field.name.clone().expect("named source field"),
+                )),
+                output_name: field.name.clone().expect("named source field"),
+                output_identity: field.identity.clone().expect("source identity"),
+            })
+            .chain([deleted_at_projection(deleted.then_some("$updatedAt"))])
+            .collect::<Vec<_>>()
+    };
+    Ok(GraphBuilder::union([
+        graph
+            .clone()
+            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(true)))
+            .project_fields(project(true)),
+        graph
+            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(false)))
+            .project_fields(project(false)),
+    ]))
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
@@ -3048,7 +3111,7 @@ where
     /// as without the lookup: exact, at the cost of the branches' rows
     /// outside the prefix. Only the trusted include-deleted read hands an
     /// index path to a step source.
-    async fn live_branch_view_registers(
+    pub(super) async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -6405,7 +6468,7 @@ pub(super) fn covered_input_record(
         descriptor
             .field_index("supplying_branch_key")
             .map(|_| ("supplying_branch_key", source_branch)),
-        None,
+        Some(row.is_deleted()),
     )?;
     values.push(Value::Bool(is_current));
     Ok(descriptor.create(&values)?)
