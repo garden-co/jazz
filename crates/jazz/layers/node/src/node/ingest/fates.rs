@@ -80,7 +80,12 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let tx_versions = self.query_versions_for_tx(tx_id).await?;
+        // A released list means the transaction settled in an earlier
+        // batch: its rows already moved to their seq and own no overlay.
+        let tx_versions = self
+            .query_listed_versions_for_tx(tx_id, &stored)
+            .await?
+            .unwrap_or_default();
         if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
@@ -88,8 +93,7 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        stage_transaction_record(
-&self.authors,
+        self.stage_tx_record(
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,

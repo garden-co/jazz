@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 import { CloudApiError, createCloudApi, type CloudApi } from "./api.js";
-import { credentialsPath, deleteProfile, saveProfile } from "./credentials.js";
+import { credentialsPath, deleteProfile, readProfile, saveProfile } from "./credentials.js";
 import {
   CloudAuthError,
   fetchWorkosClientConfig,
@@ -18,6 +18,7 @@ import {
   profileFromTokens,
   resolveCloudUrl,
   startDeviceAuthorization,
+  type CloudSessionOptions,
 } from "./session.js";
 
 export const CLOUD_COMMANDS = ["login", "logout", "whoami", "teams", "apps"] as const;
@@ -132,7 +133,7 @@ function defaultOpenBrowser(url: string): void {
 const HELP = `Jazz Cloud commands (sign in with your dashboard account):
 
   login                         Sign in through the browser (device code)
-  logout                        Forget the stored session
+  logout                        End the session and forget it locally
   whoami                        Show the signed-in user and teams
   teams list                    List your teams
   apps list [--team <id>]       List apps (all teams by default)
@@ -164,6 +165,8 @@ Options:
 Environment:
   JAZZ_CLOUD_TOKEN              Use this short-lived access token instead of the stored login
   JAZZ_CONFIG_DIR               Where the login is stored (default ~/.config/jazz)
+  JAZZ_ADMIN_SECRET             apps claim: the app's admin secret (prefer this over
+                                --admin-secret, which ends up in shell history)
 `;
 
 export async function runCloudCommand(args: string[], io: CloudCommandIo): Promise<number> {
@@ -188,10 +191,18 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
 
       case "logout": {
         allowOnly(parsed, []);
-        const removed = await deleteProfile(cloudUrl, io.env);
+        const hadSession = (await readProfile(cloudUrl, io.env)) !== undefined;
+        const sessionRevoked = hadSession && (await revokeStoredSession(sessionOptions));
+        // Revoking can itself find the session already dead and forget it.
+        const removed = (await deleteProfile(cloudUrl, io.env)) || hadSession;
         out(
-          { loggedOut: removed, cloudUrl },
-          removed ? `Logged out of ${cloudUrl}.\n` : `Not logged in to ${cloudUrl}.\n`,
+          { loggedOut: removed, sessionRevoked, cloudUrl },
+          removed
+            ? `Logged out of ${cloudUrl}.\n` +
+                (sessionRevoked
+                  ? ""
+                  : "The session could not be ended on the server; it expires on its own.\n")
+            : `Not logged in to ${cloudUrl}.\n`,
         );
         return 0;
       }
@@ -232,6 +243,25 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
     }
   } catch (error) {
     return reportError(error, io, json);
+  }
+}
+
+/**
+ * Ends the stored login's WorkOS session server-side, which also kills its
+ * refresh token. Best effort: logout always forgets the local session, even
+ * when the dashboard is unreachable or predates `/api/v1/logout`.
+ */
+async function revokeStoredSession(options: CloudSessionOptions): Promise<boolean> {
+  const env = options.env ?? process.env;
+  // Revoke the stored login's session, not one behind JAZZ_CLOUD_TOKEN.
+  const { JAZZ_CLOUD_TOKEN: _ignored, ...storedOnly } = env;
+  try {
+    const result = await createCloudApi({ ...options, env: storedOnly }).request<{
+      revoked?: unknown;
+    }>("POST", "/logout");
+    return result?.revoked === true;
+  } catch {
+    return false;
   }
 }
 

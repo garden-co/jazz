@@ -36,7 +36,7 @@ fn maintained_witness_with_projected_schema_keeps_immutable_history_identity() {
         Vec::<String>::new(),
     )
     .unwrap();
-    let original = owner.query_versions_for_tx(tx).unwrap().remove(0);
+    let original = owner.stored_versions_for_tx_for_test(tx).unwrap().remove(0);
     let alias = owner
         .ensure_schema_version_alias(evolved.version_id())
         .unwrap();
@@ -245,7 +245,7 @@ fn migration_owner_follower_cases(kind: &str) {
                             .unwrap()
                     };
                     alice.accept_global_for_test(tx).unwrap();
-                    let canonical = alice.commit_unit_for(tx).unwrap();
+                    let canonical = alice.stored_commit_unit_for_test(tx).unwrap();
                     let owner_schema = if owner_uses_new_schema {
                         evolved.clone()
                     } else {
@@ -412,7 +412,7 @@ fn renamed_maintained_witness_preserves_branch_within_one_transaction() {
         Vec::<String>::new(),
     )
     .unwrap();
-    let originals = alice.query_versions_for_tx(tx).unwrap();
+    let originals = alice.stored_versions_for_tx_for_test(tx).unwrap();
     assert_eq!(originals.len(), 2);
     for original in originals {
         let mut projected = original.clone();

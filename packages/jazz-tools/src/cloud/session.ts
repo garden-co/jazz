@@ -6,9 +6,8 @@
 // permissions as its UI, so no per-app admin secret is involved.
 
 import {
-  deleteProfile,
   readProfile,
-  saveProfile,
+  withCredentialsLock,
   type CloudProfile,
   type WorkosClientConfig,
 } from "./credentials.js";
@@ -17,6 +16,12 @@ export const DEFAULT_CLOUD_URL = "https://v2.dashboard.jazz.tools";
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 /** Refresh this long before expiry so a request never starts with a dying token. */
 const REFRESH_MARGIN_SECONDS = 30;
+/**
+ * A refresh runs under the credentials lock, so it must finish well before
+ * the lock counts as stale; otherwise another process could break the lock and
+ * present the same single-use refresh token.
+ */
+const REFRESH_TIMEOUT_MS = 20_000;
 
 export class CloudAuthError extends Error {
   constructor(
@@ -25,6 +30,7 @@ export class CloudAuthError extends Error {
       | "login_denied"
       | "login_expired"
       | "session_expired"
+      | "refresh_failed"
       | "login_unavailable",
     message: string,
   ) {
@@ -48,6 +54,8 @@ export interface CloudSessionOptions {
   fetch?: typeof fetch;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Abort a token refresh after this long (default REFRESH_TIMEOUT_MS). */
+  refreshTimeoutMs?: number;
 }
 
 interface TokenResponse {
@@ -56,21 +64,23 @@ interface TokenResponse {
   user: { id: string; email: string };
 }
 
-export function resolveCloudUrl(flag: string | undefined, env: NodeJS.ProcessEnv): string {
-  const raw = flag ?? env.JAZZ_CLOUD_URL ?? DEFAULT_CLOUD_URL;
+/** Parses `raw` and requires HTTPS, allowing plain HTTP only for loopback. */
+function secureUrl(raw: string, label: string): URL {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`Invalid Jazz Cloud URL: ${raw}`);
+    throw new Error(`Invalid ${label}: ${raw}`);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error(
-      "The Jazz Cloud URL must use HTTPS (plain HTTP is allowed only for localhost).",
-    );
+    throw new Error(`The ${label} must use HTTPS (plain HTTP is allowed only for localhost).`);
   }
-  return url.origin;
+  return url;
+}
+
+export function resolveCloudUrl(flag: string | undefined, env: NodeJS.ProcessEnv): string {
+  return secureUrl(flag ?? env.JAZZ_CLOUD_URL ?? DEFAULT_CLOUD_URL, "Jazz Cloud URL").origin;
 }
 
 /** Reads `exp` without verifying: only used to schedule refreshes. */
@@ -120,6 +130,9 @@ export async function fetchWorkosClientConfig(
       `${cloudUrl} does not support CLI login yet (GET /api/v1/cli/config returned ${status}).`,
     );
   }
+  // Refresh tokens are sent to this URL, so it gets the same HTTPS rule as the
+  // dashboard URL itself.
+  secureUrl(workos.apiBaseUrl, "WorkOS API URL");
   return { clientId: workos.clientId, apiBaseUrl: workos.apiBaseUrl.replace(/\/+$/, "") };
 }
 
@@ -236,44 +249,74 @@ export function profileFromTokens(
 }
 
 async function refreshProfile(
-  profile: CloudProfile,
+  stale: CloudProfile,
   options: CloudSessionOptions,
 ): Promise<CloudProfile> {
   const fetchImpl = options.fetch ?? fetch;
-  const { status, body } = await fetchJson(
-    fetchImpl,
-    `${profile.workos.apiBaseUrl}/user_management/authenticate`,
-    form({
-      grant_type: "refresh_token",
-      refresh_token: profile.refreshToken,
-      client_id: profile.workos.clientId,
-    }),
-  );
-  if (status !== 200) {
-    // Refresh tokens rotate. If a concurrent jazz-tools process refreshed
-    // first, our token was just consumed: pick up the one it stored.
-    const current = await readProfile(profile.cloudUrl, options.env);
-    if (current && current.refreshToken !== profile.refreshToken) {
-      return current;
+  // Refresh tokens rotate and are single-use, so parallel jazz-tools processes
+  // must not refresh at the same time: the loser would present a consumed token
+  // and could log the user out. Hold the credentials lock across the whole
+  // read-refresh-write and re-read the profile under it.
+  return withCredentialsLock(async (credentials) => {
+    const profile = await credentials.read(stale.cloudUrl);
+    if (!profile) {
+      throw new CloudAuthError(
+        "not_logged_in",
+        `Not logged in to ${stale.cloudUrl}. Run \`jazz-tools login\`.`,
+      );
     }
-    // A rejected refresh token is dead for good: forget it so the next command
-    // gives a clear "log in" message instead of retrying a revoked session.
-    if (status === 400 || status === 401) {
-      await deleteProfile(profile.cloudUrl, options.env);
+    if (profile.refreshToken !== stale.refreshToken) {
+      // Another process refreshed while we waited for the lock.
+      return profile;
     }
-    throw new CloudAuthError(
-      "session_expired",
-      "Your Jazz Cloud session has expired. Run `jazz-tools login` again.",
+    secureUrl(profile.workos.apiBaseUrl, "WorkOS API URL");
+    let response: Awaited<ReturnType<typeof fetchJson>>;
+    try {
+      response = await fetchJson(
+        fetchImpl,
+        `${profile.workos.apiBaseUrl}/user_management/authenticate`,
+        {
+          ...form({
+            grant_type: "refresh_token",
+            refresh_token: profile.refreshToken,
+            client_id: profile.workos.clientId,
+          }),
+          signal: AbortSignal.timeout(options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS),
+        },
+      );
+    } catch (error) {
+      // The token may or may not have been consumed; keep the profile so the
+      // next command can try again (it re-reads under the lock).
+      const timedOut = (error as Error)?.name === "TimeoutError";
+      throw new CloudAuthError(
+        "refresh_failed",
+        timedOut
+          ? "Refreshing the Jazz Cloud session timed out. Try again."
+          : "Could not reach WorkOS to refresh the Jazz Cloud session. Try again.",
+      );
+    }
+    const { status, body } = response;
+    if (status !== 200) {
+      // A rejected refresh token is dead for good: forget it so the next
+      // command gives a clear "log in" message instead of retrying a revoked
+      // session. Under the lock the stored token is the one just rejected.
+      if (status === 400 || status === 401) {
+        await credentials.delete(profile.cloudUrl);
+      }
+      throw new CloudAuthError(
+        "session_expired",
+        "Your Jazz Cloud session has expired. Run `jazz-tools login` again.",
+      );
+    }
+    const next = profileFromTokens(
+      profile.cloudUrl,
+      profile.workos,
+      toTokenResponse(body),
+      profile.createdAt,
     );
-  }
-  const next = profileFromTokens(
-    profile.cloudUrl,
-    profile.workos,
-    toTokenResponse(body),
-    profile.createdAt,
-  );
-  await saveProfile(next, options.env);
-  return next;
+    await credentials.save(next);
+    return next;
+  }, options.env);
 }
 
 /**

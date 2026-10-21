@@ -353,6 +353,9 @@ where
         key: &BranchKey,
         snapshot: Option<&SnapshotRef>,
     ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
+        if let Some(snapshot) = snapshot {
+            self.ensure_frozen_snapshot_available(snapshot).await?;
+        }
         let mut content = BTreeMap::new();
         let mut tx_ids = BTreeMap::new();
         let snapshot = snapshot.map(|snapshot| Snapshot {
@@ -371,6 +374,9 @@ where
                 let Some(tx) = self.query_transaction(tx_id).await? else {
                     continue;
                 };
+                if matches!(tx.fate, crate::tx::Fate::Rejected(_)) {
+                    continue;
+                }
                 let visible = match &snapshot {
                     Some(snapshot) => self.snapshot_covers(tx_id, snapshot).await,
                     None => visible_at_tier(&tx, tier),

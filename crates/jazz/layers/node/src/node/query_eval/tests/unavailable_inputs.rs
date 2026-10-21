@@ -1303,7 +1303,10 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
     // The public confirmation path normally performs both together.
     let stored = node.query_transaction(accepted).unwrap().unwrap();
     let global_time = node.allocate_global_time_for_test();
-    let version = node.query_versions_for_tx(accepted).unwrap().remove(0);
+    let version = node
+        .stored_versions_for_tx_for_test(accepted)
+        .unwrap()
+        .remove(0);
     let mut batch = node.database.open_batch();
     stage_transaction_record(
         &node.authors.clone(),

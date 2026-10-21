@@ -991,27 +991,34 @@ function toFlatConditions(
  * @param schema WasmSchema for relation analysis
  * @returns JSON string for runtime query()
  */
-export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+export function translateQuery(
+  builderJson: string,
+  schema: WasmSchema,
+  prepared?: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  const builder = prepared ?? normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
+  const translated = usesNativeRelationFeatures(builder)
+    ? translateBuilderToRelationIr(builderJson, schema)
+    : undefined;
+  const outputTable = translated?.outputTable ?? builder.table;
   const selectColumns =
-    builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
+    builder.select.length > 0 ? resolveSelectedColumns(outputTable, schema, builder.select) : [];
   const projectedColumns = visibleSelectColumns(
     selectColumns,
     builder.partialSelect,
     schema,
-    builder.table,
+    outputTable,
   );
   const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
     requireIncludes: builder.requireIncludes,
   });
 
-  if (usesNativeRelationFeatures(builder)) {
-    const { relation, outputTable } = translateBuilderToRelationIr(builderJson, schema);
+  if (translated) {
     return stringifyRuntimeQuery({
       table: outputTable,
       array_subqueries: arraySubqueries,
-      relation_ir: relation,
+      relation_ir: translated.relation,
       ...(builder.includeDeleted ? { include_deleted: true } : {}),
       ...(projectedColumns ? { select_columns: projectedColumns } : {}),
     });

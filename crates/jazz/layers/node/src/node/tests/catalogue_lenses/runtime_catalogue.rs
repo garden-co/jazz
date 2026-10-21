@@ -404,7 +404,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     drop(core);
 
     let mut reopened = reopen_node_at(&dir, node(0x3f), base);
-    let versions = reopened.query_versions_for_tx(tx_id).unwrap();
+    let versions = reopened.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].table(), "notes");
     assert_eq!(versions[0].row_uuid(), row(0x3f));

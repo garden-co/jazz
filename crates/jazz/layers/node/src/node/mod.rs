@@ -701,7 +701,9 @@ pub struct NodeState<S = BoxedStorage> {
     ahead_current_keys: AheadCurrentKeys,
     /// History rows written since the last applied node batch, per
     /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
-    /// the transaction's `jazz_tx_touched_rows` list.
+    /// the transaction's `jazz_tx_touched_rows` list, or releases the list
+    /// when the transaction has settled. A transaction whose settled status
+    /// was staged has an entry here even when it wrote no rows.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
     /// Global times of transactions read from storage, which key their
     /// history records (`history_tx_seq`). Bounded by
@@ -1173,6 +1175,31 @@ struct QueryServing {
     /// authority receipt: only an exact compatible Local lowering may use it;
     /// Remote/Global reads must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
+}
+
+impl QueryServing {
+    /// Invalidate compiler output and its admission proofs while retaining
+    /// prepared shape plans and policy authorization state.
+    fn clear_compiled_query_programs(&mut self) {
+        self.compiled_query_program_cache.clear();
+        self.query_program_templates.clear();
+        self.supported_query_program_requests.clear();
+    }
+
+    /// Prepared plans and the programs derived from them share an invalidation
+    /// boundary when their sources or the underlying runtime are retired.
+    fn clear_prepared_query_plans(&mut self) {
+        self.query_shape_cache.clear();
+        self.clear_compiled_query_programs();
+    }
+
+    /// Retire authorization requests together with their lowered graphs and
+    /// temporary replacements when the policy context changes.
+    fn clear_policy_authorization(&mut self) {
+        self.read_policy_authorization_request_cache.clear();
+        self.policy_authorization_graph_cache.clear();
+        self.policy_authorization_graph_replacements.clear();
+    }
 }
 
 /// Compiler-owned description of the root window stage represented by a
@@ -3309,6 +3336,11 @@ pub enum Error {
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),
+    /// A settled transaction's versions were asked for as a list, but its
+    /// touched-rows list was released at settle. Its versions are read by
+    /// exact `(table, row, tx)` point reads only.
+    #[error("transaction versions are no longer listed: {0:?}")]
+    TransactionVersionsReleased(TxId),
     /// View update payload was internally inconsistent.
     #[error("malformed view update: {0}")]
     MalformedViewUpdate(&'static str),
@@ -3359,6 +3391,11 @@ pub enum Error {
     /// Historical read must be evaluated by a history-complete server.
     #[error("historical read requires server evaluation")]
     HistoricalReadRequiresServer,
+    /// A frozen branch's exact history cannot be certified on this runtime.
+    #[error(
+        "Snapshot history is unavailable on this runtime; restore it on the originating store or a complete-history authority"
+    )]
+    SnapshotHistoryUnavailable,
     /// The authenticated identity is not authorized for this operation.
     #[error("authorization denied")]
     AuthorizationDenied,
