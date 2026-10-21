@@ -2406,6 +2406,11 @@ where
                     // A full send queue must not block receiving the fates and
                     // credits that release its capacity. Defer further outbound
                     // work only after applying the available inbound messages.
+                    // Inbound handlers must tolerate pending (and partly applied)
+                    // subscription commands. Each inbound-triggered tick may retry
+                    // the blocked outbound prefix: rebuilding it preserves order
+                    // after inbound fates change the outbox. With no inbound
+                    // progress, backpressure schedules only a deferred retry.
                     let mut applied = false;
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();

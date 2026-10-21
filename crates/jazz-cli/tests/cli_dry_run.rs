@@ -2287,14 +2287,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         block_on(stalled.db.tick()).expect("queue stalled data subscription");
         let frames = stalled.wire.drain_outbound();
         if !frames.is_empty() {
-            stalled
-                .socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(&frames)
-                        .expect("encode stalled data subscription")
-                        .into(),
-                ))
-                .expect("send stalled data subscription");
+            send_websocket_frames(&mut stalled.socket, &frames);
             sent_data_subscription = true;
         }
     }
@@ -2322,14 +2315,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         block_on(stalled.db.tick()).expect("queue A's unread response trigger");
         let frames = stalled.wire.drain_outbound();
         if !frames.is_empty() {
-            stalled
-                .socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(&frames)
-                        .expect("encode A's unread response trigger")
-                        .into(),
-                ))
-                .expect("send A's unread response trigger");
+            send_websocket_frames(&mut stalled.socket, &frames);
             sent_trigger = true;
         }
     }
