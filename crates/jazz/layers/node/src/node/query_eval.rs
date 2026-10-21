@@ -11,6 +11,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
+fn query_capability_error(report: &CapabilityReport) -> Error {
+    if report.gaps.iter().any(|gap| {
+        matches!(
+            gap,
+            super::query_engine::UnsupportedReason::Source(SourceGap::SnapshotHistoryUnavailable)
+        )
+    }) {
+        Error::SnapshotHistoryUnavailable
+    } else {
+        Error::QueryCapability(format!("{report:?}"))
+    }
+}
+
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
     InputSourceId, InputSourceReplacement, LiteralValue, PreparedShapeId, RoutedMultisinkTerminal,
@@ -354,7 +367,7 @@ where
             QueryAuthorizationMode::ClientLocal,
         )?;
         let tables = query_program_source_requests(&request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
+            .map_err(|report| query_capability_error(&report))?
             .into_iter()
             .filter(|source_request| {
                 source_request.visibility == RowVisibility::Visible
@@ -1807,7 +1820,7 @@ where
         let mut table_metadata = BTreeMap::<_, BTreeMap<_, _>>::new();
         let mut occurrences = Vec::new();
         for source_request in query_program_source_requests(request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
+            .map_err(|report| query_capability_error(&report))?
         {
             if source_request.visibility != RowVisibility::Visible {
                 continue;
