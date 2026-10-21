@@ -1740,10 +1740,7 @@ where
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn clear_prepared_query_plan_cache_for_test(&mut self) {
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
+        self.query.clear_prepared_query_plans();
     }
 
     #[cfg(any(test, feature = "testing"))]
