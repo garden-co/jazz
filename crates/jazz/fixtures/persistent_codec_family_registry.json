@@ -410,7 +410,7 @@
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
-        "anchor": "The pending record's four evidence slots hold exclusive read evidence"
+        "anchor": "The pending record's four evidence slots hold serializable read evidence"
       },
       "semantic_fixture": {
         "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",

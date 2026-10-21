@@ -328,7 +328,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             };
             assert!(
                 error.to_string().contains(
-                    "Reading a flat join of `todos` with `todos` is not supported in serializable transactions yet"
+                    "Reading a flat join of `todos` with `todos` is not supported in exclusive transactions yet"
                 ),
                 "unexpected error: {error}"
             );
