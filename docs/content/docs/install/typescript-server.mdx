@@ -96,6 +96,8 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it or `jwtPublicKey`, the backend only accepts Jazz local-first tokens, provided `allowLocalFirstAuth` is enabled. That option defaults to `false` when `NODE_ENV` is `production` (case-insensitive) and `true` otherwise; explicit `true` or `false` overrides the default. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
 
+The TypeScript example reads `JAZZ_ALLOW_LOCAL_FIRST_AUTH` as enabled for `true`, `1`, `yes`, `on` or `y` (case-insensitive). Any other set value disables it. Leave the variable unset to use the SDK default.
+
 For this TypeScript backend, use a direct HTTPS `jwksUrl`. HTTP is allowed for
 development only when the URL's WHATWG-canonical hostname is `localhost`,
 `[::1]`, or an IPv4 address in `127.0.0.0/8` (for example,

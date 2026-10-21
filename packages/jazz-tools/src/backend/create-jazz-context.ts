@@ -31,6 +31,7 @@ import {
   type BackendRequestOptions,
 } from "./request-auth.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
+import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -583,8 +584,7 @@ export class JazzContext {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
-      allowLocalFirstAuth:
-        config.allowLocalFirstAuth ?? process.env.NODE_ENV?.toLowerCase() !== "production",
+      allowLocalFirstAuth: resolveAllowLocalFirstAuth(config.allowLocalFirstAuth),
     };
     this.defaultSchemaInput = config.app;
     this.nodeIdentityScope =

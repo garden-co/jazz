@@ -80,7 +80,9 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     config.allowLocalFirstAuth ??
     (process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH === undefined
       ? undefined
-      : process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false");
+      : ["true", "1", "yes", "on", "y"].includes(
+          process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH.trim().toLowerCase(),
+        ));
   const writeTier = serverUrl ? "global" : "local";
 
   if (!serverUrl || !backendSecret) {
