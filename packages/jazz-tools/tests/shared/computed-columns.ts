@@ -376,6 +376,54 @@ export function testComputedColumns(create: () => Promise<Db>) {
       await expect(db.one(safe.rows.where({ id: row.id }))).resolves.toMatchObject({ score: 5 });
     });
 
+    it.each([
+      { text: '{"label":"hello"}', expected: { label: "hello" } },
+      { text: "plain text", expected: "plain text" },
+    ])("retries a caught missing dependency for $text", async ({ text, expected }) => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          parsed: s.computed((row): unknown => {
+            try {
+              return JSON.parse(row.text);
+            } catch {
+              return row.text;
+            }
+          }),
+        }),
+      });
+      const safe = s.defineApp({ rows: stored });
+      const db = await open();
+      const { value: row } = db.insert(safe.rows, { text });
+      await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
+        id: row.id,
+        parsed: expected,
+      });
+    });
+
+    it("retries a caught missing dependency through an earlier computed field", async () => {
+      const earlier = s.table(stored.columns, {
+        textValue: s.computed((row) => row.text),
+      });
+      const models = s.defineApp({
+        rows: s.table(earlier.columns, {
+          parsed: s.computed((row): unknown => {
+            try {
+              return JSON.parse(row.textValue);
+            } catch {
+              return row.textValue;
+            }
+          }),
+        }),
+      });
+      const safe = s.defineApp({ rows: stored });
+      const db = await open();
+      const { value: row } = db.insert(safe.rows, { text: "plain text" });
+      await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
+        id: row.id,
+        parsed: "plain text",
+      });
+    });
+
     it("discovers conditional dependencies and observes their later updates", async () => {
       const models = s.defineApp({
         rows: s.table(
