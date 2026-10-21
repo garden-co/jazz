@@ -1,4 +1,3 @@
-import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { BuiltRelation } from "./query-builder-shape.js";
 
@@ -20,11 +19,10 @@ export function resolveQueryOutputTable(schema: WasmSchema, relation: BuiltRelat
   if (!seedTable) throw new Error("gather(...) seed relation is missing table metadata.");
   let table: string = seedTable;
   if (relation.hops?.length) {
-    const relations = analyzeRelations(schema);
     for (const hop of relation.hops) {
-      const target = relations.get(table)?.find((candidate) => candidate.name === hop);
+      const target = schema[table]?.relations?.[hop];
       if (!target) throw new Error(`Unknown relation "${hop}" on table "${table}"`);
-      table = target.toTable;
+      table = target.table;
     }
   }
   return table;
