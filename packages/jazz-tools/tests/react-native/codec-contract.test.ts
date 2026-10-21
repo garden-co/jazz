@@ -159,7 +159,7 @@ const cases: [string, unknown, unknown][] = [
 describe("RN Rust/TypeScript foreground codec contract", () => {
   test("staged upload ABI uses append-only canonical postcard ordinals", () => {
     expect(encodeNativeForegroundCommand({ type: "stageStreamingMutation", upload: 129 })).toEqual(
-      Uint8Array.of(34, 129, 1),
+      Uint8Array.of(35, 129, 1),
     );
     expect(
       encodeNativeForegroundCommand({
@@ -167,10 +167,10 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         staged: 129,
         transaction: 256,
       }),
-    ).toEqual(Uint8Array.of(35, 129, 1, 128, 2));
+    ).toEqual(Uint8Array.of(36, 129, 1, 128, 2));
     expect(
       encodeNativeForegroundCommand({ type: "abortStagedStreamingMutation", staged: 129 }),
-    ).toEqual(Uint8Array.of(36, 129, 1));
+    ).toEqual(Uint8Array.of(37, 129, 1));
     expect(decodeNativeForegroundResponse(Uint8Array.of(26, 129, 1))).toEqual({
       type: "streamingMutationStaged",
       staged: 129,
