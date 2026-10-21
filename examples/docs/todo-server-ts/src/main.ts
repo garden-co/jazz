@@ -77,7 +77,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
   const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
   const allowLocalFirstAuth =
-    config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
+    config.allowLocalFirstAuth ??
+    (process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH === undefined
+      ? undefined
+      : process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false");
   const writeTier = serverUrl ? "global" : "local";
 
   if (!serverUrl || !backendSecret) {

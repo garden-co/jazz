@@ -17,8 +17,8 @@ const JazzLive = Layer.unwrap(
       serverUrl: yield* Config.String("JAZZ_SERVER_URL"),
       initial: { backendSecret: yield* Config.String("JAZZ_BACKEND_SECRET") },
       jwksUrl: Option.getOrUndefined(yield* Config.option(Config.String("JAZZ_JWKS_URL"))),
-      allowLocalFirstAuth: yield* Config.Boolean("JAZZ_ALLOW_LOCAL_FIRST_AUTH").pipe(
-        Config.withDefault(true),
+      allowLocalFirstAuth: Option.getOrUndefined(
+        yield* Config.option(Config.Boolean("JAZZ_ALLOW_LOCAL_FIRST_AUTH")),
       ),
     });
   }),

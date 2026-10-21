@@ -77,7 +77,14 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   jwtIssuer?: string;
   /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
   jwtAudience?: string | readonly string[];
-  /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
+  /**
+   * Whether request verification accepts local-first bearer JWTs, including in
+   * `forRequest()` and `withAttributionForRequest()`. Defaults to `false` when
+   * `NODE_ENV` is `production` (case-insensitive), and `true` otherwise.
+   * Explicit `true` or `false` overrides the default. The sync server must also
+   * accept the token and verify its account. This does not control whether the
+   * backend can create local-first accounts.
+   */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
 
@@ -576,7 +583,8 @@ export class JazzContext {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
-      allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
+      allowLocalFirstAuth:
+        config.allowLocalFirstAuth ?? process.env.NODE_ENV?.toLowerCase() !== "production",
     };
     this.defaultSchemaInput = config.app;
     this.nodeIdentityScope =

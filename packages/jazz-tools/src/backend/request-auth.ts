@@ -104,6 +104,12 @@ export interface BackendRequestAuthConfig {
   jwtPublicKey?: BackendJwtPublicKey;
   jwtIssuer?: string;
   jwtAudience?: string | readonly string[];
+  /**
+   * Whether request verification accepts local-first bearer JWTs. Defaults to
+   * `false` when `NODE_ENV` is `production` (case-insensitive), and `true`
+   * otherwise. Explicit `true` or `false` overrides the default; account
+   * verification with the configured sync-server registry still applies.
+   */
   allowLocalFirstAuth?: boolean;
 }
 
@@ -662,7 +668,8 @@ export async function resolveRequestSession(
   }
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
-  const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
+  const allowLocalFirstAuth =
+    config.allowLocalFirstAuth ?? process.env.NODE_ENV?.toLowerCase() !== "production";
   const admit = async (session: Session): Promise<Session> => {
     if (!config.accountRegistry) return session; // standalone signature-verification helper
     let assignment: unknown;
