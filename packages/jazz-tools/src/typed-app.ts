@@ -1702,7 +1702,7 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
       assertUserTableColumnNameAllowed(column);
     }
   }
-  schemaToWasm(definitionToSchema(definition));
+  schemaToWasm(definitionToSchema(withManagedEncryptionTables(definition)));
   return definition as unknown as Schema<TSchema>;
 }
 

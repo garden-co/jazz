@@ -8,6 +8,7 @@ import { translateQuery } from "../runtime/query-adapter.js";
 import { definePermissions } from "../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
+import { usesCurrentMembership } from "./encrypted-schema.js";
 
 function application(derived = false) {
   return s.defineApp({
@@ -46,6 +47,25 @@ it("uses stored UUID columns for account relationships", () => {
   expectTypeOf<Row["creator"]>().toMatchTypeOf<{ id: string } | null>();
   expectTypeOf<Row["updater"]>().toMatchTypeOf<{ id: string } | null>();
   expect(translateQuery(query._build(), app.wasmSchema)).toContain("projects.creatorAccountId");
+});
+
+it("validates automatic account relationships through defineSchema without changing the definition", () => {
+  const definition = {
+    projects: s.table({ ownerId: s.uuid() }, { owner: e2eeAccountRelation("ownerId") }),
+    notes: s
+      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
+      .encrypted({ space: "projectId", columns: ["body"] }),
+  };
+  const checked = s.defineSchema(definition);
+  expect(checked).toBe(definition);
+  expect(Object.keys(definition)).toEqual(["projects", "notes"]);
+  const app = s.defineApp(checked);
+  const query = app.projects.include({ owner: true });
+  expectTypeOf<s.RowOf<typeof query>["owner"]>().toMatchTypeOf<{ id: string } | null>();
+  expect(structuralSchemaHash(app.wasmSchema)).toBe(
+    structuralSchemaHash(s.defineApp(definition).wasmSchema),
+  );
+  expect(usesCurrentMembership(app.wasmSchema)).toBe(false);
 });
 
 it.each(["$createdBy.account", "$updatedBy.account", "$createdBy", "$createdAt"])(

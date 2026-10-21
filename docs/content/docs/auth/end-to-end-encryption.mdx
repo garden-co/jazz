@@ -121,7 +121,7 @@ export const permissions = definePermissions(app, ({ policy: p, session }) => {
     }),
   );
   p.messages.space.allowUpdate.where((space) =>
-    p.chats.exists.where({
+    p.chats.existsIncludingCreated.where({
       id: space.identifier,
       ownerId: session.user.account,
     }),

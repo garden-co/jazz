@@ -12,3 +12,8 @@ behaviour. Existing deployed schemas without the membership tables require a
 schema migration before using the generated schema, and existing shared spaces
 need their membership records populated before adopting membership-derived data
 permissions.
+
+Remove generated tables from migrations when their last encrypted table is
+dropped, while preserving tables used by other scopes or encrypted siblings.
+Validate automatic account relationships through `defineSchema()` as well as
+`defineApp()`.

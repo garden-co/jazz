@@ -101,6 +101,20 @@ export interface CanonicalMigrationBundle {
   toSchema: WasmSchema;
 }
 
+const managedScopePrefixes = [
+  spaceAdministrationPrefix,
+  currentSpaceMembersPrefix,
+  permissionSpacesPrefix,
+];
+
+function isManagedEncryptionTable(table: string): boolean {
+  return (
+    Object.hasOwn(managedEncryptionSchema, table) ||
+    table === currentGroupMembersTable ||
+    managedScopePrefixes.some((prefix) => table.startsWith(prefix))
+  );
+}
+
 export function resolveCanonicalMigrationForward(
   migration: DefinedMigration | undefined,
   canonical: CanonicalMigrationBundle,
@@ -172,11 +186,7 @@ export function resolveCanonicalMigrationForward(
   // leaves the source binding outside the migration's table partition.
   for (const lens of requested) {
     if (!lens.renamedFrom) continue;
-    for (const prefix of [
-      spaceAdministrationPrefix,
-      currentSpaceMembersPrefix,
-      permissionSpacesPrefix,
-    ]) {
+    for (const prefix of managedScopePrefixes) {
       const source = `${prefix}${lens.renamedFrom}`;
       const target = `${prefix}${lens.table}`;
       if (
@@ -190,11 +200,7 @@ export function resolveCanonicalMigrationForward(
   const managedAdditions = new Set(
     Object.keys(canonical.toSchema).filter(
       (table) =>
-        (Object.hasOwn(managedEncryptionSchema, table) ||
-          table === currentGroupMembersTable ||
-          [spaceAdministrationPrefix, currentSpaceMembersPrefix, permissionSpacesPrefix].some(
-            (prefix) => table.startsWith(prefix),
-          )) &&
+        isManagedEncryptionTable(table) &&
         !Object.hasOwn(canonical.fromSchema, table) &&
         !forward.some((lens) => lens.table === table && lens.renamedFrom),
     ),
@@ -226,6 +232,30 @@ export function resolveCanonicalMigrationForward(
       continue;
     }
     forward.push({ table, added: true, operations: [] });
+  }
+  // Dropping the last encrypted table for a scope removes its implicit tables.
+  // Renamed tables retain their existing lineage instead of being dropped.
+  for (const table of Object.keys(canonical.fromSchema)) {
+    if (
+      !isManagedEncryptionTable(table) ||
+      Object.hasOwn(canonical.toSchema, table) ||
+      forward.some((lens) => lens.renamedFrom === table)
+    )
+      continue;
+    const explicit = requested.filter((lens) => lens.table === table);
+    if (explicit.length > 0) {
+      if (
+        explicit.length !== 1 ||
+        !explicit[0]!.removed ||
+        explicit[0]!.added ||
+        explicit[0]!.renamedFrom ||
+        explicit[0]!.operations.length > 0
+      ) {
+        throw new Error(`Migration lens conflicts with managed table removal ${table}.`);
+      }
+      continue;
+    }
+    forward.push({ table, removed: true, operations: [] });
   }
   if (
     forward.length === 0 &&
