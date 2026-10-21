@@ -136,16 +136,32 @@ export class MissingComputedDependency extends Error {
 }
 
 /** Observations belong to one read/subscription, never another session or branch. */
+// Only column names are shared; definitions can be collected along with their hints.
+const computedDependencyHints = new WeakMap<ColumnTransform, Set<string>>();
+
 export class ComputedReadState {
   private readonly dependencies = new Map<ColumnTransform, Set<string>>();
   version = 0;
 
-  observe(transform: ColumnTransform, column: string): void {
+  private observedColumns(transform: ColumnTransform): Set<string> {
     let columns = this.dependencies.get(transform);
-    if (!columns) this.dependencies.set(transform, (columns = new Set()));
+    if (!columns) {
+      // Snapshot hints before planning: another read must not change this read's
+      // dependencies without advancing its own discovery version.
+      columns = new Set(computedDependencyHints.get(transform));
+      this.dependencies.set(transform, columns);
+    }
+    return columns;
+  }
+
+  observe(transform: ColumnTransform, column: string): void {
+    const columns = this.observedColumns(transform);
     if (!columns.has(column)) {
       columns.add(column);
       this.version++;
+      let hints = computedDependencyHints.get(transform);
+      if (!hints) computedDependencyHints.set(transform, (hints = new Set()));
+      hints.add(column);
     }
   }
 
@@ -157,7 +173,7 @@ export class ComputedReadState {
       visited.add(column);
       const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
       if (transform?.computed) {
-        for (const dependency of this.dependencies.get(transform) ?? []) visit(dependency);
+        for (const dependency of this.observedColumns(transform)) visit(dependency);
       } else {
         columns.add(column);
         // Stored transforms consume decoded stored context, not sibling app values.

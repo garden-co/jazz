@@ -162,3 +162,115 @@ it("reuses available inputs and batches missing dependencies without whole-row r
     await db.shutdown();
   }
 });
+
+it("reuses subscription dependencies while still discovering newly taken branches", async () => {
+  const app = s.defineApp({
+    rows: s.table(
+      { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
+      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+    ),
+  });
+  const source = new ProjectionSource();
+  const db = await createAccountDbWithRuntimeSource(
+    await localAccountConfig(`computed-subscription-cache-${crypto.randomUUID()}`),
+    source,
+  );
+  let stop: (() => void) | undefined;
+  try {
+    const { value: row } = db.insert(app.rows, {
+      useLeft: true,
+      left: 10,
+      right: 20,
+      large: new Uint8Array([1]),
+    });
+    const subscribe = vi.spyOn(source.client, "subscribeInternal");
+    let resolveUpdate: (value: unknown) => void = () => {};
+    let rejectUpdate: (reason: unknown) => void = () => {};
+    const nextUpdate = () =>
+      new Promise<unknown>((resolve, reject) => {
+        resolveUpdate = resolve;
+        rejectUpdate = reject;
+      });
+    const start = () =>
+      db.subscribe(app.rows.where({ id: row.id }).select("value"), {
+        onUpdate: (rows) => resolveUpdate(rows),
+        onError: (error) => rejectUpdate(error),
+      });
+
+    const initial = nextUpdate();
+    stop = start();
+    await expect(initial).resolves.toEqual([{ id: row.id, value: 10 }]);
+    expect(subscribe).toHaveBeenCalledTimes(3);
+    stop();
+    subscribe.mockClear();
+
+    const reopened = nextUpdate();
+    stop = start();
+    await expect(reopened).resolves.toEqual([{ id: row.id, value: 10 }]);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    const selection = JSON.parse(subscribe.mock.calls[0]![0]).select_columns as {
+      column: string;
+    }[];
+    expect(selection.map((column) => column.column).sort()).toEqual(["left", "useLeft"]);
+
+    const switched = nextUpdate();
+    await db.update(app.rows, row.id, { useLeft: false }).wait({ tier: "local" });
+    await expect(switched).resolves.toEqual([{ id: row.id, value: 20 }]);
+    expect(subscribe).toHaveBeenCalledTimes(2);
+
+    const updated = nextUpdate();
+    await db.update(app.rows, row.id, { right: 30 }).wait({ tier: "local" });
+    await expect(updated).resolves.toEqual([{ id: row.id, value: 30 }]);
+    expect(subscribe).toHaveBeenCalledTimes(2);
+  } finally {
+    stop?.();
+    vi.restoreAllMocks();
+    await db.shutdown();
+  }
+});
+
+it("keeps an in-flight read's discovery independent of another read warming the cache", async () => {
+  const app = s.defineApp({
+    rows: s.table({ score: s.int() }, { doubled: s.computed((row) => row.score * 2) }),
+  });
+  const source = new ProjectionSource();
+  const db = await createAccountDbWithRuntimeSource(
+    await localAccountConfig(`computed-concurrent-cache-${crypto.randomUUID()}`),
+    source,
+  );
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = () => {};
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  try {
+    const { value: row } = db.insert(app.rows, { score: 5 });
+    const original = source.client.queryInternal.bind(source.client);
+    const query = vi.spyOn(source.client, "queryInternal");
+    query.mockImplementationOnce(async (...args) => {
+      const rows = await original(...args);
+      entered();
+      await blocked;
+      return rows;
+    });
+    const selected = app.rows.where({ id: row.id }).select("doubled");
+    const pending = db.one(selected);
+    const result = expect(pending).resolves.toEqual({ id: row.id, doubled: 10 });
+    await started;
+    await expect(db.one(selected)).resolves.toEqual({ id: row.id, doubled: 10 });
+    release();
+    await result;
+
+    query.mockClear();
+    await db.update(app.rows, row.id, { score: 9 }).wait({ tier: "local" });
+    await expect(db.one(selected)).resolves.toEqual({ id: row.id, doubled: 18 });
+    expect(query).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    vi.restoreAllMocks();
+    await db.shutdown();
+  }
+});
