@@ -1039,3 +1039,83 @@ describe("TS Query API branch history", () => {
     });
   });
 });
+
+describe("TS Query API private draft branch history", () => {
+  const drafts = s.defineApp({
+    notes: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
+  });
+  const draftPermissions = s.definePermissions(drafts, ({ policy, anyOf, isCreator }) => {
+    policy.notes.allowRead.where(anyOf([{ branch: "main" }, isCreator]));
+    policy.notes.allowInsert.always();
+    policy.notes.allowUpdate.always();
+  });
+  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let owner: Db;
+  let bob: Db;
+  let id: string;
+
+  beforeEach(async () => {
+    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: drafts,
+      permissions: draftPermissions,
+    });
+    owner = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    bob = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      driver: { type: "persistent" },
+    });
+    id = crypto.randomUUID();
+    await owner
+      .insert(drafts.notes, { branch: "main", title: "v1" }, { id, branch: "main" })
+      .wait({ tier: "global" });
+    await owner
+      .insert(drafts.notes, { branch: "draft", title: "draft a" }, { id, branch: "draft" })
+      .wait({ tier: "global" });
+    for (const title of ["draft b", "v2"]) {
+      await owner.update(drafts.notes, id, { title }, { branch: "draft" }).wait({ tier: "global" });
+    }
+    // Merging is an app-level write of the merged content into main.
+    await owner
+      .update(drafts.notes, id, { title: "v2" }, { branch: "main" })
+      .wait({ tier: "global" });
+  });
+
+  afterEach(async () => {
+    try {
+      await bob?.shutdown();
+      await owner?.shutdown();
+    } finally {
+      await server?.stop();
+    }
+  });
+
+  function query() {
+    return drafts.$history.notes.where({ id }).orderBy("$acceptedAt").select("title");
+  }
+
+  it("shows a main reader the merge as one version, without the draft's versions", async () => {
+    expect(await bob.all(query(), { branch: "main", tier: "remote" })).toEqual([
+      { id, title: "v1" },
+      { id, title: "v2" },
+    ]);
+  });
+
+  it("hides the private draft's history from a reader who cannot read the draft", async () => {
+    expect(await bob.all(query(), { branch: "draft", tier: "remote" })).toEqual([]);
+  });
+
+  it("shows the draft's history to a reader of the draft", async () => {
+    expect(await owner.all(query(), { branch: "draft", tier: "remote" })).toEqual([
+      { id, title: "draft a" },
+      { id, title: "draft b" },
+      { id, title: "v2" },
+    ]);
+  });
+});
