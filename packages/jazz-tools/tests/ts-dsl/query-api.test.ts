@@ -17,7 +17,7 @@ function makeFriends(db: Db, user1: User, user2: User) {
   user2.friendsIds = user2Friends;
 }
 
-const readModes = ["direct", "mergeable-tx", "exclusive-tx"] as const;
+const readModes = ["direct", "mergeable-tx", "serializable-tx"] as const;
 type ReadMode = (typeof readModes)[number];
 
 const orderedIds = {
@@ -99,7 +99,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     },
   );
 
-  it.skipIf(readMode !== "exclusive-tx")(
+  it.skipIf(readMode !== "serializable-tx")(
     "relation reads participate in serializable transaction conflict detection",
     async () => {
       const user = insertUser(db, "Original assignee");
@@ -138,7 +138,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
             .where({ id: { eq: todo.id } })
             .include({ assignees: app.users.select("id", "name") }),
         );
-        if (readMode === "exclusive-tx") {
+        if (readMode === "serializable-tx") {
           // A serializable read of deleted rows with related rows cannot be
           // recorded precisely, so it is rejected (garden-co/jazz#3694).
           await expect(deletedRead).rejects.toThrow(
@@ -177,7 +177,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     },
   );
 
-  it.skipIf(readMode !== "exclusive-tx")(
+  it.skipIf(readMode !== "serializable-tx")(
     "includeDeleted relation reads are not supported in serializable transactions yet",
     async () => {
       const user = insertUser(db, "Assignee");

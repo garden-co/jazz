@@ -301,10 +301,13 @@ there is no alias for the old names.
 | `ExclusiveWriteResult`               | `SerializableWriteResult`                  |
 | `ExclusiveWriteHandle`               | `SerializableWriteHandle`                  |
 | `TransactionScope<"exclusive">`      | `TransactionScope<"serializable">`         |
+| Transaction `kind` `"exclusive"`     | Transaction `kind` `"serializable"`        |
 | Error code `"exclusive_conflict"`    | Error code `"serialization_conflict"`      |
 | Rust `db.exclusive_tx()`             | Rust `db.serializable_tx()`                |
 | Rust `ExclusiveTx`, `ExclusiveTxOps` | Rust `SerializableTx`, `SerializableTxOps` |
+| Rust `ExclusiveTxRef`                | Rust `SerializableTxRef`                   |
 
+The transaction `kind` on mutation-error events and transaction records is now `"serializable"`.
 TypeScript flags the old method and type names. Plain JavaScript does not, so search for
 `exclusive` in your code. Check retry logic that compares error codes in particular: code that
 looks for `"exclusive_conflict"` stops matching and would no longer retry a conflict.

@@ -286,7 +286,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         (tx: TransactionScope<"serializable">) => (query: QueryBuilder<Record<string, unknown>>) =>
           tx.all(query, { tier: "local-first" });
 
-      const runExclusiveMutation = async (
+      const runSerializableMutation = async (
         model: string,
         where: CleanedWhere[],
         preflight: (match: JazzRowRecord) => Promise<void>,
@@ -364,12 +364,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         });
       };
 
-      let exclusiveMutationTail = Promise.resolve();
+      let serializableMutationTail = Promise.resolve();
 
-      const serializeExclusiveMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
-        const previous = exclusiveMutationTail;
+      const enqueueSerializableMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const previous = serializableMutationTail;
         let release = () => {};
-        exclusiveMutationTail = new Promise<void>((resolve) => {
+        serializableMutationTail = new Promise<void>((resolve) => {
           release = resolve;
         });
         await previous;
@@ -502,8 +502,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }): Promise<T | null> {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          const consumed = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const consumed = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async () => {},
@@ -545,8 +545,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             delete fields.id;
             return fields;
           };
-          const updated = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const updated = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async (match) => {

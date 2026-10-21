@@ -348,7 +348,7 @@ struct ClientDbInner {
     upstream_recovery_generation: Option<u64>,
     upstream_state_notify: Arc<tokio::sync::Notify>,
     write_map: HashMap<TransactionId, CoreTxId>,
-    transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
+    transactions: HashMap<OpenTransactionId, SerializableTransactionState>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
     tick_driver_error_notify: Arc<tokio::sync::Notify>,
@@ -891,7 +891,7 @@ impl Backend {
     }
 }
 
-struct ExclusiveTransactionState {
+struct SerializableTransactionState {
     author: Option<CoreAuthorSubject>,
     has_writes: bool,
 }
@@ -1407,7 +1407,7 @@ impl ClientDb {
         });
         inner.transactions.insert(
             transaction_id,
-            ExclusiveTransactionState {
+            SerializableTransactionState {
                 author,
                 has_writes: false,
             },

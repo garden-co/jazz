@@ -132,11 +132,11 @@ impl CoreDb {
         Ok(tx_id)
     }
 
-    fn serializable_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
+    fn serializable_tx(&self) -> Result<CoreSerializableTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         let node = self.server.node();
         block_on(async { node.lock().await.open_exclusive(tx_id).await })?;
-        Ok(CoreExclusiveTx {
+        Ok(CoreSerializableTx {
             core: self,
             tx_id,
             has_reads: Cell::new(false),
@@ -144,13 +144,13 @@ impl CoreDb {
     }
 }
 
-struct CoreExclusiveTx<'a> {
+struct CoreSerializableTx<'a> {
     core: &'a CoreDb,
     tx_id: OpenTransactionId,
     has_reads: Cell<bool>,
 }
 
-impl CoreExclusiveTx<'_> {
+impl CoreSerializableTx<'_> {
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.has_reads.set(true);
         let node = self.core.server.node();
