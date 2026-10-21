@@ -63,6 +63,8 @@ export type NativeForegroundRuntimeFactory = {
  * contract onto these commands.
  */
 export type NativeForegroundRuntime = {
+  /** Additive capability; absent on native builds predating snapshot capture. */
+  readonly supportsSnapshotCapture?: boolean;
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
   /** Native typed liveness; unexpected native failures still throw. */
@@ -101,6 +103,7 @@ export type NativeForegroundCommand =
       transaction?: number;
     }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "captureSnapshot" }
   | {
       type: "subscribe";
       query: Uint8Array;
@@ -307,6 +310,9 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
       if (!(capability instanceof Uint8Array) || capability.byteLength !== 32) {
         throw new Error("Jazz native foreground runtime requires a 32-byte admitted capability");
       }
+      // A relay store written in a storage format this build does not read
+      // is thrown unchanged as an Error with `code` "unsupported_storage_codecs",
+      // the stable code every platform uses for that refusal.
       const foreground = installed.openAttached(capability) as Partial<NativeForegroundRuntime>;
       if (
         !foreground ||
@@ -326,6 +332,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
             }
           : undefined;
       return {
+        supportsSnapshotCapture: foreground.supportsSnapshotCapture === true,
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {
@@ -366,6 +373,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeConnectionStatus") return Uint8Array.of(21);
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
+  if (command.type === "captureSnapshot") return Uint8Array.of(34);
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }

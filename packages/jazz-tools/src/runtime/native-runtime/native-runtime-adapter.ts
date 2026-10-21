@@ -1,8 +1,10 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
+import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { formatUuidAt } from "../hex.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
+import { writeRow } from "../write-row.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
 import type {
   ColumnDescriptor,
@@ -74,6 +76,7 @@ import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import { nativeCoreErrorCode } from "./native-error-code.js";
+import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -237,6 +240,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -619,6 +623,13 @@ type NativeRowFieldPlan = {
 const textDecoder = new Utf8Decoder({ fatal: true });
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
+/**
+ * Open a persistent native store. A store written in a storage format this
+ * build does not read is refused by the binding with code
+ * `unsupported_storage_codecs`; it is rethrown as an
+ * `UnsupportedStorageCodecsError` so callers can match the class as well as
+ * the code.
+ */
 function openPersistentDb(
   Runtime: NativeDbConstructor,
   dataPath: string,
@@ -626,6 +637,28 @@ function openPersistentDb(
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   backendMode = false,
+): NativeDb {
+  try {
+    return openPersistentNativeDb(
+      Runtime,
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof,
+      backendMode,
+    );
+  } catch (error) {
+    throw asUnsupportedStorageCodecsError(error);
+  }
+}
+
+function openPersistentNativeDb(
+  Runtime: NativeDbConstructor,
+  dataPath: string,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof: NativeSelfSignedClientProof | undefined,
+  backendMode: boolean,
 ): NativeDb {
   if (selfSignedClientProof && backendMode) {
     throw new Error("A native runtime cannot be both self-signed and backend-scoped");
@@ -721,6 +754,18 @@ export class NativeRuntimeAdapter implements Runtime {
   // publication boundary FIFO; ordinary writes and source reads stay parallel.
   private streamingFinalization: Promise<void> = Promise.resolve();
   private readonly ownerRuntime: NativeRuntimeAdapter;
+  get preparationOwner(): object {
+    return this.ownerRuntime;
+  }
+
+  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
+    if (this.closed || this.ownerRuntime.closed) return false;
+    const context = this.nativeReadContext(
+      readSession(sessionJson),
+      transaction ? this.pendingTxs.get(transaction) : undefined,
+    );
+    return context.kind !== "session-authority";
+  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
@@ -1942,6 +1987,18 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  captureSnapshot(): Promise<SnapshotRef> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.captureSnapshot();
+    if (this.closed)
+      return Promise.reject(new Error("Cannot capture a snapshot: native runtime is closed"));
+    if (!this.db.captureSnapshot) return Promise.reject(new UnsupportedSnapshotError());
+    const captured = this.db.captureSnapshot();
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(captured).then((bytes) =>
+      parseSnapshotRef(textDecoder.decode(bytes)),
+    );
+  }
+
   beginTransaction(
     kind: TransactionKind,
     id: OpenTransactionId,
@@ -2752,23 +2809,7 @@ export class NativeRuntimeAdapter implements Runtime {
     rowId: Uint8Array,
     values: Record<string, Value>,
   ): RowState {
-    const visibleColumns = this.table(table).columns.filter(
-      (column) => !isHiddenIncludeColumn(column.name),
-    );
-    const valuesByColumn = new Map<string, Value>();
-    for (const column of visibleColumns) {
-      valuesByColumn.set(column.name, values[column.name] ?? column.default ?? { type: "Null" });
-    }
-    return withValuesByColumn(
-      {
-        table,
-        id: formatUuid(rowId),
-        values: visibleColumns
-          .filter((column) => !isProvenanceMagicColumn(column.name))
-          .map((column) => valuesByColumn.get(column.name)!),
-      },
-      valuesByColumn,
-    );
+    return writeRow(table, formatUuid(rowId), this.table(table).columns, values);
   }
 
   private async readPlainRows(

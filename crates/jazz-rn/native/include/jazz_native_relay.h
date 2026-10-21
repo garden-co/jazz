@@ -17,6 +17,9 @@ extern "C" {
  */
 uint16_t jazz_native_relay_abi_version(void);
 
+/* Optional foreground capture support; existing ABI 2 commands are unchanged. */
+bool jazz_native_relay_supports_snapshot_capture(void);
+
 typedef struct jazz_native_relay_bytes {
   uint8_t *data;
   size_t len;
@@ -34,6 +37,9 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
   JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
   JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT = 9,
+  /* The local store was written in a storage format this build does not read.
+   * Wrappers surface it with the stable code "unsupported_storage_codecs". */
+  JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS = 10,
 } jazz_native_relay_status;
 
 /* Stateless account crypto. No database or network is opened. Secret output

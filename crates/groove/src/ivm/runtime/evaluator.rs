@@ -104,6 +104,26 @@ pub(super) enum OperatorState {
     Lookup(AsOf<LookupState, SubTick>),
 }
 
+/// Memory held by grouped operator state (arg-max/min, top-by, collect).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct OperatorStateFootprint {
+    pub(super) groups: usize,
+    pub(super) rows: usize,
+    pub(super) encoded_bytes: usize,
+}
+
+impl OperatorState {
+    /// The grouped state's footprint, if this operator keeps grouped state.
+    pub(super) fn grouped_footprint(&self) -> Option<OperatorStateFootprint> {
+        match self {
+            Self::ArgBy(groups) => Some(groups.value().footprint()),
+            Self::TopBy(state) => Some(state.value().groups.footprint()),
+            Self::CollectBy(state) => Some(state.groups.footprint()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct StreamingChecksumOperatorState {
     pending: Option<PendingStreamingChecksum>,
@@ -436,6 +456,29 @@ impl SparseGroups {
     pub(super) fn clear(&mut self) {
         self.base = Rc::default();
         self.overlay = Rc::default();
+    }
+
+    /// Groups, positive rows and their encoded bytes: group keys, sort
+    /// values and row bytes, rows measured like
+    /// `ArrangementState::encoded_bytes`.
+    pub(super) fn footprint(&self) -> OperatorStateFootprint {
+        let mut footprint = OperatorStateFootprint::default();
+        for key in self.present_keys() {
+            let Some(group) = self.get(key) else {
+                continue;
+            };
+            footprint.groups += 1;
+            footprint.encoded_bytes += key.len();
+            for ((sort, row), weight) in group.iter() {
+                if *weight > 0 {
+                    footprint.rows += 1;
+                    footprint.encoded_bytes += row.len();
+                    footprint.encoded_bytes +=
+                        sort.iter().map(TopBySortPart::encoded_len).sum::<usize>();
+                }
+            }
+        }
+        footprint
     }
 
     /// Present group keys in ascending order: untouched base keys merged
@@ -1246,14 +1289,16 @@ impl TickEvaluator<'_> {
                 input,
                 batch.projection.as_deref(),
                 false,
+                Some(self.dictionaries),
             ),
             OpType::Filter(filter) => {
                 let mut deltas = Vec::new();
                 let result = input.iter().try_for_each(|delta| {
-                    if filter
-                        .predicate
-                        .matches(delta.borrowed(&batch.input.descriptor), filter.comparison)?
-                    {
+                    if filter.predicate.matches(
+                        delta.borrowed(&batch.input.descriptor),
+                        filter.comparison,
+                        self.dictionaries,
+                    )? {
                         deltas.push(delta.clone());
                     }
                     Ok::<_, IvmRuntimeError>(())
@@ -1446,7 +1491,13 @@ impl TickEvaluator<'_> {
             if !identity.projected {
                 return encoded_identity_key_part(descriptor, record, &windows.identity);
             }
-            match project_window_record(graph, &identity.chain, descriptor, record)? {
+            match project_window_record(
+                graph,
+                &identity.chain,
+                descriptor,
+                record,
+                self.dictionaries,
+            )? {
                 Some((output, projected)) => {
                     encoded_identity_key_part(output, &projected, &identity.fields)
                 }
@@ -1512,6 +1563,7 @@ impl TickEvaluator<'_> {
                     &identity.chain,
                     descriptor,
                     &entry.0,
+                    self.dictionaries,
                 )? {
                     WindowReach::Yes => true,
                     WindowReach::No => false,
@@ -1901,7 +1953,14 @@ impl TickEvaluator<'_> {
                 scope: self.context.scope,
                 input: node,
             };
-            !self.arrangement_states.contains_key(&key)
+            // A stored arrangement may not hold every bucket, so a rebuild
+            // that scans all of them must rebuild it too. One probed by
+            // another input's keys is read from storage instead.
+            self.arrangement_states.get(&key).is_none_or(|state| {
+                self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
+                    && state.value().probe_plan().is_some()
+                    && self.stored_arrangement_is_scanned(node)
+            })
         } else if matches!(
             self.graph.node(node).map(|node| &node.descriptor.operator),
             Some(OpType::Lookup(_))
@@ -2050,7 +2109,7 @@ impl TickEvaluator<'_> {
         result
     }
 
-    fn compute_filter(
+    pub(super) fn compute_filter(
         &mut self,
         node: NodeId,
         filter: &FilterOp,
@@ -2073,7 +2132,11 @@ impl TickEvaluator<'_> {
                 inputs.set_chunk_scope(None);
                 let matches = match result? {
                     Some(matches) => matches,
-                    None => filter.predicate.matches(record, filter.comparison)?,
+                    None => {
+                        filter
+                            .predicate
+                            .matches(record, filter.comparison, self.dictionaries)?
+                    }
                 };
                 if matches {
                     deltas.push(delta.clone());
@@ -2088,7 +2151,7 @@ impl TickEvaluator<'_> {
             filter.predicate.referenced_fields(&mut referenced);
             let materialized = self.materialize_indirect_fields(input, &referenced)?;
             if Arc::ptr_eq(&materialized, input) {
-                return NodeState::update_filter(filter, output_desc, input);
+                return NodeState::update_filter(filter, output_desc, input, self.dictionaries);
             }
             // Materialization only serves the predicate. Emit the rows as they
             // arrived, so downstream keys (TopBy root identity, #3309) see the
@@ -2096,10 +2159,11 @@ impl TickEvaluator<'_> {
             // values for every output anyway.
             let mut deltas = Vec::new();
             for (delta, loaded) in input.deltas.iter().zip(&materialized.deltas) {
-                if filter
-                    .predicate
-                    .matches(loaded.borrowed(&materialized.descriptor), filter.comparison)?
-                {
+                if filter.predicate.matches(
+                    loaded.borrowed(&materialized.descriptor),
+                    filter.comparison,
+                    self.dictionaries,
+                )? {
                     deltas.push(delta.clone());
                 }
             }
@@ -2110,7 +2174,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn compute_projection(
+    pub(super) fn compute_projection(
         &mut self,
         node: NodeId,
         project: &MapProjectOp,
@@ -2127,6 +2191,7 @@ impl TickEvaluator<'_> {
             input,
             raw_projection.as_deref(),
             false,
+            Some(self.dictionaries),
         );
         #[cfg(feature = "cold-settle-attribution")]
         if let Ok(output) = &result {
@@ -2220,6 +2285,12 @@ impl TickEvaluator<'_> {
                     let mut inputs = smallvec::SmallVec::<[Arc<RecordDeltas>; 2]>::new();
                     for input in &graph_node.descriptor.inputs {
                         inputs.push(self.update_node(*input).await?);
+                    }
+                    // Without a session, a kernel cannot load stored buckets.
+                    // Boxed: this driver recurses, and an inline storage scan
+                    // would grow every frame of it.
+                    if self.evaluation_inputs.is_none() {
+                        Box::pin(self.prefetch_stored_inputs(node)).await?;
                     }
                     self.compute_batch(node, &inputs)
                 }
@@ -3125,6 +3196,11 @@ impl TickEvaluator<'_> {
                 }
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -3259,6 +3335,11 @@ impl TickEvaluator<'_> {
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
+        // The copy, not the shared state, saw this kernel's reads.
+        arrangement.value().check_probed_reads()?;
+        if let Some(state) = self.arrangement_states.get(&arrangement_key) {
+            state.value().absorb_reads(arrangement.value());
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -3283,7 +3364,7 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn arrangement_key(
+    pub(super) fn arrangement_key(
         &mut self,
         input: NodeId,
         descriptor: RecordDescriptor,
@@ -3309,7 +3390,11 @@ impl TickEvaluator<'_> {
         })
     }
 
-    fn join_field_names(&mut self, node: NodeId, join: &JoinOp) -> (Arc<[String]>, Arc<[String]>) {
+    pub(super) fn join_field_names(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+    ) -> (Arc<[String]>, Arc<[String]>) {
         let meta = self.node_meta.entry(node).or_default();
         let left = meta
             .join_left_fields
@@ -3387,7 +3472,7 @@ impl TickEvaluator<'_> {
         );
     }
 
-    fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
+    pub(super) fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
         SubTick {
             tick: self.current_tick,
             // Root-scope arrangements represent table time, not recursive
@@ -3827,7 +3912,7 @@ impl TickEvaluator<'_> {
         }
     }
 
-    fn materialize_indirect_fields(
+    pub(super) fn materialize_indirect_fields(
         &mut self,
         input: &Arc<RecordDeltas>,
         fields: &BTreeSet<String>,

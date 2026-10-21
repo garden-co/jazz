@@ -6,6 +6,13 @@ export {
   JazzReactNativeProvider,
 } from "../classic-api.js";
 export { createDb, Db, type DbConfig } from "./create-db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "../runtime/snapshot-ref.js";
 export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
@@ -34,6 +41,10 @@ export {
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   REACT_NATIVE_UNSUPPORTED_ERROR,
 } from "./errors.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "../runtime/unsupported-storage-codecs-error.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
 

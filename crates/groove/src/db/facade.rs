@@ -605,6 +605,9 @@ impl Database {
         runtime.set_plain_output_root_positions_enabled(
             self.ivm_runtime.plain_output_root_positions_enabled(),
         );
+        // A rebuild keeps how this database reads stored tables.
+        runtime.set_stored_arrangements_enabled(self.ivm_runtime.stored_arrangements_enabled());
+        runtime.set_cache_memory_budget(self.ivm_runtime.own_cache_memory_budget());
         assert!(self.resident_publications.is_empty());
         assert!(!self.ivm_runtime.has_pending_storage_writes());
         let replacement = Self::from_runtime_storage(
@@ -656,6 +659,19 @@ impl Database {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Read arrangements of stored tables by primary key from storage instead
+    /// of holding them, for arrangements compiled from now on. On by default.
+    pub fn set_stored_arrangements_enabled(&mut self, enabled: bool) {
+        self.ivm_runtime.set_stored_arrangements_enabled(enabled);
+    }
+
+    /// Bound the memory the buckets of stored arrangements keep resident;
+    /// `None` (the default) is unbounded. See
+    /// `IvmRuntime::set_cache_memory_budget`.
+    pub fn set_cache_memory_budget(&mut self, budget: Option<usize>) {
+        self.ivm_runtime.set_cache_memory_budget(budget);
     }
 
     /// Enable or disable generic root positions (insert indices and moves in
@@ -2078,6 +2094,11 @@ impl Database {
     /// Compute full runtime stats on demand.
     pub fn runtime_stats(&self) -> RuntimeStats {
         self.ivm_runtime.stats()
+    }
+
+    /// Live subscriptions, without the state walk of `runtime_stats()`.
+    pub fn active_subscription_count(&self) -> usize {
+        self.ivm_runtime.active_subscription_count()
     }
 
     /// Lifetime topology-cache counters, independent of transactional state.

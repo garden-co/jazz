@@ -66,7 +66,7 @@ impl NodeState {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
-            StorageLayout::jazz_class_v2(),
+            StorageLayout::jazz_class_v3(),
         )
         .await?;
         let requested_key = [
@@ -238,7 +238,7 @@ impl NodeState {
         // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
@@ -462,7 +462,7 @@ impl NodeState {
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut genesis = None;
         let mut active = None;
@@ -681,11 +681,15 @@ impl NodeState {
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let registration_ranks = catalogue_ranks(
+            active_lineages_by_target.values().chain(staged_lineages.values()),
+        );
         let mut database = Self::open_full_database(
             &schema,
             &registration_schemas,
             &registration_aliases,
             &registration_mappings,
+            &registration_ranks,
             storage,
         )
         .await?;
@@ -834,6 +838,7 @@ impl NodeState {
                 pending_foreign_transactions: BTreeSet::new(),
             },
             rejections: RejectionTracking::default(),
+            authors: author_codes::AuthorCodes::new(database.dictionaries()),
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,
@@ -941,6 +946,7 @@ impl NodeState {
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
@@ -949,9 +955,10 @@ impl NodeState {
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
+            catalogue_ranks,
         )?;
         lowered.tables.extend(current_tables);
-        let layout = StorageLayout::jazz_class_v2();
+        let layout = StorageLayout::jazz_class_v3();
         let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
         // Jazz publishes plain ordered results from membership and version
         // deltas and never reads their generic root positions; only root
@@ -1070,9 +1077,7 @@ where
         *revision = revision
             .checked_add(1)
             .expect("session claim revision overflow must stop authorization delivery");
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_policy_authorization();
     }
 
     /// Scope one node-locked operation to this subscriber's admitted claims.
@@ -1854,6 +1859,7 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
+            &self.catalogue_ranks(),
         )?);
         self.database.rebuild(lowered)?;
         self.database.set_missing_chunk_resolver(self.chunk_resolver.clone());
@@ -1875,13 +1881,8 @@ where
     /// does not restart this node. Keep recovered durable facts intact while
     /// dropping handles and plans that were compiled against the old registry.
     fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
@@ -1941,7 +1942,7 @@ where
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v3())
                 .await?;
         let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();

@@ -2365,7 +2365,12 @@ where
                         Some(unit) => unit,
                         None => match node.commit_unit_for(tx_id).await {
                             Ok(unit) => unit,
-                            Err(crate::node::Error::MissingTransaction(_)) => {
+                            // A settled transaction has nothing left to
+                            // replay; like a missing one it blocks its closure.
+                            Err(
+                                crate::node::Error::MissingTransaction(_)
+                                | crate::node::Error::TransactionVersionsReleased(_),
+                            ) => {
                                 statuses.insert(tx_id, LocalReplayStatus::Blocked);
                                 continue;
                             }
@@ -3403,7 +3408,7 @@ impl ReadOpts {
     }
 }
 
-pub use crate::node::api_error::{Error, ErrorCode};
+pub use crate::node::api_error::{Error, ErrorCode, StorageCodecMismatch};
 
 fn transaction_abandoned(open_tx_id: OpenTransactionId) -> Error {
     Error::new(

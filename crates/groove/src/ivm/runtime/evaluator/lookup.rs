@@ -110,7 +110,6 @@ impl TickEvaluator<'_> {
     ) -> Result<ProbedRows, IvmRuntimeError> {
         let schema = self.schema;
         let variant_projections = self.variant_projections;
-        let dictionaries = self.dictionaries;
         let inputs =
             self.evaluation_inputs
                 .as_deref_mut()
@@ -150,7 +149,6 @@ impl TickEvaluator<'_> {
             let stored = inputs.rows(request(key))?;
             let grouped = NodeState::group_source_rows(
                 table,
-                dictionaries,
                 stored
                     .iter()
                     .map(|(key, row)| (key.as_slice(), row.as_slice())),

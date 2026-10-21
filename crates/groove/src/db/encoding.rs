@@ -234,38 +234,45 @@ pub(super) fn validate_raw_primary_key(
 }
 
 impl Database {
-    /// The logical descriptor and transcoder of one stored table variant,
+    /// The descriptor and key-free layout of one stored table variant,
     /// cached per database schema generation.
-    pub(super) fn stored_record_codec(
+    pub(super) fn stored_row_layout(
         &self,
         table: &TableSchema,
         variant_tag: u32,
-    ) -> Result<StoredRecordCodec, Error> {
-        if let Some(codec) = self
+    ) -> Result<StoredRowLayout, Error> {
+        if let Some(layout) = self
             .stored_record_descriptors
             .borrow()
             .get(&table.name)
             .and_then(|variants| variants.get(&variant_tag))
         {
-            return Ok(codec.clone());
+            return Ok(layout.clone());
         }
-        let (logical, transcoder) = stored_record_layout(table, variant_tag)?;
-        let codec = StoredRecordCodec {
-            logical,
-            transcoder: transcoder.map(Rc::new),
+        let descriptor = table
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| Error::UnknownTableVariant {
+                table: table.name.clone(),
+                version: u64::from(variant_tag),
+            })?;
+        let key_free = key_free_layout(table, variant_tag, descriptor)?.map(Rc::new);
+        let layout = StoredRowLayout {
+            descriptor,
+            key_free,
         };
         self.stored_record_descriptors
             .borrow_mut()
             .entry(table.name.clone())
             .or_default()
-            .insert(variant_tag, codec.clone());
-        Ok(codec)
+            .insert(variant_tag, layout.clone());
+        Ok(layout)
     }
 
-    /// Bind one stored row as its logical record. Every point, scan and index
-    /// read of table rows comes through here, so interned columns are
-    /// resolved to their values, and primary-key columns restored from the
-    /// row's key, before any caller sees the record.
+    /// Bind one stored row as its record. Every point, scan and index read
+    /// of table rows comes through here. Stored bytes leave out a keyed
+    /// table's primary-key columns; they are put back from the row's key.
+    /// Interned columns keep their codes; a caller resolves them with
+    /// [`Database::dictionaries`].
     pub(super) fn decode_stored_key_value<'a>(
         &self,
         table: &TableSchema,
@@ -273,42 +280,30 @@ impl Database {
         stored: Vec<u8>,
     ) -> Result<EncodedKeyValue<'a>, Error> {
         let (variant_tag, payload) = split_variant_record(&stored)?;
-        let codec = self.stored_record_codec(table, variant_tag)?;
-        let payload = match &codec.transcoder {
-            Some(transcoder) => crate::dictionary::transcode_to_logical(
-                transcoder,
-                &self.ivm_runtime.dictionaries().borrow(),
-                &decode_primary_key_values(table, &key)?,
-                payload,
-            )?,
+        let layout = self.stored_row_layout(table, variant_tag)?;
+        let record = match &layout.key_free {
+            Some(key_free) => {
+                key_free.to_full(payload, &decode_primary_key_values(table, &key)?)?
+            }
             None => payload.to_vec(),
         };
         Ok(EncodedKeyValue::from_variant(
             key,
-            VariantRecord::new(variant_tag, OwnedRecord::new(payload, codec.logical)),
+            VariantRecord::new(variant_tag, OwnedRecord::new(record, layout.descriptor)),
         ))
     }
 }
 
-/// The logical descriptor and stored-row transcoder of one table variant
-/// (see [`TableSchema::stored_record_layout`]), with Groove's errors for an
-/// unknown variant or one that lacks a primary-key column.
-pub(crate) fn stored_record_layout(
+/// The key-free layout of one table variant whose record descriptor is
+/// `descriptor` (see [`TableSchema::key_free_layout`]), with Groove's error
+/// for a variant that lacks a primary-key column.
+pub(crate) fn key_free_layout(
     table: &TableSchema,
     variant_tag: u32,
-) -> Result<(RecordDescriptor, Option<records::RecordTranscoder>), Error> {
-    match table.stored_record_layout(variant_tag) {
-        Some(layout) => Ok(layout?),
-        None if table
-            .physical_record_schema_for_variant(variant_tag)
-            .is_none() =>
-        {
-            Err(Error::UnknownTableVariant {
-                table: table.name.clone(),
-                version: u64::from(variant_tag),
-            })
-        }
-        None => Err(Error::SchemaVersionMissingPrimaryKey {
+    descriptor: RecordDescriptor,
+) -> Result<Option<records::KeyFreeLayout>, Error> {
+    let Some(key_fields) = table.primary_key_fields_for_variant(variant_tag) else {
+        return Err(Error::SchemaVersionMissingPrimaryKey {
             table: table.name.clone(),
             version: u64::from(variant_tag),
             column: table
@@ -323,8 +318,9 @@ pub(crate) fn stored_record_layout(
                 })
                 .map(|column| column.column.clone())
                 .unwrap_or_default(),
-        }),
-    }
+        });
+    };
+    Ok(records::KeyFreeLayout::new(descriptor, &key_fields)?)
 }
 
 /// Decode a row's encoded primary key into its parts, in key order. Stored
@@ -970,20 +966,15 @@ pub(super) fn encode_index_prefix_part(
     }
 }
 
-/// The storage key and stored bytes of one row of a table without interned
-/// columns, as a write of `values` (declaration order, variant 0) leaves them.
+/// The storage key and stored bytes of one row, as a write of `values`
+/// (declaration order, variant 0) leaves them.
 #[cfg(test)]
 pub(crate) fn stored_table_row(table: &TableSchema, values: &[Value]) -> (Vec<u8>, Vec<u8>) {
     let descriptor = table.record_schema();
     let record = descriptor.create(values).expect("values match the table");
     let key = primary_key_bytes(table, 0, descriptor, &record).expect("the table has a key");
-    let (_, transcoder) = stored_record_layout(table, 0).expect("variant 0 is laid out");
-    let stored = match transcoder {
-        Some(transcoder) => transcoder
-            .to_physical::<records::Error>(&record, |dictionary, _, _| {
-                panic!("stored_table_row cannot intern into {dictionary}")
-            })
-            .expect("the record transcodes"),
+    let stored = match key_free_layout(table, 0, descriptor).expect("variant 0 is laid out") {
+        Some(layout) => layout.to_stored(&record).expect("the record lays out"),
         None => record,
     };
     (key, records::encode_variant_record(0, &stored))

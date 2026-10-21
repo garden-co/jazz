@@ -54,6 +54,13 @@ impl Database {
         self.last_tick_metrics.as_ref()
     }
 
+    /// A handle on this database's dictionaries: resolve the codes that
+    /// interned columns carry, and intern values before writing them. It
+    /// shares the database's registry, across schema rebuilds too.
+    pub fn dictionaries(&self) -> crate::dictionary::Dictionaries {
+        crate::dictionary::Dictionaries::new(std::rc::Rc::clone(self.ivm_runtime.dictionaries()))
+    }
+
     pub fn storage_read_metrics(&self) -> StorageReadMetrics {
         *self.storage_read_metrics.borrow()
     }
@@ -862,10 +869,11 @@ impl Database {
         }
     }
 
-    /// A set write of a logical record. A table with a primary key or
-    /// interned columns also gets its stored payload: without the key fields,
-    /// which the storage key holds, and with dictionary codes in place of
-    /// values; a new value allocates its code here, synchronously.
+    /// A set write of a record. A keyed table stores the record without its
+    /// primary-key fields, which the storage key holds. A table with interned
+    /// columns stores the codes its record carries, so every code must
+    /// already name an entry of its dictionary (see
+    /// [`crate::dictionary::Dictionaries::intern`]).
     fn pending_set(
         &self,
         mode: WriteMode,
@@ -875,17 +883,21 @@ impl Database {
         descriptor: RecordDescriptor,
         record: Vec<u8>,
     ) -> Result<PendingTableWrite, Error> {
+        if descriptor.contains_interned() {
+            let dictionaries = self.ivm_runtime.dictionaries().borrow();
+            descriptor.visit_interned_codes(&record, |dictionary, code| {
+                dictionaries
+                    .check_code(dictionary, code)
+                    .map_err(Error::from)
+            })?;
+        }
         let stored = match self
-            .stored_record_codec(self.table(&table)?, variant_tag)?
-            .transcoder
+            .stored_row_layout(self.table(&table)?, variant_tag)?
+            .key_free
         {
-            Some(transcoder) => {
-                debug_assert_eq!(transcoder.logical(), descriptor);
-                Some(crate::dictionary::transcode_to_physical(
-                    &transcoder,
-                    &mut self.ivm_runtime.dictionaries().borrow_mut(),
-                    &record,
-                )?)
+            Some(key_free) => {
+                debug_assert_eq!(key_free.full(), descriptor);
+                Some(key_free.to_stored(&record)?)
             }
             None => None,
         };

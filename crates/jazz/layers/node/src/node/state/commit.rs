@@ -320,6 +320,7 @@ where
             }
         }
         stage_transaction_record(
+            &self.authors,
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,
@@ -367,10 +368,11 @@ where
                 }
                 None => None,
             };
+            let made_by = self.authors.code(commit.made_by)?;
             let (created_by, created_at) = previous_current
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, provenance_at));
+                .unwrap_or((made_by, provenance_at));
             // The image this write is made over (SPEC 4 §4.6, "Base of a
             // write"): the settled image's seq, and this node's own newest
             // pending write to the row, also when a foreign pending write
@@ -434,10 +436,10 @@ where
                 let projected = if previous_schema == write_schema_version {
                     Some(table_schema.name.clone())
                 } else {
-                    self.translate_cells(
+                    self.translate_version_cells(
                         previous_schema,
                         write_schema_version,
-                        previous.table(),
+                        previous,
                         &mut inherited,
                     )?
                 };
@@ -483,7 +485,7 @@ where
                         tx_time: made_at,
                         created_by,
                         created_at,
-                        updated_by: commit.made_by,
+                        updated_by: made_by,
                         updated_at: provenance_at,
                         cells,
                         authored_columns: authored_column_ids.clone(),
@@ -840,7 +842,7 @@ where
         let authored_table = self.table_in_schema_ref(content.table(), authored_schema)?;
         let mut cells = self.materialized_cells_for_version(authored_table, &content)?;
         let Some(projected_table) =
-            self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
+            self.translate_version_cells(authored_schema, schema_version, &content, &mut cells)?
         else {
             return Ok(None);
         };
@@ -1076,6 +1078,26 @@ where
             );
     }
 
+    /// Stage a transaction's records ([`stage_transaction_record`]). When the
+    /// status settles the transaction, the next applied node batch checks
+    /// whether its touched-rows list can be released.
+    pub(in crate::node) fn stage_tx_record(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        write: TransactionRecordWrite,
+        node_alias: NodeAlias,
+        tx: &Transaction,
+        status: &TransactionRecordStatus,
+    ) -> Result<(), Error> {
+        stage_transaction_record(&self.authors, batch, write, node_alias, tx, status)?;
+        if status.releases_touched_rows(tx.kind) {
+            self.tx_touched_dirty
+                .entry((tx.tx_id.time, node_alias))
+                .or_default();
+        }
+        Ok(())
+    }
+
     /// Apply a batch this node built. Every node batch is applied here, and
     /// each one first adds the rows marked since the previous apply to their
     /// transactions' `jazz_tx_touched_rows` lists, so a history row is listed
@@ -1084,7 +1106,8 @@ where
     /// was still being built) or, if that batch is dropped, by a later one:
     /// the list is a superset, and a listed row that was never written is
     /// skipped on read. Nothing is lost because this flush is the only
-    /// writer of the list and always extends what is stored.
+    /// writer of the list and always extends what is stored, until the
+    /// transaction settles and the flush releases the list.
     pub(in crate::node) async fn apply_node_batch(
         &mut self,
         mut batch: DatabaseBatch,
@@ -1099,7 +1122,7 @@ where
         batch: Option<&DatabaseBatch>,
         tx_time: TxTime,
         node_alias: NodeAlias,
-    ) -> Result<TouchedRows, Error> {
+    ) -> Result<Option<TouchedRows>, Error> {
         let key = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
         let raw = match batch {
             Some(batch) => {
@@ -1113,16 +1136,21 @@ where
                     .await?
             }
         };
-        match raw {
-            Some(raw) => TouchedRows::from_list_record(raw.record()),
-            None => Ok(TouchedRows::default()),
-        }
+        raw.map(|raw| TouchedRows::from_list_record(raw.record()))
+            .transpose()
     }
 
     /// Extend each marked transaction's list (as staged in this batch) with
     /// the rows marked since the last flush. The list does not depend on the
     /// transaction record, which may be written by this batch, a later one,
     /// or not yet at all.
+    ///
+    /// A transaction whose record (as staged in this batch) is settled
+    /// ([`releases_touched_rows`]) and whose rows are all on the default
+    /// branch has its list deleted instead: every later reader knows the row
+    /// it wants and reads it exactly. Marks after the release come from a
+    /// re-ingest of the complete payload, which marks every row again, so the
+    /// check always sees the whole row set.
     async fn flush_tx_touched_rows(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1132,12 +1160,33 @@ where
         }
         let dirty = std::mem::take(&mut self.tx_touched_dirty);
         for ((tx_time, node_alias), rows) in dirty {
+            let key = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
             let stored = self
                 .load_tx_touched_rows(Some(batch), tx_time, node_alias)
                 .await?;
-            let mut touched = stored.clone();
+            let mut touched = stored.clone().unwrap_or_default();
             touched.extend(&rows);
-            if touched == stored {
+            let settled = match self
+                .database
+                .primary_key_get_raw_in_batch(batch, "jazz_transactions", &key)
+                .await?
+            {
+                Some(raw) => transaction_record_releases_touched_rows(raw.record())?,
+                None => false,
+            };
+            if settled && touched.is_default_branch_only() {
+                if stored.is_some() {
+                    batch.delete(
+                        TX_TOUCHED_ROWS_TABLE,
+                        PrimaryKeyValue::Composite(vec![
+                            PrimaryKeyValue::U64(tx_time.0),
+                            PrimaryKeyValue::U64(node_alias.0),
+                        ]),
+                    );
+                }
+                continue;
+            }
+            if touched.is_empty() || stored.as_ref() == Some(&touched) {
                 continue;
             }
             batch.update(
@@ -1199,7 +1248,7 @@ where
         table: &TableSchema,
         version: &VersionRow,
     ) -> Result<CurrentRow, Error> {
-        current_row_from_version_projection(table, version)
+        current_row_from_version_projection(&self.authors, table, version)
     }
 
     fn materialized_cells_for_version(
@@ -1456,7 +1505,7 @@ where
             None => false,
         };
         let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
-        Ok(Some((decode_current_row(table, record)?, tx, deleted)))
+        Ok(Some((decode_current_row(&self.authors, table, record)?, tx, deleted)))
     }
 
     fn current_record_sort_key(

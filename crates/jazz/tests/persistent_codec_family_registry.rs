@@ -222,7 +222,7 @@ fn validate_registry_with_profiles(
         "jazz.tx-record.v2",
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
-        "groove.jazz-physical-class.v2",
+        "groove.jazz-physical-class.v3",
         "groove.durable-index.v2",
         "groove.dictionary.v1",
         // Linear row-state history retired `jazz.history-version-current.v1`,
@@ -257,7 +257,7 @@ fn registry_verifier_rejects_a_planted_known_profile_omission() {
     let mut registry = registry();
     registry
         .families
-        .retain(|family| family.id != "jazz.node-storage.v1");
+        .retain(|family| family.id != "jazz.node-storage.v2");
     let error = validate_registry(&registry).expect_err("a missing profile family must fail CI");
     assert!(
         error.contains("jazz-node-root profile registry drifted"),

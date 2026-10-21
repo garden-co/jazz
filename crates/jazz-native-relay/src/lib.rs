@@ -66,7 +66,8 @@ use thiserror::Error;
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure.
+/// refuse to open rather than misread a failure. Append-only commands use
+/// optional native capabilities while existing command layouts remain stable.
 pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
@@ -551,6 +552,8 @@ pub enum ForegroundDbCommandRequest {
     WaitForPendingWrites {
         tier: String,
     },
+    /// Capture the foreground's local frontier through its ordinary owner queue.
+    CaptureSnapshot,
 }
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
@@ -753,6 +756,10 @@ pub enum JazzNativeRelayStatus {
     IncompatibleAbi = 7,
     Backpressure = 8,
     RemotePlaintextEndpoint = 9,
+    /// The relay's SQLite root was written in a storage format this build
+    /// does not read. Opening it was refused before any record was read or
+    /// changed; the application deletes the store and resyncs from Core.
+    UnsupportedStorageCodecs = 10,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
@@ -2197,6 +2204,9 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
         RelayError::Db(error) if error.code == jazz::db::ErrorCode::Backpressure => {
             JazzNativeRelayStatus::Backpressure
         }
+        RelayError::Storage(jazz::groove::storage::Error::UnsupportedStorageCodecs { .. }) => {
+            JazzNativeRelayStatus::UnsupportedStorageCodecs
+        }
         _ => JazzNativeRelayStatus::LifecycleFailure,
     }
 }
@@ -2209,6 +2219,13 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
     NATIVE_RELAY_ABI_V1
+}
+
+/// Optional foreground capture support in the linked native artifact.
+/// Existing ABI 2 builds remain compatible without advertising this feature.
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
+    true
 }
 
 /// Run one C ABI body written with `?` and collapse it into its status code.
@@ -2913,6 +2930,11 @@ impl NativeRelayHost {
                     .map(foreground_operation_response)
                     .or_else(foreground_command_error)?
             }
+            Request::CaptureSnapshot => self
+                .foreground_client(foreground)?
+                .capture_snapshot()
+                .map(foreground_operation_response)
+                .or_else(foreground_command_error)?,
             Request::WaitForTransaction {
                 tx_id,
                 tier,
@@ -3449,6 +3471,12 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
+    }
+
+    fn capture_snapshot(&self) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.capture_foreground_snapshot(id))
     }
 
     fn wait_for_pending_writes(
@@ -6501,6 +6529,27 @@ impl RelayWorker {
         Ok(public_id)
     }
 
+    fn capture_foreground_snapshot(
+        &mut self,
+        client: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let captured = self
+            .foreground_client(client)?
+            .db
+            .enqueue_capture_snapshot();
+        self.drive.request(0);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let snapshot = captured
+                .await
+                .map_err(|_| RelayError::Closed)?
+                .map_err(RelayError::Db)?;
+            Ok(ForegroundOperationResult::Rows(
+                snapshot.to_persisted().into_bytes(),
+            ))
+        });
+        self.start_foreground_operation(client, None, future)
+    }
+
     fn wait_for_pending_writes(
         &mut self,
         client: u64,
@@ -7188,6 +7237,7 @@ pub enum RelayError {
 #[cfg(test)]
 mod tests {
     mod publication_codec;
+    mod snapshot_capture_codec;
 
     // This is intentionally an internal transport-ownership test: the public
     // user-visible behavior of rows/subscriptions belongs to the Db suites.
@@ -11725,10 +11775,10 @@ mod tests {
                             if liveness.is_alive() {
                                 Poll::Pending
                             } else {
-                                Poll::Ready(Err(jazz::db::Error {
-                                    code: jazz::db::ErrorCode::NotObserved,
-                                    message: "controlled terminal storage close failure".into(),
-                                }))
+                                Poll::Ready(Err(jazz::db::Error::new(
+                                    jazz::db::ErrorCode::NotObserved,
+                                    "controlled terminal storage close failure",
+                                )))
                             }
                         })));
                     // Enter the same final drain on this owner turn, so an
@@ -12090,10 +12140,10 @@ mod tests {
         relay
             .run(move |worker| {
                 worker.clients.get_mut(&id).unwrap().admission = Some(Box::pin(async {
-                    Err(jazz::db::Error {
-                        code: jazz::db::ErrorCode::Protocol,
-                        message: "admission was rejected".into(),
-                    })
+                    Err(jazz::db::Error::new(
+                        jazz::db::ErrorCode::Protocol,
+                        "admission was rejected",
+                    ))
                 }));
                 Ok(())
             })
@@ -14978,6 +15028,85 @@ mod tests {
                 "failed {label} admission must not leave a usable capability"
             );
         }
+    }
+
+    /// Opening a foreground over a relay root written in an older storage
+    /// format fails with the dedicated `UnsupportedStorageCodecs` C ABI
+    /// status, which the platform wrappers surface as the JavaScript code
+    /// `unsupported_storage_codecs`, rather than the generic lifecycle
+    /// failure. The root is left byte-for-byte unchanged and the refusal is
+    /// stable across attempts.
+    ///
+    /// Host-level rather than through JSI: the wrappers only translate this
+    /// status, and a Rust test cannot host a React Native runtime.
+    ///
+    /// ```text
+    /// alice's pre-index-v2 relay root ──admit_scope──► capability
+    ///   ──open_foreground──✗ JazzNativeRelayStatus::UnsupportedStorageCodecs (root unchanged)
+    /// ```
+    #[test]
+    fn foreground_open_over_an_old_storage_format_reports_unsupported_storage_codecs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("alice.sqlite");
+        let families = schema().column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        // A root from the build before the compact durable index and the
+        // consolidated node-storage profile: it lacks
+        // `groove.durable-index.v2` and `jazz.node-storage.v2`, which this
+        // build requires.
+        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs([
+                "jazz.branch-key.v1",
+                "jazz.catalogue.activation.v1",
+                "jazz.catalogue.bootstrap-ready.v1",
+                "jazz.catalogue.lens.v1",
+                "jazz.catalogue.lineage.v1",
+                "jazz.catalogue.physical-mapping.v1",
+                "jazz.catalogue.schema.v1",
+                "jazz.catalogue.write-pointer.v1",
+                "jazz.transaction-durability.v2",
+                "jazz.history-version-current.v4",
+                "jazz.transaction-record.v1",
+            ])
+            .expect("pre-index-v2 profile");
+        drop(
+            SqliteStorage::open_with_durability_and_codec_profile(
+                &path,
+                &refs,
+                SqliteDurability::FullSync,
+                &old_profile,
+            )
+            .expect("pre-index-v2 relay root"),
+        );
+        let before = std::fs::read(&path).unwrap();
+
+        let mut host = NativeRelayHost::default();
+        let admitted = host
+            .admit_scope(RelayScopeAdmissionRequest {
+                scope: RelayScopeRequest {
+                    app_namespace: "old-store".to_owned(),
+                    storage_namespace: "primary".to_owned(),
+                    auth_scope: Some("alice".to_owned()),
+                },
+                sqlite_path: path.display().to_string(),
+                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xa1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                },
+                claims: BTreeMap::new(),
+            })
+            .expect("admission does not open storage");
+
+        for attempt in ["first open", "second open"] {
+            assert_eq!(
+                host.open_foreground(admitted, DIRECT_FOREGROUND_RUNTIME_TOKEN),
+                Err(JazzNativeRelayStatus::UnsupportedStorageCodecs),
+                "{attempt}"
+            );
+        }
+        assert!(host.foregrounds.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before, "root is not mutated");
     }
 
     #[test]

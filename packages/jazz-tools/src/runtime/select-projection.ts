@@ -44,7 +44,8 @@ export function resolveSelectedColumns(
 
   // if no wildcard, return all explicitly selected columns
   if (!selection.hasWildcard) {
-    return [...selection.explicitColumnsInSchema, ...selection.explicitColumnsNotInSchema];
+    const columns = [...selection.explicitColumnsInSchema, ...selection.explicitColumnsNotInSchema];
+    return columns.length === 0 && projection.includes("id") ? ["id"] : columns;
   }
 
   if (selection.explicitColumnsNotInSchema.size === 0) {

@@ -15,6 +15,8 @@ use crate::tx::{
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
+use super::author_codes::{AuthorCode, AuthorCodes};
+
 groove::define_record! {
     pub(super) struct HistoryRowRecord {
         0 => branch_key: Vec<u8>,
@@ -22,9 +24,9 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => created_by: RowAuthor,
+        5 => created_by: AuthorCode,
         6 => created_at: TxTime,
-        7 => updated_by: RowAuthor,
+        7 => updated_by: AuthorCode,
         8 => updated_at: TxTime,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
@@ -38,9 +40,9 @@ groove::define_record! {
         2 => tx_time: TxTime,
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
-        5 => created_by: RowAuthor,
+        5 => created_by: AuthorCode,
         6 => created_at: u64,
-        7 => updated_by: RowAuthor,
+        7 => updated_by: AuthorCode,
         8 => updated_at: u64,
         9 => global_time: Option<GlobalTime>,
         10 => _deletion: Option<DeletionEvent>,
@@ -90,7 +92,7 @@ groove::define_record! {
         2 => kind: TxKind,
         3 => flags: u8,
         4 => n_total_writes: u32,
-        5 => made_by: RowAuthor,
+        5 => made_by: AuthorCode,
         6 => fate: FateTag,
         7 => global_time: Option<GlobalTime>,
         8 => durability: DurabilityTier,
@@ -186,10 +188,29 @@ const TX_TOUCHED_ROWS_LIST_IDX: usize = 2;
 /// per row plus about 20 bytes per `(table, branch)` group, and it is read
 /// only when the transaction's versions are listed, which reads every listed
 /// row anyway.
+///
+/// The list is released (deleted) once the transaction settles, when
+/// [`releases_touched_rows`] holds and every listed row is on the default
+/// branch. From then on the transaction's versions are read only by exact
+/// `(table, row, tx)` point reads from a caller that already knows the row;
+/// listing them fails with [`Error::TransactionVersionsReleased`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
 
 impl TouchedRows {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether every listed row is on the default branch, where an exact
+    /// point read needs only the table, row and transaction.
+    pub(super) fn is_default_branch_only(&self) -> bool {
+        let default_branch = BranchKey::default().canonical_bytes();
+        self.0
+            .keys()
+            .all(|(_, branch_key)| *branch_key == default_branch)
+    }
+
     pub(super) fn insert(&mut self, table: PhysicalTableId, branch_key: Vec<u8>, row: RowUuid) {
         self.0.entry((table, branch_key)).or_default().insert(row);
     }
@@ -1989,7 +2010,7 @@ groove::define_record! {
         0 => time: TxTime,
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
-        3 => made_by: RowAuthor,
+        3 => made_by: AuthorCode,
         4 => rejection_reason: groove::records::EnumValue,
         5 => user_metadata: Option<String>,
     }
@@ -2015,6 +2036,7 @@ pub(super) trait VersionRecordFromNode: Sized {
     ) -> Result<Self, Error>;
 
     fn from_stored(
+        authors: &AuthorCodes,
         stored: &VersionRow,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2050,6 +2072,7 @@ impl VersionRecordFromNode for VersionRecord {
     }
 
     fn from_stored(
+        authors: &AuthorCodes,
         stored: &VersionRow,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2061,10 +2084,10 @@ impl VersionRecordFromNode for VersionRecord {
             input.raw().len(),
             |index, output| {
                 // Both stored layouts share the provenance prefix. Timestamps
-                // are packed HLC values in storage and milliseconds on wire.
+                // are packed HLC values in storage and milliseconds on wire;
+                // authors are dictionary codes in storage and records on wire.
                 let source = match index {
                     0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
-                    1 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
                     5 => Some(HistoryRowRecord::FIELD__DELETION_IDX),
                     i if i >= WireRowRecord::USER_CELLS => {
                         Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
@@ -2077,8 +2100,9 @@ impl VersionRecordFromNode for VersionRecord {
                     return Ok(());
                 }
                 let value = match index {
+                    1 => resolved_author_value(authors, stored.created_by())?,
                     2 => Value::U64(stored.created_at().physical_ms()),
-                    3 => row_author_value(stored.updated_by())?,
+                    3 => resolved_author_value(authors, stored.updated_by())?,
                     4 => Value::U64(stored.updated_at().physical_ms()),
                     5 => Value::Nullable(stored.deletion().map(|deletion| {
                         Box::new(Value::EnumTag(match deletion {
@@ -2105,9 +2129,9 @@ impl VersionRecordFromNode for VersionRecord {
                 table,
                 schema_version,
                 stored.row_uuid(),
-                stored.created_by(),
+                authors.subject(stored.created_by())?,
                 stored.created_at().physical_ms(),
-                stored.updated_by(),
+                authors.subject(stored.updated_by())?,
                 stored.updated_at().physical_ms(),
                 &cells,
                 stored.deletion(),
@@ -2238,7 +2262,47 @@ pub(super) struct StoredTransaction {
     pub(super) is_partial: bool,
 }
 
+/// Whether a transaction with this status no longer needs its
+/// `jazz_tx_touched_rows` list: a complete mergeable transaction that is
+/// accepted at a seq. Nothing re-sequences, rejects or completes it any more,
+/// so nothing enumerates its versions. An exclusive transaction keeps its list
+/// for complete exclusive payloads, and a view-scoped one keeps it so later
+/// fragments can extend and settle the rows it already holds.
+pub(super) fn releases_touched_rows(
+    kind: TxKind,
+    fate: &Fate,
+    global_time: Option<GlobalTime>,
+    is_partial: bool,
+) -> bool {
+    kind == TxKind::Mergeable
+        && matches!(fate, Fate::Accepted)
+        && global_time.is_some()
+        && !is_partial
+}
+
+/// [`releases_touched_rows`] for a stored `jazz_transactions` record.
+pub(super) fn transaction_record_releases_touched_rows(
+    record: BorrowedRecord<'_>,
+) -> Result<bool, Error> {
+    let kind = tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
+    let is_partial = transaction_flags(record)? & TX_FLAG_VIEW_SCOPED_CARDINALITY != 0;
+    let global_time = record
+        .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+        .map(GlobalTime);
+    Ok(releases_touched_rows(
+        kind,
+        &fate_from_encoded_fields(record)?,
+        global_time,
+        is_partial,
+    ))
+}
+
 impl StoredTransaction {
+    /// See [`releases_touched_rows`].
+    pub(super) fn releases_touched_rows(&self) -> bool {
+        releases_touched_rows(self.tx.kind, &self.fate, self.global_time, self.is_partial)
+    }
+
     /// Merge incoming status without undoing an already known outcome,
     /// global time, or durability. Used for both transaction ingestion
     /// and standalone fate updates.
@@ -2290,9 +2354,9 @@ pub(super) struct VersionRowParts {
     pub(super) tx_node_alias: NodeAlias,
     pub(super) schema_version_alias: SchemaVersionAlias,
     pub(super) tx_time: TxTime,
-    pub(super) created_by: AuthorSubject,
+    pub(super) created_by: AuthorCode,
     pub(super) created_at: TxTime,
-    pub(super) updated_by: AuthorSubject,
+    pub(super) updated_by: AuthorCode,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
@@ -2440,6 +2504,7 @@ impl VersionRow {
     }
 
     pub(super) fn from_wire_with_schema_version(
+        authors: &AuthorCodes,
         table: &TableSchema,
         version: &VersionRecord,
         authored_columns: Option<BTreeSet<PhysicalColumnId>>,
@@ -2461,12 +2526,10 @@ impl VersionRow {
         let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
-        // Admission still requires an account-bearing row author, including the
-        // reserved SYSTEM identity. Preserve that check without rebuilding Values.
-        RowAuthor::from_persisted_subject(version.created_by())
-            .map_err(|_| Error::UnadmittedWriteAuthor)?;
-        RowAuthor::from_persisted_subject(version.updated_by())
-            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        // Admission requires an account-bearing row author, including the
+        // reserved SYSTEM identity; interning checks that.
+        let created_by = authors.code(version.created_by())?;
+        let updated_by = authors.code(version.updated_by())?;
         let created_at = TxTime::from_physical_ms(version.created_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0;
@@ -2507,9 +2570,9 @@ impl VersionRow {
                     2 => Value::U64(tx_time.0),
                     3 => Value::U64(tx_node_alias.0),
                     4 => Value::U64(schema_version_alias.0),
-                    5 => row_author_value(version.created_by())?,
+                    5 => Value::U32(created_by.0),
                     6 => Value::U64(created_at),
-                    7 => row_author_value(version.updated_by())?,
+                    7 => Value::U32(updated_by.0),
                     8 => Value::U64(updated_at),
                     9 => nullable_deletion_value(deletion),
                     i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
@@ -2545,6 +2608,7 @@ impl VersionRow {
             // Compare the optimized representation boundary with the previous
             // Value-based encoder across every ingress fixture in the unit suite.
             let values = history_values_from_wire(
+                authors,
                 table,
                 version,
                 authored_columns.clone(),
@@ -2606,16 +2670,14 @@ impl VersionRow {
         validate_canonical_version_parts(&self.branch_key)
     }
 
-    pub(super) fn created_by(&self) -> AuthorSubject {
+    pub(super) fn created_by(&self) -> AuthorCode {
         let idx = HistoryRowRecord::FIELD_CREATED_BY_IDX;
-        RowAuthor::from_record(
+        AuthorCode(
             self.record
                 .borrowed()
-                .get_record(idx)
+                .get_dictionary_code(idx)
                 .expect("valid created_by"),
         )
-        .expect("canonical created_by")
-        .as_author_subject()
     }
 
     pub(super) fn created_at(&self) -> TxTime {
@@ -2628,16 +2690,14 @@ impl VersionRow {
         )
     }
 
-    pub(super) fn updated_by(&self) -> AuthorSubject {
+    pub(super) fn updated_by(&self) -> AuthorCode {
         let idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        RowAuthor::from_record(
+        AuthorCode(
             self.record
                 .borrowed()
-                .get_record(idx)
+                .get_dictionary_code(idx)
                 .expect("valid updated_by"),
         )
-        .expect("canonical updated_by")
-        .as_author_subject()
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -2710,6 +2770,31 @@ impl VersionRow {
         value.map(authored_column_ids_from_value).transpose()
     }
 
+    /// The cells a union row carries beyond its schema's own columns
+    /// (SPEC 10 §10.3, "Union row cases"), by physical column, in their
+    /// physical spelling and nullable as stored. Empty for a row in its
+    /// schema's authored layout. They are the trailing fields after the
+    /// history layout's last field.
+    pub(super) fn union_extra_cells(&self) -> Result<Vec<(PhysicalColumnId, Value)>, Error> {
+        let descriptor = self.record.descriptor();
+        let Some(last) = descriptor.field_index(crate::schema::BASE_FIELD) else {
+            return Ok(Vec::new());
+        };
+        let borrowed = self.record.borrowed();
+        (last + 1..descriptor.fields().len())
+            .map(|index| {
+                let column = descriptor.fields()[index]
+                    .name
+                    .as_deref()
+                    .and_then(physical_column_id_for_user_field)
+                    .ok_or(Error::InvalidStoredValue(
+                        "union extra field is not a physical column",
+                    ))?;
+                Ok((column, borrowed.get_idx(index)?))
+            })
+            .collect()
+    }
+
     /// The sign bits of this patch's counter ops (`merge_ops::counter_signs`):
     /// empty on a settled image.
     pub(super) fn counter_signs(&self) -> Result<Vec<u8>, Error> {
@@ -2769,15 +2854,18 @@ impl VersionRow {
         self.with_merge_fields(seq, self.base()?)
     }
 
+    /// This version as a history entry leaving the node: its author codes
+    /// resolved.
     pub(super) fn to_history_entry(
         &self,
+        authors: &AuthorCodes,
         tx: &StoredTransaction,
         is_locally_current: bool,
         is_globally_current: bool,
-    ) -> HistoryEntry {
-        HistoryEntry::new(
+    ) -> Result<HistoryEntry, Error> {
+        Ok(HistoryEntry::new(
             self.table().to_owned(),
-            self.record.clone(),
+            authors.resolve_owned(&self.record)?,
             TransactionRecord {
                 tx_id: tx.tx.tx_id,
                 made_by: tx.tx.made_by,
@@ -2791,7 +2879,7 @@ impl VersionRow {
             },
             is_locally_current,
             is_globally_current,
-        )
+        ))
     }
 }
 
@@ -3620,6 +3708,11 @@ impl TransactionRecordStatus {
         self
     }
 
+    /// See [`releases_touched_rows`].
+    pub(super) fn releases_touched_rows(&self, kind: TxKind) -> bool {
+        releases_touched_rows(kind, &self.fate, self.global_time, self.is_partial)
+    }
+
     /// Whether the transaction still waits for a seq or a rejection, and so
     /// may keep a `jazz_pending_transactions` record.
     pub(super) fn is_unsettled(&self) -> bool {
@@ -3644,13 +3737,14 @@ pub(super) enum TransactionRecordWrite {
 /// The batch that settles an exclusive transaction deletes its pending
 /// record.
 pub(super) fn stage_transaction_record(
+    authors: &AuthorCodes,
     batch: &mut DatabaseBatch,
     write: TransactionRecordWrite,
     node_alias: NodeAlias,
     tx: &Transaction,
     status: &TransactionRecordStatus,
 ) -> Result<(), Error> {
-    let header = transaction_record_values(node_alias, tx, status)?;
+    let header = transaction_record_values(authors, node_alias, tx, status)?;
     let key = || {
         PrimaryKeyValue::Composite(vec![
             PrimaryKeyValue::U64(tx.tx_id.time.0),
@@ -3693,6 +3787,7 @@ pub(super) fn stage_transaction_record(
 
 /// Values of a `jazz_transactions` record (`jazz.tx-record.v2`).
 pub(super) fn transaction_record_values(
+    authors: &AuthorCodes,
     node_alias: NodeAlias,
     tx: &Transaction,
     status: &TransactionRecordStatus,
@@ -3720,9 +3815,7 @@ pub(super) fn transaction_record_values(
         }),
         Value::U8(flags),
         Value::U32(tx.n_total_writes),
-        RowAuthor::from_persisted_subject(tx.made_by)
-            .map_err(|_| Error::UnadmittedWriteAuthor)?
-            .to_value(),
+        authors.value(tx.made_by)?,
         Value::String(fate_string(&status.fate)),
         Value::Nullable(status.global_time.map(|time| Box::new(Value::U64(time.0)))),
         Value::String(durability_string(status.durability).to_owned()),
@@ -3802,6 +3895,7 @@ pub(super) fn pending_transaction_values(
 }
 
 pub(super) fn rejected_transaction_values(
+    authors: &AuthorCodes,
     node_alias: NodeAlias,
     tx: &Transaction,
     reason: RejectionReason,
@@ -3813,9 +3907,7 @@ pub(super) fn rejected_transaction_values(
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
-        RowAuthor::from_persisted_subject(tx.made_by)
-            .map_err(|_| Error::UnadmittedWriteAuthor)?
-            .to_value(),
+        authors.value(tx.made_by)?,
         reason.to_storage_value()?,
         Value::Nullable(
             tx.user_metadata_json
@@ -4010,10 +4102,19 @@ fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Re
     Ok(Value::Nullable(Some(Box::new(Value::Array(ids)))))
 }
 
+/// A durable author as a value leaving the node: its full record.
 pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
     Ok(RowAuthor::from_persisted_subject(author)
         .map_err(|_| Error::UnadmittedWriteAuthor)?
         .to_value())
+}
+
+/// The author a stored code stands for, as a value leaving the node.
+pub(super) fn resolved_author_value(
+    authors: &AuthorCodes,
+    code: AuthorCode,
+) -> Result<Value, Error> {
+    Ok(authors.row_author(code)?.to_value())
 }
 
 pub(super) fn history_values_from_parts(
@@ -4026,9 +4127,9 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.tx_time.0),
         Value::U64(version.tx_node_alias.0),
         Value::U64(version.schema_version_alias.0),
-        row_author_value(version.created_by)?,
+        Value::U32(version.created_by.0),
         Value::U64(version.created_at.0),
-        row_author_value(version.updated_by)?,
+        Value::U32(version.updated_by.0),
         Value::U64(version.updated_at.0),
         nullable_deletion_value(version.deletion),
     ];
@@ -4133,6 +4234,7 @@ fn base_from_value(value: Option<Value>) -> Result<RowBase, Error> {
 
 #[cfg(test)]
 fn history_values_from_wire(
+    authors: &AuthorCodes,
     table: &TableSchema,
     version: &VersionRecord,
     authored_columns: Option<BTreeSet<PhysicalColumnId>>,
@@ -4147,7 +4249,7 @@ fn history_values_from_wire(
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
     values.push(Value::U64(schema_version_alias.0));
-    values.push(row_author_value(version.created_by())?);
+    values.push(authors.value(version.created_by())?);
     // Wire provenance carries public Unix milliseconds. Reconstruct the
     // internal HLC with logical counter zero at this ingestion boundary.
     values.push(Value::U64(
@@ -4155,7 +4257,7 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(row_author_value(version.updated_by())?);
+    values.push(authors.value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
@@ -4279,9 +4381,9 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
         Value::U64(version.tx_time().0),
         Value::U64(version.tx_node_alias().0),
         Value::U64(version.schema_version_alias().0),
-        row_author_value(version.created_by())?,
+        Value::U32(version.created_by().0),
         Value::U64(version.created_at().0),
-        row_author_value(version.updated_by())?,
+        Value::U32(version.updated_by().0),
         Value::U64(version.updated_at().0),
     ])
 }
@@ -4312,6 +4414,12 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     )?);
+    values.extend(
+        version
+            .union_extra_cells()?
+            .into_iter()
+            .map(|(_, value)| value),
+    );
     Ok(values)
 }
 
@@ -4401,13 +4509,17 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
     )
 }
 
+/// A current row leaving Groove: its author codes are resolved, so the row
+/// carries the authors themselves.
 pub(super) fn decode_current_row(
+    authors: &AuthorCodes,
     table: &TableSchema,
     record: BorrowedRecord<'_>,
 ) -> Result<CurrentRow, Error> {
+    let (raw, descriptor) = authors.resolve_record(record.descriptor(), record.raw())?;
     Ok(CurrentRow::new(
         table.name.clone(),
-        OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+        OwnedRecord::new(raw, descriptor),
     ))
 }
 
@@ -4434,12 +4546,13 @@ pub(super) fn current_row_from_cells(
 }
 
 pub(super) fn current_row_from_version_projection(
+    authors: &AuthorCodes,
     table: &TableSchema,
     version: &VersionRow,
 ) -> Result<CurrentRow, Error> {
     let descriptor = current_row_descriptor(table);
     let mut values = current_row_prefix_and_cells_from_version(table, version)?;
-    append_current_row_provenance(&mut values, version);
+    append_current_row_provenance(authors, &mut values, version)?;
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
@@ -4448,21 +4561,23 @@ pub(super) fn current_row_from_version_projection(
 }
 
 pub(super) fn current_row_from_materialized_cells(
+    authors: &AuthorCodes,
     table: &TableSchema,
     version: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
-    current_row_from_materialized_cells_with_provenance(table, version, version, cells)
+    current_row_from_materialized_cells_with_provenance(authors, table, version, version, cells)
 }
 
 pub(super) fn current_row_from_materialized_cells_with_provenance(
+    authors: &AuthorCodes,
     table: &TableSchema,
     content: &VersionRow,
     provenance: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
     current_row_from_materialized_cells_with_layer_provenance(
-        table, content, provenance, provenance, cells,
+        authors, table, content, provenance, provenance, cells,
     )
 }
 
@@ -4472,6 +4587,7 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
 /// restoration records carry no user cells, but they still update the row's
 /// public `$updatedBy`/`$updatedAt` identity.
 pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
+    authors: &AuthorCodes,
     table: &TableSchema,
     content: &VersionRow,
     created: &VersionRow,
@@ -4486,9 +4602,9 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(row_author_value(created.created_by())?);
+    values.push(resolved_author_value(authors, created.created_by())?);
     values.push(Value::U64(created.created_at().physical_ms()));
-    values.push(row_author_value(updated.updated_by())?);
+    values.push(resolved_author_value(authors, updated.updated_by())?);
     values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
@@ -4543,21 +4659,18 @@ fn current_row_prefix_and_cells_from_version(
     Ok(values)
 }
 
-fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
-    values.push(
-        RowAuthor::from_persisted_subject(provenance.created_by())
-            .expect("stored provenance is a row author")
-            .to_value(),
-    );
+fn append_current_row_provenance(
+    authors: &AuthorCodes,
+    values: &mut Vec<Value>,
+    provenance: &VersionRow,
+) -> Result<(), Error> {
+    values.push(resolved_author_value(authors, provenance.created_by())?);
     values.push(Value::U64(provenance.created_at().physical_ms()));
-    values.push(
-        RowAuthor::from_persisted_subject(provenance.updated_by())
-            .expect("stored provenance is a row author")
-            .to_value(),
-    );
+    values.push(resolved_author_value(authors, provenance.updated_by())?);
     values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
+    Ok(())
 }
 
 /// Runtime carriers preserve logical nullable wrappers while retaining the
@@ -5200,48 +5313,31 @@ mod transaction_record_tests {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
-    /// The logical record bytes, as every read sees them.
+    /// The stored record bytes. Author columns hold `authors` dictionary
+    /// codes; each test interns its one author first, so its code is 0.
     fn encode(table: &str, values: &[Value]) -> Vec<u8> {
         descriptor(table).create(values).unwrap()
     }
 
-    /// The stored record bytes: the logical record without its primary-key
-    /// columns (the storage key holds them) and with each author column
-    /// replaced by its `authors` dictionary code, here always the first
-    /// code (0).
+    /// The stored record bytes: the record without its primary-key columns,
+    /// which the storage key holds.
     fn stored(table: &str, values: &[Value]) -> Vec<u8> {
-        let (_, transcoder) = RuntimeSchema::new(Vec::<TableSchema>::new())
+        let layout = RuntimeSchema::new(Vec::<TableSchema>::new())
             .lower_to_groove()
             .table(table)
             .unwrap()
-            .stored_record_layout(0)
+            .key_free_layout(0)
             .unwrap()
-            .unwrap();
-        let transcoder = transcoder.expect("the table has a primary key");
-        let key = transcoder
+            .unwrap()
+            .expect("the table has a primary key");
+        let stored = layout.to_stored(&encode(table, values)).unwrap();
+        let key = layout
             .key_fields()
             .iter()
             .map(|index| values[*index].clone())
             .collect::<Vec<_>>();
-        let stored = transcoder
-            .to_physical::<records::Error>(&encode(table, values), |dictionary, _, _| {
-                assert_eq!(dictionary, crate::schema::AUTHORS_DICTIONARY);
-                Ok(0)
-            })
-            .unwrap();
-        let logical = transcoder
-            .to_logical::<records::Error>(&stored, &key, |_, code| {
-                assert_eq!(code, 0);
-                Ok(
-                    RowAuthor::from_persisted_subject(AuthorSubject::for_test_bytes([5; 16]))
-                        .unwrap()
-                        .encoded_record()
-                        .raw(),
-                )
-            })
-            .unwrap();
         assert_eq!(
-            logical,
+            layout.to_full(&stored, &key).unwrap(),
             encode(table, values),
             "the stored form decodes back"
         );
@@ -5259,7 +5355,9 @@ mod transaction_record_tests {
             Some(GlobalTime(9)),
             DurabilityTier::Global,
         );
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values =
+            transaction_record_values(&AuthorCodes::detached(), NodeAlias(1), &tx, &status)
+                .unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
             "0000030000000000000001010900000000000000021e0000001f000000000000"
@@ -5281,7 +5379,9 @@ mod transaction_record_tests {
             None,
             DurabilityTier::Local,
         );
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values =
+            transaction_record_values(&AuthorCodes::detached(), NodeAlias(1), &tx, &status)
+                .unwrap();
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
             "0000030000000000000002000000000000000000011e0000003800000000010400000000000001010808080808080808080808080808080800"
@@ -5303,7 +5403,9 @@ mod transaction_record_tests {
         tx.user_metadata_json = Some("{}".to_owned());
         let status = TransactionRecordStatus::new(Fate::Pending, None, DurabilityTier::Local)
             .view_scoped(true);
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values =
+            transaction_record_values(&AuthorCodes::detached(), NodeAlias(1), &tx, &status)
+                .unwrap();
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
@@ -5321,7 +5423,9 @@ mod transaction_record_tests {
         );
 
         tx.permission_subject = Some(tx.made_by);
-        let values = transaction_record_values(NodeAlias(1), &tx, &status).unwrap();
+        let values =
+            transaction_record_values(&AuthorCodes::detached(), NodeAlias(1), &tx, &status)
+                .unwrap();
         let bytes = encode("jazz_transactions", &values);
         assert_eq!(
             hex(&stored("jazz_transactions", &values)),
@@ -5346,6 +5450,7 @@ mod transaction_record_tests {
             )
         };
         let accepted = transaction_record_values(
+            &AuthorCodes::detached(),
             NodeAlias(1),
             &tx,
             &TransactionRecordStatus::new(
@@ -5356,6 +5461,7 @@ mod transaction_record_tests {
         )
         .unwrap();
         let rejected = transaction_record_values(
+            &AuthorCodes::detached(),
             NodeAlias(1),
             &tx,
             &TransactionRecordStatus::new(

@@ -208,6 +208,16 @@ fn version_bundle_record_key(
     )
 }
 
+/// Where a version sits in its transaction: its authored identity, or for
+/// Core's post-image of a write, the physical row it addresses. A post-image
+/// is laid out in the row's newest schema version, which need not be the one
+/// (or name the table as) the patch it replaces was authored in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BundleRecordKey {
+    Authored((String, BranchKey, RowUuid, SchemaVersionId, bool)),
+    PostImage(PhysicalTableId, BranchKey, RowUuid, bool),
+}
+
 fn content_row_members_for_bundle(
     members: &[ResultMemberEntry],
     context: &'static str,
@@ -337,6 +347,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    fn bundle_record_key(
+        &self,
+        version: &VersionRecord,
+        post_image: bool,
+    ) -> Result<BundleRecordKey, Error> {
+        if !post_image {
+            return Ok(BundleRecordKey::Authored(version_bundle_record_key(
+                version,
+            )));
+        }
+        Ok(BundleRecordKey::PostImage(
+            self.physical_table_id_for_schema(version.schema_version(), version.table())?,
+            version.branch_key().clone(),
+            version.row_uuid(),
+            version.deletion().is_some(),
+        ))
+    }
+
     /// Recover the deletion-register winner currently visible at the
     /// subscription tier for an optimized scalar root. Result membership tells
     /// us that the row is visible, but not whether that visibility is due to a
@@ -416,18 +444,6 @@ where
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
-            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
-            let mut stored_by_key = BTreeMap::new();
-            for stored_version in &stored_versions {
-                let version = self.version_record_from_row(stored_version)?;
-                stored_by_key.insert(version_bundle_record_key(&version), version);
-            }
-            let incoming_by_key = bundle
-                .versions
-                .iter()
-                .cloned()
-                .map(|version| (version_bundle_record_key(&version), version))
-                .collect::<BTreeMap<_, _>>();
             // An accepted, Core-sequenced bundle carries Core's post-images,
             // which replace a locally stored authored unit: this node's own
             // patch, or, on a client relay (a browser worker), the patch it
@@ -442,6 +458,26 @@ where
                     || (self.client_relay_scope().is_some()
                         && (stored.global_time.is_none()
                             || stored.global_time == bundle.global_time)));
+            // A settled transaction's stored versions are read at the
+            // bundle's coordinates; the checks below compare row for row.
+            let stored_versions = self
+                .stored_versions_for_tx_at(*tx_id, &stored, &bundle.versions)
+                .await?;
+            let mut stored_by_key = BTreeMap::new();
+            for stored_version in &stored_versions {
+                let version = self.version_record_from_row(stored_version)?;
+                stored_by_key.insert(
+                    self.bundle_record_key(&version, carries_post_images)?,
+                    version,
+                );
+            }
+            let mut incoming_by_key = BTreeMap::new();
+            for version in &bundle.versions {
+                incoming_by_key.insert(
+                    self.bundle_record_key(version, carries_post_images)?,
+                    version.clone(),
+                );
+            }
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming
@@ -497,7 +533,10 @@ where
         })
     }
 
-    /// Subscribe to the raw history storage table.
+    /// Subscribe to the raw history storage table. Rows are stored rows:
+    /// their author columns hold node-local dictionary codes, not
+    /// `RowAuthor` values, so this is for tests and diagnostics only.
+    #[doc(hidden)]
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
         let schema_version = self.catalogue.local_schema_version_id;
@@ -2125,9 +2164,16 @@ where
         // to a same-frame body: the receiver already admitted that complete
         // immutable transaction on this link. Re-read its stored bodies before
         // accepting a source coordinate, rather than trusting the sender's
-        // declaration alone.
+        // declaration alone. A settled transaction whose list was released
+        // is checked per coordinate below, by the resident-body point read.
         for tx_id in &referenced_complete_payloads {
-            for version in self.query_versions_for_tx(*tx_id).await? {
+            let Some(stored) = self.query_transaction(*tx_id).await? else {
+                continue;
+            };
+            let Some(listed) = self.query_listed_versions_for_tx(*tx_id, &stored).await? else {
+                continue;
+            };
+            for version in listed {
                 admitted_versions.insert((
                     *tx_id,
                     version.table().to_owned(),
@@ -3046,19 +3092,31 @@ where
             })
             .collect::<BTreeSet<_>>();
         let witness_tx_id = self.version_tx_id(version)?;
+        let witness_branch = version.branch_key().canonical_bytes();
         let physical_candidates = if logical_candidates.len() == 1 {
             logical_candidates
         } else {
-            self.query_versions_for_tx(witness_tx_id)
-                .await?
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.row_uuid() == version.row_uuid()
-                        && candidate.branch_key() == version.branch_key()
-                })
-                .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
-                .filter(|table_id| logical_candidates.contains(table_id))
-                .collect::<BTreeSet<_>>()
+            // Keep the candidate tables that hold this row for the witness's
+            // transaction: one exact point read per candidate.
+            let mut holding = BTreeSet::new();
+            if let Some(stored_tx) = self.query_transaction(witness_tx_id).await? {
+                for table_id in logical_candidates {
+                    if self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        holding.insert(table_id);
+                    }
+                }
+            }
+            holding
         };
         let [projected_table_id] = physical_candidates.iter().copied().collect::<Vec<_>>()[..]
         else {
@@ -3082,17 +3140,16 @@ where
                 // physical table, branch, row, transaction, and layer. This is the
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
-                if let Some(canonical) = self
-                    .query_versions_for_tx(witness_tx_id)
-                    .await?
-                    .into_iter()
-                    .find(|candidate| {
-                        candidate.row_uuid() == version.row_uuid()
-                            && candidate.branch_key() == version.branch_key()
-                            && self
-                                .physical_table_id_for_version(candidate)
-                                .is_ok_and(|table_id| table_id == projected_table_id)
-                    })
+                if let Some(stored_tx) = self.query_transaction(witness_tx_id).await?
+                    && let Some(canonical) = self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            projected_table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
                 {
                     return Ok(canonical);
                 }

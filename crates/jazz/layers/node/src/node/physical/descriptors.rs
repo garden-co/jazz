@@ -25,9 +25,8 @@ fn widened_projection_descriptor(
                     field.name.clone().ok_or(Error::InvalidStoredValue(
                         "physical projection logical field unnamed",
                     ))?,
-                    // Projections read logical rows: an interned column
-                    // projects its full value, never its stored code.
-                    widen_projection_value_type(&field.value_type, &physical.column_type.logical()),
+                    // An interned column projects its dictionary code.
+                    widen_projection_value_type(&field.value_type, &physical.column_type),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?,
@@ -63,11 +62,10 @@ pub(super) fn physical_write_descriptor(
                 // Writes target the physical table itself. Unlike read-side
                 // widening, its descriptor must retain the physical enum
                 // registry identities so Groove accepts the variant record;
-                // values are explicitly re-encoded before this point. The
-                // record is logical: Groove interns its author columns when
-                // it stores it.
+                // values are explicitly re-encoded before this point, and
+                // author columns already hold dictionary codes.
                 let _ = logical;
-                Ok((name.clone(), physical.column_type.logical()))
+                Ok((name.clone(), physical.column_type.clone()))
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))
@@ -155,7 +153,7 @@ fn remap_authored_payload_enum_value(
     }
 }
 
-fn remap_nested_enum_value(
+pub(super) fn remap_nested_enum_value(
     value: Value,
     authored: &records::ValueType,
     physical: &records::ValueType,
@@ -359,6 +357,7 @@ pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    catalogue_ranks: &BTreeMap<SchemaVersionId, u64>,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -960,6 +959,33 @@ pub(super) fn physical_version_storage_tables(
                 let rejected =
                     physical_rejected_version_field_names_for_case(logical_table, mapping, fields)?;
                 if rejected_layouts_by_tag.insert(tag, rejected).is_some() {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant tag collision",
+                    ));
+                }
+            }
+            // The schema's union case: its own cells, then every other
+            // column of the lineage it may have to carry. Rejected versions
+            // are authored writes and never use it.
+            let extras = union_extra_columns(
+                physical_mappings,
+                catalogue_ranks,
+                *schema_version,
+                &logical_table.name,
+            )?;
+            if !extras.is_empty() {
+                let tag = union_variant_tag(alias)?;
+                let extra_names = extras
+                    .iter()
+                    .map(|column_id| physical_user_column_field(*column_id))
+                    .collect::<Vec<_>>();
+                let mut history = physical_history_field_names(logical_table, mapping)?;
+                history.extend(extra_names.iter().cloned());
+                let mut current = physical_current_field_names(logical_table, mapping)?;
+                current.extend(extra_names);
+                if layouts_by_tag.insert(tag, history).is_some()
+                    || current_layouts_by_tag.insert(tag, current).is_some()
+                {
                     return Err(Error::InvalidStoredValue(
                         "physical table variant tag collision",
                     ));

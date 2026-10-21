@@ -688,27 +688,16 @@ impl TableSchema {
             })
     }
 
-    /// The logical descriptor of one whole-row enum case: what reads,
-    /// subscriptions and writes see. Interned fields have their logical type.
-    /// Stored bytes are laid out by [`Self::storage_record_schema_for_variant`].
+    /// The descriptor of one whole-row enum case. It is both the stored
+    /// layout and what reads, IVM operators and writes see: an interned field
+    /// keeps its [`ValueType::interned`] type and holds its 4-byte dictionary
+    /// code, which is resolved to its value only on demand (see
+    /// [`crate::dictionary`]).
     pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
-        self.physical_record_schema_for_variant(tag)
-            .map(|descriptor| crate::records::logical_record_descriptor(&descriptor))
-    }
-
-    /// The logical descriptor of this table's full column catalogue.
-    pub fn record_schema(&self) -> RecordDescriptor {
-        crate::records::logical_record_descriptor(&self.physical_record_schema())
-    }
-
-    /// The full physical descriptor of one whole-row enum case: every field,
-    /// with interned fields holding their 4-byte codes. Stored bytes leave out
-    /// its primary-key fields; see [`Self::stored_record_layout`].
-    pub fn physical_record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
         #[cfg(test)]
         VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         if self.variants.is_empty() {
-            return Some(self.physical_record_schema());
+            return Some(self.record_schema());
         }
         let variant = self.variant(tag)?;
         let fields = if variant.payload_fields.is_empty() {
@@ -733,8 +722,10 @@ impl TableSchema {
         Some(RecordDescriptor::new(fields))
     }
 
-    /// The full physical descriptor of this table's column catalogue.
-    pub fn physical_record_schema(&self) -> RecordDescriptor {
+    /// The descriptor of this table's full column catalogue, as reads and
+    /// writes see it. Stored bytes leave out the primary-key fields; see
+    /// [`Self::storage_record_schema`].
+    pub fn record_schema(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             self.columns
                 .iter()
@@ -742,83 +733,73 @@ impl TableSchema {
         )
     }
 
-    /// The field index, in [`Self::physical_record_schema_for_variant`], of
-    /// each primary-key column in key order. Empty for a table without a
-    /// primary key; `None` for an unknown case or a case that lacks a
-    /// primary-key column.
+    /// The field index, in [`Self::record_schema_for_variant`], of each
+    /// primary-key column in key order. Empty for a table without a primary
+    /// key; `None` for an unknown case or a case that lacks a primary-key
+    /// column.
     pub fn primary_key_fields_for_variant(&self, tag: u32) -> Option<Vec<usize>> {
         let Some(primary_key) = &self.primary_key else {
             return Some(Vec::new());
         };
-        let names = if self.variants.is_empty() {
-            self.columns
+        if self.variants.is_empty() {
+            return primary_key
+                .columns
                 .iter()
-                .map(|column| column.name.as_str())
+                .map(|key| {
+                    self.columns
+                        .iter()
+                        .position(|column| column.name == key.column)
+                })
+                .collect();
+        }
+        let variant = self.variant(tag)?;
+        let names = if variant.payload_fields.is_empty() {
+            variant
+                .fields
+                .iter()
+                .map(String::as_str)
                 .collect::<Vec<_>>()
         } else {
-            let variant = self.variant(tag)?;
-            if variant.payload_fields.is_empty() {
-                variant.fields.iter().map(String::as_str).collect()
-            } else {
-                variant
-                    .payload_fields
-                    .iter()
-                    .map(|field| field.name.as_str())
-                    .collect()
-            }
+            variant
+                .payload_fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect()
         };
         primary_key
             .columns
             .iter()
-            .map(|column| {
-                let name = if self.variants.is_empty() {
-                    column.column.as_str()
-                } else {
-                    self.variant(tag)?.payload_name_for_shared(&column.column)?
-                };
+            .map(|key| {
+                let name = variant.payload_name_for_shared(&key.column)?;
                 names.iter().position(|candidate| *candidate == name)
             })
             .collect()
     }
 
-    /// The logical descriptor of one case and the transcoder between its
-    /// stored bytes and its logical records. Stored bytes hold interned
-    /// fields as codes and leave out the primary-key fields, which a row's
-    /// storage key already holds; the transcoder is `None` when the stored
-    /// bytes already are the logical record. `None` for an unknown case or a
-    /// case without every primary-key column.
-    pub fn stored_record_layout(
+    /// The layout between one case's records and its stored bytes, which
+    /// leave out the primary-key fields because a row's storage key already
+    /// holds them. `Ok(None)` when the table has no primary key, so stored
+    /// bytes are the record. `None` for an unknown case or a case without
+    /// every primary-key column.
+    pub fn key_free_layout(
         &self,
         tag: u32,
-    ) -> Option<
-        Result<(RecordDescriptor, Option<crate::records::RecordTranscoder>), crate::records::Error>,
-    > {
-        let physical = self.physical_record_schema_for_variant(tag)?;
+    ) -> Option<Result<Option<crate::records::KeyFreeLayout>, crate::records::Error>> {
+        let full = self.record_schema_for_variant(tag)?;
         let key_fields = self.primary_key_fields_for_variant(tag)?;
-        Some(
-            crate::records::RecordTranscoder::with_key_fields(physical, &key_fields).map(
-                |transcoder| {
-                    let logical = transcoder
-                        .as_ref()
-                        .map_or(physical, crate::records::RecordTranscoder::logical);
-                    (logical, transcoder)
-                },
-            ),
-        )
+        Some(crate::records::KeyFreeLayout::new(full, &key_fields))
     }
 
-    /// The descriptor of one case's stored bytes: its physical descriptor
-    /// without the primary-key fields. Only Groove's storage boundary reads
-    /// stored bytes with it.
+    /// The descriptor of one case's stored bytes: its record descriptor
+    /// without the primary-key fields.
     pub fn storage_record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
-        let physical = self.physical_record_schema_for_variant(tag)?;
+        let full = self.record_schema_for_variant(tag)?;
         let key_fields = self.primary_key_fields_for_variant(tag)?;
         if key_fields.is_empty() {
-            return Some(physical);
+            return Some(full);
         }
         Some(RecordDescriptor::new_with_fields(
-            physical
-                .fields()
+            full.fields()
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| !key_fields.contains(index))
@@ -827,15 +808,14 @@ impl TableSchema {
     }
 
     /// The descriptor of the stored bytes of this table's full column
-    /// catalogue: interned fields hold codes, primary-key fields are left out.
+    /// catalogue: its record descriptor without the primary-key fields.
     pub fn storage_record_schema(&self) -> RecordDescriptor {
-        let physical = self.physical_record_schema();
+        let full = self.record_schema();
         let Some(primary_key) = &self.primary_key else {
-            return physical;
+            return full;
         };
         RecordDescriptor::new_with_fields(
-            physical
-                .fields()
+            full.fields()
                 .iter()
                 .filter(|field| {
                     !primary_key

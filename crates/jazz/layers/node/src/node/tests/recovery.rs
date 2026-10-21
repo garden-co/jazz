@@ -622,7 +622,7 @@ fn assert_operation_rejection_retains_only_the_terminal_fate(
         "invalid provenance must never be stored"
     );
     assert!(
-        core.query_versions_for_tx(tx_id).unwrap().is_empty(),
+        core.stored_versions_for_tx_for_test(tx_id).unwrap().is_empty(),
         "rejected input must not store any row versions"
     );
 }
@@ -777,7 +777,7 @@ fn opening_defers_malformed_current_row_to_read() {
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         storage
             .set(
                 table.clone(),
@@ -816,9 +816,10 @@ fn mark_accepted_without_ahead_cleanup<S>(
     stored.fate = Fate::Accepted;
     stored.global_time = Some(global_time);
     stored.durability = DurabilityTier::Global;
-    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let version = node.stored_versions_for_tx_for_test(tx_id).unwrap().remove(0);
     let mut batch = node.database.open_batch();
     stage_transaction_record(
+        &node.authors.clone(),
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,
@@ -978,6 +979,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
         let stored = node.query_transaction(tx_id).unwrap().unwrap();
         let mut batch = node.database.open_batch();
         stage_transaction_record(
+            &node.authors.clone(),
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
@@ -2184,6 +2186,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
                 let mut values = transaction_record_values(
+                    &core.authors.clone(),
                     stored.node_alias,
                     &stored.tx,
                     &TransactionRecordStatus::new(fate.clone(), global_time, durability),
@@ -2224,6 +2227,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             .unwrap();
         stored.tx.contribution_merge = Some(provenance);
         let values = transaction_record_values(
+            &core.authors.clone(),
             stored.node_alias,
             &stored.tx,
             &TransactionRecordStatus::new(
@@ -2336,7 +2340,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
             .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
             .collect::<BTreeMap<_, _>>();
         let storage =
-            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
         let marker = b"\0groove-declared-index-generation".to_vec();
         storage.delete("indices".into(), marker).unwrap();
         // Damage index entries only: keys starting with `00` are Groove's
@@ -2385,7 +2389,7 @@ fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
         );
     }
     let storage =
-        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).unwrap();
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v3()).unwrap();
     let indexes = storage
         .prefix("indices".into(), Vec::new())
         .unwrap()
@@ -2479,10 +2483,19 @@ fn author_columns_store_dictionary_codes() {
                 dictionary.push((key.to_vec(), value.to_vec()));
                 continue;
             }
-            let Some((name, table)) = tables.iter().find(|(name, _)| {
-                key.len() > 4 + name.len()
-                    && key[..4] == (name.len() as u32).to_be_bytes()
-                    && &key[4..4 + name.len()] == name.as_bytes()
+            // Class table ids are unique per class, so match the class too.
+            let classes = [
+                "__groove_class_meta",
+                "__groove_class_history",
+                "__groove_class_global_current",
+                "__groove_class_ahead_current",
+            ];
+            let Some((name, table)) = tables.iter().zip(classes).find_map(|((name, table), class)| {
+                (family == class
+                    && key.len() > 4
+                    && groove::storage::class_table_id(name)
+                        .is_ok_and(|id| key[..4] == id.to_be_bytes()))
+                .then_some((name, table))
             }) else {
                 continue;
             };
@@ -2495,6 +2508,8 @@ fn author_columns_store_dictionary_codes() {
                 );
             }
             let (tag, payload) = groove::records::split_variant_record(&value).unwrap();
+            // Stored rows leave out the primary-key columns, which the key
+            // holds; the author columns are not among them.
             let descriptor = table.storage_record_schema_for_variant(tag).unwrap();
             let record = OwnedRecord::new(payload.to_vec(), descriptor);
             let columns: &[&str] = if name == "jazz_transactions" {
@@ -2572,13 +2587,13 @@ fn author_columns_store_dictionary_codes() {
             author
         );
         let [version] = reopened
-            .query_versions_for_tx(tx_id)
+            .stored_versions_for_tx_for_test(tx_id)
             .unwrap()
             .try_into()
             .unwrap();
-        assert_eq!(version.updated_by(), author);
+        assert_eq!(reopened.authors.subject(version.updated_by()).unwrap(), author);
         // Bob's edit keeps alice as the row's creator.
         let creator = if index == 2 { alice } else { author };
-        assert_eq!(version.created_by(), creator);
+        assert_eq!(reopened.authors.subject(version.created_by()).unwrap(), creator);
     }
 }

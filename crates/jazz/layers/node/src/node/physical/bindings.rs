@@ -1,3 +1,15 @@
+/// A physical table id frames every class-CF storage key of its table, so it
+/// must fit the class layout's key range. Allocation refuses a larger id at
+/// schema ingest, before a mapping storage cannot key becomes durable.
+pub(super) fn checked_physical_table_id(id: u64) -> Result<PhysicalTableId, Error> {
+    if id > groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID {
+        return Err(Error::InvalidCatalogueUpdate(
+            "physical table id exceeds the storage key range",
+        ));
+    }
+    Ok(PhysicalTableId(id))
+}
+
 pub(super) fn allocate_provisional_physical_mapping(
     schema: &JazzSchema,
     identities: PhysicalIdentityManifest,
@@ -9,7 +21,7 @@ pub(super) fn allocate_provisional_physical_mapping(
         .map_err(Error::InvalidCatalogueUpdate)?;
     let mut tables = BTreeMap::new();
     for table in &schema.tables {
-        let table_id = PhysicalTableId(*next_table_id);
+        let table_id = checked_physical_table_id(*next_table_id)?;
         *next_table_id = next_table_id
             .checked_add(1)
             .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
@@ -176,6 +188,11 @@ pub(super) fn validate_physical_mapping_registries(
     for mapping in mappings.values() {
         let mut table_ids = BTreeSet::new();
         for table in mapping.tables.values() {
+            if table.table_id.0 > groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID {
+                return Err(Error::InvalidStoredValue(
+                    "physical table id exceeds the storage key range",
+                ));
+            }
             if !table_ids.insert(table.table_id) {
                 return Err(Error::InvalidStoredValue(
                     "physical mapping aliases multiple tables to one id",

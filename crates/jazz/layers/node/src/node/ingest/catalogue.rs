@@ -408,9 +408,7 @@ where
             .catalogue_schemas
             .insert(schema.id, schema.clone());
         self.query.version_storage_sources_cache.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_policy_authorization();
         self.persist_catalogue_schema(&schema).await?;
         if schema.id == self.catalogue.active_schema.schema {
             let mut active = self.catalogue.active_schema.clone();
@@ -712,7 +710,7 @@ where
                 return Err(Error::CatalogueActivationFailed);
             }
             let rebuild_cold_runtime = mode == CatalogueActivationMode::ColdOpen
-                || self.database.runtime_stats().active_subscriptions == 0;
+                || self.database.active_subscription_count() == 0;
             if rebuild_cold_runtime && self.rebuild_database_slot().await.is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
@@ -801,13 +799,8 @@ where
         self.catalogue.physical_write_plan_cache.clear();
         self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
     }
 
     fn remove_staged_schema_lineage_from_memory(&mut self, staged: &StagedSchemaLineage) {
@@ -828,13 +821,8 @@ where
         self.catalogue.physical_write_plan_cache.clear();
         self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
     }
 
     async fn apply_publish_lens(
@@ -881,13 +869,8 @@ where
         self.catalogue.compiled_lens_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.catalogue.physical_current_winner_projections.clear();
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
         // Both endpoint schemas are already Active and their agreeing physical
         // projection cases were registered during activation. A cross-lens adds
         // a catalogue path only; re-registering those cases is unnecessary and

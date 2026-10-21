@@ -109,7 +109,7 @@ where
         read_schema: SchemaVersionId,
     ) -> Result<VersionRow, Error> {
         let candidates = self
-            .query_versions_for_tx(version_ref.tx)
+            .tx_versions_for_witness(version_ref.tx, emitted_table, row_uuid)
             .await?
             .into_iter()
             .filter(|version| version.row_uuid() == row_uuid)
@@ -160,7 +160,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 rows.push(self.materialize_current_row(&table, row)?);
             }
         }
@@ -177,7 +177,7 @@ where
         for (record, weight) in deltas.iter() {
             if weight > 0 {
                 let deleted = record.get_bool(deleted_field_idx)?;
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 let row = self.materialize_current_row(&table, row)?;
                 rows.push(if deleted { row.into_deleted() } else { row });
             }
@@ -193,7 +193,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
-                let row = decode_current_row(table, record)?;
+                let row = decode_current_row(&self.authors, table, record)?;
                 rows.push(self.materialize_current_row(table, row)?);
             }
         }
@@ -209,6 +209,7 @@ where
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             rows.push(aggregate_current_row_from_record(
+                &self.authors,
                 query,
                 output,
                 aggregate_query_row_uuid(output, &record)?,
@@ -272,12 +273,21 @@ where
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
-        let Some(version) =
-            local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
-        else {
-            return Ok(None);
+        let version = match local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
+        {
+            Some(version) => version.clone(),
+            None => {
+                let stored = self
+                    .tx_versions_for_witness(tx_id, table_name, row_uuid)
+                    .await?;
+                let Some(version) =
+                    local_maintained_view_content_witness(&stored, table_name, row_uuid)
+                else {
+                    return Ok(None);
+                };
+                version.clone()
+            }
         };
-        let version = version.clone();
         self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             &version,
@@ -407,7 +417,8 @@ where
                     )
                     .await?
                 } else {
-                    self.query_versions_for_tx(entry.2).await?
+                    self.tx_versions_for_witness(entry.2, entry.0.as_str(), entry.1)
+                        .await?
                 };
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
@@ -509,7 +520,8 @@ where
                 self.storage_backed_maintained_result_versions(entry.0.as_str(), entry.1, entry.2)
                     .await?
             } else {
-                self.query_versions_for_tx(entry.2).await?
+                self.tx_versions_for_witness(entry.2, entry.0.as_str(), entry.1)
+                    .await?
             };
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
@@ -582,11 +594,17 @@ where
             if self.node_aliases.get(&tx_id.node).is_none() {
                 continue;
             }
-            // Each transaction record lists the history rows it wrote, so
-            // its versions are exact point reads; `query_versions_for_tx`
-            // returns them in `(table, row)` order.
-            let versions = self.query_versions_for_tx(tx_id).await?;
-            cache.insert(tx_id, versions);
+            let Some(stored) = self.query_transaction(tx_id).await? else {
+                cache.insert(tx_id, Vec::new());
+                continue;
+            };
+            // Each touched-rows list names the history rows its transaction
+            // wrote, so its versions are exact point reads in `(table, row)`
+            // order. A settled transaction's list is released; its members
+            // read their own row when they materialize.
+            if let Some(versions) = self.query_listed_versions_for_tx(tx_id, &stored).await? {
+                cache.insert(tx_id, versions);
+            }
         }
         Ok(())
     }
@@ -612,12 +630,13 @@ where
         let authored_table = self.table_in_schema_ref(version.table(), authored_schema)?;
         let mut cells = self.materialized_cells_for_version(authored_table, version)?;
         let Some(projected_table) =
-            self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+            self.translate_version_cells(authored_schema, read_schema, version, &mut cells)?
         else {
             return Ok(None);
         };
         let read_table = self.table_in_schema_ref(&projected_table, read_schema)?;
-        let mut row = current_row_from_materialized_cells(read_table, version, &cells)?;
+        let mut row =
+            current_row_from_materialized_cells(&self.authors, read_table, version, &cells)?;
         self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
         Ok(Some(row))
     }
@@ -636,6 +655,7 @@ where
         )?;
         let payload_record = decoded.borrowed();
         let mut row = aggregate_current_row_from_record(
+            &self.authors,
             query,
             output,
             aggregate_result_member_row_uuid(member)?,
@@ -961,7 +981,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in app_rows.iter() {
             if weight > 0 {
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 rows.push(self.materialize_current_row(&table, row)?);
             }
         }

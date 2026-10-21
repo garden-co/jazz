@@ -85,6 +85,7 @@
 //!                                                    ^ elem2_end points here
 //! ```
 
+mod key_free;
 pub mod macros;
 mod transcode;
 mod values;
@@ -97,6 +98,7 @@ use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+pub use key_free::KeyFreeLayout;
 pub use macros::{FieldKind, RecordField, U48, assert_record_field_layout};
 pub use transcode::RecordTranscoder;
 pub(crate) use transcode::{logical_record_descriptor, validate_dictionary_value};
@@ -1332,6 +1334,18 @@ impl<'a> BorrowedRecord<'a> {
         read_exact_array::<4>(bytes).map(u32::from_le_bytes)
     }
 
+    /// The dictionary code an interned field holds.
+    pub fn get_dictionary_code(&self, field_idx: usize) -> Result<u32, Error> {
+        let field = self.field(field_idx)?;
+        if field.value_type.as_interned().is_none() {
+            return Err(Error::TypeMismatch {
+                expected: field.value_type.clone(),
+            });
+        }
+        let span = self.descriptor.field_span(self.raw, field_idx)?;
+        read_exact_array::<4>(&self.raw[span]).map(u32::from_le_bytes)
+    }
+
     pub fn get_u8(&self, field_idx: usize) -> Result<u8, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U8)?;
         bytes.first().copied().ok_or_else(|| Error::UnexpectedEof)
@@ -2212,7 +2226,7 @@ pub enum Error {
     #[error("unexpected end of record")]
     UnexpectedEof,
     #[error(
-        "a descriptor with a column interned into dictionary {dictionary} cannot be encoded: interning is storage-only"
+        "a descriptor with a column interned into dictionary {dictionary} cannot leave the node: dictionary codes are node-local, resolve the record first"
     )]
     InternedTypeNotEncodable { dictionary: String },
     #[error(

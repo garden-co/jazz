@@ -1458,9 +1458,10 @@ pub struct Database {
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: Rc<ReadMetricsSink>,
     /// Dense record descriptors are invariant for one table variant. Keep the
-    /// interned handles beside the database schema so scans do not rebuild and
-    /// re-hash the same logical field list once per stored row.
-    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>>,
+    /// interned handles, and the key-free layout of keyed tables, beside the
+    /// database schema so scans do not rebuild and re-hash the same field list
+    /// once per stored row.
+    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, StoredRowLayout>>>,
     next_publication_id: u64,
     immutable_batch_owner: Rc<()>,
     /// Rotated whenever physical record admission can change. Batches may be
@@ -1504,18 +1505,17 @@ pub struct Database {
 #[derive(Clone)]
 pub struct RuntimeRegistryCheckpoint {
     ivm_runtime: IvmRuntime,
-    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, StoredRecordCodec>>,
+    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, StoredRowLayout>>,
 }
 
-/// How one table variant's stored rows relate to its logical records.
+/// How the stored rows of one table variant become records.
 #[derive(Clone, Debug)]
-pub(crate) struct StoredRecordCodec {
-    /// The descriptor of the logical record.
-    pub(crate) logical: RecordDescriptor,
-    /// Rebuilds stored rows, which hold dictionary codes and leave out the
-    /// primary-key fields, as logical records. `None` when the table interns
-    /// nothing and has no primary key, so stored bytes are logical.
-    pub(crate) transcoder: Option<Rc<records::RecordTranscoder>>,
+pub(crate) struct StoredRowLayout {
+    /// The descriptor of the record reads see.
+    pub(crate) descriptor: RecordDescriptor,
+    /// Rebuilds stored rows, which leave out the primary-key fields, as full
+    /// records. `None` for a table without a primary key.
+    pub(crate) key_free: Option<Rc<records::KeyFreeLayout>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

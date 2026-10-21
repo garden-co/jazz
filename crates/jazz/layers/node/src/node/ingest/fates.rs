@@ -80,7 +80,12 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let tx_versions = self.query_versions_for_tx(tx_id).await?;
+        // A released list means the transaction settled in an earlier
+        // batch: its rows already moved to their seq and own no overlay.
+        let tx_versions = self
+            .query_listed_versions_for_tx(tx_id, &stored)
+            .await?
+            .unwrap_or_default();
         if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
@@ -88,7 +93,7 @@ where
                 .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
                 .await?;
         }
-        stage_transaction_record(
+        self.stage_tx_record(
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,
@@ -111,12 +116,25 @@ where
             if matches!(stored.fate, Fate::Accepted) {
                 // Every pending record of an accepted write moves to its
                 // seq, also when the row's image here did not change.
+                // A post-image may be laid out in another schema version than
+                // the write, naming a renamed table differently: match rows
+                // by physical table.
+                let updated_rows = global_current_updates
+                    .iter()
+                    .map(|update| {
+                        Ok((
+                            self.physical_table_id_for_version(update)?,
+                            update.branch_key(),
+                            update.row_uuid(),
+                        ))
+                    })
+                    .collect::<Result<BTreeSet<_>, Error>>()?;
                 for version in &tx_versions {
-                    let updated = global_current_updates.iter().any(|update| {
-                        update.table() == version.table()
-                            && update.branch_key() == version.branch_key()
-                            && update.row_uuid() == version.row_uuid()
-                    });
+                    let updated = updated_rows.contains(&(
+                        self.physical_table_id_for_version(version)?,
+                        version.branch_key(),
+                        version.row_uuid(),
+                    ));
                     if !updated && version.seq()? == GlobalTime(0) {
                         let at_seq = version.with_seq(global_time)?;
                         self.write_history_post_image(&mut batch, &at_seq)?;
@@ -1020,7 +1038,7 @@ where
             && let Fate::Rejected(reason) = &tx.fate
         {
             let rejected_tx_values =
-                rejected_transaction_values(tx.node_alias, &tx.tx, reason.clone())?;
+                rejected_transaction_values(&self.authors, tx.node_alias, &tx.tx, reason.clone())?;
             batch.insert("jazz_rejected_transactions", rejected_tx_values.clone());
             let rejected_tx_table = self
                 .catalogue
@@ -1031,8 +1049,9 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "missing rejected transaction table",
                 ))?;
-            let rejected_tx_record =
-                owned_record_from_storage_values(&rejected_tx_table, rejected_tx_values)?;
+            let rejected_tx_record = self.authors.resolve_owned(
+                &owned_record_from_storage_values(&rejected_tx_table, rejected_tx_values)?,
+            )?;
             let mut rejected_versions = Vec::new();
             for version in &rejected {
                 let schema_version = self

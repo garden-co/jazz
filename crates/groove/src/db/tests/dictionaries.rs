@@ -1,10 +1,11 @@
-//! Interned (dictionary-encoded) columns: rows store a 4-byte code, every
-//! read and subscription sees the value.
+//! Interned (dictionary-encoded) columns: a row holds a 4-byte code, and
+//! that code is the column's value everywhere inside the node. Reads, IVM
+//! sources and query results carry codes; operators that need the value
+//! resolve them on demand; a caller resolves them where rows leave the node.
 //!
 //! Most tests here assert through the public row API. Where a test also reads
-//! storage directly, it says why: the code-in-place layout and the dictionary
-//! entries are durable bytes below that API, which a round trip alone cannot
-//! distinguish from storing the full value.
+//! storage directly, it says why: the dictionary entries and the stored row
+//! bytes are durable formats below that API.
 
 use super::*;
 use crate::dictionary::{DictionaryError, dictionary_column_family};
@@ -35,6 +36,14 @@ fn author_bytes(name: &str) -> Vec<u8> {
         unreachable!()
     };
     record.raw().to_vec()
+}
+
+/// The code of `name` in the authors dictionary, interning it when new.
+fn code(database: &Database, name: &str) -> u32 {
+    database
+        .dictionaries()
+        .intern(AUTHORS, &author_bytes(name))
+        .unwrap()
 }
 
 /// `id`, an interned `author`, a nullable interned `editor` and an indexed
@@ -69,13 +78,40 @@ fn posts_storage(schema: &DatabaseSchema) -> MemoryStorage {
     MemoryStorage::new(&schema.column_families()).unwrap()
 }
 
-fn post(id: u64, author_name: &str, editor: Option<&str>, score: u64) -> Vec<Value> {
+/// A post row as the table holds it: authors as codes, interned here.
+fn post(
+    database: &Database,
+    id: u64,
+    author_name: &str,
+    editor: Option<&str>,
+    score: u64,
+) -> Vec<Value> {
+    vec![
+        Value::U64(id),
+        Value::U32(code(database, author_name)),
+        Value::Nullable(editor.map(|name| Box::new(Value::U32(code(database, name))))),
+        Value::U64(score),
+    ]
+}
+
+/// A post row as it leaves the node: authors resolved to their values.
+fn resolved_post(id: u64, author_name: &str, editor: Option<&str>, score: u64) -> Vec<Value> {
     vec![
         Value::U64(id),
         author(author_name),
         Value::Nullable(editor.map(|name| Box::new(author(name)))),
         Value::U64(score),
     ]
+}
+
+/// `record` resolved for egress, as values.
+fn resolved(database: &Database, record: BorrowedRecord<'_>) -> Vec<Value> {
+    let (bytes, descriptor) = database
+        .dictionaries()
+        .resolve_record(record.descriptor(), record.raw())
+        .unwrap();
+    assert!(!descriptor.contains_interned());
+    descriptor.bind(&bytes).to_values().unwrap()
 }
 
 async fn insert_posts(database: &mut Database, table: &str, rows: Vec<Vec<Value>>) {
@@ -107,107 +143,95 @@ fn row_key(id: u64) -> Vec<u8> {
     key
 }
 
-/// The stored payload of one row, bound with the table's stored descriptor,
-/// after the `id` its storage key holds: the stored bytes leave it out.
+/// The key-free layout of a posts table: stored rows leave out `id`.
+fn posts_layout(table: &str) -> crate::records::KeyFreeLayout {
+    let table = posts_table(table);
+    crate::records::KeyFreeLayout::new(
+        table.record_schema(),
+        &table.primary_key_fields_for_variant(0).unwrap(),
+    )
+    .unwrap()
+    .expect("posts tables have a key")
+}
+
+/// The stored payload of one row, with its key column put back, bound with
+/// the table's descriptor.
 async fn stored_row(storage: &MemoryStorage, table: &str, id: u64) -> Vec<Value> {
     let stored = storage
         .get(table.to_owned(), row_key(id))
         .await
         .unwrap()
         .expect("stored row");
-    let descriptor = posts_table(table).storage_record_schema();
-    assert!(descriptor.field_index("id").is_none());
-    std::iter::once(Value::U64(id))
-        .chain(
-            descriptor
-                .bind(version_zero_payload(&stored))
-                .to_values()
-                .unwrap(),
-        )
-        .collect()
+    let layout = posts_layout(table);
+    let full = layout
+        .to_full(version_zero_payload(&stored), &[Value::U64(id)])
+        .unwrap();
+    layout.full().bind(&full).to_values().unwrap()
 }
 
-/// Contract: point, scan and index reads of a table with interned columns
-/// return full logical values, while each stored row holds 4-byte codes and
-/// the dictionary holds one entry per distinct value.
+/// Contract: point, scan and index reads return rows exactly as stored, with
+/// interned columns as codes under the table's own descriptor (one shape, no
+/// transcoding), and resolving them for egress yields the full values. The
+/// dictionary holds one entry per distinct value.
 ///
 /// Actors: `alice` and `bob` author three posts; `alice` edits one, one has
 /// no editor (nullable interned column, null and present).
 ///
-/// Reads storage directly: the code-in-place layout is below the row API.
+/// Reads storage directly: the dictionary entries are below the row API.
 #[futures_test::test]
-async fn interned_columns_round_trip_through_point_scan_and_index_reads() {
+async fn reads_carry_codes_and_resolve_at_egress() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema, storage.clone()).await.unwrap();
-    insert_posts(
-        &mut database,
-        "posts",
-        vec![
-            post(1, "alice", None, 10),
-            post(2, "bob", Some("alice"), 20),
-            post(3, "alice", Some("bob"), 20),
-        ],
-    )
-    .await;
+    let rows = vec![
+        post(&database, 1, "alice", None, 10),
+        post(&database, 2, "bob", Some("alice"), 20),
+        post(&database, 3, "alice", Some("bob"), 20),
+    ];
+    insert_posts(&mut database, "posts", rows.clone()).await;
 
     let one = database
         .primary_key_get("posts", &[Value::U64(1)])
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(one.get("author").unwrap(), author("alice"));
+    // alice was interned first, so she is code 0; bob is code 1.
+    assert_eq!(one.get("author").unwrap(), Value::U32(0));
     assert_eq!(one.get("editor").unwrap(), Value::Nullable(None));
     assert_eq!(
         one.record().descriptor(),
         &database.table_schema("posts").unwrap().record_schema()
     );
-
-    let scanned = database
-        .primary_key_scan("posts", &[])
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.record().to_values().unwrap())
-        .collect::<Vec<_>>();
     assert_eq!(
-        scanned,
-        vec![
-            post(1, "alice", None, 10),
-            post(2, "bob", Some("alice"), 20),
-            post(3, "alice", Some("bob"), 20),
-        ]
+        resolved(&database, one.record().borrowed()),
+        resolved_post(1, "alice", None, 10)
     );
+
+    let scanned = database.primary_key_scan("posts", &[]).await.unwrap();
+    assert_eq!(
+        scanned
+            .iter()
+            .map(|row| row.record().to_values().unwrap())
+            .collect::<Vec<_>>(),
+        rows
+    );
+    assert_eq!(stored_row(&storage, "posts", 2).await, rows[1]);
 
     let indexed = database
         .index_scan("posts", "posts_by_score", &[Value::U64(20)])
         .await
         .unwrap()
-        .into_iter()
-        .map(|row| row.record().to_values().unwrap())
+        .iter()
+        .map(|row| resolved(&database, row.record().borrowed()))
         .collect::<Vec<_>>();
     assert_eq!(
         indexed,
         vec![
-            post(2, "bob", Some("alice"), 20),
-            post(3, "alice", Some("bob"), 20),
+            resolved_post(2, "bob", Some("alice"), 20),
+            resolved_post(3, "alice", Some("bob"), 20),
         ]
     );
 
-    // alice was interned first, so she is code 0; bob is code 1.
-    assert_eq!(
-        stored_row(&storage, "posts", 2).await,
-        vec![
-            Value::U64(2),
-            Value::U32(1),
-            Value::Nullable(Some(Box::new(Value::U32(0)))),
-            Value::U64(20),
-        ]
-    );
-    assert_eq!(
-        stored_row(&storage, "posts", 1).await[2],
-        Value::Nullable(None)
-    );
     assert_eq!(
         dictionary_entries(&storage).await,
         vec![
@@ -221,76 +245,61 @@ async fn interned_columns_round_trip_through_point_scan_and_index_reads() {
 /// across tables: the same value has the same code everywhere and one entry.
 ///
 /// Actors: `bob` authors a post and a draft; `carol` edits the draft.
-///
-/// Reads storage directly: codes are below the row API.
 #[futures_test::test]
 async fn tables_sharing_a_dictionary_store_the_same_code() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema, storage.clone()).await.unwrap();
-    insert_posts(&mut database, "posts", vec![post(1, "bob", None, 1)]).await;
-    insert_posts(
-        &mut database,
-        "drafts",
-        vec![post(9, "carol", Some("bob"), 1)],
-    )
-    .await;
+    let posted = post(&database, 1, "bob", None, 1);
+    insert_posts(&mut database, "posts", vec![posted]).await;
+    let drafted = post(&database, 9, "carol", Some("bob"), 1);
+    insert_posts(&mut database, "drafts", vec![drafted]).await;
 
-    assert_eq!(stored_row(&storage, "posts", 1).await[1], Value::U32(0));
-    let draft = stored_row(&storage, "drafts", 9).await;
-    assert_eq!(draft[1], Value::U32(1));
-    assert_eq!(draft[2], Value::Nullable(Some(Box::new(Value::U32(0)))));
-    assert_eq!(dictionary_entries(&storage).await.len(), 2);
-    assert_eq!(
-        database
-            .primary_key_get("drafts", &[Value::U64(9)])
-            .await
-            .unwrap()
-            .unwrap()
-            .record()
-            .to_values()
-            .unwrap(),
-        post(9, "carol", Some("bob"), 1)
-    );
-}
-
-/// Contract: a code allocated for a batch that is dropped stays reserved for
-/// its value. No other value receives it, and its entry is written by the
-/// next publication, so a later row reusing the value names a durable entry.
-///
-/// ```text
-/// batch₁: carol ─prepare─► code 2 ─drop
-/// batch₂: dave  ─prepare─► code 3 ─commit─► entries 2 (carol) and 3 (dave)
-/// batch₃: carol ─prepare─► code 2 ─commit─► no new entry
-/// ```
-///
-/// Reads storage directly: entries and codes are below the row API.
-#[futures_test::test]
-async fn a_dropped_batch_keeps_its_code_reserved_and_writes_the_entry_later() {
-    let schema = posts_schema();
-    let storage = posts_storage(&schema);
-    let mut database = Database::new(schema, storage.clone()).await.unwrap();
-    insert_posts(
-        &mut database,
-        "posts",
-        vec![post(1, "alice", Some("bob"), 1)],
-    )
-    .await;
-
-    let mut dropped = database.open_batch();
-    dropped.insert("posts", post(2, "carol", None, 1));
-    // Reading through the batch prepares its writes, which allocates.
-    let staged = database
-        .primary_key_get_raw_in_batch(&dropped, "posts", &[Value::U64(2)])
+    let draft = database
+        .primary_key_get("drafts", &[Value::U64(9)])
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(staged.record().get("author").unwrap(), author("carol"));
+    assert_eq!(draft.get("author").unwrap(), Value::U32(1));
+    assert_eq!(
+        draft.get("editor").unwrap(),
+        Value::Nullable(Some(Box::new(Value::U32(0))))
+    );
+    assert_eq!(dictionary_entries(&storage).await.len(), 2);
+    assert_eq!(
+        resolved(&database, draft.record().borrowed()),
+        resolved_post(9, "carol", Some("bob"), 1)
+    );
+}
+
+/// Contract: interning allocates a code synchronously and never undoes it.
+/// A code interned for a batch that is dropped stays reserved for its value,
+/// and its entry rides the next publication, so a later row reusing the value
+/// names a durable entry.
+///
+/// ```text
+/// intern carol ─► code 2 ─ batch dropped
+/// intern dave  ─► code 3 ─ commit ─► entries 2 (carol) and 3 (dave)
+/// intern carol ─► code 2 ─ commit ─► no new entry
+/// ```
+///
+/// Reads storage directly: entries are below the row API.
+#[futures_test::test]
+async fn an_interned_code_is_never_undone_and_its_entry_rides_the_next_publication() {
+    let schema = posts_schema();
+    let storage = posts_storage(&schema);
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    let first = post(&database, 1, "alice", Some("bob"), 1);
+    insert_posts(&mut database, "posts", vec![first]).await;
+
+    let mut dropped = database.open_batch();
+    dropped.insert("posts", post(&database, 2, "carol", None, 1));
     drop(dropped);
     assert_eq!(dictionary_entries(&storage).await.len(), 2);
 
-    insert_posts(&mut database, "posts", vec![post(3, "dave", None, 1)]).await;
-    assert_eq!(stored_row(&storage, "posts", 3).await[1], Value::U32(3));
+    let dave = post(&database, 3, "dave", None, 1);
+    assert_eq!(dave[1], Value::U32(3));
+    insert_posts(&mut database, "posts", vec![dave]).await;
     let entries = dictionary_entries(&storage).await;
     assert_eq!(entries.len(), 4);
     assert_eq!(
@@ -298,9 +307,36 @@ async fn a_dropped_batch_keeps_its_code_reserved_and_writes_the_entry_later() {
         (2u32.to_be_bytes().to_vec(), author_bytes("carol"))
     );
 
-    insert_posts(&mut database, "posts", vec![post(4, "carol", None, 1)]).await;
-    assert_eq!(stored_row(&storage, "posts", 4).await[1], Value::U32(2));
+    let carol = post(&database, 4, "carol", None, 1);
+    assert_eq!(carol[1], Value::U32(2));
+    insert_posts(&mut database, "posts", vec![carol]).await;
     assert_eq!(dictionary_entries(&storage).await.len(), 4);
+}
+
+/// Contract: a row may only store codes its dictionary holds. Writing a code
+/// nobody interned is refused before anything is staged.
+#[futures_test::test]
+async fn writing_an_unknown_code_is_refused() {
+    let schema = posts_schema();
+    let storage = posts_storage(&schema);
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "posts",
+        vec![
+            Value::U64(1),
+            Value::U32(7),
+            Value::Nullable(None),
+            Value::U64(1),
+        ],
+    );
+    assert!(matches!(
+        database.commit_batch(batch).await,
+        Err(Error::Dictionary(DictionaryError::UnknownCode {
+            code: 7,
+            ..
+        }))
+    ));
 }
 
 /// Contract: a publication that interns a new value is still exactly one
@@ -315,7 +351,7 @@ async fn a_new_entry_rides_the_publication_s_single_storage_write() {
     control.take_observed();
 
     let mut batch = database.open_batch();
-    batch.insert("posts", post(1, "alice", None, 1));
+    batch.insert("posts", post(&database, 1, "alice", None, 1));
     let applied = database.apply_batch(batch).await.unwrap();
     let persisted = applied.persist().await;
     database.finish_persistence(persisted).unwrap();
@@ -336,52 +372,43 @@ async fn a_new_entry_rides_the_publication_s_single_storage_write() {
     assert_eq!(dictionary_entries(&storage).await.len(), 1);
 }
 
-/// Contract: a reopened database loads its dictionaries, decodes stored rows
-/// to the same values, and continues allocating after the highest code.
+/// Contract: a reopened database loads its dictionaries, so stored codes
+/// resolve to the same values, and continues allocating after the highest
+/// code.
 ///
 /// Actors: `alice` and `bob` write before the restart, `carol` after.
 #[futures_test::test]
-async fn a_reopened_database_decodes_rows_and_continues_allocation() {
+async fn a_reopened_database_resolves_codes_and_continues_allocation() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema.clone(), storage.clone())
         .await
         .unwrap();
-    insert_posts(
-        &mut database,
-        "posts",
-        vec![post(1, "alice", Some("bob"), 1)],
-    )
-    .await;
+    let row = post(&database, 1, "alice", Some("bob"), 1);
+    insert_posts(&mut database, "posts", vec![row]).await;
     drop(database);
 
     let mut reopened = Database::new(schema, storage.clone()).await.unwrap();
+    let read = reopened
+        .primary_key_get("posts", &[Value::U64(1)])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        reopened
-            .primary_key_get("posts", &[Value::U64(1)])
-            .await
-            .unwrap()
-            .unwrap()
-            .record()
-            .to_values()
-            .unwrap(),
-        post(1, "alice", Some("bob"), 1)
+        resolved(&reopened, read.record().borrowed()),
+        resolved_post(1, "alice", Some("bob"), 1)
     );
-    insert_posts(
-        &mut reopened,
-        "posts",
-        vec![post(2, "carol", Some("alice"), 1)],
-    )
-    .await;
-    let stored = stored_row(&storage, "posts", 2).await;
-    assert_eq!(stored[1], Value::U32(2));
-    assert_eq!(stored[2], Value::Nullable(Some(Box::new(Value::U32(0)))));
+    let row = post(&reopened, 2, "carol", Some("alice"), 1);
+    assert_eq!(row[1], Value::U32(2));
+    assert_eq!(row[2], Value::Nullable(Some(Box::new(Value::U32(0)))));
+    insert_posts(&mut reopened, "posts", vec![row.clone()]).await;
+    assert_eq!(stored_row(&storage, "posts", 2).await, row);
 }
 
-/// Contract: opening refuses a corrupt dictionary with a typed error instead
-/// of decoding rows against it: a repeated value, a non-canonical value, a
-/// malformed key and a gap in the codes. A row naming a code with no entry is
-/// refused when read.
+/// Contract: opening refuses a corrupt dictionary with a typed error: a
+/// repeated value, a non-canonical value, a malformed key and a gap in the
+/// codes. A stored row naming a code with no entry reads back as that code;
+/// resolving it is refused.
 ///
 /// Writes storage directly: corruption cannot be produced through the API.
 #[futures_test::test]
@@ -416,9 +443,19 @@ async fn a_corrupt_dictionary_is_refused() {
     }
 
     let storage = posts_storage(&schema);
-    let physical = posts_table("posts").storage_record_schema();
-    let payload = physical
-        .create(&[Value::U32(5), Value::Nullable(None), Value::U64(1)])
+    let layout = posts_layout("posts");
+    let payload = layout
+        .to_stored(
+            &layout
+                .full()
+                .create(&[
+                    Value::U64(1),
+                    Value::U32(5),
+                    Value::Nullable(None),
+                    Value::U64(1),
+                ])
+                .unwrap(),
+        )
         .unwrap();
     storage
         .set(
@@ -429,19 +466,28 @@ async fn a_corrupt_dictionary_is_refused() {
         .await
         .unwrap();
     let database = Database::new(schema, storage).await.unwrap();
+    let row = database
+        .primary_key_get("posts", &[Value::U64(1)])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.get("author").unwrap(), Value::U32(5));
     assert!(matches!(
-        database.primary_key_get("posts", &[Value::U64(1)]).await,
-        Err(Error::Dictionary(DictionaryError::UnknownCode {
-            code: 5,
-            ..
-        }))
+        database
+            .dictionaries()
+            .resolve_record(*row.record().descriptor(), row.record().raw()),
+        Err(crate::dictionary::DictionaryTranscodeError::Dictionary(
+            DictionaryError::UnknownCode { code: 5, .. }
+        ))
     ));
 }
 
-/// Contract: subscriptions over a table with interned columns see logical
-/// values: a projection of a field nested in the interned record, a filter on
-/// it, and the deltas of inserts, updates and deletes (whose retracted old
-/// rows were read back from stored codes).
+/// Contract: subscriptions over a table with interned columns carry codes,
+/// and operators that need the value resolve them: a projection of a field
+/// nested in the interned record, a filter comparing it with a literal, and
+/// a filter comparing the whole interned value with a literal. Deltas of
+/// inserts, updates and deletes (whose retracted old rows are read back from
+/// storage) carry the same codes as the stored rows.
 ///
 /// ```text
 /// alice ─insert 1,2─► hydrate {1, 2}
@@ -450,22 +496,18 @@ async fn a_corrupt_dictionary_is_refused() {
 /// alice ─delete 1───► -1
 /// ```
 #[futures_test::test]
-async fn subscriptions_over_interned_columns_see_logical_deltas() {
+async fn subscriptions_carry_codes_and_operators_resolve_them() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema, storage).await.unwrap();
-    insert_posts(
-        &mut database,
-        "posts",
-        vec![
-            post(1, "alice", None, 1),
-            post(2, "alice", Some("bob"), 2),
-            post(4, "bob", None, 4),
-        ],
-    )
-    .await;
+    let rows = vec![
+        post(&database, 1, "alice", None, 1),
+        post(&database, 2, "alice", Some("bob"), 2),
+        post(&database, 4, "bob", None, 4),
+    ];
+    insert_posts(&mut database, "posts", rows).await;
 
-    let by_alice = database
+    let by_alice_name = database
         .subscribe_one_sink(
             GraphBuilder::table("posts")
                 .project_fields([
@@ -479,32 +521,58 @@ async fn subscriptions_over_interned_columns_see_logical_deltas() {
         )
         .await
         .unwrap();
+    let by_alice = database
+        .subscribe_one_sink(
+            GraphBuilder::table("posts")
+                .filter(PredicateExpr::eq("author", author("alice")))
+                .project_fields([ProjectField::named("id"), ProjectField::named("author")]),
+        )
+        .await
+        .unwrap();
     let whole = database
         .subscribe_one_sink(GraphBuilder::table("posts"))
         .await
         .unwrap();
-    let alice = |id| vec![Value::U64(id), Value::String("alice".into())];
-    let mut initial = by_alice.recv().unwrap().to_values().unwrap();
-    initial.sort_by_key(|(values, _)| match values[0] {
-        Value::U64(id) => id,
-        _ => unreachable!(),
-    });
-    assert_eq!(initial, vec![(alice(1), 1), (alice(2), 1)]);
-    assert_eq!(whole.recv().unwrap().to_values().unwrap().len(), 3);
+    let alice_name = |id| vec![Value::U64(id), Value::String("alice".into())];
+    let alice = |id| vec![Value::U64(id), Value::U32(0)];
+    let sorted = |mut rows: Vec<(Vec<Value>, i64)>| {
+        rows.sort_by_key(|(values, _)| match values[0] {
+            Value::U64(id) => id,
+            _ => unreachable!(),
+        });
+        rows
+    };
+    assert_eq!(
+        sorted(by_alice_name.recv().unwrap().to_values().unwrap()),
+        vec![(alice_name(1), 1), (alice_name(2), 1)]
+    );
+    assert_eq!(
+        sorted(by_alice.recv().unwrap().to_values().unwrap()),
+        vec![(alice(1), 1), (alice(2), 1)]
+    );
+    let initial = whole.recv().unwrap();
+    assert_eq!(initial.descriptor, posts_table("posts").record_schema());
+    assert_eq!(initial.deltas.len(), 3);
 
-    insert_posts(&mut database, "posts", vec![post(3, "alice", None, 3)]).await;
+    let row = post(&database, 3, "alice", None, 3);
+    insert_posts(&mut database, "posts", vec![row.clone()]).await;
+    assert_eq!(
+        by_alice_name.recv().unwrap().to_values().unwrap(),
+        vec![(alice_name(3), 1)]
+    );
     assert_eq!(
         by_alice.recv().unwrap().to_values().unwrap(),
         vec![(alice(3), 1)]
     );
-    assert_eq!(
-        whole.recv().unwrap().to_values().unwrap(),
-        vec![(post(3, "alice", None, 3), 1)]
-    );
+    assert_eq!(whole.recv().unwrap().to_values().unwrap(), vec![(row, 1)]);
 
     let mut update = database.open_batch();
-    update.update("posts", post(2, "bob", Some("bob"), 2));
+    update.update("posts", post(&database, 2, "bob", Some("bob"), 2));
     database.commit_batch(update).await.unwrap();
+    assert_eq!(
+        by_alice_name.recv().unwrap().to_values().unwrap(),
+        vec![(alice_name(2), -1)]
+    );
     assert_eq!(
         by_alice.recv().unwrap().to_values().unwrap(),
         vec![(alice(2), -1)]
@@ -514,8 +582,8 @@ async fn subscriptions_over_interned_columns_see_logical_deltas() {
     assert_eq!(
         updated,
         vec![
-            (post(2, "alice", Some("bob"), 2), -1),
-            (post(2, "bob", Some("bob"), 2), 1),
+            (post(&database, 2, "alice", Some("bob"), 2), -1),
+            (post(&database, 2, "bob", Some("bob"), 2), 1),
         ]
     );
 
@@ -523,14 +591,93 @@ async fn subscriptions_over_interned_columns_see_logical_deltas() {
     delete.delete("posts", PrimaryKeyValue::U64(1));
     database.commit_batch(delete).await.unwrap();
     assert_eq!(
-        by_alice.recv().unwrap().to_values().unwrap(),
-        vec![(alice(1), -1)]
+        by_alice_name.recv().unwrap().to_values().unwrap(),
+        vec![(alice_name(1), -1)]
+    );
+}
+
+/// Contract: equality between interned columns of one dictionary needs no
+/// value: two codes are equal exactly when their values are, so a join keyed
+/// on interned columns matches rows by code. A join between an interned key
+/// and a plain key, and ordering by an interned column, are refused with a
+/// typed error instead of silently comparing codes with values.
+///
+/// Actors: `alice` authors a post and a draft, `bob` a draft.
+#[futures_test::test]
+async fn joins_compare_codes_and_value_order_is_refused() {
+    let schema = posts_schema();
+    let storage = posts_storage(&schema);
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let posted = post(&database, 1, "alice", None, 1);
+    insert_posts(&mut database, "posts", vec![posted]).await;
+    let drafts = vec![
+        post(&database, 7, "alice", None, 1),
+        post(&database, 8, "bob", None, 1),
+    ];
+    insert_posts(&mut database, "drafts", drafts).await;
+
+    let joined = database
+        .subscribe_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::table("posts"),
+                GraphBuilder::table("drafts"),
+                ["author"],
+                ["author"],
+            )
+            .project_fields([
+                ProjectField::named("left.id"),
+                ProjectField::named("right.id"),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        joined.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1), Value::U64(7)], 1)]
+    );
+
+    let mixed = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("posts"),
+            GraphBuilder::table("drafts"),
+            ["author"],
+            ["score"],
+        ))
+        .await;
+    assert!(
+        matches!(
+            mixed,
+            Err(Error::IvmRuntime(
+                IvmRuntimeError::UnsupportedInternedOperand { .. }
+            ))
+        ),
+        "{:?}",
+        mixed.err()
+    );
+    let ordered = database
+        .subscribe_one_sink(GraphBuilder::top_by(
+            GraphBuilder::table("posts"),
+            Vec::<String>::new(),
+            [TopByOrder::asc("author")],
+            Vec::<String>::new(),
+            0,
+            TopByLimit::Finite(1),
+        ))
+        .await;
+    assert!(
+        matches!(
+            ordered,
+            Err(Error::IvmRuntime(
+                IvmRuntimeError::UnsupportedInternedOperand { .. }
+            ))
+        ),
+        "{:?}",
+        ordered.err()
     );
 }
 
 /// Contract: an index registered on a live table with interned columns is
-/// backfilled from the stored rows, which the backfill reads as logical
-/// records.
+/// backfilled from the stored rows.
 ///
 /// Actors: `alice` and `bob` post before the index exists.
 #[futures_test::test]
@@ -538,37 +685,36 @@ async fn an_index_registered_later_backfills_from_interned_rows() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema, storage).await.unwrap();
-    insert_posts(
-        &mut database,
-        "drafts",
-        vec![post(1, "alice", None, 5), post(2, "bob", Some("alice"), 6)],
-    )
-    .await;
+    let rows = vec![
+        post(&database, 1, "alice", None, 5),
+        post(&database, 2, "bob", Some("alice"), 6),
+    ];
+    insert_posts(&mut database, "drafts", rows.clone()).await;
     database
         .register_table_index("drafts", IndexSchema::new("drafts_by_id", ["id"]))
         .await
         .unwrap();
-    let rows = database
+    let found = database
         .index_scan("drafts", "drafts_by_id", &[Value::U64(2)])
         .await
         .unwrap();
-    assert_eq!(
-        rows[0].record().to_values().unwrap(),
-        post(2, "bob", Some("alice"), 6)
-    );
+    assert_eq!(found[0].record().to_values().unwrap(), rows[1]);
 }
 
-/// Contract: `ensure_exact` compares the stored form of a logical record, so
-/// re-ensuring an identical row with an interned column is idempotent.
+/// Contract: `ensure_exact` compares stored rows, codes included, so
+/// re-ensuring an identical row with an interned column is idempotent and a
+/// different author is a conflict.
 ///
-/// Actors: `alice` writes the same immutable row twice.
+/// Actors: `alice` writes the same immutable row twice; `bob` conflicts.
 #[futures_test::test]
 async fn ensure_exact_is_idempotent_for_interned_rows() {
     let schema = posts_schema();
     let storage = posts_storage(&schema);
     let mut database = Database::new(schema, storage).await.unwrap();
-    let logical = database.table_schema("posts").unwrap().record_schema();
-    let payload = logical.create(&post(1, "alice", Some("alice"), 1)).unwrap();
+    let descriptor = database.table_schema("posts").unwrap().record_schema();
+    let payload = descriptor
+        .create(&post(&database, 1, "alice", Some("alice"), 1))
+        .unwrap();
 
     let mut first = database.open_batch();
     assert_eq!(
@@ -588,7 +734,9 @@ async fn ensure_exact_is_idempotent_for_interned_rows() {
             .unwrap(),
         EnsureExactOutcome::AlreadyIdentical
     );
-    let different = logical.create(&post(1, "bob", Some("alice"), 1)).unwrap();
+    let different = descriptor
+        .create(&post(&database, 1, "bob", Some("alice"), 1))
+        .unwrap();
     let mut third = database.open_batch();
     assert_eq!(
         third
@@ -600,8 +748,7 @@ async fn ensure_exact_is_idempotent_for_interned_rows() {
 }
 
 /// Contract: interning is a property of the physical column, so it holds in
-/// every variant payload that declares an interned field, and each variant
-/// reads back logical values.
+/// every variant payload that declares an interned field.
 ///
 /// Actors: `alice` writes a row in each of two layouts.
 #[futures_test::test]
@@ -635,13 +782,14 @@ async fn variant_payload_fields_keep_their_interning() {
     let mut database = Database::new(schema, storage.clone()).await.unwrap();
     let first = table.record_schema_for_variant(1).unwrap();
     let second = table.record_schema_for_variant(2).unwrap();
+    let alice = Value::U32(code(&database, "alice"));
     let mut batch = database.open_batch();
     batch.insert(
         "events",
         VariantRecord::new(
             1,
             OwnedRecord::new(
-                first.create(&[Value::U64(1), author("alice")]).unwrap(),
+                first.create(&[Value::U64(1), alice.clone()]).unwrap(),
                 first,
             ),
         ),
@@ -652,7 +800,7 @@ async fn variant_payload_fields_keep_their_interning() {
             2,
             OwnedRecord::new(
                 second
-                    .create(&[Value::U64(2), Value::String("hi".into()), author("alice")])
+                    .create(&[Value::U64(2), Value::String("hi".into()), alice.clone()])
                     .unwrap(),
                 second,
             ),
@@ -661,17 +809,12 @@ async fn variant_payload_fields_keep_their_interning() {
     database.commit_batch(batch).await.unwrap();
 
     let rows = database.primary_key_scan("events", &[]).await.unwrap();
-    assert_eq!(rows[0].record().get("by").unwrap(), author("alice"));
-    assert_eq!(rows[1].record().get("by").unwrap(), author("alice"));
-    let stored = storage
-        .get("events".to_owned(), row_key(2))
-        .await
-        .unwrap()
-        .unwrap();
-    let (tag, payload) = crate::records::split_variant_record(&stored).unwrap();
-    assert_eq!(tag, 2);
-    let physical = table.storage_record_schema_for_variant(2).unwrap();
-    assert_eq!(physical.bind(payload).get("by").unwrap(), Value::U32(0));
+    assert_eq!(rows[0].record().get("by").unwrap(), alice);
+    assert_eq!(rows[1].record().get("by").unwrap(), alice);
+    assert_eq!(
+        resolved(&database, rows[1].record().borrowed()),
+        vec![Value::U64(2), Value::String("hi".into()), author("alice")]
+    );
     assert_eq!(dictionary_entries(&storage).await.len(), 1);
 }
 
@@ -793,29 +936,29 @@ async fn unsupported_interned_shapes_are_refused() {
     database.register_table(base(interned)).unwrap();
 }
 
-/// Contract: a descriptor carrying an interned column never crosses a
-/// persisted or wire descriptor encoding; its logical descriptor does.
+/// Contract: a node-local persisted descriptor carries an interned column
+/// with its dictionary and round-trips exactly; a descriptor resolved for
+/// egress names the logical type instead.
 #[test]
-fn descriptors_with_interned_columns_are_not_encodable() {
-    let table = posts_table("posts");
-    let physical = table.storage_record_schema();
-    let expected = crate::records::Error::InternedTypeNotEncodable {
-        dictionary: AUTHORS.to_owned(),
-    };
-    assert_eq!(
-        crate::records::encode_record_descriptor(&physical),
-        Err(expected.clone())
-    );
-    assert_eq!(
-        crate::records::encode_persisted_record_descriptor(&physical),
-        Err(expected)
-    );
-    let logical = table.record_schema();
-    assert!(!logical.contains_interned());
-    let encoded = crate::records::encode_persisted_record_descriptor(&logical).unwrap();
+fn persisted_descriptors_carry_interned_columns() {
+    let descriptor = posts_table("posts").record_schema();
+    assert!(descriptor.contains_interned());
+    let encoded = crate::records::encode_persisted_record_descriptor(&descriptor).unwrap();
     assert_eq!(
         crate::records::decode_persisted_record_descriptor(&encoded).unwrap(),
-        logical
+        descriptor
+    );
+    let encoded = crate::records::encode_record_descriptor(&descriptor).unwrap();
+    assert_eq!(
+        crate::records::decode_record_descriptor(&encoded).unwrap(),
+        descriptor
+    );
+    let logical = descriptor.logical();
+    assert!(!logical.contains_interned());
+    assert_eq!(
+        logical.fields()[1].value_type,
+        author_type(),
+        "egress names the dictionary's value type"
     );
 }
 
@@ -840,20 +983,20 @@ async fn a_rebuild_cannot_declare_an_unloaded_dictionary() {
 async fn a_rebuild_shares_loaded_dictionaries() {
     let storage = MemoryStorage::new(&posts_schema().column_families()).unwrap();
     let mut database = Database::new(posts_schema(), storage).await.unwrap();
-    insert_posts(&mut database, "posts", vec![post(1, "alice", None, 1)]).await;
+    let handle = database.dictionaries();
+    let first = post(&database, 1, "alice", None, 1);
+    insert_posts(&mut database, "posts", vec![first]).await;
     database.prepare_for_storage_extraction().await.unwrap();
     database.rebuild(posts_schema()).unwrap();
-    insert_posts(
-        &mut database,
-        "posts",
-        vec![post(2, "bob", Some("alice"), 1)],
-    )
-    .await;
+    let second = post(&database, 2, "bob", Some("alice"), 1);
+    insert_posts(&mut database, "posts", vec![second]).await;
     let rows = database.primary_key_scan("posts", &[]).await.unwrap();
     assert_eq!(
-        rows[1].record().to_values().unwrap(),
-        post(2, "bob", Some("alice"), 1)
+        resolved(&database, rows[1].record().borrowed()),
+        resolved_post(2, "bob", Some("alice"), 1)
     );
+    // A handle taken before the rebuild sees the same registry.
+    assert_eq!(handle.code(AUTHORS, &author_bytes("bob")), Some(1));
 }
 
 /// Contract (`groove.dictionary.v1` bytes): a dictionary entry is keyed by
@@ -885,22 +1028,23 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     );
     let storage = MemoryStorage::new(&schema.column_families()).unwrap();
     let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    let name = |value: &str| {
+        let bytes = crate::records::encode_single_field_value(
+            &Value::String(value.into()),
+            &ValueType::String,
+        )
+        .unwrap();
+        Value::U32(database.dictionaries().intern("names", &bytes).unwrap())
+    };
+    let (red, blue) = (name("red"), name("blue"));
     let mut batch = database.open_batch();
     batch.insert(
         "tags",
-        vec![
-            Value::U64(1),
-            Value::String("red".into()),
-            Value::Nullable(None),
-        ],
+        vec![Value::U64(1), red.clone(), Value::Nullable(None)],
     );
     batch.insert(
         "tags",
-        vec![
-            Value::U64(2),
-            Value::String("blue".into()),
-            Value::Nullable(Some(Box::new(Value::String("red".into())))),
-        ],
+        vec![Value::U64(2), blue, Value::Nullable(Some(Box::new(red)))],
     );
     database.commit_batch(batch).await.unwrap();
 
@@ -936,7 +1080,7 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     assert_eq!(
         row(1).await,
         vec![
-            0x00, // variant tag; id = 1 is in the key only
+            0x00, // variant tag (id = 1 lives in the key)
             0, 0, 0, 0, // tag = code 0 ("red")
             0, 0, 0, 0, 0, // alias = null
         ]
@@ -944,7 +1088,7 @@ async fn dictionary_v1_entry_and_row_bytes_are_pinned() {
     assert_eq!(
         row(2).await,
         vec![
-            0x00, // variant tag; id = 2 is in the key only
+            0x00, // variant tag (id = 2 lives in the key)
             1, 0, 0, 0, // tag = code 1 ("blue")
             1, 0, 0, 0, 0, // alias = present, code 0 ("red")
         ]

@@ -21,15 +21,13 @@ using `mtime=0`, then base64-encode it. Update the artifact digests in
 `native_storage_corpus.rs` and run
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`.
 
-The logical pack has 33 entries in the current storage format. The active
+The logical pack has 32 entries in the current storage format. The active
 schema selection lives in `jazz_catalogue`; the redundant write-pointer table
 and retired scope-relay repair ledger are no longer registered.
 
 History records are keyed `(branch_key, row_uuid, seq, tx_time, tx_node_id)`.
-They include required `counter_signs` and `seq` columns and one nullable `base`
-enum (settled seq, pending predecessor, or both). Stored values leave out the
-primary-key columns, which the storage key already holds, and `authored_columns`
-holds u16 physical column ids. The corpus also pins the
+They include required `counter_signs`, `seq`, `base_seq`, and `base_pending`
+columns, with nullable base values where appropriate. The corpus also pins the
 unified catalogue encoding and kind-specific record descriptors.
 
 | Store                               | Entries |
@@ -53,7 +51,7 @@ unified catalogue encoding and kind-specific record descriptors.
 | `jazz_subscription_watermarks_v1`   |       1 |
 | `jazz_transactions`                 |       4 |
 | `jazz_tx_provenance`                |       2 |
-| `jazz_tx_touched_rows`              |       4 |
+| `jazz_tx_touched_rows`              |       3 |
 
 The one `jazz_subscription_watermarks_v1` record names a catch-up revision that
 is a fresh random id per catch-up. The receipt pins its key, record version and
@@ -75,7 +73,7 @@ separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
 | ------------------- | ------------------------------------------------------------------ |
-| logical pack        | `83b4136aaeca5cda98cba414054528cab53f1e401b2771a806703aec659d8c24` |
-| SQLite payload      | `18f8b7a406f1e804afe702097762b6044364cd979b3a26fb21e204b24889c12f` |
-| gzip SQLite archive | `bb37e83033a1471f6664cb001aa8180f6a813583641e8fed228bd73e58c3157c` |
-| RocksDB archive     | `6d53880ca6391b27fabb385b5e507514ef6cd3f4eff6c390b0e83a6be6a9b9cc` |
+| logical pack        | `cb082dbbf76311d0969abea96aafbe6cefee4c10d5be5e2caa2c7a7f992c9d6a` |
+| SQLite payload      | `6cc542586345ac3b3d1e7f3f1419c92683d83f504b0a28390fd4777fc1e1651c` |
+| gzip SQLite archive | `45ca448dcf57433e9e5a329652beb6bf3cbae60b6c508bb54c5a896dbf27199f` |
+| RocksDB archive     | `da4bcb7c54b1ff5bf6266d70b7527a3911caf0a36827ad2b1d5029e283964030` |
