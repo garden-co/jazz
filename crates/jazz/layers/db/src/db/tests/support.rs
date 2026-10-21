@@ -2302,7 +2302,7 @@ impl CoreDb {
         block_on(self.server.tick()).map(|_| ())
     }
 
-    pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
+    pub(super) fn serializable_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         block_on(
             self.server

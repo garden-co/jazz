@@ -93,7 +93,7 @@ describe("React Native structured reads", () => {
           ],
         },
       ]);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       tx.update(app.notes, note.id, { body: "draft note" });
       expect(await tx.all(query)).toMatchObject([
         { tasksViaGroup: [{ notesViaTask: [{ body: "draft note" }] }] },

@@ -719,7 +719,7 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         ErrorCode::WriteRejected,
     );
     assert_eq!(
-        block_on(db.begin_exclusive(OpenTransactionId::new()))
+        block_on(db.begin_serializable(OpenTransactionId::new()))
             .expect_err("direct transaction entry through a sibling view must be rejected")
             .code,
         ErrorCode::WriteRejected,
@@ -1229,7 +1229,7 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     storage_control.evict_all();
     control.pause_on(TestStorageOperation::Get);
     control.pause_on(TestStorageOperation::ScanOpen);
-    db.enqueue_begin_exclusive(open_tx, None, None).unwrap();
+    db.enqueue_begin_serializable(open_tx, None, None).unwrap();
     db.enqueue_transaction_update(
         open_tx,
         "todos".to_owned(),
@@ -1239,7 +1239,7 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     )
     .unwrap();
     let queued = db
-        .enqueue_commit_exclusive_handle(open_tx)
+        .enqueue_commit_serializable_handle(open_tx)
         .expect("reserve final transaction identity");
     let reserved = queued.mergeable_tx_id();
 
@@ -1367,7 +1367,7 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         .unwrap();
         let open_tx = OpenTransactionId::new();
         if exclusive {
-            db.enqueue_begin_exclusive(open_tx, None, None).unwrap();
+            db.enqueue_begin_serializable(open_tx, None, None).unwrap();
         } else {
             db.enqueue_begin_mergeable(open_tx, None, None).unwrap();
         }
@@ -1383,7 +1383,7 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         .unwrap();
         let host_now = 1_800_000_000_000;
         let write = if exclusive {
-            db.enqueue_commit_exclusive_handle_at_ms(open_tx, host_now)
+            db.enqueue_commit_serializable_handle_at_ms(open_tx, host_now)
         } else {
             db.enqueue_commit_mergeable_handle_at_ms(open_tx, host_now)
         }

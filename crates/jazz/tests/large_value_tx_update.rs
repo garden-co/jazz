@@ -14,7 +14,7 @@ mod common;
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, InsertOptions, MergeableTxOps, UpdateOptions,
+    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, SerializableTxOps, UpdateOptions,
     UpsertOptions,
 };
 use jazz::groove::large_values::{
@@ -250,14 +250,14 @@ fn transaction_upsert_of_existing_row_keeps_large_values() {
     assert_large_values_intact(&after);
 }
 
-/// Contract: the exclusive transaction path keeps untouched large values
+/// Contract: the serializable transaction path keeps untouched large values
 /// when one small column is updated.
 #[test]
 fn exclusive_transaction_update_keeps_large_values() {
     let db = open_db();
     let row = seed(&db);
 
-    let tx = block_on(db.exclusive_tx()).expect("open exclusive tx");
+    let tx = block_on(db.serializable_tx()).expect("open serializable tx");
     block_on(tx.update("docs", row, rank_patch(2), UpdateOptions::default()))
         .expect("stage exclusive update");
     block_on(tx.commit()).expect("exclusive update commits");

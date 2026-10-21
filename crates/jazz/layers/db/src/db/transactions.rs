@@ -1,4 +1,4 @@
-//! Mergeable and exclusive transaction handles and staging.
+//! Mergeable and serializable transaction handles and staging.
 
 use super::*;
 
@@ -780,49 +780,49 @@ where
         }));
     }
 
-    /// Open an exclusive transaction over the current local snapshot.
+    /// Open a serializable transaction over the current local snapshot.
     ///
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
-    /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
+    /// on drop. Use [`Db::serializable_tx_ref`] only when another layer retains the
     /// `OpenTransactionId` and owns that lifetime explicitly.
-    pub async fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
+    pub async fn serializable_tx(&self) -> Result<SerializableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.open_exclusive_handle(tx_id).await?;
-        Ok(ExclusiveTx {
+        self.open_serializable_handle(tx_id).await?;
+        Ok(SerializableTx {
             db: self,
             tx_id,
             committed: false,
         })
     }
 
-    /// Open an exclusive transaction and return its id.
+    /// Open a serializable transaction and return its id.
     ///
     /// The caller owns this transaction's lifetime and must commit it with
-    /// [`Db::commit_exclusive_handle`] or abandon it with
-    /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
-    /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
-    /// [`Db::exclusive_tx`] instead.
-    pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.begin_exclusive_with_identity(id, WriteIdentity::Database)
+    /// [`Db::commit_serializable_handle`] or abandon it with
+    /// [`Db::abandon_serializable_handle`]. Perform its operations through an
+    /// [`SerializableTxRef`]. Rust callers that want RAII should use
+    /// [`Db::serializable_tx`] instead.
+    pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.begin_serializable_with_identity(id, WriteIdentity::Database)
             .await
     }
 
-    /// Open an exclusive transaction whose identity is fixed for its lifetime.
+    /// Open a serializable transaction whose identity is fixed for its lifetime.
     ///
     /// Transaction-local reads, authorization, provenance, and commit
     /// attribution all use `author`; subsequent calls cannot replace it.
     #[doc(hidden)]
-    pub async fn begin_exclusive_for_identity(
+    pub async fn begin_serializable_for_identity(
         &self,
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.begin_exclusive_with_identity(id, WriteIdentity::Session(author))
+        self.begin_serializable_with_identity(id, WriteIdentity::Session(author))
             .await
     }
 
     #[doc(hidden)]
-    pub async fn begin_exclusive_with_identity(
+    pub async fn begin_serializable_with_identity(
         &self,
         id: OpenTransactionId,
         identity: WriteIdentity,
@@ -839,9 +839,9 @@ where
             .map_err(Into::into)
     }
 
-    /// Queue exclusive snapshot admission behind earlier owner operations.
+    /// Queue serializable snapshot admission behind earlier owner operations.
     #[doc(hidden)]
-    pub fn enqueue_begin_exclusive(
+    pub fn enqueue_begin_serializable(
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
@@ -851,18 +851,18 @@ where
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
-            Box::pin(async move { db.begin_exclusive_with_identity(id, identity).await }),
+            Box::pin(async move { db.begin_serializable_with_identity(id, identity).await }),
         )
     }
 
-    /// Return a non-owning operations handle for an already-open exclusive transaction.
+    /// Return a non-owning operations handle for an already-open serializable transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
     /// for a single call in a binding that retains `tx_id` between calls. Its
-    /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
-    /// [`ExclusiveTx`] handle.
-    pub fn exclusive_tx_ref(&self, tx_id: OpenTransactionId) -> ExclusiveTxRef<'_, S> {
-        ExclusiveTxRef { db: self, tx_id }
+    /// CRUD API is defined by [`SerializableTxOps`] and is shared with the owning
+    /// [`SerializableTx`] handle.
+    pub fn serializable_tx_ref(&self, tx_id: OpenTransactionId) -> SerializableTxRef<'_, S> {
+        SerializableTxRef { db: self, tx_id }
     }
 
     #[doc(hidden)]
@@ -923,7 +923,7 @@ where
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
-                    db.exclusive_tx_ref(id)
+                    db.serializable_tx_ref(id)
                         .update(&table, row, patch, options)
                         .await
                 } else {
@@ -1016,7 +1016,9 @@ where
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
-                    db.exclusive_tx_ref(id).delete(&table, row, options).await
+                    db.serializable_tx_ref(id)
+                        .delete(&table, row, options)
+                        .await
                 } else {
                     db.mergeable_tx_ref(id).delete(&table, row, options).await
                 }
@@ -1039,7 +1041,7 @@ where
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
-                    db.exclusive_tx_ref(id)
+                    db.serializable_tx_ref(id)
                         .restore(&table, row, cells, options)
                         .await
                 } else {
@@ -1121,7 +1123,7 @@ where
 
     /// Binding-facing transaction read selected by open id, with an optional
     /// trusted-serving identity. The open transaction itself determines its
-    /// mergeable or exclusive semantics.
+    /// mergeable or serializable semantics.
     #[doc(hidden)]
     pub async fn all_in_open_transaction(
         &self,
@@ -1397,7 +1399,7 @@ where
         operation: &str,
         allow_absent: bool,
     ) -> Result<Option<RowCells>, Error> {
-        // Exclusive transactions are the only callers that may skip the kind
+        // Serializable transactions are the only callers that may skip the kind
         // check: the subject lookup rejects a mergeable id.
         self.lock_for_transaction_operation(tx_id)
             .await?
@@ -1511,8 +1513,8 @@ where
         Ok(())
     }
 
-    /// Commit an owned exclusive transaction handle.
-    pub async fn commit_exclusive_handle(
+    /// Commit an owned serializable transaction handle.
+    pub async fn commit_serializable_handle(
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
@@ -1524,19 +1526,19 @@ where
         self.finish_exclusive_publication(published, unit).await
     }
 
-    /// Reserve the final identity and retain exclusive serializability,
+    /// Reserve the final identity and retain serializable validation,
     /// publication, and finalization on the node owner.
     #[doc(hidden)]
-    pub fn enqueue_commit_exclusive_handle(
+    pub fn enqueue_commit_serializable_handle(
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<WriteHandle<S>, Error> {
-        self.enqueue_commit_exclusive_handle_at_ms(open_tx_id, self.next_now_ms())
+        self.enqueue_commit_serializable_handle_at_ms(open_tx_id, self.next_now_ms())
     }
 
-    /// Exclusive counterpart of [`Db::enqueue_commit_mergeable_handle_at_ms`].
+    /// Serializable counterpart of [`Db::enqueue_commit_mergeable_handle_at_ms`].
     #[doc(hidden)]
-    pub fn enqueue_commit_exclusive_handle_at_ms(
+    pub fn enqueue_commit_serializable_handle_at_ms(
         &self,
         open_tx_id: OpenTransactionId,
         now_ms: u64,
@@ -1562,13 +1564,13 @@ where
         Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
     }
 
-    /// Commit an owned exclusive transaction as an explicit policy identity.
+    /// Commit an owned serializable transaction as an explicit policy identity.
     ///
     /// Bindings that expose session-scoped transactions use this rather than
     /// the connection's default identity so a trusted backend cannot silently
     /// turn a `for_session` transaction into a system-authored commit.
     #[cfg_attr(not(feature = "testing"), allow(dead_code))]
-    pub async fn commit_exclusive_handle_for_identity(
+    pub async fn commit_serializable_handle_for_identity(
         &self,
         open_tx_id: OpenTransactionId,
         author: AuthorSubject,
@@ -1591,13 +1593,13 @@ where
         Ok(tx_id)
     }
 
-    /// Abandon an owned exclusive transaction handle.
-    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
+    /// Abandon an owned serializable transaction handle.
+    pub fn abandon_serializable_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
         self.abandon_transaction_handle(open_tx_id)
     }
 
     #[doc(hidden)]
-    pub async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+    pub async fn open_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_exclusive_handle_for_identity(id, self.identity.author)
             .await
     }

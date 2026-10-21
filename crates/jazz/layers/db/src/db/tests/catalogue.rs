@@ -188,7 +188,7 @@ fn assert_offline_replica_schema_bootstrap(backend: bool) {
     assert_offline_catalogue_subscription_denied(&alice, &retained_query);
     assert!(alice.attach_query(&retained_query).is_err());
     assert!(block_on(alice.begin_mergeable(OpenTransactionId::new())).is_err());
-    assert!(block_on(alice.begin_exclusive(OpenTransactionId::new())).is_err());
+    assert!(block_on(alice.begin_serializable(OpenTransactionId::new())).is_err());
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     // Cancellation before the first catalogue must not affect a later waiter.
     let mut expired = offline_catalogue_serialized_read_with_deadline(

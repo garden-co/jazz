@@ -5859,9 +5859,9 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(transactionCall?.[2]).toBeUndefined();
     expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
 
-    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
+    runtime.beginTransaction("serializable", "attributed-exclusive" as never, context);
     const exclusiveCall = beginTransaction.mock.calls[1];
-    expect(exclusiveCall?.[1]).toBe("exclusive");
+    expect(exclusiveCall?.[1]).toBe("serializable");
     expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
@@ -7586,7 +7586,7 @@ function encodeArrayRows(): Uint8Array {
 
 function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const implementation = db as T & {

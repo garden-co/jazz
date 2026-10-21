@@ -988,13 +988,14 @@ impl WasmDbInner {
             .await
     }
 
-    fn begin_exclusive(
+    fn begin_serializable(
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
         attribution: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
-        self.db.enqueue_begin_exclusive(id, author, attribution)?;
+        self.db
+            .enqueue_begin_serializable(id, author, attribution)?;
         self.after_enqueue();
         Ok(())
     }
@@ -1019,7 +1020,7 @@ impl WasmDbInner {
     fn commit_exclusive(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {
         let write = self
             .db
-            .enqueue_commit_exclusive_handle_at_ms(open_tx_id, current_timestamp())
+            .enqueue_commit_serializable_handle_at_ms(open_tx_id, current_timestamp())
             .map_err(to_js_error)?;
         self.after_enqueue();
         wasm_write(Rc::clone(&self.db), write)
@@ -1561,8 +1562,8 @@ impl WasmDb {
             "mergeable" => inner
                 .begin_mergeable(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
-            "exclusive" => inner
-                .begin_exclusive(open_transaction_id, author, attribution)
+            "serializable" => inner
+                .begin_serializable(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
@@ -1580,7 +1581,7 @@ impl WasmDb {
         let inner = self.open_inner()?;
         match kind.as_deref().unwrap_or("mergeable") {
             "mergeable" => inner.commit_mergeable(open_transaction_id),
-            "exclusive" => inner.commit_exclusive(open_transaction_id),
+            "serializable" => inner.commit_exclusive(open_transaction_id),
             kind => Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
     }
@@ -3500,7 +3501,7 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 #[cfg(test)]
 mod dynamic_schema_view_tests {
     use super::*;
-    use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
+    use jazz::db::{DbConfig, DbIdentity, MergeableTxOps, SerializableTxOps};
     use jazz::groove::records::{Error as RecordError, RecordDescriptor, ValueType};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
@@ -4480,8 +4481,8 @@ mod dynamic_schema_view_tests {
         block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
         let exclusive = OpenTransactionId::new();
-        block_on(owner.begin_exclusive(exclusive)).unwrap();
-        block_on(view.exclusive_tx_ref(exclusive).insert(
+        block_on(owner.begin_serializable(exclusive)).unwrap();
+        block_on(view.serializable_tx_ref(exclusive).insert(
             "items",
             BTreeMap::from([(
                 "label".to_owned(),
@@ -4493,7 +4494,7 @@ mod dynamic_schema_view_tests {
             },
         ))
         .unwrap();
-        block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+        block_on(owner.commit_serializable_handle(exclusive)).unwrap();
     }
 
     /// Transaction reads cross the WASM boundary as promises: a valid
@@ -4584,10 +4585,10 @@ mod dynamic_schema_view_tests {
 
         let attached_exclusive = OpenTransactionId::new();
         owner
-            .begin_exclusive(attached_exclusive)
+            .begin_serializable(attached_exclusive)
             .await
-            .expect("begin attached exclusive transaction");
-        view.exclusive_tx_ref(attached_exclusive)
+            .expect("begin attached serializable transaction");
+        view.serializable_tx_ref(attached_exclusive)
             .insert(
                 "items",
                 BTreeMap::from([(
@@ -4602,9 +4603,9 @@ mod dynamic_schema_view_tests {
             .await
             .expect("attached facade preserves the exclusive owner batch");
         owner
-            .commit_exclusive_handle(attached_exclusive)
+            .commit_serializable_handle(attached_exclusive)
             .await
-            .expect("commit attached exclusive transaction");
+            .expect("commit attached serializable transaction");
 
         let binding = WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::memory(Rc::clone(&owner))))),
@@ -4616,7 +4617,7 @@ mod dynamic_schema_view_tests {
         binding
             .begin_transaction(
                 tx_id.to_string(),
-                "exclusive".to_owned(),
+                "serializable".to_owned(),
                 Some(alice.canonical().as_bytes().to_vec()),
                 None,
             )

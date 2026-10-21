@@ -447,7 +447,7 @@ where
     Ok((tx_id, unit))
 }
 
-/// Commit, persist, and settle one exclusive transaction.
+/// Commit, persist, and settle one serializable transaction.
 pub fn commit_exclusive_settled<S>(
     node: &mut NodeState<S>,
     open_tx: OpenTransactionId,

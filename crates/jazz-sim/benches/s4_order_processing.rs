@@ -7,7 +7,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
@@ -811,7 +811,7 @@ async fn apply_jazz_op(
     now_ms: u64,
     relay_acceptance: &mut Histogram<u64>,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = client.db.exclusive_tx().await?;
+    let tx = client.db.serializable_tx().await?;
     match op {
         Op::NewOrder {
             warehouse,

@@ -1,4 +1,4 @@
-//! Reads inside an exclusive transaction on a partial client hydrate through
+//! Reads inside a serializable transaction on a partial client hydrate through
 //! the authority at the transaction's frozen snapshot (INV-TX-13), whatever
 //! tier the caller asked for (garden-co/jazz#3694).
 //!
@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, RemoteLinkHint, SerializedReadResult,
+    Db, DbConfig, DbIdentity, ReadOpts, RemoteLinkHint, SerializableTxOps, SerializedReadResult,
     SubscriptionEvent, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
@@ -327,7 +327,7 @@ impl Net {
     }
 
     /// The invite-link recipe at the default (local) read tier: check the
-    /// invite inside an exclusive transaction, add a membership only if it
+    /// invite inside a serializable transaction, add a membership only if it
     /// exists, and report whether the server accepted the commit.
     fn redeem(&self, client: usize, code: &str) -> Redeem {
         self.redeem_via(client, code, InviteCheck::Binding)
@@ -372,12 +372,12 @@ impl Net {
             InviteCheck::RustApi => {
                 let prepared = db.prepare_query(&invite_query(code)).unwrap();
                 !self
-                    .drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+                    .drive(db.serializable_tx_ref(open).all_prepared(&prepared))
                     .expect("read")
                     .is_empty()
             }
             InviteCheck::RustWholeTable => self
-                .drive(db.exclusive_tx_ref(open).all("invites"))
+                .drive(db.serializable_tx_ref(open).all("invites"))
                 .expect("read")
                 .iter()
                 .any(|row| {
@@ -391,17 +391,17 @@ impl Net {
         let db = self.db(client);
         self.unrelated_receipt(client);
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         if !self.invite_is_live(client, code, open, check) {
             db.abandon_transaction_handle(open).ok();
             return Redeem::Invalid;
         }
         self.drive(
-            db.exclusive_tx_ref(open)
+            db.serializable_tx_ref(open)
                 .insert("members", cells(code), Default::default()),
         )
         .unwrap();
-        let tx_id = self.drive(db.commit_exclusive_handle(open)).unwrap();
+        let tx_id = self.drive(db.commit_serializable_handle(open)).unwrap();
         match self.settle(client, tx_id) {
             Ok(_) => Redeem::Joined,
             Err(_) => Redeem::Conflict,
@@ -610,7 +610,7 @@ fn exclusive_read_sees_an_invite_the_backend_never_received() {
     net.unrelated_receipt(BACKEND);
 
     let open = OpenTransactionId::new();
-    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    block_on(net.db(BACKEND).begin_serializable(open)).unwrap();
     assert_eq!(
         net.read(
             BACKEND,
@@ -655,7 +655,7 @@ fn revocation_after_the_read_rejects_the_redemption() {
     net.unrelated_receipt(BACKEND);
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     assert_eq!(
         net.read(
             BACKEND,
@@ -669,11 +669,11 @@ fn revocation_after_the_read_rejects_the_redemption() {
     net.revoke(OWNER, invite);
 
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     assert!(net.settle(BACKEND, tx_id).is_err());
     assert!(
         net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
@@ -696,7 +696,7 @@ fn a_redemption_on_another_backend_is_seen_as_taken() {
     // "Only if nobody has redeemed it": the second backend must see the
     // first redemption, which it never received.
     let open = OpenTransactionId::new();
-    block_on(net.db(2).begin_exclusive(open)).unwrap();
+    block_on(net.db(2).begin_serializable(open)).unwrap();
     let taken = Query::from("members").filter(eq(col("code"), lit("abc")));
     assert_eq!(
         net.read(2, &taken, DurabilityTier::Local, Some(open)).len(),
@@ -718,7 +718,7 @@ fn offline_prepared_exclusive_commit_succeeds_while_its_reads_hold() {
     let db = net.db(BACKEND);
     db.set_remote_link_hint(RemoteLinkHint::NoServer);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     assert_eq!(
         net.read_while(
             BACKEND,
@@ -729,11 +729,11 @@ fn offline_prepared_exclusive_commit_succeeds_while_its_reads_hold() {
         Some(vec![invite])
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
     net.settle(BACKEND, tx_id)
         .expect("the offline read still holds, so the authority accepts it");
@@ -750,7 +750,7 @@ fn offline_prepared_redemption_of_a_revoked_invite_conflicts() {
     let db = net.db(BACKEND);
     db.set_remote_link_hint(RemoteLinkHint::NoServer);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     assert_eq!(
         net.read_while(
             BACKEND,
@@ -761,11 +761,11 @@ fn offline_prepared_redemption_of_a_revoked_invite_conflicts() {
         Some(vec![invite])
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
 
     net.revoke(OWNER, invite);
     db.set_remote_link_hint(RemoteLinkHint::Live);
@@ -790,18 +790,18 @@ fn offline_absence_guard_conflicts_when_the_invite_was_taken() {
     let db = net.db(2);
     db.set_remote_link_hint(RemoteLinkHint::NoServer);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let taken = Query::from("members").filter(eq(col("code"), lit("abc")));
     assert_eq!(
         net.read_while(2, &taken, open, RemoteLinkHint::NoServer),
         Some(vec![])
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
     assert!(net.settle(2, tx_id).is_err());
     assert_eq!(net.members(), 1, "the invite was redeemed only once");
@@ -821,7 +821,7 @@ fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
     let db = net.db(BACKEND);
     db.set_remote_link_hint(RemoteLinkHint::Live);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     // While the link stays live, the read waits for the authority.
     assert_eq!(
         net.read_while(BACKEND, &invite_query("abc"), open, RemoteLinkHint::Live),
@@ -832,12 +832,12 @@ fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
         Some(vec![invite])
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     net.settle(BACKEND, tx_id).expect("the read still holds");
     assert_eq!(net.members(), 1);
 }
@@ -850,17 +850,17 @@ fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
     let db = net.db(OWNER);
     db.set_remote_link_hint(RemoteLinkHint::NoServer);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     assert_eq!(
         net.read_while(OWNER, &invite_query("abc"), open, RemoteLinkHint::NoServer),
         Some(vec![])
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("invites", cells("abc"), Default::default()),
     )
     .unwrap();
-    net.drive(db.commit_exclusive_handle(open))
+    net.drive(db.commit_serializable_handle(open))
         .expect("an offline commit is prepared locally");
 }
 
@@ -935,9 +935,9 @@ fn assert_second_backend_cannot_redeem_through_the_rust_api(whole_table: bool) {
 
     let db = net.db(2);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let taken = if whole_table {
-        net.drive(db.exclusive_tx_ref(open).all("members"))
+        net.drive(db.serializable_tx_ref(open).all("members"))
             .unwrap()
             .into_iter()
             .any(|row| !row.is_deleted() && row.cell_at(0) == Some(Value::String("abc".to_owned())))
@@ -945,17 +945,17 @@ fn assert_second_backend_cannot_redeem_through_the_rust_api(whole_table: bool) {
         let prepared = db
             .prepare_query(&Query::from("members").filter(eq(col("code"), lit("abc"))))
             .unwrap();
-        !net.drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+        !net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
             .unwrap()
             .is_empty()
     };
     if !taken {
         net.drive(
-            db.exclusive_tx_ref(open)
+            db.serializable_tx_ref(open)
                 .insert("members", cells("abc"), Default::default()),
         )
         .unwrap();
-        if let Ok(tx_id) = net.drive(db.commit_exclusive_handle(open)) {
+        if let Ok(tx_id) = net.drive(db.commit_serializable_handle(open)) {
             let _ = net.settle(2, tx_id);
         }
     }
@@ -992,7 +992,7 @@ fn redeemed_invite_query(code: &str, check: RedemptionCheck) -> Query {
     }
 }
 
-/// Redeem `code` on `client` inside one exclusive transaction: read the
+/// Redeem `code` on `client` inside one serializable transaction: read the
 /// invite on its own, then read it through its redemptions, and add a member
 /// only if the invite is live and has none. `between` runs after the reads
 /// and before the commit.
@@ -1012,7 +1012,7 @@ fn redeem_unless_redeemed(
     };
     db.set_remote_link_hint(hint);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let read = |query: &Query| {
         if offline {
             net.read_while(client, query, open, hint)
@@ -1029,11 +1029,11 @@ fn redeem_unless_redeemed(
     }
     between();
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells(code), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
     match net.settle(client, tx_id) {
         Ok(_) => Redeem::Joined,
@@ -1137,7 +1137,7 @@ fn global_tier_join_commits_despite_unrelated_joined_rows() {
 
     let db = net.db(2);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let joined = redeemed_invite_query("abc", RedemptionCheck::Join);
     assert_eq!(
         net.read(2, &invite_query("abc"), DurabilityTier::Global, Some(open))
@@ -1149,11 +1149,11 @@ fn global_tier_join_commits_despite_unrelated_joined_rows() {
             .is_empty()
     );
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     net.settle(2, tx_id)
         .expect("nobody redeemed this invite, so the redemption commits");
     assert_eq!(net.members(), 2);
@@ -1266,7 +1266,7 @@ fn redeem_grant_while_revoking(revoke_included: bool) -> Redeem {
 
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     assert_eq!(
         net.read(
             BACKEND,
@@ -1279,11 +1279,11 @@ fn redeem_grant_while_revoking(revoke_included: bool) -> Redeem {
     );
     net.revoke(OWNER, if revoke_included { abc } else { xyz });
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("g"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     match net.settle(BACKEND, tx_id) {
         Ok(_) => Redeem::Joined,
         Err(_) => Redeem::Conflict,
@@ -1312,14 +1312,14 @@ fn exclusive_read_through_a_flat_join_is_unsupported() {
     net.create_invite(OWNER, "abc");
 
     let open = OpenTransactionId::new();
-    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    block_on(net.db(BACKEND).begin_serializable(open)).unwrap();
     let query = Query::from("invites").flat_join("members", "invites.code", "members.code");
     let Err(error) = net.try_read(BACKEND, &query, DurabilityTier::Local, Some(open)) else {
-        panic!("a flat join is not supported in exclusive transactions");
+        panic!("a flat join is not supported in serializable transactions");
     };
     assert!(
         error.to_string().contains(
-            "Reading a flat join of `invites` with `members` is not supported in exclusive \
+            "Reading a flat join of `invites` with `members` is not supported in serializable \
              transactions yet"
         ),
         "{error}"
@@ -1337,7 +1337,7 @@ fn redeem_while_claiming(claim_read_invite: bool) -> Redeem {
 
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let query = invite_query("abc").array_subquery(ArraySubquery::new(
         "claims",
         "claims",
@@ -1351,11 +1351,11 @@ fn redeem_while_claiming(claim_read_invite: bool) -> Redeem {
     );
     net.create_claim(OWNER, if claim_read_invite { abc } else { xyz });
     net.drive(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     match net.settle(BACKEND, tx_id) {
         Ok(_) => Redeem::Joined,
         Err(_) => Redeem::Conflict,
@@ -1445,7 +1445,7 @@ enum ShareRead {
 }
 
 /// A signed-in client reads its own list with its shares inside an
-/// exclusive transaction, then adds a share. Returns how many rows the read
+/// serializable transaction, then adds a share. Returns how many rows the read
 /// returned and whether the server accepted the commit.
 fn read_own_list_then_share(shares: SharePolicy, read: ShareRead) -> (usize, Redeem) {
     let net = Net::with_schema(owned_lists_schema(shares), &[0x0a]);
@@ -1472,7 +1472,7 @@ fn read_own_list_then_share(shares: SharePolicy, read: ShareRead) -> (usize, Red
             .include("list"),
     };
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let rows = net
         .try_read_as(
             0,
@@ -1483,13 +1483,13 @@ fn read_own_list_then_share(shares: SharePolicy, read: ShareRead) -> (usize, Red
         )
         .map(|result| root_rows(&query, result).len())
         .expect("the exclusive read resolves");
-    net.drive(db.exclusive_tx_ref(open).insert(
+    net.drive(db.serializable_tx_ref(open).insert(
         "shares",
         share_cells("red", list),
         Default::default(),
     ))
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let tx_id = net.drive(db.commit_serializable_handle(open)).unwrap();
     let outcome = match net.settle(0, tx_id) {
         Ok(_) => Redeem::Joined,
         Err(_) => Redeem::Conflict,
@@ -1507,7 +1507,7 @@ fn assert_include_resolves_and_commits(shares: SharePolicy) {
     }
 }
 
-/// An include in an exclusive transaction hydrates at the transaction's
+/// An include in a serializable transaction hydrates at the transaction's
 /// snapshot, where the server evaluates the included table's read policy
 /// under the reader's session. A policy comparing the reader's account
 /// resolves and commits instead of timing out.

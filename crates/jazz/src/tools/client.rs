@@ -16,11 +16,11 @@ use futures::task::{ArcWake, waker};
 
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, FirstLoad as CoreFirstLoad,
-    PeerConnection as CorePeerConnection, ReadOpts as CoreReadOpts,
-    RemoteLinkHint as CoreRemoteLinkHint, SubscriptionEvent as CoreSubscriptionEvent,
-    SubscriptionOutputRow as CoreSubscriptionOutputRow, TickScheduler, TickUrgency,
-    Transport as CoreTransport, WireTransportAdapter, WriteIdentity as CoreWriteIdentity,
+    ErrorCode as CoreDbErrorCode, FirstLoad as CoreFirstLoad, PeerConnection as CorePeerConnection,
+    ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint, SerializableTxOps,
+    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
+    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
+    WriteIdentity as CoreWriteIdentity,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -348,7 +348,7 @@ struct ClientDbInner {
     upstream_recovery_generation: Option<u64>,
     upstream_state_notify: Arc<tokio::sync::Notify>,
     write_map: HashMap<TransactionId, CoreTxId>,
-    transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
+    transactions: HashMap<OpenTransactionId, SerializableTransactionState>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
     tick_driver_error_notify: Arc<tokio::sync::Notify>,
@@ -800,14 +800,14 @@ impl Backend {
         StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
-    fn begin_exclusive(
+    fn begin_serializable(
         &self,
         id: OpenTransactionId,
         identity: Option<CoreWriteIdentity>,
     ) -> std::result::Result<(), CoreDbError> {
         crate::local_executor::block_on(
             self.0
-                .begin_exclusive_with_identity(id, identity.unwrap_or_default()),
+                .begin_serializable_with_identity(id, identity.unwrap_or_default()),
         )
     }
 
@@ -818,7 +818,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).insert(
+        crate::local_executor::block_on(self.0.serializable_tx_ref(tx_id).insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -836,7 +836,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
+        crate::local_executor::block_on(self.0.serializable_tx_ref(tx_id).upsert(
             table,
             row_id,
             cells,
@@ -851,7 +851,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).update(
+        crate::local_executor::block_on(self.0.serializable_tx_ref(tx_id).update(
             table,
             row_id,
             cells,
@@ -865,30 +865,33 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).delete(
+        crate::local_executor::block_on(self.0.serializable_tx_ref(tx_id).delete(
             table,
             row_id,
             Default::default(),
         ))
     }
 
-    fn commit_exclusive_handle(
+    fn commit_serializable_handle(
         &self,
         tx_id: OpenTransactionId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::local_executor::block_on(self.0.commit_exclusive_handle(tx_id))
+        crate::local_executor::block_on(self.0.commit_serializable_handle(tx_id))
     }
 
-    fn commit_exclusive_handle_for_identity(
+    fn commit_serializable_handle_for_identity(
         &self,
         tx_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::local_executor::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
+        crate::local_executor::block_on(
+            self.0
+                .commit_serializable_handle_for_identity(tx_id, author),
+        )
     }
 }
 
-struct ExclusiveTransactionState {
+struct SerializableTransactionState {
     author: Option<CoreAuthorSubject>,
     has_writes: bool,
 }
@@ -1394,7 +1397,7 @@ impl ClientDb {
         }
         inner
             .backend()?
-            .begin_exclusive(transaction_id, identity)
+            .begin_serializable(transaction_id, identity)
             .map_err(|error| JazzError::Write(error.to_string()))?;
         // Explicit sessions bind commit identity; attributed transactions use
         // the core's bound commit path to retain their separate provenance.
@@ -1404,7 +1407,7 @@ impl ClientDb {
         });
         inner.transactions.insert(
             transaction_id,
-            ExclusiveTransactionState {
+            SerializableTransactionState {
                 author,
                 has_writes: false,
             },
@@ -1432,8 +1435,8 @@ impl ClientDb {
         let tx_id = match state.author {
             Some(author) => inner
                 .backend()?
-                .commit_exclusive_handle_for_identity(transaction_id, author),
-            None => inner.backend()?.commit_exclusive_handle(transaction_id),
+                .commit_serializable_handle_for_identity(transaction_id, author),
+            None => inner.backend()?.commit_serializable_handle(transaction_id),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);

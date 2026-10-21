@@ -3,7 +3,7 @@ import type { Db } from "jazz-tools";
 import { app, type ToolCall, type Turn } from "@/schema";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
 import { retryOnConflict } from "@/src/lib/retry";
-import { isExclusiveConflict } from "@/src/lib/write-errors";
+import { isSerializationConflict } from "@/src/lib/write-errors";
 import { agentProvider } from "./config";
 import type { GenerateInput, HistoryTurn, TurnSink } from "./provider";
 import { runTool, type ToolContext } from "./tools";
@@ -26,7 +26,7 @@ export type QueuedReply = { turnId: string; created: boolean };
 
 /**
  * Queue an assistant reply under `parentId` and make it the conversation's
- * head, in one exclusive transaction. With `reuse`, a reply that already
+ * head, in one serializable transaction. With `reuse`, a reply that already
  * exists under the same parent is returned instead, so a retried request
  * never queues a second answer.
  */
@@ -38,7 +38,7 @@ export async function queueAssistantTurn(
 ): Promise<QueuedReply> {
   const provider = agentProvider();
   return retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       if (reuse) {
         const existing = await tx.one(
           app.turns.where({ conversationId, parentId, role: "assistant" }),
@@ -72,7 +72,7 @@ class LeaseLostError extends Error {
   override name = "LeaseLostError";
 }
 
-type Tx = Parameters<Parameters<Db["exclusiveTransaction"]>[0]>[0];
+type Tx = Parameters<Parameters<Db["serializableTransaction"]>[0]>[0];
 
 /**
  * The right to write one turn, held by one claim. Its id is stored as the
@@ -80,7 +80,7 @@ type Tx = Parameters<Parameters<Db["exclusiveTransaction"]>[0]>[0];
  * mistaken for an older run of the same process.
  *
  * Every write the holder makes (body appends, tool calls, heartbeats and the
- * final status) goes through `write`: one exclusive transaction that first
+ * final status) goes through `write`: one serializable transaction that first
  * checks the turn is still streaming under this lease, and renews the
  * heartbeat with it. The authority rejects the transaction if the turn changed
  * meanwhile, so a runner that was swept and taken over can never land a write
@@ -115,7 +115,7 @@ class Lease {
     const next = this.queue.then(async () => {
       this.assertHeld();
       const held = await retryOnConflict(async () => {
-        const write = await this.db.exclusiveTransaction(async (tx) => {
+        const write = await this.db.serializableTransaction(async (tx) => {
           const turn = await tx.one(app.turns.where({ id: this.turnId }));
           if (turn?.runnerId !== this.id || turn.status !== "streaming") return false;
           change(tx, turn);
@@ -184,7 +184,7 @@ export async function runTurn(turnId: string, client?: Db): Promise<void> {
 /** Take ownership of a queued, interrupted or failed turn, exactly once across runners. */
 async function claim(db: Db, turnId: string, lease: Lease): Promise<Turn | null> {
   return retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const turn = await tx.one(app.turns.where({ id: turnId }));
       if (!turn || turn.role !== "assistant" || !CLAIMABLE.includes(turn.status)) return null;
       tx.update(app.turns, turnId, {
@@ -444,7 +444,7 @@ export async function sweepStaleTurns(now = Date.now()): Promise<number> {
   for (const turn of open) {
     if (runner.active.has(turn.id) || !isStale(turn, now)) continue;
     try {
-      const write = await db.exclusiveTransaction(async (tx) => {
+      const write = await db.serializableTransaction(async (tx) => {
         const current = await tx.one(app.turns.where({ id: turn.id }));
         if (!current || !["queued", "streaming"].includes(current.status) || !isStale(current, now))
           return false;
@@ -455,7 +455,7 @@ export async function sweepStaleTurns(now = Date.now()): Promise<number> {
       if (write.value) swept++;
     } catch (error) {
       // A runner renewed or finished the turn meanwhile; the next sweep reads it again.
-      if (!isExclusiveConflict(error)) throw error;
+      if (!isSerializationConflict(error)) throw error;
     }
   }
   return swept;

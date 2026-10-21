@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, SerializableTxOps, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -347,11 +347,11 @@ impl Net {
         );
     }
 
-    /// Open an exclusive transaction on `client` and check that `code` is a
+    /// Open a serializable transaction on `client` and check that `code` is a
     /// live invite nobody has redeemed.
     fn begin_redemption(&self, client: usize, code: &str) -> Redemption {
         let open = OpenTransactionId::new();
-        block_on(self.db(client).begin_exclusive(open)).unwrap();
+        block_on(self.db(client).begin_serializable(open)).unwrap();
         assert_eq!(
             self.read(
                 client,
@@ -380,13 +380,13 @@ impl Net {
     /// Redeem, commit and report whether the authority accepted the commit.
     fn finish_redemption(&self, redemption: Redemption) -> bool {
         let db = self.db(redemption.client);
-        self.drive(db.exclusive_tx_ref(redemption.open).insert(
+        self.drive(db.serializable_tx_ref(redemption.open).insert(
             "members",
             cells(&redemption.code),
             Default::default(),
         ))
         .unwrap();
-        let Ok(tx_id) = self.drive(db.commit_exclusive_handle(redemption.open)) else {
+        let Ok(tx_id) = self.drive(db.commit_serializable_handle(redemption.open)) else {
             return false;
         };
         self.settle(redemption.client, tx_id)

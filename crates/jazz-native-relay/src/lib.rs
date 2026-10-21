@@ -603,7 +603,9 @@ pub enum ForegroundMutationKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum ForegroundTransactionKind {
     Mergeable,
-    Exclusive,
+    // The serialized spelling predates the rename and stays stable.
+    #[serde(rename = "Exclusive")]
+    Serializable,
 }
 
 /// Response for [`ForegroundDbCommandRequest`].
@@ -6271,8 +6273,8 @@ impl RelayWorker {
             ForegroundTransactionKind::Mergeable => {
                 db.enqueue_begin_mergeable(open_tx_id, None, None)
             }
-            ForegroundTransactionKind::Exclusive => {
-                db.enqueue_begin_exclusive(open_tx_id, None, None)
+            ForegroundTransactionKind::Serializable => {
+                db.enqueue_begin_serializable(open_tx_id, None, None)
             }
         }
         .map_err(RelayError::Db)?;
@@ -6508,8 +6510,8 @@ impl RelayWorker {
             ForegroundTransactionKind::Mergeable => {
                 db.enqueue_commit_mergeable_handle(transaction_state.open_tx_id)
             }
-            ForegroundTransactionKind::Exclusive => {
-                db.enqueue_commit_exclusive_handle(transaction_state.open_tx_id)
+            ForegroundTransactionKind::Serializable => {
+                db.enqueue_commit_serializable_handle(transaction_state.open_tx_id)
             }
         }
         .map_err(RelayError::Db)?;
@@ -8596,10 +8598,10 @@ mod tests {
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
-                kind: ForegroundTransactionKind::Exclusive,
+                kind: ForegroundTransactionKind::Serializable,
             },
         ) else {
-            panic!("exclusive transaction opens");
+            panic!("serializable transaction opens");
         };
         assert_eq!(
             fixture.execute(
@@ -11221,7 +11223,7 @@ mod tests {
     fn explicit_transactions_queue_reads_before_commit_under_owner_contention() {
         for kind in [
             ForegroundTransactionKind::Mergeable,
-            ForegroundTransactionKind::Exclusive,
+            ForegroundTransactionKind::Serializable,
         ] {
             let directory = tempfile::tempdir().unwrap();
             let relay =
@@ -11477,7 +11479,7 @@ mod tests {
                 .unwrap();
             let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
             let tx = client
-                .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
+                .begin_foreground_transaction(ForegroundTransactionKind::Serializable)
                 .unwrap();
             client
                 .insert_foreground_transaction(
@@ -16219,7 +16221,7 @@ mod tests {
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
-                kind: ForegroundTransactionKind::Exclusive,
+                kind: ForegroundTransactionKind::Serializable,
             },
         ) else {
             panic!("exclusive begin must return a handle");
@@ -16458,7 +16460,7 @@ mod tests {
         );
         assert_eq!(
             postcard::to_allocvec(&ForegroundDbCommandRequest::BeginTransaction {
-                kind: ForegroundTransactionKind::Exclusive,
+                kind: ForegroundTransactionKind::Serializable,
             })
             .unwrap(),
             vec![9, 1]

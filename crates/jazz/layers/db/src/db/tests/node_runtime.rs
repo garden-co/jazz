@@ -5071,7 +5071,7 @@ fn probe_3378_opening_snapshot_serve_cost() {
         for byte_wire in [false, true] {
             let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
             for chunk in 0..rows.div_ceil(500) {
-                let tx = server.exclusive_tx().unwrap();
+                let tx = server.serializable_tx().unwrap();
                 for index in chunk * 500..((chunk + 1) * 500).min(rows) {
                     let mut id = [0u8; 16];
                     id[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
@@ -5141,7 +5141,7 @@ fn probe_3378_opening_snapshot_serve_cost() {
     }
 }
 
-/// How an exclusive transaction that was in flight at a restart is replayed.
+/// How a serializable transaction that was in flight at a restart is replayed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InFlightExclusiveReplay {
     /// Nothing changes while alice is offline; Core must accept the replay.
@@ -5158,7 +5158,7 @@ enum InFlightExclusiveReplay {
 /// the unit from storage and replays it:
 ///
 /// ```
-/// alice ──read todo──► exclusive tx ──commit (offline)──► outbox
+/// alice ──read todo──► serializable tx ──commit (offline)──► outbox
 ///   │                                                      │
 ///   └── close / reopen ──connect──► Core ◄── replay unit ───┘
 ///                                    │
@@ -5226,7 +5226,7 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
     }
 
     // Offline: the exclusive commit stays pending in the outbox.
-    let exclusive = client.exclusive_tx().unwrap();
+    let exclusive = client.serializable_tx().unwrap();
     let seen = exclusive.read("todos", todo).unwrap().unwrap();
     assert_eq!(seen.get("title"), Some(&Value::String("draft".to_owned())));
     assert_eq!(exclusive.all("todos").unwrap().len(), 1);
@@ -5298,9 +5298,9 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
     block_on(client.close()).unwrap();
 }
 
-/// garden-co/jazz#3663: an exclusive transaction in flight at a restart
+/// garden-co/jazz#3663: a serializable transaction in flight at a restart
 /// replays with its persisted read evidence and is accepted, not rejected as
-/// a false `exclusive_conflict`.
+/// a false `serialization_conflict`.
 #[test]
 fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict() {
     assert_in_flight_exclusive_replays_after_restart(InFlightExclusiveReplay::Unchanged);

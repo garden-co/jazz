@@ -28,7 +28,7 @@ it("keeps local reads available while another transaction waits for remote cover
     await initial.wait({ tier: "global" });
     expect(await db.all(app.entries, { tier: "remote" })).toEqual([initial.value]);
     await db.disconnect();
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     let remoteState = "pending";
     const remoteRead = tx.all(app.entries.where({ title: "Not cached" }), { tier: "remote" }).then(
       () => {

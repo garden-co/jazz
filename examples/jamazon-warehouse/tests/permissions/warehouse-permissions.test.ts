@@ -478,14 +478,14 @@ describe("stock contention", () => {
       "Write rejected by server authorization",
     );
     const real = asDb(manager.db);
-    let exclusiveCalls = 0;
+    let serializableCalls = 0;
     const db = new Proxy(real, {
       get(target, property) {
-        if (property === "exclusiveTransaction") {
-          return (...args: Parameters<Db["exclusiveTransaction"]>) => {
-            exclusiveCalls += 1;
-            if (exclusiveCalls === 2) return Promise.reject(rejection);
-            return target.exclusiveTransaction(...args);
+        if (property === "serializableTransaction") {
+          return (...args: Parameters<Db["serializableTransaction"]>) => {
+            serializableCalls += 1;
+            if (serializableCalls === 2) return Promise.reject(rejection);
+            return target.serializableTransaction(...args);
           };
         }
         const value = Reflect.get(target, property, target);
@@ -502,7 +502,7 @@ describe("stock contention", () => {
         idempotencyKey: "rejected-placement",
       }),
     ).rejects.toBe(rejection);
-    expect(exclusiveCalls).toBe(3);
+    expect(serializableCalls).toBe(3);
 
     const read = { tier: "remote" } as const;
     const [order] = await manager.db.all(

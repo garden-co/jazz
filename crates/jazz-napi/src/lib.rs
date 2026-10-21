@@ -2774,7 +2774,7 @@ impl NapiDb {
                 .into());
             }
         }
-        if kind != "mergeable" && kind != "exclusive" {
+        if kind != "mergeable" && kind != "serializable" {
             return Err(napi::Error::from_reason(unknown_transaction_kind_message(&kind)).into());
         }
         let db = self.inner.borrow();
@@ -2786,7 +2786,7 @@ impl NapiDb {
                 .enqueue_begin_mergeable(open_transaction_id, author, attribution)
         } else {
             db.core
-                .enqueue_begin_exclusive(open_transaction_id, author, attribution)
+                .enqueue_begin_serializable(open_transaction_id, author, attribution)
         }
         .map_err(napi_error)?;
         db.after_enqueue();
@@ -2811,9 +2811,10 @@ impl NapiDb {
             "mergeable" => db
                 .core
                 .enqueue_commit_mergeable_handle_at_ms(open_transaction_id, commit_timestamp_ms()?),
-            "exclusive" => db
-                .core
-                .enqueue_commit_exclusive_handle_at_ms(open_transaction_id, commit_timestamp_ms()?),
+            "serializable" => db.core.enqueue_commit_serializable_handle_at_ms(
+                open_transaction_id,
+                commit_timestamp_ms()?,
+            ),
             kind => {
                 return Err(
                     napi::Error::from_reason(unknown_transaction_kind_message(kind)).into(),
@@ -5426,8 +5427,8 @@ mod tests {
     use groove::storage::TestStorage;
     use jazz::account_registry::AccountId;
     use jazz::db::{
-        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, SubscriptionEvent as CoreSubscriptionEvent,
+        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, MergeableTxOps,
+        SerializableTxOps, SubscriptionEvent as CoreSubscriptionEvent,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
@@ -7478,8 +7479,8 @@ mod tests {
         core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
         let exclusive = CoreOpenTransactionId::new();
-        core_block_on(owner.begin_exclusive(exclusive)).unwrap();
-        core_block_on(view.exclusive_tx_ref(exclusive).insert(
+        core_block_on(owner.begin_serializable(exclusive)).unwrap();
+        core_block_on(view.serializable_tx_ref(exclusive).insert(
             "items",
             BTreeMap::from([(
                 "label".to_owned(),
@@ -7491,7 +7492,7 @@ mod tests {
             },
         ))
         .unwrap();
-        core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+        core_block_on(owner.commit_serializable_handle(exclusive)).unwrap();
 
         // The public NAPI transaction surface binds Alice at begin and addresses
         // subsequent reads through the owner-wide open transaction id.
@@ -7511,7 +7512,7 @@ mod tests {
         binding
             .begin_transaction(
                 bound.to_string(),
-                "exclusive".to_owned(),
+                "serializable".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
                 None,
             )
@@ -7545,7 +7546,7 @@ mod tests {
         );
 
         binding
-            .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
+            .commit_transaction(bound.to_string(), Some("serializable".to_owned()))
             .unwrap();
     }
 }

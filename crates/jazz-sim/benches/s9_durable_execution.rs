@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
@@ -563,7 +563,7 @@ fn apply_transition(
     steps_per_instance: usize,
     now_ms: u64,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = jazz::db::block_on(client.db.exclusive_tx())?;
+    let tx = jazz::db::block_on(client.db.serializable_tx())?;
     let row = instance_row(instance);
     let cells = jazz::db::block_on(tx.read(INSTANCES, row))?.expect("instance");
     let workflow = uuid_cell(&cells, "workflow");
@@ -575,7 +575,7 @@ fn apply_transition(
         "running"
     };
     // The instance row already exists (read above); advancing it is an
-    // update, since an explicit-id insert in an exclusive tx only creates.
+    // update, since an explicit-id insert in a serializable tx only creates.
     jazz::db::block_on(tx.update(
         INSTANCES,
         row,

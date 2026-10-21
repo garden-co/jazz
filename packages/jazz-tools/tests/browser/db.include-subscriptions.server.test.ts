@@ -97,13 +97,13 @@ afterEach(async () => {
 describe("websocket include subscriptions", () => {
   /**
    * A client may attach several independently bound strict-global reads after an
-   * authority has accepted an exclusive transaction. Each attachment
+   * authority has accepted a serializable transaction. Each attachment
    * needs its own current authority receipt; one must not strand the others.
    *
    * owner ──exclusive todo──► server
    * observer ──three Global attachments──► server ──current receipts──► observer
    */
-  it("covers concurrent global queries attached after an exclusive commit", async () => {
+  it("covers concurrent global queries attached after a serializable commit", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("exclusive-then-global-coverage"),
     );
@@ -131,7 +131,7 @@ describe("websocket include subscriptions", () => {
     expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "remote" })).toMatchObject([
       { id: org.id },
     ]);
-    const write = await owner.exclusiveTransaction((transaction) => {
+    const write = await owner.serializableTransaction((transaction) => {
       const todo = transaction.insert(app.todos, { title: "Ship", org_id: org.id });
       const check = transaction.insert(app.user_checks, { org_id: org.id, todo_id: todo.id });
       const note = transaction.insert(app.check_notes, {
@@ -144,7 +144,7 @@ describe("websocket include subscriptions", () => {
     const { todo, check, note } = await withTimeout(
       write.wait(),
       15_000,
-      "exclusive transaction did not reach the authority",
+      "serializable transaction did not reach the authority",
     );
 
     let subscribedTodoIds: string[] = [];
