@@ -148,26 +148,50 @@ impl Dictionaries {
         descriptor: records::RecordDescriptor,
         record: &[u8],
     ) -> Result<(Vec<u8>, records::RecordDescriptor), DictionaryTranscodeError> {
-        let transcoder = match records::RecordTranscoder::new(descriptor) {
-            Ok(Some(transcoder)) => transcoder,
-            Ok(None) => return Ok((record.to_vec(), descriptor)),
-            // Query output can nest stored rows, so codes sit inside arrays,
-            // records or enums (a query's included rows). Resolve those value
-            // by value; the byte-copying transcoder handles only top level.
-            Err(records::Error::UnsupportedInternedPlacement { .. }) => {
+        match self.record_plan(descriptor)? {
+            RecordPlan::Plain => Ok((record.to_vec(), descriptor)),
+            RecordPlan::Transcode(transcoder) => {
+                let bytes = transcode_to_logical(&transcoder, &self.0.borrow(), record)?;
+                Ok((bytes, transcoder.logical()))
+            }
+            RecordPlan::ValueByValue(logical) => {
                 let values = descriptor
                     .fields()
                     .iter()
                     .zip(descriptor.bind(record).to_values()?)
                     .map(|(field, value)| self.resolve_value(value, &field.value_type))
                     .collect::<Result<Vec<_>, _>>()?;
-                let logical = descriptor.logical();
-                return Ok((logical.create(&values)?, logical));
+                Ok((logical.create(&values)?, logical))
+            }
+        }
+    }
+
+    /// How records of `descriptor` cross the node boundary, built once per
+    /// descriptor: rows of one table share it, so egress of a large result
+    /// does not rebuild a transcoder per row.
+    fn record_plan(
+        &self,
+        descriptor: records::RecordDescriptor,
+    ) -> Result<RecordPlan, DictionaryTranscodeError> {
+        if let Some(plan) = self.0.borrow().record_plans.get(&descriptor) {
+            return Ok(plan.clone());
+        }
+        let plan = match records::RecordTranscoder::new(descriptor) {
+            Ok(Some(transcoder)) => RecordPlan::Transcode(Rc::new(transcoder)),
+            Ok(None) => RecordPlan::Plain,
+            // Query output can nest stored rows, so codes sit inside arrays,
+            // records or enums (a query's included rows). Resolve those value
+            // by value; the byte-copying transcoder handles only top level.
+            Err(records::Error::UnsupportedInternedPlacement { .. }) => {
+                RecordPlan::ValueByValue(descriptor.logical())
             }
             Err(error) => return Err(error.into()),
         };
-        let bytes = transcode_to_logical(&transcoder, &self.0.borrow(), record)?;
-        Ok((bytes, transcoder.logical()))
+        self.0
+            .borrow_mut()
+            .record_plans
+            .insert(descriptor, plan.clone());
+        Ok(plan)
     }
 
     /// `value`, of `value_type`, with every interned code at any depth
@@ -242,10 +266,19 @@ impl Dictionaries {
         descriptor: records::RecordDescriptor,
         logical: &[u8],
     ) -> Result<Vec<u8>, DictionaryTranscodeError> {
-        let Some(transcoder) = records::RecordTranscoder::new(descriptor)? else {
-            return Ok(logical.to_vec());
-        };
-        transcode_to_physical(&transcoder, &mut self.0.borrow_mut(), logical)
+        match self.record_plan(descriptor)? {
+            RecordPlan::Plain => Ok(logical.to_vec()),
+            RecordPlan::Transcode(transcoder) => {
+                transcode_to_physical(&transcoder, &mut self.0.borrow_mut(), logical)
+            }
+            // Ingress interns top-level fields only; report the placement.
+            RecordPlan::ValueByValue(_) => Err(records::RecordTranscoder::new(descriptor)
+                .err()
+                .unwrap_or(records::Error::UnsupportedInternedPlacement {
+                    field: String::new(),
+                })
+                .into()),
+        }
     }
 }
 
@@ -301,6 +334,22 @@ impl DictionaryState {
 #[derive(Debug, Default)]
 pub struct DictionaryRegistry {
     dictionaries: BTreeMap<String, DictionaryState>,
+    /// [`Dictionaries::record_plan`] per descriptor seen at egress or
+    /// ingress. Descriptors are interned, so this holds one entry per table
+    /// shape.
+    record_plans: FxHashMap<records::RecordDescriptor, RecordPlan>,
+}
+
+/// How records of one descriptor are resolved or interned.
+#[derive(Clone, Debug)]
+enum RecordPlan {
+    /// No interned field: bytes pass through.
+    Plain,
+    /// Top-level interned fields: byte-copying transcode.
+    Transcode(Rc<records::RecordTranscoder>),
+    /// Codes nested in arrays, records or enums: resolve value by value into
+    /// this logical descriptor.
+    ValueByValue(records::RecordDescriptor),
 }
 
 /// The dictionary entries one publication must make durable, and what to
@@ -330,6 +379,7 @@ impl DictionaryRegistry {
                 .into_iter()
                 .map(|schema| (schema.name.clone(), DictionaryState::new(schema.clone())))
                 .collect(),
+            record_plans: FxHashMap::default(),
         }
     }
 
@@ -694,5 +744,34 @@ mod tests {
                 Value::Nullable(None),
             ]
         );
+    }
+
+    #[test]
+    fn record_plans_are_built_once_per_descriptor() {
+        use crate::records::{RecordDescriptor, Value};
+
+        let dictionaries =
+            Dictionaries::detached(&[DictionarySchema::new("names", ValueType::String)]);
+        let stored = RecordDescriptor::new([
+            ("author", ValueType::interned("names", ValueType::String)),
+            ("title", ValueType::String),
+        ]);
+        for (index, author) in ["ada", "bob", "ada"].into_iter().enumerate() {
+            let code = dictionaries.intern("names", &name(author)).unwrap();
+            let record = stored
+                .create(&[Value::U32(code), Value::String(format!("row {index}"))])
+                .unwrap();
+            let (raw, logical) = dictionaries.resolve_record(stored, &record).unwrap();
+            assert_eq!(
+                logical.bind(&raw).get_idx(0).unwrap(),
+                Value::String(author.to_owned())
+            );
+            assert_eq!(
+                dictionaries.intern_record(stored, &raw).unwrap(),
+                record,
+                "ingress reuses the egress plan and round-trips"
+            );
+        }
+        assert_eq!(dictionaries.0.borrow().record_plans.len(), 1);
     }
 }

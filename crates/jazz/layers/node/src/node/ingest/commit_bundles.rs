@@ -1011,7 +1011,7 @@ where
                 )?;
                 let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let stored = VersionRow::from_wire_with_schema_version(
-&self.authors,
+                    &self.authors,
                     source_table_schema,
                     version,
                     authored_column_ids,

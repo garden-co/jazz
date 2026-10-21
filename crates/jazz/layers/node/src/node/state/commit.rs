@@ -320,7 +320,7 @@ where
             }
         }
         stage_transaction_record(
-&self.authors,
+            &self.authors,
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,

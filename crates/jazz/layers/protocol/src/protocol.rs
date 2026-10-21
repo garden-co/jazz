@@ -1160,14 +1160,17 @@ mod version_record_wire_row {
         descriptor: &RecordDescriptor,
     ) -> Result<(), groove::records::Error> {
         for field in descriptor.fields() {
-            let interned = match &field.value_type {
-                groove::records::ValueType::Nullable(inner) => inner.as_interned(),
-                other => other.as_interned(),
-            };
-            if let Some((dictionary, _)) = interned {
-                return Err(groove::records::Error::InternedTypeNotEncodable {
-                    dictionary: dictionary.to_owned(),
-                });
+            // Codes nested in arrays, records or enums are refused too.
+            if field.value_type.contains_interned() {
+                let dictionary = match &field.value_type {
+                    groove::records::ValueType::Nullable(inner) => inner.as_interned(),
+                    other => other.as_interned(),
+                }
+                .map_or_else(
+                    || format!("nested in {}", field.name.as_deref().unwrap_or("field")),
+                    |(name, _)| name.to_owned(),
+                );
+                return Err(groove::records::Error::InternedTypeNotEncodable { dictionary });
             }
         }
         Ok(())

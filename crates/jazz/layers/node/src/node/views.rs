@@ -533,7 +533,10 @@ where
         })
     }
 
-    /// Subscribe to the raw history storage table.
+    /// Subscribe to the raw history storage table. Rows are stored rows:
+    /// their author columns hold node-local dictionary codes, not
+    /// `RowAuthor` values, so this is for tests and diagnostics only.
+    #[doc(hidden)]
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
         let schema_version = self.catalogue.local_schema_version_id;
