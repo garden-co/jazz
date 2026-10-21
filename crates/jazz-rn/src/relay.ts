@@ -63,6 +63,8 @@ export type NativeForegroundRuntimeFactory = {
  * contract onto these commands.
  */
 export type NativeForegroundRuntime = {
+  /** Additive capability; absent on native builds predating snapshot capture. */
+  readonly supportsSnapshotCapture?: boolean;
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
   /** Native typed liveness; unexpected native failures still throw. */
@@ -109,6 +111,7 @@ export type NativeForegroundCommand =
       transaction?: number;
     }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "captureSnapshot" }
   | {
       type: "subscribe";
       query: Uint8Array;
@@ -345,6 +348,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
             }
           : undefined;
       return {
+        supportsSnapshotCapture: foreground.supportsSnapshotCapture === true,
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {
@@ -385,6 +389,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeConnectionStatus") return Uint8Array.of(21);
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
+  if (command.type === "captureSnapshot") return Uint8Array.of(34);
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }
@@ -556,38 +561,38 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     );
   }
   if (command.type === "stageStreamingMutation") {
-    return concatForegroundBytes(Uint8Array.of(34), encodeForegroundU64(command.upload));
+    return concatForegroundBytes(Uint8Array.of(35), encodeForegroundU64(command.upload));
   }
   if (command.type === "attachStagedStreamingMutation") {
     return concatForegroundBytes(
-      Uint8Array.of(35),
+      Uint8Array.of(36),
       encodeForegroundU64(command.staged),
       encodeForegroundU64(command.transaction),
     );
   }
   if (command.type === "abortStagedStreamingMutation") {
-    return concatForegroundBytes(Uint8Array.of(36), encodeForegroundU64(command.staged));
+    return concatForegroundBytes(Uint8Array.of(37), encodeForegroundU64(command.staged));
   }
   if (command.type === "initializationV1") {
     if (command.version !== 1) throw new Error("Unsupported initialization bridge version");
     const action = command.action;
     switch (action.type) {
       case "hasAuthenticatedCatalogue":
-        return Uint8Array.of(37, 1, 5);
+        return Uint8Array.of(38, 1, 5);
       case "seal":
         return concatForegroundBytes(
-          Uint8Array.of(37, 1, 0),
+          Uint8Array.of(38, 1, 0),
           encodeForegroundU64(action.transaction),
         );
       case "publish":
       case "cancel":
         return concatForegroundBytes(
-          Uint8Array.of(37, 1, action.type === "publish" ? 1 : 2),
+          Uint8Array.of(38, 1, action.type === "publish" ? 1 : 2),
           encodeForegroundString(action.token),
         );
       case "recordAbsence":
         return concatForegroundBytes(
-          Uint8Array.of(37, 1, 3),
+          Uint8Array.of(38, 1, 3),
           encodeForegroundU64(action.transaction),
           encodeForegroundString(action.table),
           encodeForegroundId(action.rowId, "row id"),
@@ -595,7 +600,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
       case "status":
         if (action.ids.length > 64) throw new Error("Initialization status accepts at most 64 IDs");
         return concatForegroundBytes(
-          Uint8Array.of(37, 1, 4),
+          Uint8Array.of(38, 1, 4),
           encodeForegroundU64(action.ids.length),
           ...action.ids.map(encodeForegroundString),
         );

@@ -229,7 +229,7 @@ where
     owner_release_wait: RefCell<Option<futures::future::LocalBoxFuture<'static, ()>>>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     close_owner: futures::lock::Mutex<()>,
-    tx_time_reservation_clock: Rc<Cell<TxTime>>,
+    pub(super) tx_time_reservation_clock: Rc<Cell<TxTime>>,
     node_uuid: NodeUuid,
     receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
@@ -630,7 +630,7 @@ where
         self.enqueue_read_after_mutations(None, std::future::ready(Ok(())))
     }
 
-    fn enqueue_read_after_mutations<T: 'static>(
+    pub(super) fn enqueue_read_after_mutations<T: 'static>(
         &self,
         open_tx_id: Option<OpenTransactionId>,
         read: impl Future<Output = Result<T, Error>> + 'static,

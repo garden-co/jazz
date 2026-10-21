@@ -160,6 +160,7 @@ declare module "jazz-wasm" {
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
+    captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,
       kind: string,
