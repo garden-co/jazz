@@ -59,6 +59,7 @@ export type {
   ColumnBuilderReferences,
   ColumnBuilderValue,
   ColumnTransform,
+  ComputedColumn,
   StringColumn,
   UuidColumn,
   BooleanColumn,
