@@ -16,7 +16,7 @@ import {
 } from "../src/lib/mutations";
 import { loadDemoData } from "../src/lib/demo-data";
 import { addMember, findPersonByEmail } from "../src/lib/members";
-import { isExclusiveConflict } from "../src/lib/write-errors";
+import { isSerializationConflict } from "../src/lib/write-errors";
 
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
@@ -316,7 +316,7 @@ describe("BigLabel workflows", () => {
     );
     expect(twice.sort()).toEqual(["added", "already-member"]);
     expect(conflicts).toHaveLength(1);
-    expect(conflicts.every(isExclusiveConflict)).toBe(true);
+    expect(conflicts.every(isSerializationConflict)).toBe(true);
     await expect(
       as("admin").all(app.memberships.where({ organizationId: org.id, personId: newcomer.id })),
     ).resolves.toHaveLength(1);

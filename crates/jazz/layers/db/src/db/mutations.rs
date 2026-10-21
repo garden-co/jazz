@@ -997,7 +997,7 @@ where
     /// Coordinates are relative to the value the transaction reads: its
     /// snapshot overlaid with its own staged writes, so a splice sees earlier
     /// splices and ordinary updates from the same transaction. The target is
-    /// read like any transaction point read, so an exclusive transaction also
+    /// read like any transaction point read, so a serializable transaction also
     /// conflicts if the row changes before commit.
     ///
     /// Each descriptor stages only the Groove nodes it touches, exactly as the

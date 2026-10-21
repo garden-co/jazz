@@ -1665,15 +1665,15 @@ pub struct LocalTransactionRecord {
 pub enum TransactionKind {
     /// CRDT-style mergeable transaction.
     Mergeable,
-    /// Authority-validated exclusive transaction.
-    Exclusive,
+    /// Authority-validated serializable transaction.
+    Serializable,
 }
 
 impl From<TxKind> for TransactionKind {
     fn from(kind: TxKind) -> Self {
         match kind {
             TxKind::Mergeable => Self::Mergeable,
-            TxKind::Exclusive => Self::Exclusive,
+            TxKind::Exclusive => Self::Serializable,
         }
     }
 }
@@ -3953,7 +3953,7 @@ fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
     if *target != ExactWriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
-            "exclusive transactions do not support branch writes",
+            "serializable transactions do not support branch writes",
         ));
     }
     Ok(())
@@ -3963,7 +3963,7 @@ fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
     if *target != WriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
-            "exclusive transactions do not support branch writes",
+            "serializable transactions do not support branch writes",
         ));
     }
     Ok(())
@@ -4397,12 +4397,12 @@ where
     }
 }
 
-/// CRUD and read operations for an open exclusive transaction.
+/// CRUD and read operations for an open serializable transaction.
 ///
-/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
+/// [`SerializableTx`] and [`SerializableTxRef`] implement this trait, so serializable
 /// operations have one definition regardless of who owns the transaction
 /// lifetime. Import this trait to call its methods.
-pub trait ExclusiveTxOps<S = BoxedStorage>
+pub trait SerializableTxOps<S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4412,19 +4412,19 @@ where
     /// The id of the already-open transaction.
     fn tx_id(&self) -> OpenTransactionId;
 
-    /// Read one row inside the exclusive transaction.
+    /// Read one row inside the serializable transaction.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.db().transaction_read(self.tx_id(), table, row).await
     }
 
-    /// Read all current rows in a table inside the exclusive transaction.
+    /// Read all current rows in a table inside the serializable transaction.
     async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_current_rows(self.tx_id(), table)
             .await
     }
 
-    /// Read a prepared query inside the exclusive transaction.
+    /// Read a prepared query inside the serializable transaction.
     async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_with_opts(prepared, ReadOpts::default())
             .await
@@ -4441,7 +4441,7 @@ where
             .await
     }
 
-    /// Read a prepared query inside the exclusive transaction as `author`.
+    /// Read a prepared query inside the serializable transaction as `author`.
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
@@ -4570,7 +4570,7 @@ where
         let cells = cells.ok_or_else(|| {
             Error::new(
                 ErrorCode::Schema,
-                "exclusive transaction restores require replacement cells",
+                "serializable transaction restores require replacement cells",
             )
         })?;
         self.db()
@@ -4579,12 +4579,12 @@ where
     }
 }
 
-/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
+/// Owning, Rust-facing handle for a serializable transaction over a stable snapshot.
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
-/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
+/// transaction on drop. Use [`SerializableTxRef`] when a caller retains an
 /// [`OpenTransactionId`] between calls and must not close the transaction on return.
-pub struct ExclusiveTx<'a, S = BoxedStorage>
+pub struct SerializableTx<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4593,17 +4593,17 @@ where
     committed: bool,
 }
 
-impl<S> ExclusiveTx<'_, S>
+impl<S> SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Commit the exclusive transaction.
+    /// Commit the serializable transaction.
     ///
     /// Once the commit succeeds, dropping this handle does not abandon the
     /// already-committed transaction. If it fails, dropping the handle attempts
     /// to abandon any transaction that remains open.
     pub async fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_exclusive_handle(self.tx_id).await;
+        let result = self.db.commit_serializable_handle(self.tx_id).await;
         if result.is_ok() {
             self.committed = true;
         }
@@ -4611,7 +4611,7 @@ where
     }
 }
 
-impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
+impl<S> SerializableTxOps<S> for SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4624,7 +4624,7 @@ where
     }
 }
 
-impl<S> Drop for ExclusiveTx<'_, S>
+impl<S> Drop for SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4636,11 +4636,11 @@ where
     }
 }
 
-/// Non-owning operations handle for an already-open exclusive transaction.
+/// Non-owning operations handle for an already-open serializable transaction.
 ///
-/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
+/// Construct this with [`Db::serializable_tx_ref`] when another layer owns the
 /// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct ExclusiveTxRef<'a, S = BoxedStorage>
+pub struct SerializableTxRef<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4648,7 +4648,7 @@ where
     tx_id: OpenTransactionId,
 }
 
-impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
+impl<S> SerializableTxOps<S> for SerializableTxRef<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {

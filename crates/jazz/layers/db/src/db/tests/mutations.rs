@@ -1853,7 +1853,7 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe1);
-    let exclusive = client.exclusive_tx().unwrap();
+    let exclusive = client.serializable_tx().unwrap();
     exclusive
         .insert(
             "todos",
@@ -1900,7 +1900,7 @@ fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
     // This authority-local path cannot use a remote session transport. Its
     // accountless subject must fail at provisional durable authorship, before
     // policy evaluation can stage a row or transaction.
-    let Err(error) = core.exclusive_tx() else {
+    let Err(error) = core.serializable_tx() else {
         panic!("accountless author unexpectedly opened a durable transaction")
     };
 
@@ -1910,7 +1910,7 @@ fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
 }
 
 #[test]
-fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
+fn db_sync_surface_returns_serialization_conflict_fate_to_client() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -1921,8 +1921,8 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe2);
-    let first = client.exclusive_tx().unwrap();
-    let second = client.exclusive_tx().unwrap();
+    let first = client.serializable_tx().unwrap();
+    let second = client.serializable_tx().unwrap();
     first
         .insert(
             "todos",
@@ -2136,7 +2136,9 @@ fn enqueue_incomplete_upsert(db: &Db, kind: Option<TransactionKind>) -> WriteHan
             let id = OpenTransactionId::new();
             match kind {
                 TransactionKind::Mergeable => db.enqueue_begin_mergeable(id, None, None).unwrap(),
-                TransactionKind::Exclusive => db.enqueue_begin_exclusive(id, None, None).unwrap(),
+                TransactionKind::Serializable => {
+                    db.enqueue_begin_serializable(id, None, None).unwrap()
+                }
             }
             db.enqueue_transaction_upsert(
                 id,
@@ -2148,7 +2150,7 @@ fn enqueue_incomplete_upsert(db: &Db, kind: Option<TransactionKind>) -> WriteHan
             .unwrap();
             match kind {
                 TransactionKind::Mergeable => db.enqueue_commit_mergeable_handle(id).unwrap(),
-                TransactionKind::Exclusive => db.enqueue_commit_exclusive_handle(id).unwrap(),
+                TransactionKind::Serializable => db.enqueue_commit_serializable_handle(id).unwrap(),
             }
         }
     }
@@ -2161,7 +2163,7 @@ fn unobserved_queued_upsert_failures_are_reported_once() {
     for kind in [
         None,
         Some(TransactionKind::Mergeable),
-        Some(TransactionKind::Exclusive),
+        Some(TransactionKind::Serializable),
     ] {
         let db = open_db(0xb1, AuthorSubject::for_test_bytes([0xb1; 16]), &schema());
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -2214,7 +2216,7 @@ fn application_waits_claim_queued_errors_but_internal_observers_do_not() {
     for kind in [
         None,
         Some(TransactionKind::Mergeable),
-        Some(TransactionKind::Exclusive),
+        Some(TransactionKind::Serializable),
     ] {
         for application_wait in [false, true] {
             for already_failed in [false, true] {
@@ -3989,11 +3991,13 @@ fn backend_attribution_survives_transactions_and_streaming_publication() {
 
     let exclusive = OpenTransactionId::new();
     block_on(
-        backend
-            .begin_exclusive_with_identity(exclusive, crate::db::WriteIdentity::Attribution(alice)),
+        backend.begin_serializable_with_identity(
+            exclusive,
+            crate::db::WriteIdentity::Attribution(alice),
+        ),
     )
     .unwrap();
-    block_on(backend.exclusive_tx_ref(exclusive).insert(
+    block_on(backend.serializable_tx_ref(exclusive).insert(
         "todos",
         cells("exclusive provenance", false, backend_author),
         crate::db::InsertOptions {
@@ -4002,15 +4006,15 @@ fn backend_attribution_survives_transactions_and_streaming_publication() {
         },
     ))
     .unwrap();
-    let exclusive_tx = block_on(backend.commit_exclusive_handle(exclusive)).unwrap();
+    let serializable_tx = block_on(backend.commit_serializable_handle(exclusive)).unwrap();
     let SyncMessage::CommitUnit { tx, .. } = backend
         .node
         .node
         .borrow_mut()
-        .commit_unit_for(exclusive_tx)
+        .commit_unit_for(serializable_tx)
         .unwrap()
     else {
-        panic!("exclusive transaction must publish a commit unit");
+        panic!("serializable transaction must publish a commit unit");
     };
     assert_eq!(tx.made_by, alice);
     assert_eq!(tx.permission_subject, Some(backend_author));
@@ -4636,7 +4640,7 @@ fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
     settle_cancelled_local_publication(&db, published);
 }
 
-/// Causal flow: an exclusive transaction transfers its upload-bearing
+/// Causal flow: a serializable transaction transfers its upload-bearing
 /// publication to the deferred queue, refresh stalls, then its caller is
 /// cancelled. The node tick must retain and persist that exact publication.
 #[test]
@@ -4646,15 +4650,16 @@ fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
     let db = open_db(0xa4, owner, &schema);
     db.set_deferred_local_persistence(true);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
-    block_on(db.exclusive_tx_ref(open).insert(
+    block_on(db.begin_serializable(open)).unwrap();
+    block_on(db.serializable_tx_ref(open).insert(
         "todos",
         cells("exclusive handle", false, owner),
         Default::default(),
     ))
     .unwrap();
 
-    let published = cancel_during_subscription_refresh(&db, db.commit_exclusive_handle(open), true);
+    let published =
+        cancel_during_subscription_refresh(&db, db.commit_serializable_handle(open), true);
     settle_cancelled_local_publication(&db, published);
 }
 
@@ -4872,7 +4877,7 @@ fn nullable_json_accepts_present_values_wrapped_as_nullable() {
         Default::default(),
     ))
     .unwrap();
-    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive = db.serializable_tx().unwrap();
     let exclusive_row = exclusive
         .insert(
             "docs",

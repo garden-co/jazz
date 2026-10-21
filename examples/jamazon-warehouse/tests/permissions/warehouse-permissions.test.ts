@@ -481,11 +481,11 @@ describe("stock contention", () => {
     let exclusiveCalls = 0;
     const db = new Proxy(real, {
       get(target, property) {
-        if (property === "exclusiveTransaction") {
-          return (...args: Parameters<Db["exclusiveTransaction"]>) => {
+        if (property === "serializableTransaction") {
+          return (...args: Parameters<Db["serializableTransaction"]>) => {
             exclusiveCalls += 1;
             if (exclusiveCalls === 2) return Promise.reject(rejection);
-            return target.exclusiveTransaction(...args);
+            return target.serializableTransaction(...args);
           };
         }
         const value = Reflect.get(target, property, target);

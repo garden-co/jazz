@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -261,7 +261,7 @@ fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
     let prepared = db
         .prepare_query(&db.table("todos"))
         .expect("prepare todos query");
-    let tx = block_on(db.exclusive_tx()).expect("open exclusive transaction");
+    let tx = block_on(db.serializable_tx()).expect("open serializable transaction");
 
     storage.evict_all();
     control.pause();

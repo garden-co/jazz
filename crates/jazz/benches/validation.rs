@@ -321,7 +321,7 @@ impl ValidationBench {
         );
         fields.insert(
             "reject_exclusive_conflict".to_owned(),
-            serde_json::json!(self.metrics.rejected.exclusive_conflict),
+            serde_json::json!(self.metrics.rejected.serialization_conflict),
         );
         fields.insert(
             "reject_cascade".to_owned(),
@@ -497,7 +497,7 @@ impl Metrics {
 struct RejectCounts {
     client_clock_too_far_ahead: u64,
     authorization_denied: u64,
-    exclusive_conflict: u64,
+    serialization_conflict: u64,
     cascade: u64,
     malformed: u64,
     causality_violation: u64,
@@ -508,7 +508,7 @@ impl RejectCounts {
         match reason {
             RejectionReason::ClientClockTooFarAhead => self.client_clock_too_far_ahead += 1,
             RejectionReason::AuthorizationDenied => self.authorization_denied += 1,
-            RejectionReason::ExclusiveConflict => self.exclusive_conflict += 1,
+            RejectionReason::ExclusiveConflict => self.serialization_conflict += 1,
             RejectionReason::Cascade { .. } => self.cascade += 1,
             RejectionReason::MalformedCommit(_) => self.malformed += 1,
             RejectionReason::CausalityViolation => self.causality_violation += 1,
@@ -518,7 +518,7 @@ impl RejectCounts {
     fn total(&self) -> u64 {
         self.client_clock_too_far_ahead
             + self.authorization_denied
-            + self.exclusive_conflict
+            + self.serialization_conflict
             + self.cascade
             + self.malformed
             + self.causality_violation

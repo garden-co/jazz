@@ -55,7 +55,7 @@ representation is `PeerState::shipped_complete_tx_payloads`; the known-state
 successor remains an implementation transition, not an invariant condition.
 
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
-example, a permission change can make an old exclusive transaction newly
+example, a permission change can make an old serializable transaction newly
 visible. `MaintainedSubscriptionViewMetrics::full_diff_fallbacks` counts each
 recompute of an already-published view by cause (membership reconciliation,
 query reopen, authorization-support reopen); opening a view is not counted.

@@ -286,3 +286,25 @@ export default m.defineMigration({
   // fromHash, toHash, from, to unchanged
 });
 ```
+
+### Exclusive transactions are now serializable transactions
+
+Exclusive transactions were renamed to serializable transactions, the name most databases use for
+the same guarantee. Only the names changed: validation, conflicts and stored data are the same, and
+there is no alias for the old names.
+
+| Before                               | After                                      |
+| ------------------------------------ | ------------------------------------------ |
+| `db.exclusiveTransaction(...)`       | `db.serializableTransaction(...)`          |
+| `db.beginExclusiveTransaction()`     | `db.beginSerializableTransaction()`        |
+| `jazz.exclusiveTransaction(...)`     | `jazz.serializableTransaction(...)`        |
+| `ExclusiveWriteResult`               | `SerializableWriteResult`                  |
+| `ExclusiveWriteHandle`               | `SerializableWriteHandle`                  |
+| `TransactionScope<"exclusive">`      | `TransactionScope<"serializable">`         |
+| Error code `"exclusive_conflict"`    | Error code `"serialization_conflict"`      |
+| Rust `db.exclusive_tx()`             | Rust `db.serializable_tx()`                |
+| Rust `ExclusiveTx`, `ExclusiveTxOps` | Rust `SerializableTx`, `SerializableTxOps` |
+
+TypeScript flags the old method and type names. Plain JavaScript does not, so search for
+`exclusive` in your code. Check retry logic that compares error codes in particular: code that
+looks for `"exclusive_conflict"` stops matching and would no longer retry a conflict.

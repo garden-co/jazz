@@ -363,7 +363,7 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
 
             let tx = client
                 .begin_transaction()
-                .expect("open exclusive transaction");
+                .expect("open serializable transaction");
             let error = tx
                 .insert("documents", row_input!("payloads" => invalid.clone()))
                 .expect_err("exclusive insert rejects schema-invalid nested JSON");
@@ -373,7 +373,7 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
                     .contains("JSON schema validation failed for column `payloads[0]`")
             );
             tx.rollback()
-                .expect("roll back rejected exclusive transaction");
+                .expect("roll back rejected serializable transaction");
             assert_json_array_documents_empty(&client, "rejected nested JSON inserts").await;
 
             let (id, _, _) = client
@@ -397,7 +397,7 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
 
             let tx = client
                 .begin_transaction()
-                .expect("open exclusive transaction");
+                .expect("open serializable transaction");
             let error = tx
                 .upsert(
                     "documents",
@@ -411,7 +411,7 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
                 .expect_err("exclusive update rejects schema-invalid nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
             tx.rollback()
-                .expect("roll back rejected exclusive transaction");
+                .expect("roll back rejected serializable transaction");
         })
         .await;
 }

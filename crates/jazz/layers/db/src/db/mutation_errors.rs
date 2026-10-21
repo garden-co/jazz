@@ -68,8 +68,8 @@ pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, Strin
             "Write rejected by server authorization".to_owned(),
         ),
         RejectionReason::ExclusiveConflict => (
-            "exclusive_conflict".to_owned(),
-            "Exclusive transaction conflicted with another write".to_owned(),
+            "serialization_conflict".to_owned(),
+            "Serializable transaction conflicted with another write".to_owned(),
         ),
         RejectionReason::CausalityViolation => (
             "causality_violation".to_owned(),

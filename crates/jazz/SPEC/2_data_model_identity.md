@@ -485,7 +485,7 @@ whatever the write count.
 rejected) may have one `jazz_pending_transactions` record keyed like its
 transaction record: `(time, node_id, base_snapshot, row_read_set,
 absent_read_set, predicate_read_set)`, the last four nullable bytes holding
-its exclusive read evidence. It exists only when one of those fields is
+its serializable read evidence. It exists only when one of those fields is
 non-null, and the batch that records the transaction's seq or rejection
 deletes it. A settled transaction therefore keeps no read evidence; a stored
 copy without it still matches a redelivery that carries it.
@@ -526,8 +526,8 @@ exact key `(default branch, row, seq, tx_time, tx_node_id)` in the physical
 table it names, and a resent or re-delivered copy is compared row for row at
 the copy's coordinates, its write count already checked against the stored
 record. Asking to list a released transaction's versions is an error
-(`TransactionVersionsReleased`), never an empty answer. Exclusive transactions
-keep the list (complete exclusive payloads list every write), as do
+(`TransactionVersionsReleased`), never an empty answer. Serializable transactions
+keep the list (complete serializable payloads list every write), as do
 view-scoped ones (later fragments extend and settle the rows already held) and
 any transaction with a row on another branch (a point read needs the branch).
 A history write after the release comes from a re-ingest of the complete
@@ -535,9 +535,9 @@ payload, which marks every row again, so the release check always sees the
 whole row set and writes no partial list. Releasing changes no record layout:
 a store whose settled transactions still have lists reads them as before.
 
-The pending record's four evidence slots hold exclusive read evidence in the
+The pending record's four evidence slots hold serializable read evidence in the
 `jazz.exclusive-read-evidence.v2` family, and only while it can still be
-retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
+retransmitted. Serializable snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
 authored or relays an `Exclusive` transaction whose fate is still `Pending`
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
@@ -545,7 +545,7 @@ stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 restart (outbox or relay recovery) is byte-for-byte the unit that was
 committed. The batch that records a settled fate deletes the pending record;
 the slots are not an audit or revalidation log. Every other row, and any
-exclusive row whose evidence v1 cannot represent, writes all four null, and a
+serializable row whose evidence v1 cannot represent, writes all four null, and a
 missing snapshot still fails authority validation. Each non-null slot is the
 Groove typed-record v1 bytes of one fixed descriptor led by a format byte:
 `(format_v1 = 1, owner, global_base, local_base, dots[(time, node)])`,
@@ -562,13 +562,13 @@ binding id that does not match its bindings,
 read sets without a snapshot, and evidence on a `Mergeable` row, as corrupt
 storage. Validation MUST still finish before lowering discards the evidence.
 Reopen recovers the resulting fate and immutable versions, and MUST NOT
-reconstruct exclusive dependencies from parents or user metadata.
+reconstruct serializable dependencies from parents or user metadata.
 
 The optional audit fields have kind-specific meaning; their shared physical
 slots do not make their semantics interchangeable:
 
 - A `Mergeable` transaction carries row-version provenance and causal parent
-  dots but has no exclusive dependency/read-set contract. Canonical local
+  dots but has no serializable dependency/read-set contract. Canonical local
   authoring leaves `base_snapshot`, `row_read_set`, `absent_read_set`, and
   `predicate_read_set` null; their shared audit slots do not confer
   serializability if encountered on a mergeable receipt. An authority MUST NOT
@@ -586,11 +586,11 @@ binding_id, binding values)`. The authority compares those dependencies and
   every written row's single parent against global current state. The table is
   part of each dependency identity; the same `RowUuid` in another table is not
   the same read or CAS target. These fields MUST NOT be discarded or inferred
-  from version parents while an exclusive commit is being validated.
+  from version parents while a serializable commit is being validated.
 
 For example, concurrent mergeable edits to `todos/r1` may each name the prior
 transaction as provenance and later merge per column; neither asserts that the
-prior transaction is still current. By contrast, an exclusive update that read
+prior transaction is still current. By contrast, a serializable update that read
 `todos/r1@T1`, proved `todos/r2` absent, and evaluated predicate `P(binding B)`
 commits only if `r1` is still at `T1`, `r2` is still absent, and the bound
 predicate output is unchanged at authority validation. A write to
@@ -624,7 +624,7 @@ Column components contain exactly `physical_column_id: u64`,
 operation components contain `(physical_column_id: u64, identity bytes)`, and
 the register component has an empty payload. Substitutions and source dots use
 their canonical sorted/deduplicated order. These records explain contributed
-field origin only; they add neither causal parents nor exclusive dependencies.
+field origin only; they add neither causal parents nor serializable dependencies.
 
 Derived global-current content positions `0..=10` are `(branch_key, row_uuid,
 tx_time, tx_node_alias, schema_version_alias, parents, created_by,
@@ -692,7 +692,7 @@ require byte-for-byte postcard equality.
 `VersionRecord::new` remains a public untrusted constructor, so every node
 semantic ingress repeats whole-carrier validation before accessor-based
 filtering, parking, staging, policy evaluation, or mutation. This includes
-Core commit authority and local relay paths, local exclusive finalization, view and
+Core commit authority and local relay paths, local serializable finalization, view and
 authorization-view application, and row-version repair. Multi-bundle view and
 repair frames are preflighted in full: one bad later receipt leaves no partial
 transaction, history, clock, or view mutation.

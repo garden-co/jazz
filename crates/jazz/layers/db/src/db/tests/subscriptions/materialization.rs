@@ -452,7 +452,7 @@ fn deferred_mergeable_commit_refreshes_projected_current_view_once() {
     );
 }
 
-/// Exclusive transaction publication takes the same deferred-local admission
+/// Serializable transaction publication takes the same deferred-local admission
 /// path as a direct write, including projection-only current views.
 #[test]
 fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
@@ -472,7 +472,7 @@ fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
     assert!(added.is_empty());
 
     let inserted = row(0x75);
-    let tx = db.exclusive_tx().expect("open exclusive transaction");
+    let tx = db.serializable_tx().expect("open serializable transaction");
     tx.insert(
         "todos",
         cells("exclusive after opening", false, author),

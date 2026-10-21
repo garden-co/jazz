@@ -11,7 +11,7 @@ mod common;
 
 use duplex_transport::duplex;
 use jazz::db::{
-    ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, SubscriptionEvent,
+    ClientRelayScope, Db, DbConfig, DbIdentity, ReadOpts, SerializableTxOps, SubscriptionEvent,
     TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, Value};
@@ -2298,7 +2298,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
 }
 
 #[test]
-/// Alice seeds one exclusive transaction containing sibling rows; her browser
+/// Alice seeds one serializable transaction containing sibling rows; her browser
 /// main thread asks its durable worker relay for each sibling as a Global read.
 ///
 /// ```text
@@ -2394,7 +2394,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
         &seeder
     };
     let tx = writer
-        .exclusive_tx()
+        .serializable_tx()
         .expect("open exclusive seed transaction");
     let org = tx
         .insert(

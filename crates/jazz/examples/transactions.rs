@@ -132,7 +132,7 @@ impl CoreDb {
         Ok(tx_id)
     }
 
-    fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
+    fn serializable_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         let node = self.server.node();
         block_on(async { node.lock().await.open_exclusive(tx_id).await })?;
@@ -246,8 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let row = RowUuid::from_bytes([0x22; 16]);
     core.insert_with_id("todos", row, todo_cells("base title", false))?;
 
-    let first_tx = core.exclusive_tx()?;
-    let second_tx = core.exclusive_tx()?;
+    let first_tx = core.serializable_tx()?;
+    let second_tx = core.serializable_tx()?;
     let read = second_tx.read("todos", row)?.expect("row is visible");
     assert_eq!(
         read.get("title"),
@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         current.cell(&core.schema.tables()[0], "title"),
         Some(Value::String("first writer".to_owned()))
     );
-    println!("exclusive_tx committed {accepted:?} and rejected a stale writer");
+    println!("serializable_tx committed {accepted:?} and rejected a stale writer");
 
     Ok(())
 }

@@ -290,7 +290,7 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
         None,
     ))
     .unwrap();
-    let (exclusive_tx, exclusive_unit) = block_on(async {
+    let (serializable_tx, exclusive_unit) = block_on(async {
         let (published, unit) = ui.commit_exclusive(tx_id, ui_author, 17).await.unwrap();
         let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
         (tx_id, unit)
@@ -298,7 +298,11 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
 
     let (skewed_tx, skewed_unit) = commit(&mut ui, skewed_row, 100_000, "too new", ui_owner, []);
     let tail = [
-        (exclusive_tx, exclusive_unit, u64::MAX - SKEW_TOLERANCE_MS),
+        (
+            serializable_tx,
+            exclusive_unit,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        ),
         (skewed_tx, skewed_unit, 0),
     ];
     for (tx_id, unit, now) in tail {
@@ -340,10 +344,10 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
         );
     }
 
-    let (_, global_time, _) = transaction_state(&mut core, exclusive_tx);
+    let (_, global_time, _) = transaction_state(&mut core, serializable_tx);
     for node in [&mut ui, &mut worker, &mut core] {
         assert_eq!(
-            transaction_state(node, exclusive_tx),
+            transaction_state(node, serializable_tx),
             (Fate::Accepted, global_time, DurabilityTier::Global)
         );
     }
