@@ -330,25 +330,25 @@ fn initialization_v1_command_corpus_is_canonical() {
     let cases = [
         (
             InitializationAction::Seal { transaction: 129 },
-            vec![37, 1, 0, 129, 1],
+            vec![38, 1, 0, 129, 1],
         ),
         (
             InitializationAction::Publish { token: "x".into() },
-            vec![37, 1, 1, 1, 120],
+            vec![38, 1, 1, 1, 120],
         ),
         (
             InitializationAction::Cancel { token: "x".into() },
-            vec![37, 1, 2, 1, 120],
+            vec![38, 1, 2, 1, 120],
         ),
         (
             InitializationAction::Status {
                 ids: vec!["x".into()],
             },
-            vec![37, 1, 4, 1, 1, 120],
+            vec![38, 1, 4, 1, 1, 120],
         ),
         (
             InitializationAction::HasAuthenticatedCatalogue,
-            vec![37, 1, 5],
+            vec![38, 1, 5],
         ),
     ];
     for (action, bytes) in cases {
