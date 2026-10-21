@@ -1,6 +1,7 @@
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
+import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { e2eeForDb, type E2ee } from "../e2ee/lifecycle.js";
 import type { AccountHandle } from "../accounts/state.js";
@@ -228,7 +229,7 @@ export interface QueryBuilder<T> {
 export type BranchValue = string | number | bigint;
 export type QualifiedBranch = Record<string, BranchValue>;
 export type Branch = BranchValue | QualifiedBranch;
-export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
+export type BranchBase = Branch | readonly [branch: Branch, snapshot: SnapshotRef];
 
 export type QueryOptions = ReadTierOptions & {
   /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
@@ -415,7 +416,7 @@ function normalizeBranchView(
       base: {
         kind: "snapshot",
         branch: normalizeBranchSelector(schema, tableName, base[0], "schema"),
-        snapshot: base[1],
+        snapshot: parseSnapshotRef(base[1]),
       },
     };
   }
@@ -3325,6 +3326,29 @@ export class Db {
       context,
       ownerClient ?? undefined,
     );
+  }
+
+  /**
+   * Capture this database's local read frontier for a frozen branch base.
+   *
+   * Includes earlier locally committed writes, including pending server
+   * acceptance, and excludes uncommitted transaction changes and later writes.
+   * Works offline after the first query or mutation has attached a schema.
+   * The reference does not retain history or grant permission. Persist it with
+   * `serializeSnapshotRef`; restoring it requires the same dataset and enough
+   * retained history to answer the requested read.
+   */
+  async captureSnapshot(): Promise<SnapshotRef> {
+    this.assertOpen();
+    const client = this.getCurrentClient();
+    if (!client) {
+      throw new Error(
+        "Cannot capture a snapshot before a schema is attached. Run a query or mutation first.",
+      );
+    }
+    // Admit capture now, before later writes, including writes whose async
+    // transforms share this owner's preparation queue.
+    return runAfterPreparation(client, () => client.captureSnapshot());
   }
 
   /**
