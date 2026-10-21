@@ -3228,6 +3228,11 @@ fn source_join_field(
             "source field {field:?} is missing from resolved descriptor"
         )));
     };
+    // This is an optional equality-join optimization. Structured values
+    // remain residual predicates instead of reaching the scalar key encoder.
+    if !collect_by_ordered_scalar(&value_type) {
+        return Ok(None);
+    }
     let (value_type, nullable) = match value_type {
         ValueType::Nullable(inner) => ((*inner).clone(), true),
         value_type => (value_type, false),

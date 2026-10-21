@@ -2625,7 +2625,9 @@ where
                 data: DataSource::Current,
                 ..
             } => {
-                let param_binding_mode = if binding_source_shape.is_some() {
+                let param_binding_mode = if request.visibility == RowVisibility::Visible
+                    && binding_source_shape.is_some()
+                {
                     ParamBindingMode::RetainAllParams
                 } else {
                     ParamBindingMode::InlineAllReachableSeeds
@@ -2639,7 +2641,7 @@ where
                     binding_source_shape,
                     binding_user_params,
                     binding_claim_params,
-                    RowVisibility::Visible,
+                    request.visibility,
                 )
             }
             SourceExpr::VisibleCurrent { .. }
