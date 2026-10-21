@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import {
   materializeJazzRnConsumerManifest,
@@ -76,6 +77,47 @@ function assertRelayAndroidArchitectures(gradleProperties, label) {
     `${label} must request exactly the three sealed relay ABIs`,
   );
 }
+
+test("native header staging preserves every relay function used by the JSI bridge", async () => {
+  const repository = new URL("../../../", import.meta.url);
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-header-staging-"));
+  try {
+    const script = await readFile(
+      new URL("crates/jazz-rn/scripts/build-relay-artifacts.sh", repository),
+      "utf8",
+    );
+    const stageHeader = script.match(/^stage_header\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert.ok(stageHeader, "the platform build must expose its header staging step");
+    execFileSync("bash", [
+      "-c",
+      'set -eu\nroot="$1"\npackage="$2"\n' + stageHeader + "\nstage_header\n",
+      "stage-native-header",
+      fileURLToPath(repository),
+      directory,
+    ]);
+    const staged = await readFile(join(directory, "native/include/jazz_native_relay.h"), "utf8");
+    assert.equal(
+      staged,
+      await readFile(
+        new URL("crates/jazz-rn/native/include/jazz_native_relay.h", repository),
+        "utf8",
+      ),
+      "the checked-in header must match the canonical header copied by platform builds",
+    );
+    const bridge = await readFile(
+      new URL("crates/jazz-rn/native/foreground-runtime.cpp", repository),
+      "utf8",
+    );
+    const functions = new Set(
+      [...bridge.matchAll(/\b(jazz_native_relay_[a-z_0-9]+)\s*\(/g)].map((match) => match[1]),
+    );
+    assert.ok(functions.has("jazz_native_relay_supports_snapshot_capture"));
+    for (const name of functions)
+      assert.match(staged, new RegExp("\\b" + name + "\\s*\\("), `${name} must survive staging`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("machine JSON accepts structured tool info but no arbitrary stdout", () => {
   assert.deepEqual(

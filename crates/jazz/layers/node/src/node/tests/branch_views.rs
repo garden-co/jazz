@@ -37,6 +37,240 @@ fn branch_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
+/// Alice captures a pending write, then Core rejects it. A subsequent frozen
+/// read must refuse the invalidated history. This lower-layer test is needed
+/// to deliver an upstream fate after capture without a binding-only test hook.
+#[test]
+fn captured_pending_snapshot_reports_rejected_history() {
+    let schema = branch_view_schema();
+    let (_dir, mut alice) = open_node_with_schema(node(0xe5), schema.clone());
+    let base = branch_selector(0xe6);
+    let head = branch_selector(0xe7);
+    let (tx_id, _) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0xe8), 10)
+                .branch(base.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("pending")),
+                    (
+                        "owner".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0xe9; 16])),
+                    ),
+                ])),
+        )
+        .unwrap();
+    let snapshot = crate::local_executor::block_on(alice.capture_branch_snapshot()).unwrap();
+    assert!(snapshot.dots.contains(&tx_id));
+    alice
+        .apply_fate_update(
+            tx_id,
+            Fate::Rejected(crate::tx::RejectionReason::ClientClockTooFarAhead),
+            None,
+            None,
+        )
+        .unwrap();
+    let view = crate::protocol::ReadViewSpec::branch_view(
+        head,
+        Some(crate::protocol::BranchViewBase::snapshot(
+            base.clone(),
+            snapshot,
+        )),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let error = alice
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            &view,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Snapshot history is unavailable")
+    );
+    let fresh = alice.capture_branch_snapshot().unwrap();
+    assert!(!fresh.dots.contains(&tx_id));
+    let view = crate::protocol::ReadViewSpec::branch_view(
+        branch_selector(0xe7),
+        Some(crate::protocol::BranchViewBase::snapshot(base, fresh)),
+    );
+    assert_eq!(
+        alice
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &view
+            )
+            .unwrap()
+            .root_count,
+        0
+    );
+}
+
+/// Alice captures a pending main row and opens her frozen draft before Core
+/// rejects that write. The materialised base stays Original while main rolls
+/// back and later changes; draft-head writes still publish normally. This
+/// lower-layer test injects an upstream fate without binding-only test hooks.
+///
+/// Alice: capture -> subscribe -> Core rejection -> main edit -> draft edit
+#[test]
+fn captured_frozen_subscription_keeps_values_after_rejection() {
+    let schema = branch_view_schema();
+    let (_dir, mut alice) = open_node_with_schema(node(0xf1), schema.clone());
+    let base = branch_selector(0xf2);
+    let head = branch_selector(0xf3);
+    let original = row(0xf4);
+    let draft_only = row(0xf5);
+    let cells = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+        ])
+    };
+    let (pending, _) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", original, 10)
+                .branch(base.clone())
+                .cells(cells("Original")),
+        )
+        .unwrap();
+    let snapshot = alice.capture_branch_snapshot().unwrap();
+    let view = crate::protocol::ReadViewSpec::branch_view(
+        head.clone(),
+        Some(crate::protocol::BranchViewBase::snapshot(
+            base.clone(),
+            snapshot,
+        )),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = alice
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut maintained, initial) = alice
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Local,
+            &view,
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+    assert_eq!(initial.rows.len(), 1);
+    assert_eq!(initial.rows[0].cell(table, "title"), Some(v("Original")));
+
+    alice
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id: pending,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: None,
+        })
+        .unwrap();
+    assert!(
+        alice
+            .drain_local_maintained_view_subscription(&mut maintained, None)
+            .unwrap()
+            .is_none()
+    );
+    let live = crate::protocol::ReadViewSpec::branch_view(base.clone(), None);
+    assert_eq!(
+        alice
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &live,
+            )
+            .unwrap()
+            .root_count,
+        0
+    );
+    assert!(
+        alice
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &view,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Snapshot history is unavailable")
+    );
+
+    alice
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", original, 20)
+                .branch(base)
+                .cells(cells("Changed")),
+        )
+        .unwrap();
+    assert!(
+        alice
+            .drain_local_maintained_view_subscription(&mut maintained, None)
+            .unwrap()
+            .is_none()
+    );
+    alice
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", draft_only, 30)
+                .branch(head)
+                .cells(cells("Draft-only")),
+        )
+        .unwrap();
+    assert!(
+        alice
+            .drain_local_maintained_view_subscription(&mut maintained, None)
+            .unwrap()
+            .is_some()
+    );
+    let retained = alice
+        .materialize_local_maintained_relation_snapshot_with_occurrences(&maintained)
+        .unwrap()
+        .snapshot;
+    assert_eq!(retained.rows.len(), 2);
+    assert_eq!(
+        retained
+            .rows
+            .iter()
+            .find(|row| row.row_uuid() == original)
+            .unwrap()
+            .cell(table, "title"),
+        Some(v("Original"))
+    );
+    assert_eq!(
+        retained
+            .rows
+            .iter()
+            .find(|row| row.row_uuid() == draft_only)
+            .unwrap()
+            .cell(table, "title"),
+        Some(v("Draft-only"))
+    );
+}
+
 #[test]
 fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let schema = branch_view_schema();
