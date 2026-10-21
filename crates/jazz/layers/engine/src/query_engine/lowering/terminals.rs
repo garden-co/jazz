@@ -4394,7 +4394,19 @@ fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
 }
 
 fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
+    let mut fields = row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let column = MagicColumn::parse(field.logical_name()?)?;
+            if column.is_provenance() {
+                field.name.clone()
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
     for metadata in row_shape.metadata.values() {
         match metadata {
             SourceMetadataFields::VersionWitnesses {
@@ -4445,9 +4457,6 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
             } => {
                 fields.insert(policy_path_field.clone());
                 fields.insert(edge_kind_field.clone());
-            }
-            SourceMetadataFields::Provenance { field } => {
-                fields.insert(field.clone());
             }
         }
     }

@@ -5256,13 +5256,9 @@ fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
 }
 
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
-    if let Some(ty) = AuthorSubject::metadata_type(column) {
-        return Some(ty);
-    }
-    match column {
-        "$createdAt" | "$updatedAt" | "$deletedAt" => Some(&groove::schema::ColumnType::U64),
-        _ => None,
-    }
+    crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type())
 }
 
 fn is_magic_current_column(column: &str) -> bool {

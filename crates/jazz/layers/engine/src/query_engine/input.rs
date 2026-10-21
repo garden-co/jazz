@@ -690,6 +690,24 @@ pub enum ProvenanceField {
     UpdatedBy,
 }
 
+impl From<ProvenanceField> for MagicColumn {
+    fn from(field: ProvenanceField) -> Self {
+        let (event, value) = match field {
+            ProvenanceField::CreatedAt => (ProvenanceEvent::Creation, ProvenanceValue::Timestamp),
+            ProvenanceField::CreatedBy => (
+                ProvenanceEvent::Creation,
+                ProvenanceValue::Author(AuthorField::Whole),
+            ),
+            ProvenanceField::UpdatedAt => (ProvenanceEvent::Update, ProvenanceValue::Timestamp),
+            ProvenanceField::UpdatedBy => (
+                ProvenanceEvent::Update,
+                ProvenanceValue::Author(AuthorField::Whole),
+            ),
+        };
+        Self::Provenance { event, value }
+    }
+}
+
 /// Normalized row-id reference.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RowIdRef {

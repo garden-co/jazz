@@ -379,6 +379,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                         authorization: SourceAuthorizationRequest::System,
                         requirements: SourceRequirements {
                             app_fields: FieldRequirement::None,
+                            magic_fields: BTreeSet::new(),
                             metadata: BTreeSet::new(),
                         },
                     };

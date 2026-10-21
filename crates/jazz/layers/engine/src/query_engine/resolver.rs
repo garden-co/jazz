@@ -78,9 +78,23 @@ pub struct PolicyAuthorizationPlan {
 pub struct SourceRequirements {
     /// Public/app fields needed by output projection.
     pub app_fields: FieldRequirement,
+    /// Public computed columns needed by selection, predicates, or ordering.
+    pub magic_fields: BTreeSet<MagicColumn>,
     /// Internal metadata needed by facts, sync, transaction validation, and
     /// policy witnesses.
     pub metadata: BTreeSet<SourceMetadataRequirement>,
+}
+
+impl SourceRequirements {
+    /// Content provenance uses the same source witness as internal version consumers.
+    pub fn needs_version_witnesses(&self) -> bool {
+        self.metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses)
+            || self
+                .magic_fields
+                .iter()
+                .any(|column| column.is_content_provenance())
+    }
 }
 
 /// Internal source metadata requirement.
@@ -102,16 +116,6 @@ pub enum SourceMetadataRequirement {
     ValidationReads,
     /// Include policy dependency witness fields.
     PolicyWitnesses,
-    /// Include one public provenance field.
-    Provenance(ProvenanceField),
-    /// Project one nested structured-author field only when requested.
-    AuthorPath(String),
-    /// Expose the current winning deletion's authored timestamp.
-    DeletedAt,
-    /// Authorship of the winning deletion, or null for live rows.
-    DeletedBy,
-    /// Nullable nested field of the winning deletion author.
-    DeletionAuthorPath(String),
 }
 
 /// Public field requirement for a source.
@@ -440,11 +444,6 @@ pub enum SourceMetadataFields {
         policy_path_field: String,
         /// Dependency edge kind field.
         edge_kind_field: String,
-    },
-    /// Public provenance field.
-    Provenance {
-        /// Field emitted by the source for this provenance value.
-        field: String,
     },
 }
 

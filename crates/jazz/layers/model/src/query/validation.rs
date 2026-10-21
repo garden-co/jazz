@@ -2037,22 +2037,12 @@ fn planner_column_type<'a>(
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
-    if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
-        return Ok(Some(ty));
-    }
     if is_permission_introspection_magic_column(column) {
-        return Err(QueryError::UnsupportedMagicColumn {
-            column: column.to_owned(),
-        });
+        return Err(QueryError::UnsupportedMagicColumn { column: column.to_owned() });
     }
-    match column {
-        "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
-        "$deletedAt" => {
-            static TYPE: std::sync::LazyLock<ColumnType> = std::sync::LazyLock::new(|| ColumnType::Nullable(Box::new(ColumnType::U64)));
-            Ok(Some(&TYPE))
-        }
-        _ => Ok(None),
-    }
+    Ok(crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type()))
 }
 
 fn is_permission_introspection_magic_column(column: &str) -> bool {

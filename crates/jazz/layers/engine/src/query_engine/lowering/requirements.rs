@@ -78,12 +78,9 @@ pub(super) fn source_requirements(
             ) || crate::ids::AuthorSubject::metadata_path(field).is_some())
         );
         if app_rows.public_terminal && projects_provenance {
-            root_requirements.metadata.extend([
-                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedAt),
-                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedBy),
-                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedAt),
-                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedBy),
-            ]);
+            root_requirements
+                .metadata
+                .insert(SourceMetadataRequirement::VersionWitnesses);
         }
         merge_field_requirement(
             &mut root_requirements.app_fields,
@@ -97,18 +94,6 @@ pub(super) fn source_requirements(
             if let FieldProjection::Fields(fields) = &tree.fields {
                 for field in fields {
                     add_required_app_field(root_requirements, field.clone());
-                    let provenance = match field.as_str() {
-                        "$createdAt" => Some(ProvenanceField::CreatedAt),
-                        "$createdBy" => Some(ProvenanceField::CreatedBy),
-                        "$updatedAt" => Some(ProvenanceField::UpdatedAt),
-                        "$updatedBy" => Some(ProvenanceField::UpdatedBy),
-                        _ => None,
-                    };
-                    if let Some(provenance) = provenance {
-                        root_requirements
-                            .metadata
-                            .insert(SourceMetadataRequirement::Provenance(provenance));
-                    }
                 }
             }
             collect_app_path_projection_requirements(&tree.paths, &mut requirements)?;
@@ -195,6 +180,18 @@ pub(super) fn source_requirements(
 
     collect_plan_requirements(plan, &mut requirements)?;
 
+    for requirement in requirements.values_mut() {
+        if let FieldRequirement::Fields(fields) = &mut requirement.app_fields {
+            fields.retain(|name| {
+                if let Some(column) = MagicColumn::parse(name) {
+                    requirement.magic_fields.insert(column);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
     Ok(requirements)
 }
 
@@ -433,9 +430,7 @@ fn collect_value_requirements(
             if value_source != source {
                 return Ok(());
             }
-            requirements
-                .metadata
-                .insert(SourceMetadataRequirement::Provenance(*field));
+            requirements.magic_fields.insert((*field).into());
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source => {}
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) => {
@@ -452,38 +447,8 @@ fn collect_value_requirements(
 }
 
 fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
-    if field.starts_with("$deletedBy.")
-        && crate::ids::AuthorSubject::metadata_type(&field).is_some()
-    {
-        requirements
-            .metadata
-            .insert(SourceMetadataRequirement::DeletedBy);
-        requirements
-            .metadata
-            .insert(SourceMetadataRequirement::DeletionAuthorPath(field));
-        return;
-    }
-    if matches!(field.as_str(), "$deletedAt" | "$deletedBy") {
-        requirements.metadata.insert(if field == "$deletedAt" {
-            SourceMetadataRequirement::DeletedAt
-        } else {
-            SourceMetadataRequirement::DeletedBy
-        });
-        return;
-    }
-    if let Some((root, _)) = crate::ids::AuthorSubject::metadata_path(&field) {
-        requirements
-            .metadata
-            .insert(SourceMetadataRequirement::AuthorPath(field.clone()));
-        requirements
-            .metadata
-            .insert(SourceMetadataRequirement::Provenance(
-                if root == "$createdBy" {
-                    ProvenanceField::CreatedBy
-                } else {
-                    ProvenanceField::UpdatedBy
-                },
-            ));
+    if let Some(column) = MagicColumn::parse(&field) {
+        requirements.magic_fields.insert(column);
         return;
     }
     match &mut requirements.app_fields {

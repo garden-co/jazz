@@ -1118,17 +1118,10 @@ pub(super) fn operand_column_type(
     let Operand::Column(column) = operand else {
         return Ok(None);
     };
-    if let Some(field) = provenance_field(column) {
-        return Ok(Some(match field {
-            ProvenanceField::CreatedAt | ProvenanceField::UpdatedAt => ColumnType::U64,
-            ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => RowAuthor::value_type(),
-        }));
-    }
-    if column == "$deletedBy" || column.starts_with("$deletedBy.") {
-        return Ok(AuthorSubject::metadata_type(column).cloned());
-    }
-    if column == "$deletedAt" {
-        return Ok(Some(ColumnType::Nullable(Box::new(ColumnType::U64))));
+    if let Some(column) =
+        crate::schema::magic::MagicColumn::parse(column).filter(|column| column.is_provenance())
+    {
+        return Ok(Some(column.value_type().clone()));
     }
     if column == "id" {
         return Ok(Some(ColumnType::Uuid));

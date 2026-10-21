@@ -291,10 +291,8 @@ fn collector_orders_and_slices_by_hidden_provenance_keys() {
             request.source.table == "todos"
                 && request
                     .requirements
-                    .metadata
-                    .contains(&SourceMetadataRequirement::Provenance(
-                        ProvenanceField::CreatedAt,
-                    ))
+                    .magic_fields
+                    .contains(&MagicColumn::from(ProvenanceField::CreatedAt))
         }));
         let terminal = program
             .lowered
@@ -336,8 +334,8 @@ fn collector_executes_every_hidden_provenance_order_key() {
             request.source.table == "todos"
                 && request
                     .requirements
-                    .metadata
-                    .contains(&SourceMetadataRequirement::Provenance(field))
+                    .magic_fields
+                    .contains(&MagicColumn::from(field))
         }));
         let terminal = program
             .lowered
@@ -806,10 +804,8 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
         request.source == tags
             && request
                 .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::Provenance(
-                    ProvenanceField::CreatedAt,
-                ))
+                .magic_fields
+                .contains(&MagicColumn::from(ProvenanceField::CreatedAt))
     }));
     let terminal = program
         .lowered

@@ -489,6 +489,44 @@ impl RowAuthor {
     }
 }
 
+/// A whole author or one of its public fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AuthorField {
+    /// The complete author.
+    Whole,
+    /// Author account.
+    Account,
+    /// Provider identity.
+    Identity,
+    /// Identity issuer.
+    IdentityIssuer,
+    /// Identity subject.
+    IdentitySubject,
+}
+impl AuthorField {
+    /// Parse one supported nested author path.
+    pub fn parse_path(path: &str) -> Option<Self> {
+        match path {
+            "account" => Some(Self::Account),
+            "identity" => Some(Self::Identity),
+            "identity.issuer" => Some(Self::IdentityIssuer),
+            "identity.subject" => Some(Self::IdentitySubject),
+            _ => None,
+        }
+    }
+
+    /// Record members traversed to obtain this field.
+    pub fn path(self) -> &'static [&'static str] {
+        match self {
+            Self::Whole => &[],
+            Self::Account => &["account"],
+            Self::Identity => &["identity"],
+            Self::IdentityIssuer => &["identity", "issuer"],
+            Self::IdentitySubject => &["identity", "subject"],
+        }
+    }
+}
+
 impl AuthorSubject {
     /// Internal authority subject that bypasses policy checks.
     pub const SYSTEM: Self = Self::System;
@@ -644,13 +682,7 @@ impl AuthorSubject {
         if !matches!(root, "$createdBy" | "$updatedBy" | "$deletedBy") {
             return None;
         }
-        let path: &'static [&'static str] = match path {
-            "account" => &["account"],
-            "identity" => &["identity"],
-            "identity.issuer" => &["identity", "issuer"],
-            "identity.subject" => &["identity", "subject"],
-            _ => return None,
-        };
+        let path = AuthorField::parse_path(path)?.path();
         Some((root, path))
     }
 
