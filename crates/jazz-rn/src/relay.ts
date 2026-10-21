@@ -63,6 +63,8 @@ export type NativeForegroundRuntimeFactory = {
  * contract onto these commands.
  */
 export type NativeForegroundRuntime = {
+  /** Additive capability; absent on native builds predating snapshot capture. */
+  readonly supportsSnapshotCapture?: boolean;
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
   /** Native typed liveness; unexpected native failures still throw. */
@@ -101,6 +103,7 @@ export type NativeForegroundCommand =
       transaction?: number;
     }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "captureSnapshot" }
   | {
       type: "subscribe";
       query: Uint8Array;
@@ -337,6 +340,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
             }
           : undefined;
       return {
+        supportsSnapshotCapture: foreground.supportsSnapshotCapture === true,
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {
@@ -377,6 +381,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeConnectionStatus") return Uint8Array.of(21);
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
+  if (command.type === "captureSnapshot") return Uint8Array.of(34);
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }
@@ -548,17 +553,17 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     );
   }
   if (command.type === "stageStreamingMutation") {
-    return concatForegroundBytes(Uint8Array.of(34), encodeForegroundU64(command.upload));
+    return concatForegroundBytes(Uint8Array.of(35), encodeForegroundU64(command.upload));
   }
   if (command.type === "attachStagedStreamingMutation") {
     return concatForegroundBytes(
-      Uint8Array.of(35),
+      Uint8Array.of(36),
       encodeForegroundU64(command.staged),
       encodeForegroundU64(command.transaction),
     );
   }
   if (command.type === "abortStagedStreamingMutation") {
-    return concatForegroundBytes(Uint8Array.of(36), encodeForegroundU64(command.staged));
+    return concatForegroundBytes(Uint8Array.of(37), encodeForegroundU64(command.staged));
   }
   throw new Error("Unsupported native foreground command");
 }

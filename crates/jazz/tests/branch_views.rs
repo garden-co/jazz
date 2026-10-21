@@ -58,6 +58,242 @@ fn selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
+fn captured_branch_snapshot(db: &Db) -> SnapshotRef {
+    let mut capture = db.enqueue_capture_snapshot();
+    for _ in 0..128 {
+        db.tick().unwrap();
+        if let Some(result) = capture.try_recv().unwrap() {
+            return result.unwrap();
+        }
+    }
+    panic!("snapshot capture did not complete");
+}
+
+/// Alice captures pending local work before a later queued edit. Her frozen
+/// draft keeps Original; the live draft sees Changed, and copy-on-write only
+/// changes the draft. No authority or server acceptance is required.
+#[test]
+fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
+    let (db, schema) = open_db();
+    let base = selector(0xe1);
+    let head = selector(0xe2);
+    let row = db
+        .insert(
+            "todos",
+            BTreeMap::from([("title".into(), Value::String("Original".into()))]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .row_uuid();
+    let mut capture = db.enqueue_capture_snapshot();
+    db.update(
+        "todos",
+        row,
+        BTreeMap::from([("title".into(), Value::String("Changed".into()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: base.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let snapshot = loop {
+        db.tick().unwrap();
+        if let Some(snapshot) = capture.try_recv().unwrap() {
+            break snapshot.unwrap();
+        }
+    };
+    assert!(
+        !snapshot.dots.is_empty(),
+        "pending transactions are explicit availability witnesses"
+    );
+    let snapshot = SnapshotRef::from_persisted(&snapshot.to_persisted()).unwrap();
+    let frozen = ReadOpts::default().branch_view(
+        head.clone(),
+        Some(BranchViewBase::snapshot(base.clone(), snapshot.clone())),
+    );
+    let live =
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::current(base.clone())));
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .unwrap();
+    assert_eq!(
+        db.all(&query, frozen.clone()).unwrap()[0].cell(table, "title"),
+        Some(Value::String("Original".into()))
+    );
+    assert_eq!(
+        db.all(&query, live).unwrap()[0].cell(table, "title"),
+        Some(Value::String("Changed".into()))
+    );
+    db.update(
+        "todos",
+        row,
+        BTreeMap::from([("title".into(), Value::String("Draft".into()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head,
+                base: Some(BranchViewBase::snapshot(base.clone(), snapshot)),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        db.all(&query, frozen).unwrap()[0].cell(table, "title"),
+        Some(Value::String("Draft".into()))
+    );
+    assert_eq!(
+        db.all(&query, ReadOpts::default().branch_view(base, None))
+            .unwrap()[0]
+            .cell(table, "title"),
+        Some(Value::String("Changed".into()))
+    );
+}
+
+/// Alice restores a captured reference with retained history after reopening
+/// her persistent database. Bob's empty store must refuse the same reference.
+#[test]
+fn captured_snapshot_reopens_and_missing_history_is_explicit() {
+    let (_, schema) = open_db();
+    let dir = tempfile::tempdir().unwrap();
+    let base = selector(0xe3);
+    let head = selector(0xe4);
+    let persisted = {
+        let db = open_rocks_db(dir.path(), &schema);
+        let row = db
+            .insert(
+                "todos",
+                BTreeMap::from([("title".into(), Value::String("Original".into()))]),
+                jazz::db::InsertOptions {
+                    target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .row_uuid();
+        let reference = captured_branch_snapshot(&db).to_persisted();
+        db.update(
+            "todos",
+            row,
+            BTreeMap::from([("title".into(), Value::String("Changed".into()))]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: base.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.wait_for_pending_writes(jazz::tx::DurabilityTier::Local)
+            .unwrap();
+        reference
+    };
+    let snapshot = SnapshotRef::from_persisted(&persisted).unwrap();
+    let opts =
+        ReadOpts::default().branch_view(head, Some(BranchViewBase::snapshot(base, snapshot)));
+    {
+        let db = open_rocks_db(dir.path(), &schema);
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        let table = schema
+            .tables
+            .iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
+        let frozen = db.all(&query, opts.clone()).unwrap();
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(
+            frozen[0].cell(table, "title"),
+            Some(Value::String("Original".into()))
+        );
+        assert_eq!(
+            db.all(
+                &query,
+                ReadOpts::default().branch_view(selector(0xe3), None)
+            )
+            .unwrap()[0]
+                .cell(table, "title"),
+            Some(Value::String("Changed".into()))
+        );
+    }
+    let (bob, _) = open_db();
+    let query = bob.prepare_query(&bob.table("todos")).unwrap();
+    assert!(
+        block_on(bob.all(&query, opts))
+            .unwrap_err()
+            .to_string()
+            .contains("Snapshot history is unavailable")
+    );
+}
+
+/// The application codec is a public compatibility contract: u64 extrema and
+/// transaction dots survive both the string format and the established binary
+/// serde layout. The fixture is authored independently of serde.
+#[test]
+fn snapshot_reference_codec_matches_pinned_bytes_and_preserves_wire_layout() {
+    #[derive(serde::Serialize)]
+    struct OldLayout<'a> {
+        owner: NodeUuid,
+        global_base: GlobalTime,
+        local_base: jazz::time::TxTime,
+        dots: &'a [jazz::tx::TxId],
+    }
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/snapshot_ref_v1.json")).unwrap();
+    for case in fixture["cases"].as_array().unwrap() {
+        let token = case["reference"].as_str().unwrap();
+        let snapshot = SnapshotRef::from_persisted(token).unwrap();
+        assert_eq!(snapshot.to_persisted(), token);
+        let expected: SnapshotRef = serde_json::from_value(case["fields"].clone()).unwrap();
+        assert_eq!(snapshot, expected);
+        let old = postcard::to_allocvec(&OldLayout {
+            owner: snapshot.owner,
+            global_base: snapshot.global_base,
+            local_base: snapshot.local_base,
+            dots: &snapshot.dots,
+        })
+        .unwrap();
+        assert_eq!(postcard::to_allocvec(&snapshot).unwrap(), old);
+        assert_eq!(postcard::from_bytes::<SnapshotRef>(&old).unwrap(), snapshot);
+        assert_eq!(
+            serde_json::from_value::<SnapshotRef>(serde_json::Value::String(token.to_owned()))
+                .unwrap(),
+            snapshot
+        );
+    }
+    for invalid in fixture["invalid"].as_array().unwrap() {
+        assert!(SnapshotRef::from_persisted(invalid.as_str().unwrap()).is_err());
+    }
+}
+
+/// Alice restores a reference containing unsorted duplicate transaction dots.
+/// Rust re-encoding canonicalises the string without changing its frontier.
+#[test]
+fn snapshot_reference_codec_canonicalises_unsorted_duplicate_dots() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/snapshot_ref_v1.json")).unwrap();
+    for case in fixture["noncanonical"].as_array().unwrap() {
+        let mut restored =
+            SnapshotRef::from_persisted(case["reference"].as_str().unwrap()).unwrap();
+        let canonical = case["canonical"].as_str().unwrap();
+        let expected = SnapshotRef::from_persisted(canonical).unwrap();
+        assert_ne!(restored.dots, expected.dots);
+        assert_eq!(restored.to_persisted(), canonical);
+        restored.dots.sort_unstable();
+        restored.dots.dedup();
+        assert_eq!(restored, expected);
+        assert_eq!(expected.to_persisted(), canonical);
+    }
+}
+
 fn branch_owner_policy() -> PolicyExpr {
     PolicyExpr::Exists {
         table: "branches".to_owned(),
@@ -1206,12 +1442,9 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         )
         .unwrap()
         .mergeable_tx_id();
-    let cut = SnapshotRef {
-        owner: authored.node,
-        global_base: GlobalTime(0),
-        local_base: authored.time,
-        dots: Vec::new(),
-    };
+    let cut = captured_branch_snapshot(&db);
+    assert_eq!(cut.owner, authored.node);
+    assert!(cut.local_base >= authored.time);
     db.update(
         "branches",
         head_branch,
