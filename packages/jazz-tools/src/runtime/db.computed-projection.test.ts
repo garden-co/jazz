@@ -229,9 +229,12 @@ it("reuses subscription dependencies while still discovering newly taken branche
   }
 });
 
-it("keeps an in-flight read's discovery independent of another read warming the cache", async () => {
+it("keeps an in-flight read independent of another read extending partially warm hints", async () => {
   const app = s.defineApp({
-    rows: s.table({ score: s.int() }, { doubled: s.computed((row) => row.score * 2) }),
+    rows: s.table(
+      { useLeft: s.boolean(), left: s.int(), right: s.int() },
+      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+    ),
   });
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -247,7 +250,12 @@ it("keeps an in-flight read's discovery independent of another read warming the 
     entered = resolve;
   });
   try {
-    const { value: row } = db.insert(app.rows, { score: 5 });
+    const { value: first } = db.insert(app.rows, { useLeft: true, left: 10, right: 20 });
+    const { value: row } = db.insert(app.rows, { useLeft: false, left: 10, right: 20 });
+    await expect(db.one(app.rows.where({ id: first.id }).select("value"))).resolves.toEqual({
+      id: first.id,
+      value: 10,
+    });
     const original = source.client.queryInternal.bind(source.client);
     const query = vi.spyOn(source.client, "queryInternal");
     query.mockImplementationOnce(async (...args) => {
@@ -256,17 +264,17 @@ it("keeps an in-flight read's discovery independent of another read warming the 
       await blocked;
       return rows;
     });
-    const selected = app.rows.where({ id: row.id }).select("doubled");
+    const selected = app.rows.where({ id: row.id }).select("value");
     const pending = db.one(selected);
-    const result = expect(pending).resolves.toEqual({ id: row.id, doubled: 10 });
+    const result = expect(pending).resolves.toEqual({ id: row.id, value: 20 });
     await started;
-    await expect(db.one(selected)).resolves.toEqual({ id: row.id, doubled: 10 });
+    await expect(db.one(selected)).resolves.toEqual({ id: row.id, value: 20 });
     release();
     await result;
 
     query.mockClear();
-    await db.update(app.rows, row.id, { score: 9 }).wait({ tier: "local" });
-    await expect(db.one(selected)).resolves.toEqual({ id: row.id, doubled: 18 });
+    await db.update(app.rows, row.id, { right: 30 }).wait({ tier: "local" });
+    await expect(db.one(selected)).resolves.toEqual({ id: row.id, value: 30 });
     expect(query).toHaveBeenCalledTimes(1);
   } finally {
     release();
