@@ -4761,6 +4761,16 @@ impl IvmRuntime {
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        self.infer_builder_output_with_inputs(graph, |child| {
+            self.infer_builder_output_cached(child, output_memo)
+        })
+    }
+
+    pub(crate) fn infer_builder_output_with_inputs(
+        &self,
+        graph: &GraphBuilder,
+        mut input_output: impl FnMut(&GraphBuilder) -> Result<RecordDescriptor, IvmRuntimeError>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
             GraphBuilder::TypedTemplate {
                 program,
@@ -4775,7 +4785,7 @@ impl IvmRuntime {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 for (input, output) in inputs.iter().zip(&program.inputs) {
-                    if self.infer_builder_output_cached(input, output_memo)? != *output {
+                    if input_output(input)? != *output {
                         return Err(IvmRuntimeError::GraphOutputMismatch);
                     }
                 }
@@ -4783,7 +4793,7 @@ impl IvmRuntime {
             }
             GraphBuilder::TemplateInput { output, input, .. } => {
                 let input = input.as_ref().ok_or(IvmRuntimeError::UnsupportedOperator)?;
-                let actual = self.infer_builder_output_cached(input, output_memo)?;
+                let actual = input_output(input)?;
                 if actual != *output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
@@ -4800,7 +4810,7 @@ impl IvmRuntime {
                 variant_projection,
                 ..
             } => {
-                self.infer_builder_output_cached(keys, output_memo)?;
+                input_output(keys)?;
                 self.table_source_output(table, variant_projection.as_deref())
             }
             GraphBuilder::InlineRecords { output, .. }
@@ -4826,11 +4836,9 @@ impl IvmRuntime {
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
-            | GraphBuilder::TopBy { input, .. } => {
-                self.infer_builder_output_cached(input, output_memo)
-            }
+            | GraphBuilder::TopBy { input, .. } => input_output(input),
             GraphBuilder::CollectBy { input, collect, .. } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 match collect.mode {
                     CollectByMode::Root => {
                         collect_by_root_descriptor(&input, &collect.parent_fields)
@@ -4857,11 +4865,11 @@ impl IvmRuntime {
                 group_cols,
                 aggregates,
             } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 aggregate_descriptor(&input, group_cols, aggregates)
             }
             GraphBuilder::UnwrapNullable { input, field } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 let field_idx = resolve_field_ref(&input, field)?;
                 unwrap_nullable_descriptor(&input, field_idx)
             }
@@ -4870,16 +4878,16 @@ impl IvmRuntime {
                 array_field,
                 element_field,
             } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 let field_idx = resolve_field_ref(&input, array_field)?;
                 unnest_descriptor(&input, field_idx, element_field)
             }
             GraphBuilder::VariantProject { input, field, case } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 variant_project_descriptor(&input, field, case)
             }
             GraphBuilder::Project { input, fields } => {
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 Ok(self.projection_plan(input, fields)?.output)
             }
             GraphBuilder::StreamingChecksum {
@@ -4892,7 +4900,7 @@ impl IvmRuntime {
                 if *window_bytes == 0 || *max_bytes_per_turn == 0 {
                     return Err(IvmRuntimeError::InvalidStreamingChecksumBudget);
                 }
-                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let input = input_output(input)?;
                 let field_idx = resolve_field_ref(&input, field)?;
                 match input.fields()[field_idx].value_type {
                     ValueType::String | ValueType::Bytes => {}
@@ -4921,7 +4929,7 @@ impl IvmRuntime {
             GraphBuilder::Union { inputs } => {
                 let mut output: Option<RecordDescriptor> = None;
                 for input in inputs {
-                    let next = self.infer_builder_output_cached(input, output_memo)?;
+                    let next = input_output(input)?;
                     if let Some(output) = output {
                         if !output.registry_compatible_with(&next) {
                             return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -4933,19 +4941,15 @@ impl IvmRuntime {
                 Ok(output.unwrap_or_default())
             }
             GraphBuilder::Join { left, right, .. } => {
-                let left = self.infer_builder_output_cached(left, output_memo)?;
-                let right = self.infer_builder_output_cached(right, output_memo)?;
+                let left = input_output(left)?;
+                let right = input_output(right)?;
                 Ok(join_descriptor(&left, &right))
             }
-            GraphBuilder::SemiJoin { left, .. } => {
-                self.infer_builder_output_cached(left, output_memo)
-            }
-            GraphBuilder::AntiJoin { left, .. } => {
-                self.infer_builder_output_cached(left, output_memo)
-            }
+            GraphBuilder::SemiJoin { left, .. } => input_output(left),
+            GraphBuilder::AntiJoin { left, .. } => input_output(left),
             GraphBuilder::Recursive { seed, step, .. } => {
-                let seed = self.infer_builder_output_cached(seed, output_memo)?;
-                let step = self.infer_builder_output_cached(step, output_memo)?;
+                let seed = input_output(seed)?;
+                let step = input_output(step)?;
                 if !seed.registry_compatible_with(&step) {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
@@ -4959,7 +4963,7 @@ impl IvmRuntime {
                 else {
                     return Err(IvmRuntimeError::UnsupportedOperator);
                 };
-                self.infer_builder_output_cached(step_witness, output_memo)
+                input_output(step_witness)
             }
         }
     }

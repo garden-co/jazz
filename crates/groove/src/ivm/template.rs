@@ -67,6 +67,52 @@ impl TypedGraphTemplate {
         self.output
     }
 
+    /// Borrow the declarative topology for analysis. Argument values do not
+    /// change its operators, field lineage or output types. Validate the same
+    /// argument and source-slot contracts as declarative binding, but leave
+    /// every input in its caller's namespace. This does not install a graph.
+    pub fn declarative_analysis_shape(
+        &self,
+        inputs: &[Arc<GraphBuilder>],
+        predicates: &[super::PredicateExpr],
+        scalars: &[TemplateScalarArgument],
+    ) -> Result<&GraphBuilder, TemplateBindingError> {
+        if predicates.len() != self.predicate_markers.len() {
+            return Err(TemplateBindingError::PredicateArity);
+        }
+        for (slot, (marker, argument)) in self.predicate_markers.iter().zip(predicates).enumerate()
+        {
+            if !marker.accepts_template_argument(argument) {
+                return Err(TemplateBindingError::PredicateArgument(slot as u32));
+            }
+        }
+        for node in self.fallback.postorder() {
+            if let GraphBuilder::Project { fields, .. } = node {
+                for field in fields {
+                    arguments::validate_project_expression(&field.expression, scalars)?;
+                }
+            }
+        }
+        for node in self.fallback.postorder() {
+            if let GraphBuilder::TemplateInput {
+                slot,
+                output,
+                input: None,
+            } = node
+            {
+                let contract = self
+                    .inputs
+                    .get(*slot as usize)
+                    .filter(|_| inputs.get(*slot as usize).is_some())
+                    .ok_or(TemplateBindingError::MissingInput(*slot))?;
+                if contract != output {
+                    return Err(TemplateBindingError::DescriptorMismatch(*slot));
+                }
+            }
+        }
+        Ok(&self.fallback)
+    }
+
     /// Reconstruct the declarative equivalent for diagnostics and compiler
     /// fallbacks. Ordinary typed installation does not pay for this walk.
     pub fn bind_declarative(
