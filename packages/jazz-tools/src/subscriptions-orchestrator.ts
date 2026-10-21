@@ -231,6 +231,14 @@ export class SubscriptionsOrchestrator {
     return `${this.config.appId}:${serializeQueryOptions(this.prepareQueryOptions(options))}:${query._build()}`;
   }
 
+  /**
+   * Register a query and optionally hydrate its initial result. A seed is
+   * immediately visible to readers and settles a pending entry's promise, but
+   * registration does not notify existing subscription listeners. This method
+   * also runs during Suspense render; invoking listeners here would re-enter
+   * mounted consumers during another component's render. Source deltas continue
+   * to drive listener notifications.
+   */
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
@@ -297,9 +305,12 @@ export class SubscriptionsOrchestrator {
     // own via `use()`.
     deferred.catch(() => {});
 
-    const initialState: UseAllState<T> = slot.seed
-      ? { status: "fulfilled", data: slot.seed.data, error: null }
-      : { status: "pending", data: undefined, promise: deferred, error: null };
+    const initialState: UseAllState<T> = slot.seed ?? {
+      status: "pending",
+      data: undefined,
+      promise: deferred,
+      error: null,
+    };
 
     const entry = {
       key,
@@ -381,7 +392,10 @@ export class SubscriptionsOrchestrator {
     entry.unsubscribe = undefined;
     entry.listeners.clear();
     this.cancelCleanup(entry);
-    this.slots.delete(entry.key);
+    const slot = this.slots.get(entry.key);
+    if (slot?.phase === "live" && slot.entry === entry) {
+      this.slots.delete(entry.key);
+    }
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {

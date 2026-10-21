@@ -950,6 +950,35 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("hydration settles pending readers without re-entrant listener notifications", async () => {
+    const harness = createUnitHarness();
+    try {
+      const query = makeQuery();
+      const key = harness.manager.makeQueryKey(query);
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      const onfulfilled = vi.fn();
+      const onDelta = vi.fn();
+      entry.subscribe({ onfulfilled, onDelta });
+      const snapshot = [makeTodo("seed")];
+
+      harness.manager.makeQueryKey(query, undefined, snapshot);
+
+      expect(entry.state).toEqual({ status: "fulfilled", data: snapshot, error: null });
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).not.toHaveBeenCalled();
+      await expect(entry.promise).resolves.toBe(snapshot);
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).not.toHaveBeenCalled();
+
+      const delta = makeDelta([makeTodo("live")]);
+      harness.emit(0, delta);
+      expect(onDelta).toHaveBeenCalledExactlyOnceWith(delta);
+      expect(entry.state).toEqual({ status: "fulfilled", data: delta.all, error: null });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U20 listener unsubscribe is idempotent", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
@@ -1112,6 +1141,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(first.status === "fulfilled" ? first.data : undefined).toEqual(snapshot);
       expect(first).toBe(second);
       expect(harness.calls).toHaveLength(0);
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      expect(entry.state).toBe(first);
+      expect(harness.manager.peekState<Todo>(key)).toBe(first);
     } finally {
       await harness.manager.shutdown();
     }
@@ -1181,7 +1214,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
   });
 
-  it("SO-U28 destroying a seeded entry drops its memoised peekState snapshot", async () => {
+  it("SO-U28 destroying a seeded entry retires its query slot", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness("app-so-u28");
     try {
@@ -1200,6 +1233,41 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it.each(["registered", "live"] as const)(
+    "late cleanup from a retired entry preserves its %s replacement",
+    async (phase) => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const query = makeQuery();
+        const key = harness.manager.makeQueryKey(query);
+        const retired = harness.manager.getCacheEntry<Todo>(key);
+        retired.subscribe({})();
+        vi.advanceTimersByTime(30_000);
+        expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
+
+        harness.manager.makeQueryKey(query, undefined, [makeTodo("replacement")]);
+        if (phase === "live") {
+          harness.manager.getCacheEntry<Todo>(key).subscribe({});
+        }
+        const replacementState = harness.manager.peekState<Todo>(key);
+
+        // An already-queued source callback can outlive its unsubscribe and
+        // schedule another cleanup for the retired entry.
+        harness.emit(0, makeDelta([makeTodo("retired late result")]));
+        vi.advanceTimersByTime(30_000);
+
+        expect(harness.manager.peekState<Todo>(key)).toBe(replacementState);
+        const replacement = harness.manager.getCacheEntry<Todo>(key);
+        expect(replacement).not.toBe(retired);
+        expect(replacement.state).toBe(replacementState);
+        expect(harness.calls[1]?.unsubscribe).not.toHaveBeenCalled();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
 
   it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
     const sessionA: Session = {
