@@ -425,6 +425,97 @@ export function testComputedColumns(create: () => Promise<Db>) {
       }
     });
 
+    it("materialises row references nested in computed results before completing reads", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          wrapper: s.computed((row) => Object.freeze({ nested: [{ saved: row }] })),
+          mapping: s.computed((row) => new Map([[row, row]])),
+          membership: s.computed((row) => new Set([row])),
+        }),
+      });
+      const db = await open();
+      // Insert through the stored schema so the selected read must discover its inputs.
+      const safe = s.defineApp({ rows: stored });
+      const { value: inserted } = db.insert(safe.rows, {});
+      const selected = await db.one(
+        models.rows.where({ id: inserted.id }).select("wrapper", "mapping", "membership"),
+      );
+      const expected = { id: inserted.id, score: 5, text: "hello" };
+      expect(selected!.wrapper.nested[0]!.saved.score).toBe(5);
+      expect(selected!.wrapper.nested[0]!.saved).toEqual(expected);
+      expect(Object.isFrozen(selected!.wrapper)).toBe(true);
+      const [key, value] = [...selected!.mapping][0]!;
+      expect(key.score).toBe(5);
+      expect(value).toBe(key);
+      expect([...selected!.membership][0]!.score).toBe(5);
+      expect(Object.keys(selected!).sort()).toEqual(["id", "mapping", "membership", "wrapper"]);
+      const immediate = db.insert(models.rows, {}).value;
+      expect(immediate.wrapper.nested[0]!.saved.score).toBe(5);
+    });
+
+    it("observes dependencies of rows nested in computed subscription results", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          wrapper: s.computed((row) => ({ saved: row })),
+        }),
+      });
+      const db = await open();
+      const safe = s.defineApp({ rows: stored });
+      const { value: row } = db.insert(safe.rows, {});
+      let next: ((score: number) => void) | undefined;
+      let fail: ((error: unknown) => void) | undefined;
+      const waitFor = (score: number) =>
+        new Promise<void>((resolve, reject) => {
+          next = (value) => {
+            if (value === score) resolve();
+          };
+          fail = reject;
+        });
+      const initial = waitFor(5);
+      const stop = db.subscribe(models.rows.where({ id: row.id }).select("wrapper"), {
+        onUpdate: (rows) => {
+          try {
+            if (rows[0]) next?.(rows[0].wrapper.saved.score);
+          } catch (error) {
+            fail?.(error);
+          }
+        },
+        onError: (error) => fail?.(error),
+      });
+      try {
+        await initial;
+        const updated = waitFor(9);
+        await db.update(safe.rows, row.id, { score: 9 }).wait({ tier: "local" });
+        await updated;
+      } finally {
+        stop();
+      }
+    });
+
+    it("keeps computed siblings out of the callback input row", async () => {
+      const models = s.defineApp({
+        rows: s.table(stored.columns, {
+          toString: s.computed(() => "custom"),
+          valueOf: s.computed(() => "custom value"),
+          tag: s.computed((row) => row.toString()),
+          original: s.computed((row) => row.valueOf() === row),
+        }),
+      });
+      const db = await open();
+      const safe = s.defineApp({ rows: stored });
+      const { value: row } = db.insert(safe.rows, {});
+      await expect(
+        db.one(models.rows.select("toString", "valueOf", "tag", "original")),
+      ).resolves.toEqual({
+        id: row.id,
+        toString: "custom",
+        valueOf: "custom value",
+        tag: "[object Object]",
+        original: true,
+      });
+      expect(db.insert(models.rows, {}).value.tag).toBe("[object Object]");
+    });
+
     it("supports row enumeration, JSON serialisation and returning a materialised row", async () => {
       const models = s.defineApp({
         rows: s.table(stored.columns, {
