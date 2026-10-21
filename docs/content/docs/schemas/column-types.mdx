@@ -117,7 +117,7 @@ The callback above receives a read-only row with `id`, `title` and `score`. The 
 
 Computed fields receive app-facing values, after any stored column transforms. To build on an earlier computed field, pass the earlier table's `.columns` to another `s.table` declaration; callbacks infer those existing fields too. A stored column transform cannot depend on a virtual field.
 
-Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or retain the proxy for later use. Unknown fields and dependency cycles fail when evaluated.
+Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or capture the proxy in a closure for later use. Returning the row directly or nested in result data completes a snapshot before delivering the result, loading all of that callback's input fields. Unknown fields and dependency cycles fail when evaluated.
 
 Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows and relationship hops use the same preparation. Subscriptions retain the dependencies they observe and expand their native selection when a callback takes a new branch. A dependency-only update recomputes the result without writing a computed value.
 

@@ -169,6 +169,25 @@ export class ComputedReadState {
   }
 }
 
+function containsComputedRow(value: unknown, row: object, seen?: Set<object>): boolean {
+  if (value === row) return true;
+  if (typeof value !== "object" || value === null || ArrayBuffer.isView(value) || seen?.has(value))
+    return false;
+  (seen ??= new Set()).add(value);
+  if (value instanceof Map) {
+    for (const [key, entry] of value)
+      if (containsComputedRow(key, row, seen) || containsComputedRow(entry, row, seen)) return true;
+  } else if (value instanceof Set) {
+    for (const entry of value) if (containsComputedRow(entry, row, seen)) return true;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && "value" in descriptor && containsComputedRow(descriptor.value, row, seen))
+      return true;
+  }
+  return false;
+}
+
 /** Resolve app-facing values once, without evaluating hidden stored dependencies as outputs. */
 export function computedColumnValues(
   transforms: ColumnTransformMap,
@@ -195,15 +214,18 @@ export function computedColumnValues(
     let value: unknown;
     if (transform?.computed) {
       const keys = transform.rowColumns ?? [];
+      let snapshot: Record<string, unknown> | undefined;
       const readonly = () => {
         throw new TypeError("Computed callback rows are read-only.");
       };
       const read = (key: string) => {
-        if (!keys.includes(key) && !(Object.hasOwn(transforms, key) && transforms[key]?.computed)) {
+        if (snapshot) return Reflect.get(snapshot, key);
+        if (!keys.includes(key)) {
           // Honour ordinary object operations, while stored prototype-named
           // columns still take precedence over Object.prototype.
           if (Object.hasOwn(Object.prototype, key)) return Reflect.get(Object.prototype, key);
           if (key === "toJSON") return undefined;
+          if (key === column) return resolve(key);
           throw new Error(`Unknown computed dependency "${key}".`);
         }
         state?.observe(transform, key);
@@ -224,8 +246,11 @@ export function computedColumnValues(
         preventExtensions: readonly,
       });
       value = transform.from(undefined, row);
-      // A returned row must not retain a live proxy after evaluation has finished.
-      if (value === row) value = { ...row };
+      // Complete nested row references without cloning or mutating the callback's result.
+      if (containsComputedRow(value, row)) {
+        snapshot = { ...row };
+        if (value === row) value = snapshot;
+      }
       if (missing) throw missing;
       if (
         value &&
