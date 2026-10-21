@@ -1,11 +1,18 @@
 import { assertRelationshipDeclaration } from "./relationships.js";
+import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
 import {
   columnTransformDependencies,
   validateTransformDependencies,
 } from "./runtime/column-transforms.js";
-import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
-  AnyTypedColumnBuilder,
+  Relationships,
+  ForwardRelationship,
+  ReverseRelationship,
+  Relationship,
+} from "./relationships.js";
+import type {
+  AnyColumnDefinition,
+  ComputedColumn,
   ColumnBuilderHasDefault,
   ColumnBuilderOptional,
   ColumnBuilderSqlType,
@@ -15,7 +22,7 @@ import type {
 } from "./dsl.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { hasExternalProvenanceNameAllowance } from "./dsl.js";
+import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
@@ -30,7 +37,10 @@ import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
+export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
+type StoredColumnKeys<C extends TableDefinition> = {
+  [K in keyof C & string]: C[K] extends ComputedColumn ? never : K;
+}[keyof C & string];
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
@@ -43,9 +53,9 @@ export class DefinedTable<
   constructor(
     public readonly columns: TColumns,
     public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
-    public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
-    public readonly compositeIndexes?: readonly (readonly Extract<keyof TColumns, string>[])[],
+    public readonly indexedColumns?: readonly (keyof TColumns & string)[],
+    public readonly branchColumns?: readonly (keyof TColumns & string)[],
+    public readonly compositeIndexes?: readonly (readonly (keyof TColumns & string)[])[],
   ) {
     validateTransformDependencies(columns);
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
@@ -53,13 +63,13 @@ export class DefinedTable<
 
   indexOnly<
     const TColumnsForIndex extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
+    const normalizedColumns = [...columns];
     for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
+      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
       }
     }
@@ -75,14 +85,14 @@ export class DefinedTable<
 
   compositeIndex<
     const TColumnsForIndex extends readonly [
-      Extract<keyof TColumns, string>,
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
     if (
       new Set(columns).size !== columns.length ||
-      columns.some((column) => !(column in this.columns))
+      columns.some((column) => !(column in this.columns) || isComputedColumn(this.columns[column]!))
     ) {
       throw new Error("table.compositeIndex(...) requires distinct declared columns.");
     }
@@ -96,13 +106,13 @@ export class DefinedTable<
     ]);
   }
 
-  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
+  branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
     column: TBranchColumn,
   ): DefinedTable<TColumns, TRelations>;
   branchBy<
     const TBranchColumns extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
   branchBy(
@@ -115,7 +125,7 @@ export class DefinedTable<
       string
     >[];
     for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
+      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.branchBy(...) references unknown column "${column}".`);
       }
     }
@@ -147,12 +157,12 @@ export class DefinedTable<
  */
 declare const tableRelationsBrand: unique symbol;
 type RelationColumns<T extends TableDefinition> = {
-  [K in keyof T & string]: ColumnBuilderSqlType<T[K]> extends
+  [K in StoredColumnKeys<T>]: ColumnBuilderSqlType<T[K]> extends
     | "UUID"
     | { kind: "ARRAY"; element: "UUID" }
     ? K
     : never;
-}[keyof T & string];
+}[StoredColumnKeys<T>];
 type ConflictingTargets<R extends Relationships, C extends string, T extends string> = {
   [N in keyof R]: R[N] extends ForwardRelationship<infer OtherTarget, C>
     ? OtherTarget extends T
@@ -180,17 +190,30 @@ type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> 
 };
 export function defineTable<
   const TColumns extends TableDefinition,
-  const TRelations extends Relationships,
+  const TFields extends Record<
+    string,
+    Relationship | ComputedField<ComputedRow<TColumns>, unknown>
+  >,
 >(
   columns: TColumns & ValidateTransformContexts<TColumns>,
-  relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
-): DefinedTable<TColumns, TRelations> {
-  if (!relations || typeof relations !== "object" || Array.isArray(relations))
+  fields: TFields,
+  ..._validation: [TFields] extends [
+    ValidateLocalRelations<TColumns, TableRelations<TFields>> & {
+      [K in keyof TFields]: K extends keyof TColumns | "id" ? never : TFields[K];
+    },
+  ]
+    ? []
+    : [invalidFields: never]
+): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>> {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields))
     throw new Error(
-      "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
+      "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",
     );
+  let completeColumns: Record<string, AnyColumnDefinition> = columns;
+  const relations: Relationships = {};
   const targets = new Map<string, string>();
-  for (const [name, relation] of Object.entries(relations)) {
+  for (const [name, relation] of Object.entries(fields)) {
+    const computed = relation && typeof relation === "object" && "_computed" in relation;
     if (
       !name ||
       ["__proto__", "constructor", "prototype"].includes(name) ||
@@ -198,16 +221,32 @@ export function defineTable<
       name === "id" ||
       Object.hasOwn(columns, name)
     )
-      throw new Error(`Relationship "${name}" collides with a column.`);
+      throw new Error(
+        `${computed ? "Computed field" : "Relationship"} "${name}" collides with a column.`,
+      );
+    if (computed) {
+      assertUserTableColumnNameAllowed(name);
+      if (completeColumns === columns) completeColumns = { ...columns };
+      completeColumns[name] = {
+        _computed: {
+          ...relation._computed,
+          rowColumns: Object.freeze(["id", ...Object.keys(columns)]),
+        },
+      } as ComputedColumn;
+      continue;
+    }
     assertRelationshipDeclaration(relation, name);
+    relations[name] = relation;
     if (relation.kind === "forward") {
       const previous = targets.get(relation.column);
       if (previous && previous !== relation.table)
         throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
       targets.set(relation.column, relation.table);
-      const column = Object.hasOwn(columns, relation.column)
-        ? columns[relation.column]?._build(relation.column)
-        : undefined;
+      const builder = columns[relation.column];
+      const column =
+        Object.hasOwn(columns, relation.column) && builder && !isComputedColumn(builder)
+          ? builder._build(relation.column)
+          : undefined;
       if (!column)
         throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
       if (
@@ -232,10 +271,41 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable<TColumns, TRelations>(columns, relations);
+  return new DefinedTable(
+    completeColumns as TColumns & ComputedColumns<TFields>,
+    relations as TableRelations<TFields>,
+  );
 }
 
-type StoredDependencyValue<C extends AnyTypedColumnBuilder> =
+type ComputedRow<C extends TableDefinition> = { readonly id: string } & {
+  readonly [K in keyof C & string]: ReturnedColumnValue<C[K]>;
+};
+export type ComputedField<R, V> = {
+  readonly _computed: {
+    readonly compute: (row: Readonly<R>) => V;
+  };
+};
+type ComputedColumns<F> = [F] extends [never]
+  ? {}
+  : {
+      [K in keyof F as F[K] extends ComputedField<never, unknown>
+        ? K
+        : never]: F[K] extends ComputedField<never, infer V> ? ComputedColumn<V> : never;
+    };
+type TableRelations<F> = [F] extends [never]
+  ? never
+  : {
+      [K in keyof F as F[K] extends Relationship ? K : never]: Extract<F[K], Relationship>;
+    };
+
+/** Declare a virtual, read-only field in s.table's second argument. */
+export function defineComputed<R, V>(compute: (row: Readonly<R>) => V): ComputedField<R, V> {
+  if (typeof compute !== "function")
+    throw new TypeError("s.computed(...) requires a synchronous callback.");
+  return Object.freeze({ _computed: Object.freeze({ compute }) });
+}
+
+type StoredDependencyValue<C extends AnyColumnDefinition> =
   ColumnBuilderOptional<C> extends true
     ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
     : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
@@ -269,7 +339,7 @@ type ValidateTransformContexts<C extends TableDefinition> = {
   }
     ? string extends D
       ? C[K]
-      : Exclude<D, keyof C | "id"> extends never
+      : Exclude<D, StoredColumnKeys<C> | "id"> extends never
         ? K extends D
           ? never
           : ValidDependencyContext<C, D, S, true> extends true
@@ -375,15 +445,15 @@ type BuilderForColumn<
   TColumn extends ColumnName<TSchema, TTable>,
 > = NormalizedSchema<TSchema>[TTable][TColumn];
 
-type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = ColumnBuilderValue<TBuilder>;
-type StoredColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
+type ColumnValue<TBuilder extends AnyColumnDefinition> = ColumnBuilderValue<TBuilder>;
+type StoredColumnValue<TBuilder extends AnyColumnDefinition> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
-type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+type ReturnedColumnValue<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderOptional<TBuilder> extends true
     ? ColumnValue<TBuilder> | null
     : ColumnValue<TBuilder>;
-type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+type InsertColumnValue<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderOptional<TBuilder> extends true
     ? ColumnBuilderInitValue<TBuilder> | null
     : ColumnBuilderInitValue<TBuilder>;
@@ -397,7 +467,7 @@ type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSc
 }[ColumnName<TSchema, TTable>];
 
 type RequiredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Exclude<
-  ColumnName<TSchema, TTable>,
+  StoredColumnName<TSchema, TTable>,
   OptionalColumnName<TSchema, TTable>
 >;
 type DefaultedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
@@ -413,11 +483,25 @@ type OptionalInsertColumnName<TSchema extends SchemaLike, TTable extends TableNa
 type RequiredInsertColumnName<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
-> = Exclude<ColumnName<TSchema, TTable>, OptionalInsertColumnName<TSchema, TTable>>;
+> = Exclude<StoredColumnName<TSchema, TTable>, OptionalInsertColumnName<TSchema, TTable>>;
+
+type ComputedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [K in ColumnName<TSchema, TTable>]: BuilderForColumn<TSchema, TTable, K> extends ComputedColumn
+    ? K
+    : never;
+}[ColumnName<TSchema, TTable>];
+type StoredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Exclude<
+  ColumnName<TSchema, TTable>,
+  ComputedColumnName<TSchema, TTable>
+>;
 
 export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   {
     id: string;
+  } & {
+    readonly [TColumn in ComputedColumnName<TSchema, TTable>]: ColumnValue<
+      BuilderForColumn<TSchema, TTable, TColumn>
+    >;
   } & {
     [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
@@ -442,12 +526,12 @@ export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSche
 >;
 
 type StreamingColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderSqlType<
+  [TColumn in StoredColumnName<TSchema, TTable>]-?: ColumnBuilderSqlType<
     BuilderForColumn<TSchema, TTable, TColumn>
   > extends "TEXT" | "BYTEA" | { kind: "JSON" }
     ? TColumn
     : never;
-}[ColumnName<TSchema, TTable>];
+}[StoredColumnName<TSchema, TTable>];
 
 /**
  * Input for a streaming insert. Exactly one Text, JSON, or Bytea column is
@@ -501,7 +585,7 @@ type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
   ? { type: Case; where?: Partial<Omit<T, "type">> }
   : never;
 
-type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+type WhereInputForBuilder<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
     ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string } & Membership<string>>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
@@ -556,7 +640,7 @@ export type TableWhereInput<
   {
     id?: string | ({ eq?: string; ne?: string } & Membership<string>);
   } & {
-    [TColumn in ColumnName<TSchema, TTable>]?: WhereInputForBuilder<
+    [TColumn in StoredColumnName<TSchema, TTable>]?: WhereInputForBuilder<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
@@ -588,7 +672,7 @@ type DefaultSelection<
   TTable extends TableName<TSchema>,
 > = BaseColumnName<TSchema, TTable>;
 
-type IsArrayRelation<TBuilder extends AnyTypedColumnBuilder> =
+type IsArrayRelation<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderSqlType<TBuilder> extends {
     kind: "ARRAY";
     element: "UUID";
@@ -973,7 +1057,7 @@ export interface JsonSetValueUpdate {
   edits: readonly { op: "set"; at: string; value: unknown }[];
 }
 
-type LargeValueUpdateForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+type LargeValueUpdateForBuilder<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderSqlType<TBuilder> extends "BYTEA"
     ? ByteValueUpdate
     : ColumnBuilderSqlType<TBuilder> extends "TEXT"
@@ -987,12 +1071,12 @@ export type TableLargeValueUpdate<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = Simplify<{
-  [TColumn in ColumnName<TSchema, TTable>]?: LargeValueUpdateForBuilder<
+  [TColumn in StoredColumnName<TSchema, TTable>]?: LargeValueUpdateForBuilder<
     BuilderForColumn<TSchema, TTable, TColumn>
   >;
 }>;
 
-type PageForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+type PageForBuilder<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderSqlType<TBuilder> extends "BYTEA"
     ? BytePage
     : ColumnBuilderSqlType<TBuilder> extends "TEXT"
@@ -1005,7 +1089,7 @@ type TableLargeValueSelection<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = Simplify<{
-  [TColumn in ColumnName<TSchema, TTable>]?: PageForBuilder<
+  [TColumn in StoredColumnName<TSchema, TTable>]?: PageForBuilder<
     BuilderForColumn<TSchema, TTable, TColumn>
   >;
 }>;
@@ -1015,7 +1099,7 @@ export type LargeValueSelection<TMeta extends AnyTableMeta> =
   TableLargeValueSelectionFromMeta<TMeta>;
 
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
-  | BaseColumnNameFromMeta<TMeta>
+  | Extract<keyof TMeta["where"], string>
   | ProvenanceMagicColumn;
 type DefaultTableSelection<TMeta extends AnyTableMeta> = BaseColumnNameFromMeta<TMeta>;
 
@@ -1210,6 +1294,7 @@ export class TypedTableQueryBuilder<
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
   private _select?: string[] | Record<string, LargeValuePage>;
+  private _partialSelect?: Record<string, LargeValuePage>;
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -1249,7 +1334,7 @@ export class TypedTableQueryBuilder<
     RestSelection extends readonly TableSelectableFromMeta<TMeta>[] = [],
   >(
     first: FirstSelection,
-    ...rest: FirstSelection extends LargeValueSelection<TMeta> ? [] : RestSelection
+    ...rest: RestSelection
   ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired>;
   select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
@@ -1257,10 +1342,22 @@ export class TypedTableQueryBuilder<
     this._rejectUnsupportedUnionModifier("select(...)");
     const clone = this._clone<TInclude, NewSelection, TRequired>();
     const first = selection[0];
+    if (typeof first === "object" && first !== null) {
+      const transforms = this._outputColumnTransforms();
+      for (const column of Object.keys(first))
+        if (transforms?.[column]?.computed)
+          throw new TypeError(`Computed field "${column}" cannot have a stored partial selection.`);
+    }
     clone._select =
       typeof first === "object" && first !== null
-        ? ({ ...first } as Record<string, LargeValuePage>)
+        ? selection.length > 1
+          ? [...Object.keys(first), ...selection.slice(1).map(String)]
+          : ({ ...first } as Record<string, LargeValuePage>)
         : (selection as TableSelectableFromMeta<TMeta>[]).map((column) => String(column));
+    clone._partialSelect =
+      typeof first === "object" && first !== null && selection.length > 1
+        ? ({ ...first } as Record<string, LargeValuePage>)
+        : undefined;
     return clone;
   }
 
@@ -1284,6 +1381,10 @@ export class TypedTableQueryBuilder<
     column: TableOrderableFromMeta<TMeta>,
     direction: "asc" | "desc" = "asc",
   ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    if (this._outputColumnTransforms()?.[column as string]?.computed)
+      throw new TypeError(
+        `Computed field "${String(column)}" cannot be ordered in a stored query.`,
+      );
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1428,6 +1529,7 @@ export class TypedTableQueryBuilder<
         includes: this._includes,
         __jazz_requireIncludes: this._requireIncludes || undefined,
         select: this._select,
+        ...(this._partialSelect ? { partialSelect: this._partialSelect } : {}),
         orderBy: this._orderBys,
         limit: this._limitVal,
         offset: this._offsetVal,
@@ -1464,6 +1566,7 @@ export class TypedTableQueryBuilder<
         ? { ...this._select }
         : undefined;
     clone._orderBys = [...this._orderBys];
+    clone._partialSelect = this._partialSelect ? { ...this._partialSelect } : undefined;
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
     clone._includeDeleted = this._includeDeleted;
@@ -1473,10 +1576,22 @@ export class TypedTableQueryBuilder<
     return clone;
   }
 
+  private _outputColumnTransforms(): ColumnTransformMap | undefined {
+    if (!this._columnTransformsByTable) return this._columnTransforms;
+    if (!this._hops.length && !this._gatherVal?.seed && !this._unionVal)
+      return this._columnTransforms;
+    return this._columnTransformsByTable[
+      resolveQueryOutputTable(this._schema, this._serializeRelation())
+    ];
+  }
+
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
     const tableSchema = this._schema[this._table];
+    const transforms = this._outputColumnTransforms();
     for (const [key, value] of Object.entries(conditions)) {
+      if (transforms?.[key]?.computed)
+        throw new TypeError(`Computed field "${key}" cannot be filtered in a stored query.`);
       if (value === undefined) continue;
       const declaredColumn = tableSchema?.columns.find((column) => column.name === key);
       const columnType: ColumnType | undefined =
@@ -1556,9 +1671,7 @@ export interface Query<
     RestSelection extends readonly TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>[] = [],
   >(
     first: FirstSelection,
-    ...rest: FirstSelection extends LargeValueSelection<SchemaMeta<TTable, TSchema>>
-      ? []
-      : RestSelection
+    ...rest: RestSelection
   ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
@@ -1773,6 +1886,7 @@ function definitionToColumns(
   const columns: Column[] = [];
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     assertUserTableColumnNameAllowed(columnName);
+    if (isComputedColumn(builder)) continue;
     const column = builder._build(columnName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
     columns.push(column);
@@ -1797,10 +1911,19 @@ function columnTransformsForTable(
   }
 
   const columnsDefinition = unwrapTableDefinition(definition);
-  const transforms: ColumnTransformMap = {};
+  const transforms: ColumnTransformMap = Object.create(null);
   validateTransformDependencies(columnsDefinition);
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
-    if (builder._transform) {
+    if (isComputedColumn(builder)) {
+      transforms[columnName] = {
+        computed: true,
+        rowColumns: builder._computed.rowColumns,
+        from: (_value, dependencies) => builder._computed.compute(dependencies),
+        to: () => {
+          throw new TypeError(`Computed field "${columnName}" is read-only.`);
+        },
+      };
+    } else if (builder._transform) {
       transforms[columnName] = {
         ...builder._transform,
         ...(builder._transform.dependsOn
@@ -1820,7 +1943,7 @@ function columnTransformsForSchema(
   let registry: ColumnTransformRegistry | undefined;
   for (const [tableName, tableDefinition] of Object.entries(definition)) {
     const transforms = columnTransformsForTable(tableDefinition);
-    if (transforms) (registry ??= {})[tableName] = transforms;
+    if (transforms) (registry ??= Object.create(null))[tableName] = transforms;
   }
   return registry;
 }
@@ -2022,7 +2145,7 @@ function createAppForTables(
     },
     wasmSchema,
     schemaAst,
-  } as App<Schema<SchemaDefinition>>;
+  } as unknown as App<Schema<SchemaDefinition>>;
 }
 
 const utf8 = new TextEncoder();
