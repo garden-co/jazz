@@ -218,7 +218,6 @@ interface RelationFilterEntry {
 }
 
 interface RelationExprState {
-  columnTransformsByTable?: ColumnTransformRegistry;
   kind: "table" | "recursive" | "union";
   outputTable: string;
   base: RelExpr;
@@ -307,10 +306,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.kind === "union") {
       throw new Error("where(...) does not support union(...) relations in MVP.");
     }
-    const where = resolveRelationWhereInput(
-      input,
-      this.state.columnTransformsByTable?.[this.state.outputTable],
-    );
+    const where = resolveRelationWhereInput(input);
     const filters = [...this.state.filters, ...extractRelationFilters(where, this.state)];
     return new PermissionRelationBuilder(
       {
@@ -534,7 +530,6 @@ class PermissionRelationBuilder implements PermissionRelation {
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
-        columnTransformsByTable: this.state.columnTransformsByTable,
         outputTable: this.state.outputTable,
         base: {
           Gather: {
@@ -602,7 +597,6 @@ class PermissionRelationBuilder implements PermissionRelation {
         edge_filters,
       },
       this.relations,
-      this.state.columnTransformsByTable,
     );
   }
 
@@ -628,7 +622,6 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     private readonly rootTable: string,
     private readonly args: ReachableRelationArgs,
     private readonly relations: Map<string, Relation[]>,
-    private readonly columnTransformsByTable?: ColumnTransformRegistry,
   ) {}
 
   seeded_by(
@@ -738,7 +731,6 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     return new PermissionRelationBuilder(
       {
         kind: "recursive",
-        columnTransformsByTable: this.columnTransformsByTable,
         outputTable: this.rootTable,
         base: applyRelFilter(joined, correlated),
         initialScope: this.rootTable,
@@ -1058,7 +1050,14 @@ export function definePermissions<TApp extends AppLike>(
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
   factory(ctx);
-  return compileRules(rules, fkReferencesByTable, relationsByTable);
+  const compiled = compileRules(rules, fkReferencesByTable, relationsByTable);
+  for (const [table, policies] of Object.entries(compiled)) {
+    for (const operation of [policies.select, policies.insert, policies.update, policies.delete]) {
+      validateComputedPermissionReferences(operation?.using, table, columnTransformsByTable);
+      validateComputedPermissionReferences(operation?.with_check, table, columnTransformsByTable);
+    }
+  }
+  return compiled;
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
@@ -1178,7 +1177,7 @@ function buildTablePolicyBuilder(
   const read = actionBuilder("read", "using");
   const insert = actionBuilder("insert", "withCheck");
   const del = actionBuilder("delete", "using");
-  const relation = () => createTableRelation(table, relationsByTable, columnTransformsByTable);
+  const relation = () => createTableRelation(table, relationsByTable);
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, hasTypeColumn, collectRule, columnTransforms);
   const managedByCreator = (): void => {
@@ -1228,12 +1227,10 @@ function buildTablePolicyBuilder(
 function createTableRelation(
   table: string,
   relationsByTable: Map<string, Relation[]>,
-  columnTransformsByTable: ColumnTransformRegistry,
 ): PermissionRelation {
   return new PermissionRelationBuilder(
     {
       kind: "table",
-      columnTransformsByTable,
       outputTable: table,
       base: {
         TableScan: {
@@ -1272,7 +1269,6 @@ function createUnionRelation(
   return new PermissionRelationBuilder(
     {
       kind: "union",
-      columnTransformsByTable: firstState.columnTransformsByTable,
       outputTable: firstState.outputTable,
       base: {
         Union: {
@@ -1315,7 +1311,7 @@ function buildGatherSeedState(
   const joins = [...state.joins];
   const filters = [...state.filters];
   collectQualifiedWhere(
-    resolveRelationWhereInput(start, state.columnTransformsByTable?.[state.outputTable]),
+    resolveRelationWhereInput(start),
     state.outputTable,
     currentRelationScope(state),
     state.kind,
@@ -1499,12 +1495,10 @@ function isRecursiveCurrentFilter(raw: unknown, token: RecursiveCurrentValue): b
   return keys.length === 1 && keys[0] === "eq" && raw.eq === token;
 }
 
-function resolveRelationWhereInput(
-  input: unknown,
-  columnTransforms?: ColumnTransformMap,
-): Record<string, unknown> {
+function resolveRelationWhereInput(input: unknown): Record<string, unknown> {
   if (typeof input === "function") {
-    return resolveRelationWhereInput(input(createRowContext(columnTransforms)), columnTransforms);
+    // Relation callbacks reference the enclosing policy row, whose table is not known yet.
+    return resolveRelationWhereInput(input(createRowContext()));
   }
   return normalizeWhereObject(input);
 }
@@ -2006,16 +2000,79 @@ function normalizeSessionPath(path: string | string[]): string[] {
   return parts.map((part) => part.trim()).filter((part) => part.length > 0);
 }
 
+function assertStoredPermissionReference(column: string, transforms?: ColumnTransformMap): void {
+  if (transforms?.[column]?.computed)
+    throw new TypeError(`Computed field "${column}" cannot be referenced in permission policies.`);
+}
+
+/** Check outer references only once a relation is attached to its owning policy. */
+function validateComputedPermissionReferences(
+  expression: PolicyExpr | undefined,
+  table: string,
+  transforms: ColumnTransformRegistry,
+): void {
+  if (!expression) return;
+  if (expression.type === "And" || expression.type === "Or") {
+    for (const child of expression.exprs)
+      validateComputedPermissionReferences(child, table, transforms);
+  } else if (expression.type === "Not") {
+    validateComputedPermissionReferences(expression.expr, table, transforms);
+  } else if (expression.type === "Exists") {
+    validateComputedPermissionReferences(expression.condition, expression.table, transforms);
+  } else if (expression.type === "ExistsRel" && transforms[table]) {
+    const value = (ref: RelValueRef) => {
+      if ("OuterColumn" in ref)
+        assertStoredPermissionReference(ref.OuterColumn.column, transforms[table]);
+    };
+    const predicate = (expr: RelPredicateExpr): void => {
+      if (typeof expr === "string") return;
+      if ("Cmp" in expr) value(expr.Cmp.right);
+      else if ("Contains" in expr) value(expr.Contains.right);
+      else if ("In" in expr) expr.In.values.forEach(value);
+      else if ("And" in expr) expr.And.forEach(predicate);
+      else if ("Or" in expr) expr.Or.forEach(predicate);
+      else if ("Not" in expr) predicate(expr.Not);
+      else if ("EnumMatch" in expr) predicate(expr.EnumMatch.payload);
+    };
+    const relation = (expr: RelExpr): void => {
+      if ("Filter" in expr) {
+        relation(expr.Filter.input);
+        predicate(expr.Filter.predicate);
+      } else if ("Union" in expr) {
+        for (const arm of expr.Union.inputs) relation(arm.input);
+      } else if ("Join" in expr) {
+        relation(expr.Join.left);
+        relation(expr.Join.right);
+      } else if ("Gather" in expr) {
+        relation(expr.Gather.seed);
+        relation(expr.Gather.step);
+      } else {
+        const unary =
+          "Project" in expr
+            ? expr.Project
+            : "Distinct" in expr
+              ? expr.Distinct
+              : "OrderBy" in expr
+                ? expr.OrderBy
+                : "Offset" in expr
+                  ? expr.Offset
+                  : "Limit" in expr
+                    ? expr.Limit
+                    : undefined;
+        if (unary) relation(unary.input);
+      }
+    };
+    relation(expression.rel);
+  }
+}
+
 function createRowContext(
   columnTransforms?: ColumnTransformMap,
 ): RowContext<Record<string, unknown>> {
   return new Proxy({} as RowContext<Record<string, unknown>>, {
     get(_target, prop) {
       if (typeof prop === "string") {
-        if (columnTransforms?.[prop]?.computed)
-          throw new TypeError(
-            `Computed field "${prop}" cannot be referenced in permission policies.`,
-          );
+        assertStoredPermissionReference(prop, columnTransforms);
         return {
           __jazzPermissionKind: "row-ref",
           column: prop,

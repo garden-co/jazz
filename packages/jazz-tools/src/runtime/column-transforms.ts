@@ -212,65 +212,76 @@ export function computedColumnValues(
     if (values.has(column)) return values.get(column);
     if (visiting.has(column)) throw new Error(`Cyclic computed dependency at "${column}".`);
     visiting.add(column);
-    const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
-    let value: unknown;
-    if (transform?.computed) {
-      const keys = transform.rowColumns ?? [];
-      let snapshot: Record<string, unknown> | undefined;
-      const readonly = () => {
-        throw new TypeError("Computed callback rows are read-only.");
-      };
-      const read = (key: string) => {
-        if (snapshot) return Reflect.get(snapshot, key);
-        if (!keys.includes(key)) {
-          // Honour ordinary object operations, while stored prototype-named
-          // columns still take precedence over Object.prototype.
-          if (Object.hasOwn(Object.prototype, key)) return Reflect.get(Object.prototype, key);
-          if (key === "toJSON") return undefined;
-          if (key === column) return resolve(key);
-          throw new Error(`Unknown computed dependency "${key}".`);
+    try {
+      const transform = Object.hasOwn(transforms, column) ? transforms[column] : undefined;
+      let value: unknown;
+      if (transform?.computed) {
+        const keys = transform.rowColumns ?? [];
+        let snapshot: Record<string, unknown> | undefined;
+        const readonly = () => {
+          throw new TypeError("Computed callback rows are read-only.");
+        };
+        const read = (key: string) => {
+          if (snapshot) return Reflect.get(snapshot, key);
+          if (!keys.includes(key)) {
+            // Honour ordinary object operations, while stored prototype-named
+            // columns still take precedence over Object.prototype.
+            if (Object.hasOwn(Object.prototype, key)) return Reflect.get(Object.prototype, key);
+            if (key === "toJSON") return undefined;
+            if (key === column) return resolve(key);
+            throw new Error(`Unknown computed dependency "${key}".`);
+          }
+          state?.observe(transform, key);
+          return resolve(key);
+        };
+        const row = new Proxy(Object.create(null) as Record<string, unknown>, {
+          get: (_target, key) => (typeof key === "string" ? read(key) : undefined),
+          has: (_target, key) => typeof key === "string" && keys.includes(key),
+          ownKeys: () => [...keys],
+          getOwnPropertyDescriptor: (_target, key) =>
+            typeof key === "string" && keys.includes(key)
+              ? { configurable: true, enumerable: true, get: () => read(key) }
+              : undefined,
+          set: readonly,
+          deleteProperty: readonly,
+          defineProperty: readonly,
+          setPrototypeOf: readonly,
+          preventExtensions: readonly,
+        });
+        try {
+          value = transform.from(undefined, row);
+        } catch (error) {
+          // A callback may wrap the private signal while handling ordinary data errors.
+          throw missing ?? error;
         }
-        state?.observe(transform, key);
-        return resolve(key);
-      };
-      const row = new Proxy(Object.create(null) as Record<string, unknown>, {
-        get: (_target, key) => (typeof key === "string" ? read(key) : undefined),
-        has: (_target, key) => typeof key === "string" && keys.includes(key),
-        ownKeys: () => [...keys],
-        getOwnPropertyDescriptor: (_target, key) =>
-          typeof key === "string" && keys.includes(key)
-            ? { configurable: true, enumerable: true, get: () => read(key) }
-            : undefined,
-        set: readonly,
-        deleteProperty: readonly,
-        defineProperty: readonly,
-        setPrototypeOf: readonly,
-        preventExtensions: readonly,
-      });
-      value = transform.from(undefined, row);
-      // Complete nested row references without cloning or mutating the callback's result.
-      if (containsComputedRow(value, row)) {
-        snapshot = { ...row };
-        if (value === row) value = snapshot;
+        if (
+          value &&
+          (typeof value === "object" || typeof value === "function") &&
+          "then" in value &&
+          typeof value.then === "function"
+        ) {
+          // Async callbacks are unsupported, but their rejection must remain contained.
+          Promise.resolve(value).catch(() => {});
+          throw new TypeError(`Computed field "${column}" must return synchronously.`);
+        }
+        if (missing) throw missing;
+        // Complete nested row references without cloning or mutating the callback's result.
+        if (containsComputedRow(value, row)) {
+          snapshot = { ...row };
+          if (value === row) value = snapshot;
+        }
+      } else {
+        const storedValue = requireStored(column);
+        for (const dependency of transform?.dependsOn ?? []) requireStored(dependency);
+        value = transform
+          ? transform.from(storedValue, dependencyContext(transform, stored))
+          : storedValue;
       }
-      if (missing) throw missing;
-      if (
-        value &&
-        (typeof value === "object" || typeof value === "function") &&
-        "then" in value &&
-        typeof value.then === "function"
-      )
-        throw new TypeError(`Computed field "${column}" must return synchronously.`);
-    } else {
-      const storedValue = requireStored(column);
-      for (const dependency of transform?.dependsOn ?? []) requireStored(dependency);
-      value = transform
-        ? transform.from(storedValue, dependencyContext(transform, stored))
-        : storedValue;
+      values.set(column, value);
+      return value;
+    } finally {
+      visiting.delete(column);
     }
-    visiting.delete(column);
-    values.set(column, value);
-    return value;
   };
   for (const column of requested) resolve(column);
   return values;

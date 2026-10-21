@@ -1,4 +1,5 @@
 import { assertRelationshipDeclaration } from "./relationships.js";
+import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
 import {
   columnTransformDependencies,
   validateTransformDependencies,
@@ -1576,14 +1577,12 @@ export class TypedTableQueryBuilder<
   }
 
   private _outputColumnTransforms(): ColumnTransformMap | undefined {
-    if (!this._hops.length || !this._columnTransformsByTable) return this._columnTransforms;
-    let table: string = this._table;
-    for (const hop of this._hops) {
-      const relation = this._schema[table]?.relations?.[hop];
-      if (!relation) throw new Error(`Unknown relation "${hop}" on table "${table}"`);
-      table = relation.table;
-    }
-    return this._columnTransformsByTable[table];
+    if (!this._columnTransformsByTable) return this._columnTransforms;
+    if (!this._hops.length && !this._gatherVal?.seed && !this._unionVal)
+      return this._columnTransforms;
+    return this._columnTransformsByTable[
+      resolveQueryOutputTable(this._schema, this._serializeRelation())
+    ];
   }
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
