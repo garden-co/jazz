@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { AccountManager, AccountOperationSuperseded, type AccountHandle } from "./state.js";
+import {
+  AccountManager,
+  AccountOperationSuperseded,
+  type AccountHandle,
+  type AccountSelectionDurability,
+} from "./state.js";
 
 // Enrollment is deliberately a controlled boundary here: these tests exercise
 // UI scheduling, not credential verification or registry acceptance.
@@ -18,16 +23,20 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-function setup() {
+function setup(durability?: AccountSelectionDurability) {
   const pending = deferred<AccountHandle>();
   const local = handle("local");
-  const manager = new AccountManager({
-    createLocalFirst: () => local,
-    registerJWT: () => pending.promise,
-    loginJWT: () => pending.promise,
-    loginOrRegisterJWT: () => pending.promise,
-    linkJWT: () => pending.promise,
-  });
+  const manager = new AccountManager(
+    {
+      createLocalFirst: () => local,
+      registerJWT: () => pending.promise,
+      loginJWT: () => pending.promise,
+      loginOrRegisterJWT: () => pending.promise,
+      linkJWT: () => pending.promise,
+    },
+    undefined,
+    durability,
+  );
   return { manager, pending, local };
 }
 
@@ -92,6 +101,98 @@ describe("account selection", () => {
     manager.createLocalFirst();
     await expect(manager.settleSelection()).resolves.toBeUndefined();
     await expect(manager.settleSelection(true)).resolves.toBeUndefined();
+  });
+
+  it("retains a synchronous persistence failure until retry or a new selection", async () => {
+    const failure = new Error("cannot queue selection");
+    const settle = vi.fn(async () => {});
+    const selectionChanged = vi.fn((account) => {
+      if (account === local) throw failure;
+    });
+    const { manager, local, pending } = setup({ selectionChanged, settle });
+    manager.createLocalFirst();
+    expect(manager.getSnapshot()).toMatchObject({ account: local, error: failure });
+    manager.createLocalFirst(); // Re-publishing the same handle cannot clear the failure.
+    await expect(manager.settleSelection()).rejects.toBe(failure);
+    expect(selectionChanged).toHaveBeenCalledOnce();
+    expect(settle).not.toHaveBeenCalled();
+
+    const login = manager.loginJWT("token");
+    expect(manager.getSnapshot()).toMatchObject({ account: local, error: failure });
+    const external = handle("external");
+    pending.resolve(external);
+    await login;
+    expect(manager.getSnapshot().error).toBeUndefined();
+    await expect(manager.settleSelection()).resolves.toBeUndefined();
+    expect(selectionChanged.mock.calls).toEqual([[local], [external]]);
+    expect(settle).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    "keeps a re-entrant selection's own durability outcome (replacement fails: %s)",
+    async (replacementFails) => {
+      const oldFailure = new Error("old selection failed");
+      const replacementFailure = new Error("logout failed");
+      const settle = vi.fn(async () => {});
+      const { manager } = setup({
+        selectionChanged(account) {
+          if (account) {
+            manager.logout();
+            throw oldFailure;
+          }
+          if (replacementFails) throw replacementFailure;
+        },
+        settle,
+      });
+      manager.createLocalFirst();
+      expect(manager.getLoggedIn()).toBeUndefined();
+      if (replacementFails) {
+        expect(manager.getSnapshot().error).toBe(replacementFailure);
+        await expect(manager.settleSelection()).rejects.toBe(replacementFailure);
+        expect(settle).not.toHaveBeenCalled();
+      } else {
+        expect(manager.getSnapshot().error).toBeUndefined();
+        await expect(manager.settleSelection()).resolves.toBeUndefined();
+        expect(settle).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it("does not clear a newer reported error when retry queues the selection", async () => {
+    const failure = new Error("cannot queue selection");
+    const otherFailure = new Error("another persistence failure");
+    const { manager } = setup({
+      selectionChanged: vi.fn().mockImplementationOnce(() => {
+        throw failure;
+      }),
+      settle: async () => {},
+    });
+    manager.createLocalFirst();
+    manager.reportPersistenceError(otherFailure);
+    await expect(manager.settleSelection()).rejects.toBe(failure);
+    await expect(manager.settleSelection(true)).resolves.toBeUndefined();
+    expect(manager.getSnapshot().error).toBe(otherFailure);
+  });
+
+  it("rejects a retry superseded by a re-entrant selection", async () => {
+    let retrying = false;
+    const failure = new Error("cannot queue selection");
+    const settle = vi.fn(async () => {});
+    const { manager } = setup({
+      selectionChanged(account) {
+        if (!account) return;
+        if (retrying) manager.logout();
+        else throw failure;
+      },
+      settle,
+    });
+    manager.createLocalFirst();
+    retrying = true;
+    await expect(manager.settleSelection(true)).rejects.toBeInstanceOf(AccountOperationSuperseded);
+    expect(settle).not.toHaveBeenCalled();
+    expect(manager.getLoggedIn()).toBeUndefined();
+    expect(manager.getSnapshot().error).toBeUndefined();
+    await expect(manager.settleSelection()).resolves.toBeUndefined();
   });
 
   it("does not restore a login after logout even if enrollment committed remotely", async () => {

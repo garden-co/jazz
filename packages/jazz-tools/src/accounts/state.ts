@@ -28,6 +28,7 @@ export interface AccountSnapshot {
 
 /** @internal Host-owned persistence of actual account-selection transitions. */
 export interface AccountSelectionDurability {
+  /** Queue this selection before returning; a synchronous failure is retried explicitly. */
   selectionChanged(account: AccountHandle | undefined): void;
   settle(retry: boolean): Promise<void>;
 }
@@ -70,6 +71,8 @@ export class AccountManager<Auth> {
     error: undefined,
   });
   private generation = 0;
+  // Pending/error-only publications and retries retain the same selection token.
+  private selectionDurabilityAttempt: { error?: Error } = {};
   private listeners = createListeners("Account state observer failed");
 
   /** @internal Public factories supply the verified enrollment adapter. */
@@ -91,6 +94,14 @@ export class AccountManager<Auth> {
 
   /** @internal Await host persistence before opening the selected account's client. */
   settleSelection(retry = false): Promise<void> {
+    const attempt = this.selectionDurabilityAttempt;
+    if (retry && attempt.error) {
+      this.queueSelectionPersistence();
+      this.listeners.notify();
+      if (attempt !== this.selectionDurabilityAttempt)
+        return Promise.reject(new AccountOperationSuperseded());
+    }
+    if (attempt.error) return Promise.reject(attempt.error);
     return this.selectionDurability?.settle(retry) ?? Promise.resolve();
   }
 
@@ -251,12 +262,32 @@ export class AccountManager<Auth> {
     const previousAccount = this.snapshot.account;
     this.snapshot = Object.freeze(snapshot);
     if (snapshot.account !== previousAccount) {
-      try {
-        this.selectionDurability?.selectionChanged(snapshot.account);
-      } catch (error) {
-        console.error("Account state observer failed", error);
-      }
+      this.selectionDurabilityAttempt = {};
+      this.queueSelectionPersistence();
+    }
+    if (this.selectionDurabilityAttempt.error && this.snapshot.error === undefined) {
+      this.snapshot = Object.freeze({
+        ...this.snapshot,
+        error: this.selectionDurabilityAttempt.error,
+      });
     }
     this.listeners.notify();
+  }
+
+  private queueSelectionPersistence(): void {
+    const attempt = this.selectionDurabilityAttempt;
+    const previousError = attempt.error;
+    try {
+      this.selectionDurability?.selectionChanged(this.snapshot.account);
+      if (attempt !== this.selectionDurabilityAttempt) return;
+      attempt.error = undefined;
+      if (previousError && this.snapshot.error === previousError)
+        this.snapshot = Object.freeze({ ...this.snapshot, error: undefined });
+    } catch (cause) {
+      // A re-entrant selection owns its own outcome; an older hook cannot poison it.
+      if (attempt !== this.selectionDurabilityAttempt) return;
+      attempt.error = toError(cause);
+      this.snapshot = Object.freeze({ ...this.snapshot, error: attempt.error });
+    }
   }
 }

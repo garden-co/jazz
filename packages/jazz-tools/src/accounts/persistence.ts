@@ -134,6 +134,8 @@ export async function prepareAccountManager(options: {
           next && options.retainAccountAssignment
             ? (retainedAccountAssignment(next) ?? null)
             : null;
+        // Construction does not publish a selection, and this promise callback runs
+        // only after the factory has returned and assigned manager.
         void save().catch((error) => manager.reportPersistenceError(error));
       },
       settle: (retry) => (retry ? writes.catch(() => save()) : writes),
