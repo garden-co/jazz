@@ -150,13 +150,13 @@ it("reuses available inputs and batches missing dependencies without whole-row r
     expect((await db.all(app.rows.select("value"))).map((row) => row.value).sort()).toEqual([
       10, 40,
     ]);
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(1);
     const selections = query.mock.calls.map(([json]) =>
       (JSON.parse(json).select_columns as { column: string }[])
         .map((column) => column.column)
         .sort(),
     );
-    expect(selections).toEqual([["id"], ["useLeft"], ["left", "right", "useLeft"]]);
+    expect(selections).toEqual([["left", "right", "useLeft"]]);
   } finally {
     vi.restoreAllMocks();
     await db.shutdown();
