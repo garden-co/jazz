@@ -12,5 +12,5 @@
     },
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "schema.ts", "permissions.ts", "tests", "e2e", "*.config.ts"]
+  "include": ["src", "schema.ts", "permissions.ts", "quickstart", "tests", "e2e", "*.config.ts"]
 }

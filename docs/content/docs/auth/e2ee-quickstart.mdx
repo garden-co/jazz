@@ -1,0 +1,126 @@
+---
+title: E2EE quickstart
+description: Create a minimal encrypted chat and share it with another account.
+reviewedAt: "0532477ff9"
+---
+
+Build a chat with two tables: one for chats and one for encrypted messages. Jazz
+manages the encryption keys and membership tables. Only the chat owner can share
+it; members can read messages and write their own.
+
+This guide uses browser TypeScript and a local Jazz server. E2EE is experimental;
+see the [E2EE guide](/docs/auth/end-to-end-encryption) for its limits, recovery and
+offline behaviour. For a complete React UI with image uploads, see the
+[encrypted chat example](https://github.com/garden-co/jazz/tree/main/examples/e2ee-chat).
+
+## 1. Create a browser app
+
+```sh
+pnpm create vite encrypted-chat --template vanilla-ts
+cd encrypted-chat
+pnpm install
+pnpm add jazz-tools@alpha
+```
+
+Add the Jazz plugin. During development it starts a local server, deploys your
+schema and permissions, and supplies the app ID and server URL to the browser.
+
+<include cwd lang="ts" meta='title="vite.config.ts"'>
+  ../examples/e2ee-chat/quickstart/vite.config.ts
+</include>
+
+## 2. Declare the encrypted messages
+
+Create `schema.ts` at the project root. Each chat is an encryption space;
+`chatId` connects its messages to that space. The `owner` relationship lets
+permissions verify who may create and administer it.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/e2ee-chat/quickstart/schema.ts
+</include>
+
+Message text is encrypted. Chat IDs, owner IDs, timestamps and sharing metadata
+remain visible. This example lets signed-in accounts read chat metadata; message
+access requires membership.
+
+## 3. Define access and sharing
+
+Create `permissions.ts` beside `schema.ts`. `fromEncryptionSpace()` gives members
+access to messages. The `space` rules give the owner permission to create the
+space and change its membership.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/e2ee-chat/quickstart/permissions.ts
+</include>
+
+Keep `existsIncludingCreated` here: creating a chat also creates its initial
+creator membership in the same transaction. Later administration checks use
+accepted ownership. You do not need a separate application membership table.
+
+## 4. Open the database
+
+Import permissions in the browser before creating the Db, using the same `app`
+instance. This registers the selected membership behaviour with the SDK; the
+server enforces the deployed policies.
+
+<include cwd lang="ts" meta='title="src/client.ts"'>
+  ../examples/e2ee-chat/quickstart/src/client.ts
+</include>
+
+Browser account selection and encryption keys persist automatically in separate
+stores. Use localhost or HTTPS with IndexedDB available, and retain browser
+storage to keep your keys. Node hosts need an explicit atomic `e2ee.store`.
+
+Replace the scaffold's `src/main.ts` to display the account ID:
+
+<include cwd lang="ts" meta='title="src/main.ts"'>
+  ../examples/e2ee-chat/quickstart/src/main.ts
+</include>
+
+## 5. Create, send, read and share
+
+Add these functions for your UI:
+
+<include cwd lang="ts" meta='title="src/chat.ts"'>
+  ../examples/e2ee-chat/quickstart/src/chat.ts
+</include>
+
+Await `createChat()` before sending the first message. Its Global wait includes
+initial space acceptance and the creator's key handoff. Sharing grants both key
+access and the membership used by `fromEncryptionSpace()`; only the owner can
+call it successfully. Reads return decrypted text through the ordinary query API.
+
+These calls wait for the server to make the first two-account test easy to
+follow. For local saving and offline use, see the
+[completion guidance](/docs/auth/end-to-end-encryption#start-automatically-including-offline).
+
+## Try it with two accounts
+
+Run `pnpm dev` and open the URL Vite prints in two independent browser profiles,
+or a normal and private window. Two tabs in the same profile share an account.
+Copy the second profile's account ID.
+
+In the first profile's browser console:
+
+```ts
+const chatApi = await import("/src/chat.ts");
+const chat = await chatApi.createChat();
+await chatApi.sendMessage(chat.id, "Hello, encrypted world!");
+await chatApi.shareChat(chat.id, "<second-profile-account-id>");
+chat.id;
+```
+
+The recipient must have opened the app and completed account setup. If sharing
+fails because their keys are not ready, let setup finish and explicitly retry
+`shareChat` for the same chat and account. A chat ID alone grants no access.
+
+Copy `chat.id` into the second profile's browser console:
+
+```ts
+const chatApi = await import("/src/chat.ts");
+await chatApi.readMessages("<chat-id>");
+await chatApi.sendMessage("<chat-id>", "I can read it!");
+```
+
+Reload either profile to check that its account and keys persist. When your app
+disposes of this database instance, call `await db.shutdown()`.

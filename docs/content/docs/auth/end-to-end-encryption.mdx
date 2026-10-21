@@ -1,10 +1,13 @@
 ---
 title: End-to-end encryption
 description: "Encrypt table values and image uploads while keeping Jazz permissions and sync."
-reviewedAt: "17d2f3b86"
+reviewedAt: "0532477ff9"
 ---
 
 End-to-end encryption (E2EE) keeps selected logical values encrypted on the server. Jazz still checks ordinary row permissions. A recipient needs both permission to receive a row and a verified encryption key to read its protected values.
+
+Start with the [E2EE quickstart](/docs/auth/e2ee-quickstart) for a minimal chat
+schema, permissions and browser client.
 
 This is experimental browser and native Node functionality. It is not a claim of independent security audit, production qualification or React Native support. The [encrypted chat example](https://github.com/garden-co/jazz/tree/main/examples/e2ee-chat) demonstrates two-account messaging and encrypted image uploads using the existing chat UI.
 
@@ -176,8 +179,10 @@ rejected to prevent bypassing membership. A read predicate such as
 `{ visibility: "public" }` still requires membership and does not make encrypted
 content public outside the space.
 
-Initial membership matches the explicit recipient list, which can
-exclude the creator. Revocation retracts ordinary row access but cannot erase
+With explicit managed-table policies, initial membership matches the supplied
+recipient list and can exclude the creator. The space administration helper
+initialises membership for the creator; add others with `spaces.grant()`.
+Revocation retracts ordinary row access but cannot erase
 keys or plaintext that a former recipient already retained.
 
 ## Keep account and key storage separate
@@ -254,7 +259,13 @@ The example's sharing helper updates ordinary membership and then grants the key
 
 The recipient must have usable, accepted device history. A key grant does not add an application membership row, and an application membership row does not grant a key. If an app performs those operations separately, report success only after both finish. Use a stable membership-row identity so retrying does not create duplicate memberships. Show failures and allow explicit retry rather than claiming atomic sharing.
 
-Creating a scope row prepares its initial space and creator grant automatically. Explicit initial recipients can exclude the creator; do not assume the initialiser becomes a member. Use an exclusive transaction when initial scope, membership and encrypted data must share one accepted outcome. Keep `existsIncludingCreated` on the relevant INSERT-policy source occurrences. It does not change read, update or delete policies, or let created rows substitute for accepted history during later administration.
+Creating a scope row prepares its initial space and creator grant automatically.
+Applications using explicit managed-table policies can supply initial recipients
+that exclude the creator. With explicit data policies, an exclusive transaction
+can publish the initial scope, membership and encrypted data together. Tables
+using `fromEncryptionSpace()` require the scope to be accepted first. Keep
+`existsIncludingCreated` on the relevant INSERT-policy source occurrences; later
+administration still requires accepted history.
 
 Initial recipient delivery follows in a later accepted transaction. Local completion does not wait for it. An explicit Global wait includes the permitted handoff, but failure cannot roll back data that the server has already accepted. The SDK retries rejected maintenance conflicts at most twice, revalidating accepted eligibility each time, without replaying your original write. Report other failures and inspect the state with `db.e2ee.explain({ scope: app.chats, identifier: chatId })`; do not describe accepted data as rolled back.
 
@@ -402,3 +413,13 @@ file source is being consumed rejects publication even in warning mode.
 Encrypted predicates require an opt-in equality index and an equality constraint on the plaintext space column. The SDK rejects unindexed encrypted predicates and unsupported operators; it does not silently filter plaintext on the client. `orderBy` on encrypted columns is unsupported, including equality-indexed columns. Deterministic index tokens disclose equality information. Keep permission and routing fields plaintext, and choose searchable protected fields deliberately. File streams cannot target an equality-indexed encrypted column.
 
 Encryption contexts bind stable application, scope, row, table and column identities and logical types. Use supported schema migrations; do not copy ciphertext between rows/columns or relabel logical types as a shortcut. A schema migration does not encrypt existing plaintext values: conversion requires an explicit authorised client read, re-encrypt and write workflow. A rename and a value conversion are different operations. Test migrations with authorised readers and retained history before deployment.
+
+Both `defineApp(definition)` and `defineApp(defineSchema(definition))` resolve
+automatically managed account relationships. Schema validation leaves your
+definition unchanged.
+
+Declare application-table additions and removals in the migration's
+`createTables` and `dropTables`. Jazz adds the corresponding managed tables and
+removes them when their last encrypted table is dropped. Tables still needed by
+another scope or encrypted sibling remain. Renaming a scope preserves its
+generated tables' identities and existing membership.
