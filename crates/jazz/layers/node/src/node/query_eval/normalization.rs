@@ -1071,10 +1071,10 @@ fn normalize_operand_with_target_type_and_flat_join_alias(
         Operand::Column(column) if column == "id" => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
         }
-        Operand::Column(column) => match provenance_field(column) {
-            Some(field) => NormalizedValueRef::Provenance {
+        Operand::Column(column) => match crate::schema::magic::MagicColumn::parse(column) {
+            Some(column) => NormalizedValueRef::Magic {
                 source: source.clone(),
-                field,
+                column,
             },
             None => NormalizedValueRef::SourceField {
                 source: source.clone(),
@@ -1185,16 +1185,6 @@ pub(super) fn coerce_literal_for_column_type(value: Value, column_type: &ColumnT
         ))),
         (value, ColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
         (value, _) => value,
-    }
-}
-
-fn provenance_field(column: &str) -> Option<ProvenanceField> {
-    match column {
-        "$createdAt" => Some(ProvenanceField::CreatedAt),
-        "$createdBy" => Some(ProvenanceField::CreatedBy),
-        "$updatedAt" => Some(ProvenanceField::UpdatedAt),
-        "$updatedBy" => Some(ProvenanceField::UpdatedBy),
-        _ => None,
     }
 }
 

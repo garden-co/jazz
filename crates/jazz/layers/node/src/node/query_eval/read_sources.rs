@@ -6164,6 +6164,9 @@ fn normalized_program_equality(
 fn normalized_program_source_field(value: &NormalizedValueRef) -> Option<(SourceId, String)> {
     match value {
         NormalizedValueRef::SourceField { source, field } => Some((source.clone(), field.clone())),
+        NormalizedValueRef::Magic { source, column } => {
+            Some((source.clone(), column.name().to_owned()))
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(source)) => {
             Some((source.clone(), "id".to_owned()))
         }

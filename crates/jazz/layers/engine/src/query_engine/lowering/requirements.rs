@@ -423,14 +423,14 @@ fn collect_value_requirements(
             }
             add_required_app_field(requirements, field.clone());
         }
-        NormalizedValueRef::Provenance {
+        NormalizedValueRef::Magic {
             source: value_source,
-            field,
+            column,
         } => {
             if value_source != source {
                 return Ok(());
             }
-            requirements.magic_fields.insert((*field).into());
+            requirements.magic_fields.insert(*column);
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source => {}
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) => {

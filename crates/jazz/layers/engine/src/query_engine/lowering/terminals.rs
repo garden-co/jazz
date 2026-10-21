@@ -1811,13 +1811,10 @@ pub(super) fn collect_window_source_field<'a>(
                     .and_then(|index| descriptor.fields().get(index));
             }
         }
-        NormalizedValueRef::Provenance { field, .. } => match field {
-            ProvenanceField::CreatedAt => "$createdAt",
-            ProvenanceField::CreatedBy => "$createdBy",
-            ProvenanceField::UpdatedAt => "$updatedAt",
-            ProvenanceField::UpdatedBy => "$updatedBy",
+        NormalizedValueRef::Magic { column, .. } => {
+            return resolved_source_descriptor_index(source, column.name())
+                .and_then(|index| descriptor.fields().get(index));
         }
-        .to_owned(),
         _ => return None,
     };
     descriptor
@@ -3984,6 +3981,12 @@ fn aggregate_source_field_name(
             field,
         } if value_source == &source.row_shape.source => {
             require_source_field(source, field).map_err(single_gap_report)
+        }
+        NormalizedValueRef::Magic {
+            source: value_source,
+            column,
+        } if value_source == &source.row_shape.source => {
+            require_source_field(source, column.name()).map_err(single_gap_report)
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
             if value_source == &source.row_shape.source =>

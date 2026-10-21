@@ -178,6 +178,7 @@ fn source_lookup(
         match value {
             NormalizedValueRef::RowId(RowIdRef::Source(source)) => Some((source, "id")),
             NormalizedValueRef::SourceField { source, field } => Some((source, field)),
+            NormalizedValueRef::Magic { source, column } => Some((source, column.name())),
             _ => None,
         }
     }
@@ -1092,7 +1093,9 @@ fn param_route_field(param: &str) -> String {
 fn source_value_ref(value: &NormalizedValueRef) -> bool {
     matches!(
         value,
-        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_))
+        NormalizedValueRef::SourceField { .. }
+            | NormalizedValueRef::Magic { .. }
+            | NormalizedValueRef::RowId(RowIdRef::Source(_))
     )
 }
 

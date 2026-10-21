@@ -663,49 +663,18 @@ pub enum NormalizedValueRef {
     },
     /// Row identity reference.
     RowId(RowIdRef),
-    /// Magic provenance field such as `$createdAt`.
-    Provenance {
+    /// Public computed column such as `$createdAt`.
+    Magic {
         /// Source identity.
         source: SourceId,
-        /// Provenance field.
-        field: ProvenanceField,
+        /// Public computed column.
+        column: MagicColumn,
     },
     /// Literal value encoded canonically.
     Literal(Vec<u8>),
     /// Process-local compiler argument. Created only after source admission;
     /// never a public normalized query, stored format or wire identity.
     TemplateLiteral(u32),
-}
-
-/// First-class provenance fields exposed by public query surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ProvenanceField {
-    /// `$createdAt`.
-    CreatedAt,
-    /// `$createdBy`.
-    CreatedBy,
-    /// `$updatedAt`.
-    UpdatedAt,
-    /// `$updatedBy`.
-    UpdatedBy,
-}
-
-impl From<ProvenanceField> for MagicColumn {
-    fn from(field: ProvenanceField) -> Self {
-        let (event, value) = match field {
-            ProvenanceField::CreatedAt => (ProvenanceEvent::Creation, ProvenanceValue::Timestamp),
-            ProvenanceField::CreatedBy => (
-                ProvenanceEvent::Creation,
-                ProvenanceValue::Author(AuthorField::Whole),
-            ),
-            ProvenanceField::UpdatedAt => (ProvenanceEvent::Update, ProvenanceValue::Timestamp),
-            ProvenanceField::UpdatedBy => (
-                ProvenanceEvent::Update,
-                ProvenanceValue::Author(AuthorField::Whole),
-            ),
-        };
-        Self::Provenance { event, value }
-    }
 }
 
 /// Normalized row-id reference.

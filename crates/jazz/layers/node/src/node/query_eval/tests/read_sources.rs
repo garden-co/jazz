@@ -15,9 +15,9 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
     let table = &schema.tables[0];
     let requirements = SourceRequirements {
         app_fields: FieldRequirement::None,
-        magic_fields: BTreeSet::from([crate::schema::magic::MagicColumn::from(
-            ProvenanceField::CreatedBy,
-        )]),
+        magic_fields: BTreeSet::from([
+            crate::schema::magic::MagicColumn::parse("$createdBy").unwrap()
+        ]),
         metadata: BTreeSet::new(),
     };
     assert!(
