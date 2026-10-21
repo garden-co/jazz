@@ -6,6 +6,13 @@ export {
   JazzReactNativeProvider,
 } from "../classic-api.js";
 export { createDb, Db, type DbConfig } from "./create-db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "../runtime/snapshot-ref.js";
 export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,

@@ -72,7 +72,8 @@ use thiserror::Error;
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure.
+/// refuse to open rather than misread a failure. Append-only commands use
+/// optional native capabilities while existing command layouts remain stable.
 pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
@@ -557,6 +558,8 @@ pub enum ForegroundDbCommandRequest {
     WaitForPendingWrites {
         tier: String,
     },
+    /// Capture the foreground's local frontier through its ordinary owner queue.
+    CaptureSnapshot,
     StageStreamingMutation {
         upload: u64,
     },
@@ -567,7 +570,7 @@ pub enum ForegroundDbCommandRequest {
     AbortStagedStreamingMutation {
         staged: u64,
     },
-    /// Local bridge tag 37. Version and action ordinals are frozen independently of sync wire v3.
+    /// Local bridge tag 38. Version and action ordinals are frozen independently of sync wire v3.
     InitializationV1 {
         version: u8,
         action: InitializationAction,
@@ -2246,6 +2249,13 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
     NATIVE_RELAY_ABI_V1
 }
 
+/// Optional foreground capture support in the linked native artifact.
+/// Existing ABI 2 builds remain compatible without advertising this feature.
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
+    true
+}
+
 /// Run one C ABI body written with `?` and collapse it into its status code.
 fn ffi_call(body: impl FnOnce() -> Result<(), JazzNativeRelayStatus>) -> JazzNativeRelayStatus {
     match body() {
@@ -2959,6 +2969,11 @@ impl NativeRelayHost {
                     .map(foreground_operation_response)
                     .or_else(foreground_command_error)?
             }
+            Request::CaptureSnapshot => self
+                .foreground_client(foreground)?
+                .capture_snapshot()
+                .map(foreground_operation_response)
+                .or_else(foreground_command_error)?,
             Request::WaitForTransaction {
                 tx_id,
                 tier,
@@ -3498,6 +3513,12 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
+    }
+
+    fn capture_snapshot(&self) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.capture_foreground_snapshot(id))
     }
 
     fn wait_for_pending_writes(
@@ -6617,6 +6638,27 @@ impl RelayWorker {
         Ok(public_id)
     }
 
+    fn capture_foreground_snapshot(
+        &mut self,
+        client: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let captured = self
+            .foreground_client(client)?
+            .db
+            .enqueue_capture_snapshot();
+        self.drive.request(0);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let snapshot = captured
+                .await
+                .map_err(|_| RelayError::Closed)?
+                .map_err(RelayError::Db)?;
+            Ok(ForegroundOperationResult::Rows(
+                snapshot.to_persisted().into_bytes(),
+            ))
+        });
+        self.start_foreground_operation(client, None, future)
+    }
+
     fn wait_for_pending_writes(
         &mut self,
         client: u64,
@@ -7305,6 +7347,7 @@ pub enum RelayError {
 mod tests {
     mod initialization;
     mod publication_codec;
+    mod snapshot_capture_codec;
 
     // This is intentionally an internal transport-ownership test: the public
     // user-visible behavior of rows/subscriptions belongs to the Db suites.
@@ -17040,23 +17083,25 @@ mod tests {
         }
     }
 
+    /// Alice's staged uploads use command tags appended after main's snapshot
+    /// command. This boundary fixture pins the Rust bytes independently of JS.
     #[test]
     fn foreground_staged_upload_v1_byte_contract() {
         for (request, bytes) in [
             (
                 ForegroundDbCommandRequest::StageStreamingMutation { upload: 128 },
-                vec![34, 128, 1],
+                vec![35, 128, 1],
             ),
             (
                 ForegroundDbCommandRequest::AttachStagedStreamingMutation {
                     staged: 128,
                     transaction: 300,
                 },
-                vec![35, 128, 1, 172, 2],
+                vec![36, 128, 1, 172, 2],
             ),
             (
                 ForegroundDbCommandRequest::AbortStagedStreamingMutation { staged: 128 },
-                vec![36, 128, 1],
+                vec![37, 128, 1],
             ),
         ] {
             assert_eq!(postcard::to_allocvec(&request).unwrap(), bytes);
