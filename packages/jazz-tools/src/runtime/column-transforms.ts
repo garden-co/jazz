@@ -207,6 +207,8 @@ export function computedColumnValues(
     return stored[column];
   };
   const resolve = (column: string): unknown => {
+    // Callbacks may catch a dependency miss; subsequent reads must preserve the retry signal.
+    if (missing) throw missing;
     if (values.has(column)) return values.get(column);
     if (visiting.has(column)) throw new Error(`Cyclic computed dependency at "${column}".`);
     visiting.add(column);
