@@ -1,5 +1,41 @@
 import { expect, it, vi } from "vitest";
 import { NativeForegroundDb } from "./native-foreground-db.js";
+import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
+
+it.each([undefined, false])(
+  "keeps existing reads usable when native snapshot support is %s",
+  (supportsSnapshotCapture) => {
+    const rows = Uint8Array.of(9);
+    const execute = vi.fn(() => rows);
+    const db = new NativeForegroundDb(
+      { supportsSnapshotCapture, execute, tick: vi.fn(), close: () => true },
+      {
+        encodeNativeForegroundCommand: vi.fn(() => Uint8Array.of(2)),
+        decodeNativeForegroundResponse: () => ({ type: "rows", rows }),
+      } as never,
+    );
+    expect(db.all(Uint8Array.of(1), {})).toEqual(rows);
+    expect(() => db.captureSnapshot()).toThrow(UnsupportedSnapshotError);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(db.all(Uint8Array.of(1), {})).toEqual(rows);
+  },
+);
+
+it("uses snapshot capture only when the native handle advertises support", () => {
+  const reference = Uint8Array.of(7);
+  const execute = vi.fn(() => reference);
+  const encode = vi.fn(() => Uint8Array.of(34));
+  const db = new NativeForegroundDb(
+    { supportsSnapshotCapture: true, execute, tick: vi.fn(), close: () => true },
+    {
+      encodeNativeForegroundCommand: encode,
+      decodeNativeForegroundResponse: () => ({ type: "rows", rows: reference }),
+    } as never,
+  );
+  expect(db.captureSnapshot()).toEqual(reference);
+  expect(encode).toHaveBeenCalledWith({ type: "captureSnapshot" });
+  expect(execute).toHaveBeenCalledWith(Uint8Array.of(34));
+});
 
 /**
  * The native callback can be queued by CallInvoker before close/revocation.

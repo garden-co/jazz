@@ -3628,6 +3628,27 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Capture through the same ordered owner queue as local mutations.
+    #[napi(js_name = "captureSnapshot")]
+    pub fn capture_snapshot(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi::Error::from_reason("database closed"))?;
+        let captured = inner.core.enqueue_capture_snapshot();
+        inner.after_enqueue();
+        native_read_or_pending(Box::pin(async move {
+            let snapshot = captured
+                .await
+                .map_err(|_| napi::Error::from_reason("snapshot capture was cancelled"))?
+                .map_err(napi_error)?;
+            Ok(Uint8Array::new(snapshot.to_persisted().into_bytes()))
+        }))
+        .map_err(BindingError::from)
+    }
+
     #[napi(js_name = "waitForPendingWrites")]
     pub fn wait_for_pending_writes(
         &self,

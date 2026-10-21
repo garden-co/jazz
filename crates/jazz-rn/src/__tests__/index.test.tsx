@@ -18,6 +18,7 @@ type RelayExports = {
   installNativeForegroundRuntime(): {
     abiVersion: number;
     openAttached(capability: Uint8Array): {
+      readonly supportsSnapshotCapture?: boolean;
       execute(command: Uint8Array): Uint8Array;
       tick(): void;
       setWakeTrace?(enabled: boolean): void;
@@ -139,6 +140,27 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
 
+it.each([undefined, false, true])(
+  "forwards optional native capture support %s without rejecting ABI 2",
+  (supportsSnapshotCapture) => {
+    const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
+    const nativeRelay: FixtureNativeRelay = {
+      getAbiVersion: () => 2,
+      execute: jest.fn(),
+    };
+    (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+      abiVersion: 2,
+      openAttached: jest.fn(() => foreground),
+    };
+    const runtime = loadRelay(nativeRelay)
+      .installNativeForegroundRuntime()
+      .openAttached(new Uint8Array(32));
+    expect(runtime.supportsSnapshotCapture).toBe(supportsSnapshotCapture === true);
+    expect(runtime.execute(Uint8Array.of(0))).toEqual(Uint8Array.of(1));
+    expect(foreground.execute).toHaveBeenCalledWith(Uint8Array.of(0));
+  },
+);
+
 it("forwards the private wake trace switch only when the native handle provides it", () => {
   const setWakeTrace = jest.fn();
   const foreground = { ...foregroundFixture(), setWakeTrace };
@@ -233,6 +255,22 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   expect(relay.encodeNativeForegroundCommand("probe")).toEqual(Uint8Array.of(0));
   expect(relay.encodeNativeForegroundCommand("tick")).toEqual(Uint8Array.of(1));
   expect(relay.encodeNativeForegroundCommand("close")).toEqual(Uint8Array.of(6));
+  expect(relay.encodeNativeForegroundCommand({ type: "captureSnapshot" })).toEqual(
+    Uint8Array.of(34),
+  );
+  expect(
+    relay.encodeNativeForegroundCommand({ type: "stageStreamingMutation", upload: 128 }),
+  ).toEqual(Uint8Array.of(35, 128, 1));
+  expect(
+    relay.encodeNativeForegroundCommand({
+      type: "attachStagedStreamingMutation",
+      staged: 128,
+      transaction: 300,
+    }),
+  ).toEqual(Uint8Array.of(36, 128, 1, 172, 2));
+  expect(
+    relay.encodeNativeForegroundCommand({ type: "abortStagedStreamingMutation", staged: 128 }),
+  ).toEqual(Uint8Array.of(37, 128, 1));
   expect(
     relay.encodeNativeForegroundCommand({
       type: "all",
@@ -519,9 +557,9 @@ it("pins initialization V1 command tags and rejects oversized status batches", (
   const relay = loadRelay({ getAbiVersion: () => NATIVE_RELAY_ABI_V1, execute: jest.fn() });
   const encode = (action: NativeInitializationAction) =>
     relay.encodeNativeForegroundCommand({ type: "initializationV1", version: 1, action });
-  expect(encode({ type: "seal", transaction: 129 })).toEqual(Uint8Array.of(37, 1, 0, 129, 1));
-  expect(encode({ type: "publish", token: "x" })).toEqual(Uint8Array.of(37, 1, 1, 1, 120));
-  expect(encode({ type: "cancel", token: "x" })).toEqual(Uint8Array.of(37, 1, 2, 1, 120));
+  expect(encode({ type: "seal", transaction: 129 })).toEqual(Uint8Array.of(38, 1, 0, 129, 1));
+  expect(encode({ type: "publish", token: "x" })).toEqual(Uint8Array.of(38, 1, 1, 1, 120));
+  expect(encode({ type: "cancel", token: "x" })).toEqual(Uint8Array.of(38, 1, 2, 1, 120));
   expect(
     encode({
       type: "recordAbsence",
@@ -529,9 +567,9 @@ it("pins initialization V1 command tags and rejects oversized status batches", (
       table: "t",
       rowId: new Uint8Array(16).fill(7),
     }),
-  ).toEqual(Uint8Array.of(37, 1, 3, 3, 1, 116, ...new Array(16).fill(7)));
-  expect(encode({ type: "status", ids: ["x"] })).toEqual(Uint8Array.of(37, 1, 4, 1, 1, 120));
-  expect(encode({ type: "hasAuthenticatedCatalogue" })).toEqual(Uint8Array.of(37, 1, 5));
+  ).toEqual(Uint8Array.of(38, 1, 3, 3, 1, 116, ...new Array(16).fill(7)));
+  expect(encode({ type: "status", ids: ["x"] })).toEqual(Uint8Array.of(38, 1, 4, 1, 1, 120));
+  expect(encode({ type: "hasAuthenticatedCatalogue" })).toEqual(Uint8Array.of(38, 1, 5));
   expect(() => encode({ type: "status", ids: new Array(65).fill("x") })).toThrow("at most 64");
   expect(() =>
     encode({ type: "recordAbsence", transaction: 3, table: "t", rowId: new Uint8Array(15) }),

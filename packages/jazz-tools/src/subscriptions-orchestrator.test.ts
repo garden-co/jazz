@@ -8,6 +8,7 @@ import type {
 } from "./runtime/db.js";
 import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { parseSnapshotRef } from "./runtime/snapshot-ref.js";
 import {
   SubscriptionsOrchestrator,
   makeDeferred,
@@ -306,7 +307,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const options = {
         branch: 7n,
-        base: [3n, { revision: 1 }] as const,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -323,7 +324,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const options = Object.freeze({
         branch: 7n,
-        base: Object.freeze([3n, { revision: 1 }] as const),
+        base: Object.freeze([3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const),
       }) satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -379,13 +380,16 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         branch: Object.freeze({ workspace: 7n, tenant: "acme" }),
         base: Object.freeze([
           Object.freeze({ workspace: 3n, tenant: "base" }),
-          { revision: 1 },
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
         ] as const),
       }) satisfies QueryOptions;
 
       const before = {
         branch: { workspace: 7n, tenant: "acme" },
-        base: [{ workspace: 3n, tenant: "base" }, { revision: 1 }] as const,
+        base: [
+          { workspace: 3n, tenant: "base" },
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
+        ] as const,
       };
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -402,7 +406,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const options = {
         tier: "remote",
         branch: { workspace: 9007199254740993n, tenant: "acme" },
-        base: [{ workspace: 3n, tenant: "base" }, { revision: 1 }] as const,
+        base: [
+          { workspace: 3n, tenant: "base" },
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
+        ] as const,
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -420,11 +427,11 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const query = makeQuery();
       const firstKey = harness.manager.makeQueryKey(query, {
         branch: 7n,
-        base: [3n, { revision: 1 }] as const,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
       });
       const secondKey = harness.manager.makeQueryKey(query, {
         branch: 7n,
-        base: [3n, { revision: 1 }] as const,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
       });
 
       expect(secondKey).toBe(firstKey);
