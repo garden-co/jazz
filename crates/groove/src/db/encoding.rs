@@ -234,48 +234,38 @@ pub(super) fn validate_raw_primary_key(
 }
 
 impl Database {
-    /// The logical descriptor and transcoder of one stored table variant,
-    /// cached per database schema generation.
-    pub(super) fn stored_record_codec(
+    /// The descriptor of one stored table variant, cached per database
+    /// schema generation.
+    pub(super) fn stored_record_descriptor(
         &self,
         table: &TableSchema,
         variant_tag: u32,
-    ) -> Result<StoredRecordCodec, Error> {
-        if let Some(codec) = self
+    ) -> Result<RecordDescriptor, Error> {
+        if let Some(descriptor) = self
             .stored_record_descriptors
             .borrow()
             .get(&table.name)
             .and_then(|variants| variants.get(&variant_tag))
         {
-            return Ok(codec.clone());
+            return Ok(*descriptor);
         }
-        let storage = table
-            .storage_record_schema_for_variant(variant_tag)
+        let descriptor = table
+            .record_schema_for_variant(variant_tag)
             .ok_or_else(|| Error::UnknownTableVariant {
                 table: table.name.clone(),
                 version: u64::from(variant_tag),
             })?;
-        let codec = match records::RecordTranscoder::new(storage)? {
-            Some(transcoder) => StoredRecordCodec {
-                logical: transcoder.logical(),
-                transcoder: Some(Rc::new(transcoder)),
-            },
-            None => StoredRecordCodec {
-                logical: storage,
-                transcoder: None,
-            },
-        };
         self.stored_record_descriptors
             .borrow_mut()
             .entry(table.name.clone())
             .or_default()
-            .insert(variant_tag, codec.clone());
-        Ok(codec)
+            .insert(variant_tag, descriptor);
+        Ok(descriptor)
     }
 
-    /// Bind one stored row as its logical record. Every point, scan and index
-    /// read of table rows comes through here, so interned columns are
-    /// resolved to their values before any caller sees the record.
+    /// Bind one stored row as its record. Every point, scan and index read
+    /// of table rows comes through here. Interned columns keep their codes;
+    /// a caller resolves them with [`Database::dictionaries`].
     pub(super) fn decode_stored_key_value<'a>(
         &self,
         table: &TableSchema,
@@ -283,18 +273,10 @@ impl Database {
         stored: Vec<u8>,
     ) -> Result<EncodedKeyValue<'a>, Error> {
         let (variant_tag, payload) = split_variant_record(&stored)?;
-        let codec = self.stored_record_codec(table, variant_tag)?;
-        let payload = match &codec.transcoder {
-            Some(transcoder) => crate::dictionary::transcode_to_logical(
-                transcoder,
-                &self.ivm_runtime.dictionaries().borrow(),
-                payload,
-            )?,
-            None => payload.to_vec(),
-        };
+        let descriptor = self.stored_record_descriptor(table, variant_tag)?;
         Ok(EncodedKeyValue::from_variant(
             key,
-            VariantRecord::new(variant_tag, OwnedRecord::new(payload, codec.logical)),
+            VariantRecord::new(variant_tag, OwnedRecord::new(payload.to_vec(), descriptor)),
         ))
     }
 }

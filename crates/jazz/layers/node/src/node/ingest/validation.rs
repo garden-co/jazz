@@ -120,6 +120,7 @@ where
         let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
         let table = self.table_in_schema_ref(version.table(), author_schema)?;
         let row = VersionRow::from_wire_with_schema_version(
+            &self.authors,
             table, version, authored, tx_node_alias, schema_alias, tx_time, seq,
             (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
         )?;
@@ -350,6 +351,7 @@ where
                 _ => GlobalTime(0),
             };
             let stored = VersionRow::from_wire_with_schema_version(
+                &self.authors,
                 &table_schema,
                 &version,
                 authored_column_ids,
@@ -744,6 +746,7 @@ where
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let mut batch = self.database.open_batch();
         stage_transaction_record(
+            &self.authors,
             &mut batch,
             TransactionRecordWrite::Insert {
                 provenance: contribution_merge,

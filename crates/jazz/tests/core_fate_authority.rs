@@ -1105,6 +1105,84 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
     }
 }
 
+/// Author codes are node-local: each node allocates them in the order it
+/// first sees an author. Alice's node codes alice=0, bob=1 and Bob's node
+/// codes bob=0, alice=1, so a code that crossed the wire unresolved would
+/// name the wrong author on the other side.
+#[test]
+fn author_codes_allocated_in_different_orders_resolve_to_the_same_authors() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice_author = author(0xa1);
+    let bob_author = author(0xb1);
+    let insert = |db: &Db, title: &str| {
+        block_on(db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ]),
+            Default::default(),
+        ))
+        .unwrap()
+    };
+
+    let alice = open_db(0xa1, alice_author, &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, alice_author);
+    let alice_write = insert(&alice, "by alice");
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    assert!(block_on(alice_write.wait(DurabilityTier::Global)).is_ok());
+
+    // Bob writes before he hears of Alice, so his node codes bob first.
+    let bob = open_db(0xb1, bob_author, &schema);
+    let bob_write = insert(&bob, "by bob");
+    let bob_wire = QueuedWireTransport::default();
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, bob_author);
+
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let subscriptions = [
+        (&alice, &alice_wire, alice_session),
+        (&bob, &bob_wire, bob_session),
+    ]
+    .map(|(db, wire, session)| {
+        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+        let subscription = block_on(db.subscribe(&prepared, remote.clone())).unwrap();
+        (db, wire, session, prepared, subscription)
+    });
+    for _ in 0..3 {
+        for (db, wire, session, _, _) in &subscriptions {
+            pump_client_core(db, wire, &mut core, *session);
+        }
+    }
+    assert!(block_on(bob_write.wait(DurabilityTier::Global)).is_ok());
+
+    for (db, _, _, prepared, _) in &subscriptions {
+        let rows = block_on(db.all(prepared, remote.clone())).unwrap();
+        assert_eq!(rows.len(), 2, "both rows reach both clients");
+        for row in &rows {
+            let Some(Value::String(title)) = row.cell(&schema.tables[0], "title") else {
+                panic!("every row has a title");
+            };
+            let expected = match title.as_str() {
+                "by alice" => alice_author,
+                "by bob" => bob_author,
+                other => panic!("unexpected row {other}"),
+            };
+            let provenance = db.row_provenance(row).unwrap().unwrap();
+            assert_eq!(provenance.created_by, expected, "{title}");
+            assert_eq!(provenance.updated_by, expected, "{title}");
+        }
+    }
+}
+
 /// `schema()` plus one added column, published by the core as a descendant.
 fn schema_with_notes() -> JazzSchema {
     use jazz::tools::test_support::AllowAll;

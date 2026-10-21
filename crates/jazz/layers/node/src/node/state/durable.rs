@@ -383,10 +383,9 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by =
-                RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
-                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                    .as_author_subject();
+            let made_by = self.authors.subject(AuthorCode(
+                record.get_dictionary_code(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            ))?;
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
@@ -433,6 +432,9 @@ where
         } else {
             author
         };
+        // A subject the authors dictionary does not know made no stored
+        // transaction, so nothing below matches it.
+        let durable_author_code = self.authors.existing_code(durable_author);
 
         let mut scan = PendingTransactionScan::default();
         for raw in self
@@ -447,12 +449,9 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || RowAuthor::from_record(
-                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-                )
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                .as_author_subject()
-                    != durable_author
+                || Some(AuthorCode(
+                    record.get_dictionary_code(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                )) != durable_author_code
             {
                 continue;
             }
@@ -658,7 +657,12 @@ where
                         .is_ok_and(|winner_tx| winner_tx == tx_id)
                 })
                 .unwrap_or(false);
-            entries.push(version.to_history_entry(&tx, local_current, global_current));
+            entries.push(version.to_history_entry(
+                &self.authors,
+                &tx,
+                local_current,
+                global_current,
+            )?);
         }
         entries.sort_by_key(|entry| entry.tx_id().time.sort_key(entry.tx_id().node));
         Ok(entries)

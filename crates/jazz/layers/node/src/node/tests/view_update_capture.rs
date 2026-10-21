@@ -401,6 +401,7 @@ impl MaintainedSubscriptionViewSubscription {
                             &self.terminal_schemas,
                             &self.tables,
                             &core.node_aliases,
+                            &core.authors,
                         )
                         .unwrap();
                     program_fact_adds.extend(transitions.program_fact_adds.clone());
