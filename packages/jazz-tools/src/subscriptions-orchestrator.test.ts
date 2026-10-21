@@ -788,7 +788,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       unsubscribe();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.cleanupTimeoutId).not.toBeNull();
       expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
     } finally {
@@ -870,14 +870,14 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const unsubscribeA = entry.subscribe({});
       unsubscribeA();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.cleanupTimeoutId).not.toBeNull();
 
       const unsubscribeB = entry.subscribe({});
       expect(internal.cleanupTimeoutId).toBeNull();
 
       vi.advanceTimersByTime(30_000);
-      expect((harness.manager as any).entries.has(key)).toBe(true);
+      expect((harness.manager as any).slots.has(key)).toBe(true);
 
       unsubscribeB();
     } finally {
@@ -891,21 +891,21 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const { key, entry } = harness.makeEntry();
       const unsubscribe = entry.subscribe({});
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
 
       unsubscribe();
       vi.advanceTimersByTime(30_000);
 
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
-      expect((harness.manager as any).entries.has(key)).toBe(false);
-      expect((harness.manager as any).queryDefinitions.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
+      expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
       expect(internal.listeners.size).toBe(0);
     } finally {
       await harness.manager.shutdown();
     }
   });
 
-  it("SO-U18 shutdown tears down entries and clears definition maps", async () => {
+  it("SO-U18 shutdown tears down entries and clears registrations", async () => {
     const harness = createUnitHarness();
     const firstKey = harness.manager.makeQueryKey(makeQuery({ table: "todos", marker: "first" }));
     const secondKey = harness.manager.makeQueryKey(makeQuery({ table: "todos", marker: "second" }));
@@ -918,8 +918,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
     expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
     expect(harness.calls[1]?.unsubscribe).toHaveBeenCalledTimes(1);
-    expect((harness.manager as any).entries.size).toBe(0);
-    expect((harness.manager as any).queryDefinitions.size).toBe(0);
+    expect((harness.manager as any).slots.size).toBe(0);
+    expect(() => harness.manager.getCacheEntry(firstKey)).toThrow(/Unknown query key/);
+    expect(() => harness.manager.getCacheEntry(secondKey)).toThrow(/Unknown query key/);
 
     offA();
     offB();
@@ -959,14 +960,41 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       unsubscribe();
       unsubscribe();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.listeners.size).toBe(0);
       expect(internal.cleanupTimeoutId).not.toBeNull();
 
       vi.advanceTimersByTime(30_000);
 
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
-      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("session changes and shutdown visit live entries in activation order", async () => {
+    const harness = createUnitHarness();
+    try {
+      const first = makeQuery({ table: "todos", marker: "first" });
+      const second = makeQuery({ table: "todos", marker: "second" });
+      const firstKey = harness.manager.makeQueryKey(first);
+      const secondKey = harness.manager.makeQueryKey(second);
+      harness.manager.getCacheEntry(secondKey);
+      harness.manager.getCacheEntry(firstKey);
+
+      harness.setSession({
+        user_id: "alice",
+        claims: {},
+        issuer: "https://issuer.example",
+        authMode: "external",
+      });
+
+      expect(harness.calls.map((call) => call.query)).toEqual([second, first, second, first]);
+      await harness.manager.shutdown();
+      expect(vi.mocked(harness.calls[2]!.unsubscribe).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(harness.calls[3]!.unsubscribe).mock.invocationCallOrder[0]!,
+      );
     } finally {
       await harness.manager.shutdown();
     }
@@ -1089,6 +1117,70 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("re-registering an unopened query replaces its stable seed and retains a copy", async () => {
+    const harness = createUnitHarness();
+    try {
+      const query = makeQuery();
+      const key = harness.manager.makeQueryKey(query, undefined, [makeTodo("old")]);
+      const previous = harness.manager.peekState<Todo>(key);
+      const replacement = [makeTodo("new")];
+
+      expect(harness.manager.makeQueryKey(query, undefined, replacement)).toBe(key);
+      replacement.push(makeTodo("caller-only"));
+      const state = harness.manager.peekState<Todo>(key);
+      expect(state).not.toBe(previous);
+      expect(state).toBe(harness.manager.peekState<Todo>(key));
+      expect(state).toEqual({ status: "fulfilled", data: [makeTodo("new")], error: null });
+      expect(harness.calls).toHaveLength(0);
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      expect(entry.state).toEqual(state);
+      await expect(entry.promise).resolves.toEqual([makeTodo("new")]);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it.each(["fulfilled", "rejected"] as const)(
+    "re-registering a %s live query preserves its current state and promise",
+    async (status) => {
+      const harness = createUnitHarness();
+      try {
+        const query = makeQuery();
+        const key = harness.manager.makeQueryKey(query);
+        const entry = harness.manager.getCacheEntry<Todo>(key);
+        if (status === "fulfilled") {
+          harness.emit(0, makeDelta([makeTodo("live")]));
+        } else {
+          harness.emitError(0, new Error("live error"));
+        }
+        const state = entry.state;
+        const promise = entry.promise;
+
+        expect(harness.manager.makeQueryKey(query, undefined, [makeTodo("seed")])).toBe(key);
+        expect(harness.manager.getCacheEntry<Todo>(key)).toBe(entry);
+        expect(harness.manager.peekState<Todo>(key)).toBe(state);
+        expect(entry.promise).toBe(promise);
+        expect(harness.calls).toHaveLength(1);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
+
+  it("shutdown clears registrations and seeds that never opened a subscription", async () => {
+    const harness = createUnitHarness();
+    const query = makeQuery();
+    const key = harness.manager.makeQueryKey(query, undefined, [makeTodo("seed")]);
+    expect(harness.manager.peekState<Todo>(key).status).toBe("fulfilled");
+
+    await harness.manager.shutdown();
+
+    expect(harness.calls).toHaveLength(0);
+    expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
+    expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
+  });
+
   it("SO-U28 destroying a seeded entry drops its memoised peekState snapshot", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness("app-so-u28");
@@ -1102,7 +1194,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       unsubscribe();
       vi.advanceTimersByTime(30_000);
 
-      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
       expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
     } finally {
       await harness.manager.shutdown();
