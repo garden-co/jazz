@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use groove::records::{
+use jazz_types::records::{
     EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value,
     ValueType,
 };
