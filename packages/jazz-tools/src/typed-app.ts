@@ -16,12 +16,7 @@ import {
   columnTransformDependencies,
   validateTransformDependencies,
 } from "./runtime/column-transforms.js";
-import type {
-  Relationships,
-  ForwardRelationship,
-  ReverseRelationship,
-  Relationship,
-} from "./relationships.js";
+import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyColumnDefinition,
   ComputedColumn,
@@ -149,6 +144,11 @@ type ColumnValue<TBuilder extends AnyColumnDefinition> = ColumnBuilderValue<TBui
 type StoredColumnValue<TBuilder extends AnyColumnDefinition> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+
+type InsertColumnValue<TBuilder extends AnyColumnDefinition> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnBuilderInitValue<TBuilder> | null
+    : ColumnBuilderInitValue<TBuilder>;
 
 type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderOptional<

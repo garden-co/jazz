@@ -19,12 +19,8 @@ import type { TSTypeFromSqlType } from "./schema.js";
 
 export type ReturnedColumnValue<TBuilder extends AnyColumnDefinition> =
   ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnValue<TBuilder> | null
-    : ColumnValue<TBuilder>;
-type InsertColumnValue<TBuilder extends AnyColumnDefinition> =
-  ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnBuilderInitValue<TBuilder> | null
-    : ColumnBuilderInitValue<TBuilder>;
+    ? ColumnBuilderValue<TBuilder> | null
+    : ColumnBuilderValue<TBuilder>;
 
 export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
 type StoredColumnKeys<C extends TableDefinition> = {
