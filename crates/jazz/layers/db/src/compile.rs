@@ -676,34 +676,51 @@ impl<'a> Ctx<'a> {
         }
         for array in &query.array_subqueries {
             self.validate_array(array)?;
-            match array.requirement {
-                ArraySubqueryRequirement::Optional => {}
-                ArraySubqueryRequirement::AtLeastOne => {
-                    let child = self.table(&array.table)?;
-                    let c = self.alias("c");
-                    let mut conds = vec![
-                        format!("{c}._del = 0"),
-                        format!(
-                            "{} = {}",
-                            column_sql(child, &c, &array.inner_column)?,
-                            column_sql(table, alias, &array.outer_column)?
-                        ),
-                    ];
-                    for filter in &array.filters {
-                        conds.push(self.predicate(filter, child, &c)?);
-                    }
-                    wheres.push(format!(
-                        "EXISTS (SELECT 1 FROM {} AS {c} WHERE {})",
-                        self.source(child)?,
-                        conds.join(" AND ")
-                    ));
-                }
-                ArraySubqueryRequirement::MatchCorrelationCardinality => {
-                    return Err(unsupported(
-                        "cardinality-matching array requirements on SQLite",
-                    ));
-                }
+            if array.requirement == ArraySubqueryRequirement::Optional {
+                continue;
             }
+            let child = self.table(&array.table)?;
+            let c = self.alias("c");
+            let outer = column_sql(table, alias, &array.outer_column)?;
+            let mut conds = vec![format!("{c}._del = 0")];
+            for filter in &array.filters {
+                conds.push(self.predicate(filter, child, &c)?);
+            }
+            let source = self.source(child)?;
+            if is_array(table, &array.outer_column) {
+                // A forward array relation: one child per element, in the
+                // array's order and with its duplicates.
+                let r = self.alias("r");
+                conds.push(format!(
+                    "{} = {}",
+                    column_sql(child, &c, &array.inner_column)?,
+                    array_element_id(&r)
+                ));
+                let matched = format!(
+                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
+                    conds.join(" AND ")
+                );
+                wheres.push(match array.requirement {
+                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
+                    _ => {
+                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
+                    }
+                });
+                continue;
+            }
+            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
+                return Err(unsupported(
+                    "cardinality-matching requirements on scalar relations on SQLite",
+                ));
+            }
+            conds.push(format!(
+                "{} = {outer}",
+                column_sql(child, &c, &array.inner_column)?
+            ));
+            wheres.push(format!(
+                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
+                conds.join(" AND ")
+            ));
         }
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(table, alias, session)?);
@@ -761,14 +778,25 @@ impl<'a> Ctx<'a> {
         let child = self.table(&array.table)?;
         let projection = projection(child, array.select.as_deref())?;
         let alias = "t";
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
         let parent = match self.value_term(parent)? {
             Term::Bound(sql, _) => sql,
             _ => "NULL".to_owned(),
         };
+        // A forward array relation reads one child per array element, in
+        // the array's order and with its duplicates.
+        let (from, correlated) = if elements {
+            ("JOIN", array_element_id("r"))
+        } else {
+            ("", parent.clone())
+        };
         let mut wheres = vec![
             format!("{alias}._del = 0"),
             format!(
-                "{} = {parent}",
+                "{} = {correlated}",
                 column_sql(child, alias, &array.inner_column)?
             ),
         ];
@@ -786,6 +814,16 @@ impl<'a> Ctx<'a> {
         let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(array.offset as i64));
         let source = self.source(child)?;
+        let source = if elements {
+            format!("json_each({parent}) AS r {from} {source}")
+        } else {
+            source
+        };
+        let order = if elements && array.order_by.is_empty() {
+            "r.key".to_owned()
+        } else {
+            order
+        };
         let statement = |order: &str| {
             format!(
                 "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
@@ -932,9 +970,14 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
+                let array = matches!(l, Operand::Column(column) if is_array(table, column));
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
-                self.contains(l, r)
+                if array {
+                    self.array_contains(l, r)
+                } else {
+                    self.contains(l, r)
+                }
             }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
                 Term::Missing => "1".to_owned(),
@@ -1106,7 +1149,11 @@ impl<'a> Ctx<'a> {
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
-                self.contains(left, right)
+                if is_array(table, column) {
+                    self.array_contains(left, right)
+                } else {
+                    self.contains(left, right)
+                }
             }
             PolicyExpr::In {
                 column,
@@ -1590,6 +1637,24 @@ fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, V
     }
 }
 
+/// The row id an array element names: array cells hold uuids as their
+/// hyphenated text (see [`crate::values::to_sql`]).
+fn array_element_id(element: &str) -> String {
+    format!("unhex(replace({element}.value, '-', ''))")
+}
+
+/// Whether `column` is an array column (nullable or not).
+fn is_array(table: &Table, column: &str) -> bool {
+    let Some(column) = table.column(column) else {
+        return false;
+    };
+    let ty = match &column.ty {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        ty => ty,
+    };
+    matches!(ty, ValueType::Array(_))
+}
+
 pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
     if column == "id" {
         return Ok(format!("{alias}.id"));
@@ -1974,6 +2039,22 @@ impl Ctx<'_> {
         self.params.truncate(first);
         self.params.push(array);
         Some(select)
+    }
+
+    /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
+    /// element equal to `right`.
+    fn array_contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(array), Term::Bound(placeholder, needle)) = (left.sql(), right) else {
+            return "0".to_owned();
+        };
+        // Rebind the needle in its own slot, as `json_each` reads elements.
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = crate::values::array_needle(needle);
+        let needle = placeholder;
+        format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {

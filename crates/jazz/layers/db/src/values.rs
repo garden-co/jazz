@@ -103,8 +103,88 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
+        Value::Array(items) => Sql::Text(array_json(items)?.to_string().into_bytes()),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
+}
+
+/// An array cell as JSON text, so plain SQLite reads it with `json_each`.
+/// Elements are JSON scalars (uuids as their hyphenated strings, enum
+/// tags as numbers) or nested arrays; equal arrays encode to equal text.
+fn array_json(items: &[Value]) -> Result<serde_json::Value, Error> {
+    items
+        .iter()
+        .map(element_json)
+        .collect::<Result<Vec<_>, _>>()
+        .map(serde_json::Value::Array)
+}
+
+fn element_json(item: &Value) -> Result<serde_json::Value, Error> {
+    Ok(match item {
+        Value::Nullable(None) => serde_json::Value::Null,
+        Value::Nullable(Some(inner)) => element_json(inner)?,
+        Value::U8(v) => (*v).into(),
+        Value::U16(v) => (*v).into(),
+        Value::U32(v) => (*v).into(),
+        Value::U64(v) | Value::U48(v) => (*v).into(),
+        Value::I32(v) => (*v).into(),
+        Value::I64(v) => (*v).into(),
+        Value::F64(v) => serde_json::Number::from_f64(*v)
+            .ok_or_else(|| unsupported("storing NaN or infinity in an array"))?
+            .into(),
+        Value::Bool(v) => (*v).into(),
+        Value::String(v) => v.clone().into(),
+        Value::Uuid(v) => v.to_string().into(),
+        Value::EnumTag(v) => (*v).into(),
+        Value::Array(items) => array_json(items)?,
+        other => {
+            return Err(unsupported(format!(
+                "storing {other:?} inside an array in SQLite"
+            )));
+        }
+    })
+}
+
+/// A JSON array element back as a value of its declared type.
+fn json_element(ty: &ValueType, json: &serde_json::Value) -> Option<Value> {
+    use serde_json::Value as Json;
+    Some(match (ty, json) {
+        (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+        (ValueType::Nullable(inner), json) => {
+            Value::Nullable(Some(Box::new(json_element(inner, json)?)))
+        }
+        (ValueType::U8, json) => Value::U8(json.as_u64()?.try_into().ok()?),
+        (ValueType::U16, json) => Value::U16(json.as_u64()?.try_into().ok()?),
+        (ValueType::U32, json) => Value::U32(json.as_u64()?.try_into().ok()?),
+        (ValueType::U64, json) => Value::U64(json.as_u64()?),
+        (ValueType::U48, json) => Value::U48(json.as_u64()?),
+        (ValueType::I32, json) => Value::I32(json.as_i64()?.try_into().ok()?),
+        (ValueType::I64, json) => Value::I64(json.as_i64()?),
+        (ValueType::F64, json) => Value::F64(json.as_f64()?),
+        (ValueType::Bool, Json::Bool(v)) => Value::Bool(*v),
+        (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+        (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+        (ValueType::EnumTag(_), json) => Value::EnumTag(json.as_u64()?.try_into().ok()?),
+        (ValueType::Array(element), Json::Array(items)) => Value::Array(
+            items
+                .iter()
+                .map(|item| json_element(element, item))
+                .collect::<Option<_>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+/// An array element bound for comparison with what `json_each` reads back
+/// as its `value`: uuids are their hyphenated text there.
+pub(crate) fn array_needle(sql: Sql) -> Sql {
+    match sql {
+        Sql::Blob(bytes) => match uuid::Uuid::from_slice(&bytes) {
+            Ok(id) => Sql::Text(id.to_string().into_bytes()),
+            Err(_) => Sql::Blob(bytes),
+        },
+        sql => sql,
+    }
 }
 
 /// Decode a SQLite cell by the column's declared type, reading a chunked
@@ -131,6 +211,11 @@ pub(crate) fn from_sql(
         }
         (ValueType::Bytes, ValueRef::Text(cell)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
+        }
+        (ValueType::Array(_), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            return Ok(json_element(ty, &json));
         }
         _ => {}
     }
