@@ -4,18 +4,17 @@
 
 mod compatible;
 pub use compatible::schemas_are_compatible;
+mod migration_validation;
 mod runtime;
 pub use runtime::prepare_runtime_snapshot;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::node::migration_validation::{
-    validate_lineage_table_partition, validate_migration_lens_between,
-};
 use crate::protocol::SchemaVersion;
 use crate::schema::JazzSchema;
 use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, Value};
 use crate::tools::schema_lens::{Lens, LensOp, runtime::compile_lens};
+use migration_validation::{validate_lineage_table_partition, validate_migration_lens_between};
 
 type Hash = [u8; 32];
 type Edge = (Hash, Hash);

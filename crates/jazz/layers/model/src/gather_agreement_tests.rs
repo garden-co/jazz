@@ -268,7 +268,7 @@ fn expected_edge(bound: RecursionBound) -> GatherEdge {
         edge_parent_column: "parent".to_owned(),
         edge_filters: vec![Predicate::Eq(
             crate::query::Operand::Column("enabled".to_owned()),
-            crate::query::Operand::Literal(groove::records::Value::Bool(true)),
+            crate::query::Operand::Literal(jazz_types::records::Value::Bool(true)),
         )],
         bound,
     }

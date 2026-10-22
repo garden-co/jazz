@@ -102,3 +102,27 @@ Transforms add client-side conversion work. Tables without transforms use ordina
 Explicit transactions retain the native runtime's read restrictions. For example, if a transaction cannot read a branch view, a missing dependency in that view rejects the transaction rather than falling back to another branch. Standalone mutations can use the ordinary scoped branch-read path before staging their write.
 
 A combined write cannot convert `price` if its new dependency value is supplied only as a stream or partial edit. Supply a whole-value replacement for that dependency instead. Streaming or partially editing a dependency on its own is allowed, and subsequent reads recompute the dependent value.
+
+## Computed Columns
+
+Use `s.computed(callback)` in `s.table`'s second argument, alongside relationships, to derive values when a row is read. A computed field has no stored column and is read-only. Keep `.transform({ from, to })` for converting a stored, writable column between the database and your app.
+
+TypeScript infers the callback's row type from the columns in the first argument:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/computed-columns.ts#computed-columns-ts
+</include>
+
+The callback above receives a read-only row with `id`, `title` and `score`. The returned row has a read-only `priority` property; computed object and array values also have read-only result types. This is a TypeScript contract, not a deep runtime freeze.
+
+Computed fields receive app-facing values, after any stored column transforms. To build on an earlier computed field, pass the earlier table's `.columns` to another `s.table` declaration; callbacks infer those existing fields too. A stored column transform cannot depend on a virtual field.
+
+Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or capture the proxy in a closure for later use. Returning the row directly or nested in result data completes a snapshot before delivering the result, loading all of that callback's input fields. Unknown fields and dependency cycles fail when evaluated.
+
+Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows and relationship hops use the same preparation. Subscriptions retain the dependencies they observe and expand their native selection when a callback takes a new branch. A dependency-only update recomputes the result without writing a computed value.
+
+Reads use complete dependency values. To return a partial value alongside a computed field, pass the partial projection first and the computed field name afterwards, for example `app.tasks.select({ title: { from: 0, to: 10 } }, "priority")`. A computation accessing `title` still receives the complete title. Accessing a large text, JSON or byte value can therefore load the entire value. Streaming and partial edits to stored dependencies remain available.
+
+Computed fields cannot be inserted, updated, filtered, sorted, indexed, used as relationship keys or used for branching. Filter and sort by stored columns. Permission callbacks expose only stored column references; computed fields cannot be referenced in a permission row context. Computed declarations do not change the structural schema hash, migrations or permission rules; the ordinary permissions on their dependencies still apply.
+
+Computed fields add proxy and callback work when requested. Accessing fields already selected needs no extra read. Jazz caches discovered dependency names per computed definition in memory, so later reads and subscriptions can fetch known dependencies up front. Values are always fetched using the current read's session, branch and transaction scope. First use or a previously unseen conditional branch can still require several reads as dependencies are discovered; each retry batches missing fields across rows. Subscriptions may also need replacement native subscriptions when encountering new dependencies. Later reads can fetch dependencies learned from different branches together, so access only the fields you need, especially for large values or remote reads. Tables without transforms or computed fields retain the ordinary read and write path.

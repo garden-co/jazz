@@ -1,12 +1,12 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     CmpOp as PublicCmpOp, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
@@ -386,12 +386,9 @@ fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
 }
 
 fn open_db_with_schema_as(schema: JazzSchema, author: AuthorSubject) -> BenchDb {
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author,
