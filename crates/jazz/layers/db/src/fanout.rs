@@ -850,7 +850,13 @@ impl Inner {
         projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
-        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
+        // Same tie-break as the compiled ORDER BY: id in the last key's
+        // direction.
+        let tie_desc = matches!(
+            order.last().map(|by| by.direction),
+            Some(crate::query::OrderDirection::Desc)
+        );
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         if projected {
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
