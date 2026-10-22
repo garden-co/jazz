@@ -164,6 +164,17 @@ pub enum MatchTest {
     Cmp(CmpOp, Vec<u8>),
 }
 
+impl MatchTest {
+    /// Names the test by its literal's hash, so a long literal costs one
+    /// hash, not a formatted dump.
+    fn question(&self) -> String {
+        match self {
+            MatchTest::Contains(literal) => format!("contains {}", blake3::hash(literal)),
+            MatchTest::Cmp(op, literal) => format!("{op:?} {}", blake3::hash(literal)),
+        }
+    }
+}
+
 impl Prep {
     fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
         let hash = blake3::hash(question.as_bytes());
@@ -1692,7 +1703,12 @@ impl Ctx<'_> {
     }
 
     fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
-        let question = format!("match {} {} {test:?}", column.table, column.column);
+        let question = format!(
+            "match {} {} {}",
+            column.table,
+            column.column,
+            test.question()
+        );
         let (table, name) = (column.table.clone(), column.column.clone());
         self.prep(
             |slot| Prep::Match {

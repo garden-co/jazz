@@ -929,12 +929,18 @@ impl Inner {
             Err(error) => return Some(Err(storage(error))),
         };
         let mut keys = Vec::with_capacity(rows.len());
+        // Reads on past missing chunks, so one round trip asks for them all.
+        let mut blocked = false;
         for row in rows {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
             let mut key: SortKey = Vec::with_capacity(order.len() + 1);
             for (value, by) in values.into_iter().zip(order) {
                 let value = match self.logical_key(value) {
                     Ok(value) => value,
+                    Err(error) if crate::large::is_missing(&error) => {
+                        blocked = true;
+                        Sql::Null
+                    }
                     Err(error) => return Some(Err(error)),
                 };
                 key.push((
@@ -944,6 +950,9 @@ impl Inner {
             }
             key.push(id_key(row));
             keys.push(key);
+        }
+        if blocked {
+            return Some(Err(crate::large::missing()));
         }
         Some(Ok(keys))
     }

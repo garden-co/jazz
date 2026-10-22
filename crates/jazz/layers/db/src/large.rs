@@ -659,7 +659,7 @@ fn chunked_cells(conn: &Connection, table: &str, column: &str) -> Result<Vec<Vec
     let mut out = Vec::new();
     for target in [table.to_owned(), format!("{table}__h")] {
         let sql = format!(
-            "SELECT DISTINCT CAST({cell} AS BLOB) FROM {} WHERE {}",
+            "SELECT CAST({cell} AS BLOB) FROM {} WHERE {}",
             quote(&target),
             chunked_sql(&cell)
         );
@@ -681,6 +681,75 @@ fn cell_prefix(cell: &[u8]) -> Result<&[u8], Error> {
     let descriptor = chunked_descriptor(cell)?;
     let end = cell.len() - descriptor.len();
     Ok(&cell[PREFIX_AT - 1..end])
+}
+
+/// The logical bytes a cell carries itself: an inline cell's value, or a
+/// chunked cell's sort prefix, both in inline-cell form.
+fn head(cell: &[u8]) -> Result<&[u8], Error> {
+    if cell.first() == Some(&CHUNKED) {
+        cell_prefix(cell)
+    } else {
+        Ok(cell)
+    }
+}
+
+/// `cell op literal` decided without reading chunks, when the bytes both
+/// carry differ or (for equality) their lengths do.
+fn shortcut(
+    cell: &[u8],
+    literal: &[u8],
+    op: &crate::tools::CmpOp,
+) -> Result<Option<Ordering>, Error> {
+    use crate::tools::CmpOp;
+    let (a, b) = (head(cell)?, head(literal)?);
+    let n = a.len().min(b.len());
+    if a[..n] != b[..n] {
+        return Ok(Some(a[..n].cmp(&b[..n])));
+    }
+    let (len_a, len_b) = (logical(cell)?.len(), logical(literal)?.len());
+    if matches!(op, CmpOp::Eq | CmpOp::Ne) && len_a != len_b {
+        return Ok(Some(len_a.cmp(&len_b)));
+    }
+    Ok(None)
+}
+
+/// Orders `cells` that agree on their first `from` logical bytes into runs of
+/// equal values, reading each cell's next window once per level instead of
+/// once per comparison.
+fn order_runs(
+    chunks: &Chunks,
+    cells: Vec<Vec<u8>>,
+    from: u64,
+    runs: &mut Vec<Vec<Vec<u8>>>,
+) -> Result<(), Error> {
+    if cells.len() < 2 {
+        runs.push(cells);
+        return Ok(());
+    }
+    let to = from + from.max(8 * 1024);
+    let mut keyed = Vec::with_capacity(cells.len());
+    for cell in cells {
+        let value = logical(&cell)?;
+        let len = value.len();
+        let piece = chunks.range(&value, from.min(len)..to.min(len))?;
+        keyed.push((piece, len <= to, cell));
+    }
+    // A value that ends inside the window is less than one that agrees on it
+    // and goes on.
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut keyed = keyed.into_iter().peekable();
+    while let Some((piece, ended, cell)) = keyed.next() {
+        let mut run = vec![cell];
+        while let Some(next) = keyed.next_if(|next| next.0 == piece && next.1 == ended) {
+            run.push(next.2);
+        }
+        if ended {
+            runs.push(run);
+        } else {
+            order_runs(chunks, run, to, runs)?;
+        }
+    }
+    Ok(())
 }
 
 /// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
@@ -709,7 +778,8 @@ pub(crate) fn answer(
                 let pass = match test {
                     MatchTest::Contains(needle) => chunks.contains(&cell, needle)?,
                     MatchTest::Cmp(op, literal) => {
-                        let ordering = chunks.compare(&cell, literal)?;
+                        let ordering = shortcut(&cell, literal, op)?
+                            .map_or_else(|| chunks.compare(&cell, literal), Ok)?;
                         match op {
                             CmpOp::Eq => ordering.is_eq(),
                             CmpOp::Ne => ordering.is_ne(),
@@ -737,30 +807,20 @@ pub(crate) fn answer(
                     .push(cell);
             }
             let mut ties = false;
-            for (_, mut cells) in groups {
+            for (_, cells) in groups {
                 if cells.len() < 2 {
                     continue;
                 }
                 ties = true;
-                let mut failed = None;
-                cells.sort_by(|a, b| {
-                    chunks.compare(a, b).unwrap_or_else(|error| {
-                        failed.get_or_insert(error);
-                        Ordering::Equal
-                    })
-                });
-                if let Some(error) = failed {
-                    return Err(error);
-                }
+                let mut runs = Vec::new();
+                order_runs(chunks, cells, 0, &mut runs)?;
                 // Cells of one logical value share a rank.
-                let mut rank = 0_i64;
-                for (i, cell) in cells.iter().enumerate() {
-                    if i > 0 && !chunks.compare(&cells[i - 1], cell)?.is_eq() {
-                        rank += 1;
+                for (rank, run) in runs.iter().enumerate() {
+                    for cell in run {
+                        insert
+                            .execute(rusqlite::params![slot, cell, rank as i64])
+                            .map_err(storage)?;
                     }
-                    insert
-                        .execute(rusqlite::params![slot, cell, rank])
-                        .map_err(storage)?;
                 }
             }
             Ok(ties)

@@ -1367,6 +1367,9 @@ impl Inner {
             .query(params_from_iter(compiled.params.iter()))
             .map_err(storage)?;
         let mut out = Vec::new();
+        // A replica missing chunks reads on past the first blocked cell, so
+        // one round trip asks for every row's missing nodes.
+        let mut blocked = false;
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
                 let key = match row.get_ref(0).map_err(storage)? {
@@ -1385,7 +1388,13 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(3 + i).map_err(storage)?;
-                    Ok((name.clone(), from_sql(ty, cell, &self.chunks)?))
+                    match from_sql(ty, cell, &self.chunks) {
+                        Err(error) if crate::large::is_missing(&error) => {
+                            blocked = true;
+                            Ok((name.clone(), None))
+                        }
+                        value => Ok((name.clone(), value?)),
+                    }
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             out.push(CurrentRow {
@@ -1398,6 +1407,9 @@ impl Inner {
                 deleted: deleted != 0,
                 cells: Arc::new(cells),
             });
+        }
+        if blocked {
+            return Err(crate::large::missing());
         }
         Ok(out)
     }
