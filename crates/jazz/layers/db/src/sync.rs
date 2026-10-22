@@ -51,8 +51,10 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// Optimistic local seqs start here; every server seq is below it.
-pub const LOCAL_BASE: u64 = 1 << 62;
+/// Optimistic local seqs start here; every server seq is below it. Below
+/// 2^53, so seqs stay exact where SQLite integers surface as JS numbers
+/// (Durable Objects).
+pub const LOCAL_BASE: u64 = 1 << 52;
 
 /// A message transport between a client and its server.
 pub trait Transport {
