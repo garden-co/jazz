@@ -6,7 +6,9 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, WriteIdentity, block_on, duplex,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
@@ -189,4 +191,133 @@ fn history_keeps_each_versions_provenance() {
         "the as-of read sees the old version's stamp"
     );
     db.abandon_exclusive_handle(open).unwrap();
+}
+
+fn subject_cell(row: &jazz::db::CurrentRow, name: &str) -> String {
+    match row.cells().find(|(n, _)| *n == name).unwrap().1 {
+        Some(Value::Nullable(Some(v))) => match &**v {
+            Value::String(v) => v.clone(),
+            other => panic!("{other:?}"),
+        },
+        Some(Value::String(v)) => v.clone(),
+        other => panic!("{name}: {other:?}"),
+    }
+}
+
+fn user(n: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([n; 16])
+}
+
+fn as_user(n: u8, id: RowUuid) -> InsertOptions {
+    InsertOptions {
+        row_id: Some(id),
+        identity: WriteIdentity::Session(user(n)),
+        ..Default::default()
+    }
+}
+
+/// Authors are stored once each, however many versions they write, and
+/// still read, filter and order by their identity parts.
+#[test]
+fn authors_are_interned_once_and_read_back_by_identity() {
+    let db = db();
+    for n in 0..100u8 {
+        block_on(db.insert("notes", body("x"), as_user(1 + n % 2, row(n)))).unwrap();
+    }
+    for n in 0..100u8 {
+        block_on(db.update("notes", row(n), body("y"), Default::default())).unwrap();
+    }
+    assert_eq!(
+        db.interned_authors_for_test(),
+        3,
+        "two writers and the database"
+    );
+
+    let (_, subject) = user(2).principal_parts();
+    let by_two = db
+        .prepare_query(
+            &Query::from("notes")
+                .select(["$createdBy.identity.subject", "$updatedBy.identity.subject"])
+                .filter(eq(
+                    col("$createdBy.identity.subject"),
+                    lit(Value::String(subject.clone())),
+                )),
+        )
+        .unwrap();
+    let rows = block_on(db.all(&by_two, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 50);
+    let (_, system) = AuthorSubject::SYSTEM.principal_parts();
+    for row in &rows {
+        assert_eq!(subject_cell(row, "$createdBy.identity.subject"), subject);
+        assert_eq!(subject_cell(row, "$updatedBy.identity.subject"), system);
+    }
+}
+
+/// Author codes are local to each database: a replica whose codes differ
+/// from the server's still reads every row's real author.
+#[test]
+fn author_codes_never_leave_their_database() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open_history_complete(open(1, AuthorSubject::SYSTEM))).unwrap();
+    let client = block_on(Db::open(open(2, user(7)))).unwrap();
+    // Each side interns a different author first, so their codes disagree.
+    block_on(server.insert("notes", body("from 5"), as_user(5, row(1)))).unwrap();
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, user(7));
+    block_on(client.insert(
+        "notes",
+        body("from 7"),
+        InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let select = Query::from("notes").select(["body", "$createdBy.identity.subject"]);
+    let prepared = client.prepare_query(&select).unwrap();
+    let _live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    for _ in 0..6 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+
+    for (name, db) in [("client", &client), ("server", &server)] {
+        let prepared = db.prepare_query(&select).unwrap();
+        let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+        let authors: BTreeMap<RowUuid, String> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    subject_cell(row, "$createdBy.identity.subject"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            authors,
+            BTreeMap::from([
+                (row(1), user(5).principal_parts().1),
+                (row(2), user(7).principal_parts().1),
+            ]),
+            "{name}"
+        );
+    }
 }

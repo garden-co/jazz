@@ -306,6 +306,8 @@ struct Inner {
     /// share a time, and later commits get strictly later ones, so
     /// `$createdAt` orders this node's writes even within one millisecond.
     last_stamp: (u64, i64),
+    /// Interned author codes (see [`Inner::author_code`]), cached both ways.
+    authors: RefCell<AuthorCodes>,
     ids: Box<dyn RowIdSource>,
     seq: u64,
     claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
@@ -371,41 +373,33 @@ fn who(identity: WriteIdentity) -> Who {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct AuthorCodes {
+    codes: HashMap<(String, String), i64>,
+    parts: HashMap<i64, (String, String)>,
+}
+
 /// Who wrote a row version, and when (Unix ms).
 #[derive(Clone)]
 pub(crate) struct Stamp {
     at: i64,
-    author: (String, String),
+    /// The author's interned code in `_jazz_authors`.
+    author: i64,
 }
 
 impl Stamp {
-    fn columns(
-        &self,
-        at: &'static str,
-        issuer: &'static str,
-        subject: &'static str,
-    ) -> [(&'static str, Sql); 3] {
+    fn created(&self) -> [(&'static str, Sql); 2] {
         [
-            (at, Sql::Integer(self.at)),
-            (issuer, Sql::Text(self.author.0.clone())),
-            (subject, Sql::Text(self.author.1.clone())),
+            ("$createdAt", Sql::Integer(self.at)),
+            ("$createdBy", Sql::Integer(self.author)),
         ]
     }
 
-    fn created(&self) -> [(&'static str, Sql); 3] {
-        self.columns(
-            "$createdAt",
-            "$createdBy.identity.issuer",
-            "$createdBy.identity.subject",
-        )
-    }
-
-    fn updated(&self) -> [(&'static str, Sql); 3] {
-        self.columns(
-            "$updatedAt",
-            "$updatedBy.identity.issuer",
-            "$updatedBy.identity.subject",
-        )
+    fn updated(&self) -> [(&'static str, Sql); 2] {
+        [
+            ("$updatedAt", Sql::Integer(self.at)),
+            ("$updatedBy", Sql::Integer(self.author)),
+        ]
     }
 }
 
@@ -478,6 +472,7 @@ impl Db {
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
+                authors: RefCell::new(AuthorCodes::default()),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
@@ -726,6 +721,17 @@ impl Db {
                 )
             }),
         })
+    }
+
+    /// How many distinct authors this database has interned.
+    #[doc(hidden)]
+    pub fn interned_authors_for_test(&self) -> usize {
+        self.inner()
+            .conn
+            .query_row("SELECT COUNT(*) FROM _jazz_authors", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_or(0, |count| count as usize)
     }
 
     pub fn runtime_stats_for_test(&self) -> RuntimeStats {
@@ -1515,11 +1521,69 @@ impl Inner {
         })
     }
 
-    fn stamp(&self) -> Stamp {
-        self.writer.clone().unwrap_or_else(|| Stamp {
-            at: 0,
-            author: self.identity.author.principal_parts(),
-        })
+    fn stamp(&self) -> Result<Stamp, Error> {
+        match &self.writer {
+            Some(stamp) => Ok(stamp.clone()),
+            None => Ok(Stamp {
+                at: 0,
+                author: self.author_code(&self.identity.author.principal_parts())?,
+            }),
+        }
+    }
+
+    /// The interned code of an author's `(issuer, subject)`. Rows store this
+    /// small integer instead of repeating both strings in every version;
+    /// codes are local to this database and resolved back at egress.
+    pub(crate) fn author_code(&self, (issuer, subject): &(String, String)) -> Result<i64, Error> {
+        if let Some(code) = self
+            .authors
+            .borrow()
+            .codes
+            .get(&(issuer.clone(), subject.clone()))
+        {
+            return Ok(*code);
+        }
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO _jazz_authors (issuer, subject) VALUES (?1, ?2)",
+                rusqlite::params![issuer, subject],
+            )
+            .map_err(storage)?;
+        let code: i64 = self
+            .conn
+            .query_row(
+                "SELECT n FROM _jazz_authors WHERE issuer = ?1 AND subject = ?2",
+                rusqlite::params![issuer, subject],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        let mut authors = self.authors.borrow_mut();
+        authors
+            .codes
+            .insert((issuer.clone(), subject.clone()), code);
+        authors
+            .parts
+            .insert(code, (issuer.clone(), subject.clone()));
+        Ok(code)
+    }
+
+    /// The `(issuer, subject)` an author code stands for.
+    pub(crate) fn author_parts(&self, code: i64) -> Result<(String, String), Error> {
+        if let Some(parts) = self.authors.borrow().parts.get(&code) {
+            return Ok(parts.clone());
+        }
+        let parts: (String, String) = self
+            .conn
+            .query_row(
+                "SELECT issuer, subject FROM _jazz_authors WHERE n = ?1",
+                [code],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(storage)?;
+        let mut authors = self.authors.borrow_mut();
+        authors.codes.insert(parts.clone(), code);
+        authors.parts.insert(code, parts.clone());
+        Ok(parts)
     }
 
     fn validate_cells(table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
@@ -1616,7 +1680,7 @@ impl Inner {
             values.push(Self::bind_value(value)?);
             sets.push(format!("{} = ?{}", quote(name), values.len()));
         }
-        for (name, value) in self.stamp().updated() {
+        for (name, value) in self.stamp()?.updated() {
             values.push(value);
             sets.push(format!("{} = ?{}", quote(name), values.len()));
         }
@@ -1694,7 +1758,7 @@ impl Inner {
             names.push(quote(&column.name));
             values.push(value);
         }
-        let stamp = self.stamp();
+        let stamp = self.stamp()?;
         for (name, value) in stamp.created().into_iter().chain(stamp.updated()) {
             names.push(quote(name));
             values.push(value);
@@ -2487,7 +2551,7 @@ impl Inner {
         self.last_stamp = (seq, at);
         self.writer = Some(Stamp {
             at,
-            author: author.principal_parts(),
+            author: self.author_code(&author.principal_parts())?,
         });
         let result = self.apply_op(op, who, seq);
         self.writer = None;

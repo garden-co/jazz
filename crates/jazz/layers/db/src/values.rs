@@ -106,15 +106,17 @@ pub struct Table {
     pub indexes: Vec<Vec<String>>,
     /// Branch-key columns. A row's identity is `(id, branch key)`.
     pub branch_by: Vec<String>,
-    /// Engine-maintained provenance columns (`$createdAt`, ...): stored on
+    /// Engine-maintained provenance columns (`$createdAt`, ...): kept on
     /// every row version, readable by name, never written by the app and
     /// not part of the default projection.
     pub provenance: Vec<Column>,
+    /// How provenance is stored: authors as interned codes.
+    pub stored_provenance: Vec<Column>,
 }
 
-/// Provenance as stored columns. Timestamps are Unix ms (u64, as in Jazz);
-/// authors are stored by their identity parts, so policies and filters can
-/// compare `$createdBy.identity.subject` and friends.
+/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz); authors
+/// are read by their identity parts, so policies and filters can compare
+/// `$createdBy.identity.subject` and friends.
 pub(crate) const PROVENANCE: [&str; 6] = [
     "$createdAt",
     "$updatedAt",
@@ -123,6 +125,35 @@ pub(crate) const PROVENANCE: [&str; 6] = [
     "$updatedBy.identity.issuer",
     "$updatedBy.identity.subject",
 ];
+
+/// Provenance as stored: each author is one code into `_jazz_authors`
+/// instead of its two strings on every row version.
+pub(crate) const STORED_PROVENANCE: [&str; 4] =
+    ["$createdAt", "$updatedAt", "$createdBy", "$updatedBy"];
+
+/// The stored author column and identity part behind a readable provenance
+/// column, e.g. `$createdBy.identity.subject` -> (`$createdBy`, `subject`).
+pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> {
+    Some(match column {
+        "$createdBy.identity.issuer" => ("$createdBy", "issuer"),
+        "$createdBy.identity.subject" => ("$createdBy", "subject"),
+        "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
+        "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        _ => return None,
+    })
+}
+
+fn stored_provenance_columns() -> Vec<Column> {
+    STORED_PROVENANCE
+        .iter()
+        .map(|name| Column {
+            name: (*name).to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::U64)),
+            default: None,
+            json: false,
+        })
+        .collect()
+}
 
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
@@ -141,13 +172,17 @@ fn provenance_columns() -> Vec<Column> {
 }
 
 impl Table {
+    /// A readable column: an application or provenance column.
     pub fn column(&self, name: &str) -> Option<&Column> {
-        self.stored().find(|column| column.name == name)
+        self.columns
+            .iter()
+            .chain(&self.provenance)
+            .find(|column| column.name == name)
     }
 
-    /// Every stored column: application columns, then provenance.
+    /// Every stored column: application columns, then stored provenance.
     pub fn stored(&self) -> impl Iterator<Item = &Column> {
-        self.columns.iter().chain(&self.provenance)
+        self.columns.iter().chain(&self.stored_provenance)
     }
 
     pub fn has_column(&self, name: &str) -> bool {
@@ -214,6 +249,7 @@ impl Schema {
                     indexes,
                     branch_by: table.branch_by.clone(),
                     provenance: provenance_columns(),
+                    stored_provenance: stored_provenance_columns(),
                 },
             );
         }

@@ -942,7 +942,66 @@ impl Inner {
                 Ok(image)
             })
             .map_err(storage)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(storage)
+        let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
+        for image in &mut images {
+            self.resolve_authors(image)?;
+        }
+        Ok(images)
+    }
+
+    /// Images carry authors by their identity parts: codes are local to
+    /// one database, so they never leave it.
+    fn resolve_authors(&self, image: &mut Image) -> Result<(), Error> {
+        let mut cells = Vec::with_capacity(image.cells.len() + 2);
+        for (name, cell) in std::mem::take(&mut image.cells) {
+            if name != "$createdBy" && name != "$updatedBy" {
+                cells.push((name, cell));
+                continue;
+            }
+            let (issuer, subject) = match cell {
+                Cell::Int(code) => {
+                    let (issuer, subject) = self.author_parts(code)?;
+                    (Cell::Text(issuer), Cell::Text(subject))
+                }
+                _ => (Cell::Null, Cell::Null),
+            };
+            cells.push((format!("{name}.identity.issuer"), issuer));
+            cells.push((format!("{name}.identity.subject"), subject));
+        }
+        image.cells = cells;
+        Ok(())
+    }
+
+    /// The stored cells of an image: author parts back to local codes.
+    fn stored_cells(&self, image: &Image) -> Result<Vec<(String, Sql)>, Error> {
+        let mut cells = Vec::with_capacity(image.cells.len());
+        let mut parts: BTreeMap<&'static str, (Option<String>, Option<String>)> = BTreeMap::new();
+        for (name, cell) in &image.cells {
+            let Some((stored, part)) = crate::values::author_part(name) else {
+                cells.push((name.clone(), Sql::from(cell)));
+                continue;
+            };
+            let text = match cell {
+                Cell::Text(text) => Some(text.clone()),
+                _ => None,
+            };
+            let entry = parts.entry(stored).or_default();
+            if part == "issuer" {
+                entry.0 = text;
+            } else {
+                entry.1 = text;
+            }
+        }
+        for (stored, parts) in parts {
+            let code = match parts {
+                (Some(issuer), Some(subject)) => {
+                    Sql::Integer(self.author_code(&(issuer, subject))?)
+                }
+                _ => Sql::Null,
+            };
+            cells.push((stored.to_owned(), code));
+        }
+        Ok(cells)
     }
 
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
@@ -970,9 +1029,9 @@ impl Inner {
             Sql::Integer(image.seq as i64),
             Sql::Integer(image.deleted as i64),
         ];
-        for (column, cell) in &image.cells {
-            names.push(quote(column));
-            values.push(Sql::from(cell));
+        for (column, value) in self.stored_cells(image)? {
+            names.push(quote(&column));
+            values.push(value);
         }
         let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
         let verb = if history {
@@ -1108,6 +1167,7 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, rows BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_shadow (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, image BLOB, PRIMARY KEY (t, id, k));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
+    CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));";
 
 type RowKey = (String, RowUuid, Vec<u8>);

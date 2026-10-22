@@ -524,10 +524,10 @@ impl<'a> Ctx<'a> {
             return self.compile_aggregate(query, aggregate, table, alias, &wheres);
         }
         let order = order_sql(table, alias, &query.order_by)?;
-        let columns: String = projection
+        let columns = projection
             .iter()
-            .map(|(name, _)| format!(", {alias}.{}", quote(name)))
-            .collect();
+            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let sql = format!(
@@ -582,10 +582,10 @@ impl<'a> Ctx<'a> {
             wheres.push(self.read_policy(child, alias, session)?);
         }
         let order = order_sql(child, alias, &array.order_by)?;
-        let columns: String = projection
+        let columns = projection
             .iter()
-            .map(|(name, _)| format!(", {alias}.{}", quote(name)))
-            .collect();
+            .map(|(name, _)| Ok(format!(", {}", column_sql(child, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(array.offset as i64));
         let sql = format!(
@@ -1373,6 +1373,12 @@ fn order_sql(table: &Table, alias: &str, order: &[crate::query::OrderBy]) -> Res
 pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
     if column == "id" {
         return Ok(format!("{alias}.id"));
+    }
+    if let Some((stored, part)) = crate::values::author_part(column) {
+        return Ok(format!(
+            "(SELECT {part} FROM _jazz_authors WHERE n = {alias}.{})",
+            quote(stored)
+        ));
     }
     if table.column(column).is_none() {
         if column.starts_with("$createdBy") || column.starts_with("$updatedBy") {
