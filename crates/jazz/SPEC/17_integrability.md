@@ -160,11 +160,9 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    load config, open storage, admit one authenticated session, serve a
    WebSocket/byte-transport listener, publish health/metrics, and drain
    connections on shutdown while all product behavior still flows through the
-   client API and shared sync protocol. The current `jazz-server` surface has
-   two canaries: `cargo run -p jazz-cli --bin jazz-server -- dry-run`, which validates the
-   default local shell plan without opening sockets; and
-   `jazz_server::loopback_websocket::LoopbackWebSocketServer`, which sends
-   postcard batches of raw ABI `WireFrame` bytes as binary WebSocket messages.
+   client API and shared sync protocol. The shell is `jazz-tools server`
+   (the `jazz-server` crate on the SQLite engine); its WebSocket route sends
+   postcard batches of sync frames as binary messages.
    HTTP schema routes are exercised through the production Axum router.
    The alpha TS/WASM gate now spawns the WebSocket listener as a Rust process
    and proves two-client todo convergence through that boundary.
