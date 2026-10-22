@@ -30,6 +30,7 @@ mod tools {
 
 pub mod binding_args;
 pub mod binding_codec;
+pub mod binding_host;
 pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
