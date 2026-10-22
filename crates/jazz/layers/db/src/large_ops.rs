@@ -349,7 +349,7 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
 fn identity_of(identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local => None,
+        Who::Local | Who::Attributed(_) => None,
     }
 }
 

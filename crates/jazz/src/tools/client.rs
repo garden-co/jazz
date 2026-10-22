@@ -102,6 +102,9 @@ struct Shared {
     upstream_paused: watch::Sender<bool>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
+    /// The upstream link is a trusted backend or admin link, which may
+    /// attribute writes to other authors.
+    trusted: bool,
     state: RefCell<State>,
 }
 
@@ -495,6 +498,7 @@ impl JazzClient {
             progress,
             upstream_paused: watch::channel(false).0,
             serverless: connector.is_none(),
+            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
             state: RefCell::new(State::default()),
         });
 
@@ -596,6 +600,11 @@ impl JazzClient {
             if author.account_id().is_none() {
                 return Err(JazzError::Write(
                     "attribution requires an admitted account identity".into(),
+                ));
+            }
+            if !self.shared.trusted && !self.shared.serverless {
+                return Err(JazzError::Write(
+                    "attribution requires a trusted serving node".into(),
                 ));
             }
             return Ok(WriteIdentity::Attribution(author));
